@@ -15,6 +15,7 @@
   <img src="https://img.shields.io/badge/OpenGL-3.3%20Core-5586A4" alt="OpenGL 3.3 Core">
   <img src="https://img.shields.io/badge/Platform-Windows-0078D6" alt="Platform Windows">
   <img src="https://img.shields.io/badge/Status-Active%20Development-2EA043" alt="Status Active Development">
+  <img src="https://img.shields.io/badge/Development-AI%20Assisted-8A2BE2" alt="AI Assisted Development">
 </p>
 
 <p align="center">
@@ -191,6 +192,16 @@ scripts/
 .github/workflows/
   CI Windows qui execute la meme gate que le local
 ```
+
+## Developpement assiste par IA
+
+Le developpement de ValCraft s'appuie aussi sur des outils d'IA pour accelerer certaines phases du projet, notamment:
+
+- la structuration de plans de travail
+- l'assistance au prototypage et a certaines implementations
+- la relecture technique et l'amelioration de la documentation
+
+Les choix techniques, l'integration dans le projet, les validations et la direction globale restent pilotes par le mainteneur du depot.
 
 ## Etat du projet
 
