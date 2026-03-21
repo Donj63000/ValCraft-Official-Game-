@@ -12,7 +12,6 @@ L'objectif du projet est de construire une base moteur solide, testee et evoluti
 ## Captures d'ecran
 
 ![ValCraft Screenshot 1](docs/images/img.png)
-
 ![ValCraft Screenshot 2](docs/images/img_1.png)
 
 ## Apercu
