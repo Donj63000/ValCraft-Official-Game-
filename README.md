@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-forest.png" alt="ValCraft hero screenshot" width="920">
+  <img src="docs/images/screenshot-hero.png" alt="ValCraft hero screenshot" width="920">
 </p>
 
 ## Apercu
