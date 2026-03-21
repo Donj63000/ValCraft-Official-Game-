@@ -9,6 +9,12 @@ ValCraft est un prototype de jeu voxel en vue a la premiere personne, inspire pa
 
 L'objectif du projet est de construire une base moteur solide, testee et evolutive: monde procedural par chunks, deplacement FPS, collisions, casse et pose de blocs, pipeline de build strict et protection anti-regression.
 
+## Captures d'ecran
+
+![ValCraft Screenshot 1](docs/images/img.png)
+
+![ValCraft Screenshot 2](docs/images/img_1.png)
+
 ## Apercu
 
 ValCraft propose deja une base jouable avec:
