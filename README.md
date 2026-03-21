@@ -1,102 +1,118 @@
 # ValCraft
 
-[![CI Strict](https://github.com/Donj63000/ValCraft-Official-Game-/actions/workflows/strict.yml/badge.svg)](https://github.com/Donj63000/ValCraft-Official-Game-/actions/workflows/strict.yml)
-![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![CMake](https://img.shields.io/badge/CMake-3.24%2B-064F8C)
-![Platform](https://img.shields.io/badge/Platform-Windows-0078D6)
+<p align="center">
+  <strong>Prototype de jeu voxel FPS en C++20</strong>
+  <br>
+  Monde procedural, rendu OpenGL, interactions voxel et pipeline strict anti-regression.
+</p>
 
-ValCraft est un prototype de jeu voxel en vue a la premiere personne, inspire par Minecraft, developpe en `C++20` avec `SDL2` et `OpenGL 3.3 Core`.
+<p align="center">
+  <a href="https://github.com/Donj63000/ValCraft-Official-Game-/actions/workflows/strict.yml">
+    <img src="https://github.com/Donj63000/ValCraft-Official-Game-/actions/workflows/strict.yml/badge.svg" alt="CI Strict">
+  </a>
+  <img src="https://img.shields.io/badge/C%2B%2B-20-00599C" alt="C++20">
+  <img src="https://img.shields.io/badge/CMake-3.24%2B-064F8C" alt="CMake">
+  <img src="https://img.shields.io/badge/OpenGL-3.3%20Core-5586A4" alt="OpenGL 3.3 Core">
+  <img src="https://img.shields.io/badge/Platform-Windows-0078D6" alt="Platform Windows">
+  <img src="https://img.shields.io/badge/Status-Active%20Development-2EA043" alt="Status Active Development">
+</p>
 
-L'objectif du projet est de construire une base moteur solide, testee et evolutive: monde procedural par chunks, deplacement FPS, collisions, casse et pose de blocs, pipeline de build strict et protection anti-regression.
+<p align="center">
+  <a href="#apercu">Apercu</a> |
+  <a href="#captures">Captures</a> |
+  <a href="#fonctionnalites">Fonctionnalites</a> |
+  <a href="#demarrage-rapide">Demarrage rapide</a> |
+  <a href="#controles">Controles</a> |
+  <a href="#roadmap">Roadmap</a>
+</p>
 
-## Captures d'ecran
-
-![ValCraft Screenshot 1](docs/images/screenshot-forest.png)
-![ValCraft Screenshot 2](docs/images/screenshot-desert.png)
+<p align="center">
+  <img src="docs/images/screenshot-forest.png" alt="ValCraft hero screenshot" width="920">
+</p>
 
 ## Apercu
 
-ValCraft propose deja une base jouable avec:
+ValCraft est un prototype de moteur/jeu voxel en vue a la premiere personne, inspire par Minecraft et developpe en `C++20` avec `SDL2` et `OpenGL 3.3 Core`.
 
-- un monde voxel procedural genere a partir d'une seed deterministe
-- un streaming de chunks autour du joueur
-- un rendu OpenGL avec atlas voxel et faces cachees supprimees
-- un controle FPS avec souris, gravite, saut et collisions
-- un mode debug fly
-- un raycast voxel pour casser et poser des blocs
-- une suite de tests automatises et une gate stricte locale/CI
+Le projet vise une base technique solide et evolutive:
 
-Le projet est actuellement positionne comme une **V1 jouable du moteur**, pas encore comme un jeu complet avec crafting, inventaire avance, mobs ou multijoueur.
+- monde procedural par chunks
+- deplacement FPS avec collisions et gravite
+- casse et pose de blocs en temps reel
+- generation deterministe et streaming du monde
+- pipeline de verification strict pour limiter les regressions
 
-## Fonctionnalites actuelles
+> ValCraft est aujourd'hui une V1 jouable du moteur: le coeur sandbox est present, et le projet est structure pour grandir proprement.
 
-### Monde voxel
+## Pourquoi ValCraft
 
-- Chunks de `16 x 128 x 16`
-- Palette de blocs V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`
-- Generation procedural avec relief, biomes legers, caves simples et arbres
-- Monde deterministe base sur une seed fixe
+| Monde voxel | Gameplay FPS | Qualite logicielle |
+| --- | --- | --- |
+| Chunks `16 x 128 x 16`, terrain procedural, biomes legers, caves et arbres. | Controle souris/clavier, saut, collisions, mode fly debug, raycast bloc par bloc. | `21` tests automatises, smoke test, warnings stricts, couverture critique et CI GitHub. |
+
+## Captures
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/images/screenshot-forest.png" alt="ValCraft screenshot forest">
+    </td>
+    <td width="50%">
+      <img src="docs/images/screenshot-desert.png" alt="ValCraft screenshot desert">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Biome vert, relief vallonne, foret procedurale</strong>
+    </td>
+    <td align="center">
+      <strong>Zone sableuse, falaises rocheuses et grande visibilite</strong>
+    </td>
+  </tr>
+</table>
+
+## Fonctionnalites
+
+### Monde
+
+- chunks streames autour du joueur
+- seed deterministe
+- generation de relief et de surface par bruit
+- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`
+- maillage de chunks avec suppression des faces cachees
 
 ### Gameplay
 
-- Deplacement `WASD`
-- Vue souris en premiere personne
-- Saut avec gravite
-- Collisions joueur contre blocs solides
-- Mode fly debug activable
-- Casse de blocs au clic gauche
-- Pose de blocs au clic droit
-- Prevention de pose dans le volume du joueur
+- deplacement `WASD`
+- vue souris en premiere personne
+- saut avec gravite
+- collisions joueur contre blocs solides
+- mode fly debug
+- casse de blocs au clic gauche
+- pose de blocs au clic droit
+- prevention de pose dans le volume du joueur
 
-### Qualite logicielle
+### Pipeline de qualite
 
-- Build `CMake` propre en `C++20`
-- Warnings stricts avec `-Werror`
-- Suite de `21` tests automatises
-- Smoke test non interactif
-- Verification de couverture critique
-- Workflow GitHub Actions execute sur `push` et `pull_request`
+- build `CMake` en `C++20`
+- dependances gerees via `FetchContent`
+- warnings stricts avec `-Werror`
+- suite de tests automatises
+- smoke test non interactif
+- verification de couverture critique
+- gate locale et CI executees via le meme script
 
-## Commandes du jeu
-
-| Action | Touche |
-| --- | --- |
-| Avancer / reculer | `W` / `S` |
-| Strafe gauche / droite | `A` / `D` |
-| Saut | `Space` |
-| Monter / descendre en fly | `Space` / `Ctrl` |
-| Basculer le mode fly | `F` |
-| Liberer / reprendre la souris | `Escape` |
-| Casser un bloc | `Clic gauche` |
-| Poser un bloc | `Clic droit` |
-| Selection bloc 1 a 7 | `1` a `7` |
-
-## Stack technique
-
-- `C++20`
-- `CMake 3.24+`
-- `SDL2`
-- `OpenGL 3.3 Core`
-- `glad`
-- `glm`
-- `FastNoiseLite`
-- `doctest`
-
-Toutes les dependances sont recuperees automatiquement via `FetchContent`.
-
-## Build et lancement
+## Demarrage rapide
 
 ### Prerequis
 
-Configuration cible actuelle:
-
 - Windows
-- CLion ou terminal PowerShell
 - GCC / MinGW
 - Ninja
-- OpenGL 3.3 disponible
+- OpenGL `3.3 Core`
+- CLion ou terminal PowerShell
 
-### Build en local
+### Build
 
 ```powershell
 cmake -S . -B cmake-build-debug -G Ninja
@@ -116,26 +132,53 @@ cmake --build cmake-build-debug --target valcraft_tests --parallel
 ctest --test-dir cmake-build-debug --output-on-failure
 ```
 
-### Lancer la verification stricte complete
+### Lancer la gate stricte complete
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ```
 
-Cette gate verifie:
+Cette verification controle:
 
 - la compilation stricte
-- la presence d'au moins 20 tests automatises
+- la presence d'au moins `20` tests
 - l'execution complete de la suite de tests
 - un smoke test du jeu
 - une couverture critique minimale sur les modules coeur
 
-## Structure du projet
+## Controles
+
+| Action | Touche |
+| --- | --- |
+| Avancer / reculer | `W` / `S` |
+| Strafe gauche / droite | `A` / `D` |
+| Saut | `Space` |
+| Monter / descendre en fly | `Space` / `Ctrl` |
+| Basculer le mode fly | `F` |
+| Liberer / reprendre la souris | `Escape` |
+| Casser un bloc | `Clic gauche` |
+| Poser un bloc | `Clic droit` |
+| Selection du bloc actif | `1` a `7` |
+
+## Stack technique
+
+- `C++20`
+- `CMake 3.24+`
+- `SDL2`
+- `OpenGL 3.3 Core`
+- `glad`
+- `glm`
+- `FastNoiseLite`
+- `doctest`
+
+Toutes les dependances sont recuperees automatiquement via `FetchContent`.
+
+## Architecture
 
 ```text
 src/
   app/         Boucle de jeu, initialisation SDL/OpenGL
-  gameplay/    Controle joueur, collisions, interaction monde
+  gameplay/    Controle joueur, collisions, interactions monde
   render/      Shaders, atlas, meshes GPU, rendu OpenGL
   world/       Blocs, chunks, generation, raycast, meshing
 
@@ -151,45 +194,36 @@ scripts/
 
 ## Etat du projet
 
-Le projet est en developpement actif avec une base deja fonctionnelle pour:
-
-- explorer un monde procedural
-- deplacer un personnage FPS dans des voxels
-- modifier le terrain en temps reel
-- valider les changements avec une chaine stricte
-
-Ce qui n'est pas encore dans le perimetre actuel:
-
-- multijoueur
-- crafting
-- inventaire complet
-- sauvegarde persistante du monde
-- mobs / IA
-- eclairage dynamique avance
+| Dans le perimetre actuel | Pas encore dans le perimetre |
+| --- | --- |
+| Monde procedural jouable | Multijoueur |
+| Exploration FPS | Crafting |
+| Modification du terrain en temps reel | Inventaire complet |
+| Base moteur testee | Sauvegarde persistante complete |
+| Pipeline strict anti-regression | Mobs / IA |
+| CI GitHub reproductible | Eclairage dynamique avance |
 
 ## Roadmap
 
-Pistes naturelles pour la suite:
-
 - sauvegarde et chargement des modifications monde
-- hotbar et HUD in-game
+- HUD et hotbar en jeu
 - optimisation du meshing
 - frustum culling plus fin
 - generation plus riche
 - systeme d'inventaire
-- interaction d'objets et gameplay sandbox plus complet
+- sandbox plus profond et interactif
 
 ## Contribution
 
-Les contributions sont les bienvenues, en particulier sur:
+Les contributions sont bienvenues, surtout sur:
 
-- stabilite du moteur
-- gameplay voxel
-- qualite de rendu
-- couverture de tests
-- ergonomie du pipeline de build
+- la stabilite du moteur
+- le gameplay voxel
+- la qualite de rendu
+- la couverture de tests
+- l'ergonomie du pipeline de build
 
-Avant de proposer un changement, il est recommande de lancer:
+Avant toute proposition de changement:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
@@ -198,4 +232,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ## Licence
 
 Aucune licence n'est encore definie dans le depot.
-Si tu veux ouvrir le projet publiquement de maniere claire, il faudra ajouter un fichier `LICENSE`.
+Si tu veux rendre la reutilisation du projet claire publiquement, il faudra ajouter un fichier `LICENSE`.
