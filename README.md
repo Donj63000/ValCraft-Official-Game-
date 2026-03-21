@@ -231,5 +231,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 
 ## Licence
 
-Aucune licence n'est encore definie dans le depot.
-Si tu veux rendre la reutilisation du projet claire publiquement, il faudra ajouter un fichier `LICENSE`.
+Ce projet est distribue sous la licence [Apache-2.0](LICENSE).
+
+Voir aussi le fichier [NOTICE](NOTICE) pour l'attribution du projet.
