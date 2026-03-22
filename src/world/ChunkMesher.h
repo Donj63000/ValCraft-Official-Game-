@@ -15,7 +15,13 @@ struct ChunkVertex {
     float z = 0.0F;
     float u = 0.0F;
     float v = 0.0F;
-    float shade = 1.0F;
+    float nx = 0.0F;
+    float ny = 1.0F;
+    float nz = 0.0F;
+    float face_shade = 1.0F;
+    float ao = 1.0F;
+    float sky_light = 1.0F;
+    float block_light = 0.0F;
 };
 
 struct ChunkMeshData {
@@ -30,7 +36,10 @@ struct ChunkMeshData {
 
 class ChunkMesher {
 public:
-    [[nodiscard]] auto build_mesh(const World& world, const ChunkCoord& coord) const -> ChunkMeshData;
+    [[nodiscard]] auto build_mesh(const World& world,
+                                  const ChunkCoord& coord,
+                                  std::size_t vertex_reserve_hint = 0,
+                                  std::size_t index_reserve_hint = 0) const -> ChunkMeshData;
 };
 
 } // namespace valcraft

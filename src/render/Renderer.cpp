@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -17,6 +20,14 @@ namespace {
 
 constexpr auto kAtlasSize = 64;
 constexpr auto kTileSize = 16;
+constexpr auto kShadowDistance = 96.0F;
+constexpr auto kInitialVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(ChunkVertex) * 256U);
+constexpr auto kInitialIndexBufferBytes = static_cast<GLsizeiptr>(sizeof(std::uint32_t) * 384U);
+
+struct FrustumPlane {
+    glm::vec3 normal {0.0F, 1.0F, 0.0F};
+    float distance = 0.0F;
+};
 
 void set_texel(std::vector<std::uint8_t>& pixels, int x, int y, std::array<std::uint8_t, 3> color) {
     const auto index = static_cast<std::size_t>((y * kAtlasSize + x) * 4);
@@ -36,17 +47,65 @@ void fill_tile(std::vector<std::uint8_t>& pixels, int tile_x, int tile_y, const 
     }
 }
 
+auto make_plane(const glm::vec4& equation) -> FrustumPlane {
+    const auto normal = glm::vec3 {equation.x, equation.y, equation.z};
+    const auto length = glm::length(normal);
+    if (length <= 1.0e-6F) {
+        return {};
+    }
+    return {normal / length, equation.w / length};
+}
+
+auto extract_frustum_planes(const glm::mat4& matrix) -> std::array<FrustumPlane, 6> {
+    const glm::vec4 row0 {matrix[0][0], matrix[1][0], matrix[2][0], matrix[3][0]};
+    const glm::vec4 row1 {matrix[0][1], matrix[1][1], matrix[2][1], matrix[3][1]};
+    const glm::vec4 row2 {matrix[0][2], matrix[1][2], matrix[2][2], matrix[3][2]};
+    const glm::vec4 row3 {matrix[0][3], matrix[1][3], matrix[2][3], matrix[3][3]};
+
+    return {{
+        make_plane(row3 + row0),
+        make_plane(row3 - row0),
+        make_plane(row3 + row1),
+        make_plane(row3 - row1),
+        make_plane(row3 + row2),
+        make_plane(row3 - row2),
+    }};
+}
+
+auto intersects_frustum(const std::array<FrustumPlane, 6>& planes, const glm::vec3& min_corner, const glm::vec3& max_corner) -> bool {
+    for (const auto& plane : planes) {
+        const glm::vec3 positive_vertex {
+            plane.normal.x >= 0.0F ? max_corner.x : min_corner.x,
+            plane.normal.y >= 0.0F ? max_corner.y : min_corner.y,
+            plane.normal.z >= 0.0F ? max_corner.z : min_corner.z,
+        };
+        if (glm::dot(plane.normal, positive_vertex) + plane.distance < 0.0F) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, GLsizeiptr minimum_bytes) -> GLsizeiptr {
+    auto capacity = std::max(current_bytes, minimum_bytes);
+    while (capacity < required_bytes) {
+        capacity = std::max(capacity * 2, required_bytes);
+    }
+    return capacity;
+}
+
 } // namespace
 
 Renderer::~Renderer() {
     shutdown();
 }
 
-auto Renderer::initialize() -> bool {
-    if (initialized_) {
+auto Renderer::initialize(const RendererOptions& options) -> bool {
+    if (initialized_ && options_.shadows_enabled == options.shadows_enabled && options_.shadow_map_size == options.shadow_map_size) {
         return true;
     }
 
+    options_ = options;
     if (gl_api_ready_) {
         shutdown();
     }
@@ -54,6 +113,7 @@ auto Renderer::initialize() -> bool {
     gl_api_ready_ = true;
     create_programs();
     create_atlas_texture();
+    create_shadow_map();
     create_crosshair_geometry();
     initialized_ = true;
     return true;
@@ -61,8 +121,8 @@ auto Renderer::initialize() -> bool {
 
 void Renderer::shutdown() {
     if (gl_api_ready_) {
-        for (auto& [coord, mesh] : gpu_meshes_) {
-            destroy_gpu_mesh(mesh);
+        for (auto& entry : gpu_meshes_) {
+            destroy_gpu_mesh(entry.second);
         }
 
         if (crosshair_vbo_ != 0) {
@@ -74,8 +134,17 @@ void Renderer::shutdown() {
         if (atlas_texture_ != 0) {
             glDeleteTextures(1, &atlas_texture_);
         }
+        if (shadow_map_ != 0) {
+            glDeleteTextures(1, &shadow_map_);
+        }
+        if (shadow_framebuffer_ != 0) {
+            glDeleteFramebuffers(1, &shadow_framebuffer_);
+        }
         if (world_program_ != 0) {
             glDeleteProgram(world_program_);
+        }
+        if (shadow_program_ != 0) {
+            glDeleteProgram(shadow_program_);
         }
         if (crosshair_program_ != 0) {
             glDeleteProgram(crosshair_program_);
@@ -86,29 +155,34 @@ void Renderer::shutdown() {
     crosshair_vbo_ = 0;
     crosshair_vao_ = 0;
     atlas_texture_ = 0;
+    shadow_map_ = 0;
+    shadow_framebuffer_ = 0;
     world_program_ = 0;
+    shadow_program_ = 0;
     crosshair_program_ = 0;
+    world_uniforms_ = {};
+    shadow_uniforms_ = {};
+    last_frame_stats_ = {};
     gl_api_ready_ = false;
     initialized_ = false;
 }
 
-void Renderer::render_frame(const World& world, const PlayerController& player, int width, int height) {
+void Renderer::render_frame(const World& world, const PlayerController& player, const EnvironmentState& environment, int width, int height) {
     if (!initialized_) {
         return;
     }
 
-    sync_gpu_meshes(world);
+    using clock = std::chrono::steady_clock;
+    RendererFrameStats frame_stats {};
 
-    glViewport(0, 0, width, std::max(height, 1));
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glClearColor(0.53F, 0.78F, 0.96F, 1.0F);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    const auto upload_start = clock::now();
+    sync_gpu_meshes(world, frame_stats);
+    frame_stats.upload_ms = std::chrono::duration<double, std::milli>(clock::now() - upload_start).count();
 
     const auto aspect = static_cast<float>(width) / static_cast<float>(std::max(height, 1));
     const auto projection = glm::perspective(glm::radians(75.0F), aspect, 0.1F, 320.0F);
     const auto view_projection = projection * player.view_matrix();
+    const auto frustum_planes = extract_frustum_planes(view_projection);
     const auto eye = player.eye_position();
     auto forward = player.look_direction();
     forward.y = 0.0F;
@@ -118,27 +192,31 @@ void Renderer::render_frame(const World& world, const PlayerController& player, 
         forward = {0.0F, 0.0F, -1.0F};
     }
 
-    glUseProgram(world_program_);
-    glUniformMatrix4fv(glGetUniformLocation(world_program_, "u_view_projection"), 1, GL_FALSE, glm::value_ptr(view_projection));
-    glUniform3fv(glGetUniformLocation(world_program_, "u_camera_position"), 1, glm::value_ptr(eye));
-    glUniform3f(glGetUniformLocation(world_program_, "u_sky_color"), 0.53F, 0.78F, 0.96F);
-    glUniform1i(glGetUniformLocation(world_program_, "u_atlas"), 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
-
     const auto draw_distance = static_cast<float>((world.stream_radius() + 2) * kChunkSizeX);
+    std::vector<VisibleChunk> visible_chunks;
+    visible_chunks.reserve(gpu_meshes_.size());
+
     for (const auto& [coord, gpu_mesh] : gpu_meshes_) {
         if (gpu_mesh.index_count == 0) {
             continue;
         }
 
-        const auto chunk_center = glm::vec3 {
-            static_cast<float>(coord.x * kChunkSizeX) + static_cast<float>(kChunkSizeX) * 0.5F,
-            static_cast<float>(kChunkHeight) * 0.5F,
-            static_cast<float>(coord.z * kChunkSizeZ) + static_cast<float>(kChunkSizeZ) * 0.5F,
+        const auto min_corner = glm::vec3 {
+            static_cast<float>(coord.x * kChunkSizeX),
+            0.0F,
+            static_cast<float>(coord.z * kChunkSizeZ),
         };
-        auto to_chunk = chunk_center - eye;
-        const auto horizontal = glm::vec3 {to_chunk.x, 0.0F, to_chunk.z};
+        const auto max_corner = glm::vec3 {
+            min_corner.x + static_cast<float>(kChunkSizeX),
+            static_cast<float>(kChunkHeight),
+            min_corner.z + static_cast<float>(kChunkSizeZ),
+        };
+        if (!intersects_frustum(frustum_planes, min_corner, max_corner)) {
+            continue;
+        }
+
+        const auto center = (min_corner + max_corner) * 0.5F;
+        const auto horizontal = glm::vec3 {center.x - eye.x, 0.0F, center.z - eye.z};
         const auto distance = glm::length(horizontal);
         if (distance > draw_distance) {
             continue;
@@ -151,14 +229,111 @@ void Renderer::render_frame(const World& world, const PlayerController& player, 
             }
         }
 
-        glBindVertexArray(gpu_mesh.vao);
-        glDrawElements(GL_TRIANGLES, gpu_mesh.index_count, GL_UNSIGNED_INT, nullptr);
+        visible_chunks.push_back({coord, &gpu_mesh, center, distance});
+    }
+    frame_stats.visible_chunks = visible_chunks.size();
+
+    const auto sun_visible = environment.sun_direction.y > 0.0F;
+    glm::mat4 light_view_projection(1.0F);
+
+    if (options_.shadows_enabled && sun_visible) {
+        const auto shadow_start = clock::now();
+        const auto shadow_map_size = std::max(options_.shadow_map_size, 1);
+        const auto snap = (kShadowDistance * 2.0F) / static_cast<float>(shadow_map_size);
+        const auto focus = player.position() + glm::vec3 {0.0F, 18.0F, 0.0F};
+        const auto snapped_focus = glm::vec3 {
+            std::floor(focus.x / snap) * snap,
+            std::floor(focus.y / snap) * snap,
+            std::floor(focus.z / snap) * snap,
+        };
+        const auto light_position = snapped_focus + glm::normalize(environment.sun_direction) * (kShadowDistance * 0.85F);
+        const auto up = std::abs(environment.sun_direction.y) > 0.95F ? glm::vec3 {0.0F, 0.0F, 1.0F} : glm::vec3 {0.0F, 1.0F, 0.0F};
+        const auto light_view = glm::lookAt(light_position, snapped_focus, up);
+        const auto light_projection = glm::ortho(
+            -kShadowDistance,
+            kShadowDistance,
+            -kShadowDistance,
+            kShadowDistance,
+            1.0F,
+            kShadowDistance * 3.0F);
+        light_view_projection = light_projection * light_view;
+
+        glViewport(0, 0, shadow_map_size, shadow_map_size);
+        glBindFramebuffer(GL_FRAMEBUFFER, shadow_framebuffer_);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(2.0F, 4.0F);
+
+        glUseProgram(shadow_program_);
+        glUniformMatrix4fv(shadow_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+
+        for (const auto& visible_chunk : visible_chunks) {
+            const auto horizontal = glm::vec3 {
+                visible_chunk.center.x - focus.x,
+                0.0F,
+                visible_chunk.center.z - focus.z,
+            };
+            if (glm::length(horizontal) > kShadowDistance + static_cast<float>(kChunkSizeX)) {
+                continue;
+            }
+
+            glBindVertexArray(visible_chunk.mesh->vao);
+            glDrawElements(GL_TRIANGLES, visible_chunk.mesh->index_count, GL_UNSIGNED_INT, nullptr);
+            ++frame_stats.shadow_chunks;
+        }
+
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        frame_stats.shadow_ms =
+            std::chrono::duration<double, std::milli>(clock::now() - shadow_start).count();
+    }
+
+    const auto world_start = clock::now();
+    glViewport(0, 0, width, std::max(height, 1));
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glClearColor(environment.sky_color.r, environment.sky_color.g, environment.sky_color.b, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(world_program_);
+    glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
+    glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniform3fv(world_uniforms_.camera_position, 1, glm::value_ptr(eye));
+    glUniform3fv(world_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
+    glUniform3fv(world_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
+    glUniform3fv(world_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
+    glUniform3fv(world_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
+    glUniform1f(world_uniforms_.daylight_factor, environment.daylight_factor);
+    glUniform1f(world_uniforms_.sun_visibility, sun_visible ? 1.0F : 0.0F);
+    glUniform1i(world_uniforms_.atlas, 0);
+    glUniform1i(world_uniforms_.shadow_map, 1);
+    glUniform1i(world_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+
+    for (const auto& visible_chunk : visible_chunks) {
+        glBindVertexArray(visible_chunk.mesh->vao);
+        glDrawElements(GL_TRIANGLES, visible_chunk.mesh->index_count, GL_UNSIGNED_INT, nullptr);
+        ++frame_stats.world_chunks;
     }
 
     draw_crosshair();
+    frame_stats.world_ms = std::chrono::duration<double, std::milli>(clock::now() - world_start).count();
+    last_frame_stats_ = frame_stats;
 }
 
-void Renderer::sync_gpu_meshes(const World& world) {
+auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
+    return last_frame_stats_;
+}
+
+void Renderer::sync_gpu_meshes(const World& world, RendererFrameStats& frame_stats) {
     const auto& records = world.chunk_records();
 
     for (auto iterator = gpu_meshes_.begin(); iterator != gpu_meshes_.end();) {
@@ -174,16 +349,17 @@ void Renderer::sync_gpu_meshes(const World& world) {
         if (record.mesh_revision == 0) {
             continue;
         }
-        auto gpu_iterator = gpu_meshes_.find(coord);
+
+        const auto gpu_iterator = gpu_meshes_.find(coord);
         if (gpu_iterator == gpu_meshes_.end() || gpu_iterator->second.revision != record.mesh_revision) {
             upload_mesh(coord, record.mesh, record.mesh_revision);
+            ++frame_stats.uploaded_meshes;
         }
     }
 }
 
 void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision) {
     auto& gpu_mesh = gpu_meshes_[coord];
-    destroy_gpu_mesh(gpu_mesh);
     gpu_mesh.revision = revision;
 
     if (mesh.indices.empty()) {
@@ -191,23 +367,55 @@ void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, s
         return;
     }
 
-    glGenVertexArrays(1, &gpu_mesh.vao);
-    glGenBuffers(1, &gpu_mesh.vbo);
-    glGenBuffers(1, &gpu_mesh.ebo);
+    if (gpu_mesh.vao == 0) {
+        glGenVertexArrays(1, &gpu_mesh.vao);
+        glGenBuffers(1, &gpu_mesh.vbo);
+        glGenBuffers(1, &gpu_mesh.ebo);
 
-    glBindVertexArray(gpu_mesh.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(ChunkVertex)), mesh.vertices.data(), GL_STATIC_DRAW);
+        glBindVertexArray(gpu_mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t)), mesh.indices.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, x)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, u)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, nx)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, face_shade)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, ao)));
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, sky_light)));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
+    } else {
+        glBindVertexArray(gpu_mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
+    }
 
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, x)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, u)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, shade)));
+    const auto vertex_bytes = static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(ChunkVertex));
+    const auto index_bytes = static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t));
+
+    if (gpu_mesh.vertex_buffer_bytes < vertex_bytes) {
+        gpu_mesh.vertex_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.vertex_buffer_bytes,
+            vertex_bytes,
+            kInitialVertexBufferBytes);
+        glBufferData(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
+    }
+    if (gpu_mesh.index_buffer_bytes < index_bytes) {
+        gpu_mesh.index_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.index_buffer_bytes,
+            index_bytes,
+            kInitialIndexBufferBytes);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
+    }
+
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, mesh.vertices.data());
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, mesh.indices.data());
 
     gpu_mesh.index_count = static_cast<GLsizei>(mesh.indices.size());
 }
@@ -226,6 +434,9 @@ void Renderer::destroy_gpu_mesh(GpuMesh& mesh) {
         mesh.vao = 0;
     }
     mesh.index_count = 0;
+    mesh.revision = 0;
+    mesh.vertex_buffer_bytes = 0;
+    mesh.index_buffer_bytes = 0;
 }
 
 auto Renderer::compile_shader(GLenum type, const char* source) -> GLuint {
@@ -277,39 +488,117 @@ void Renderer::create_programs() {
     static constexpr auto* world_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
-layout(location = 2) in float a_shade;
+layout(location = 2) in vec3 a_normal;
+layout(location = 3) in float a_face_shade;
+layout(location = 4) in float a_ao;
+layout(location = 5) in float a_sky_light;
+layout(location = 6) in float a_block_light;
 
 uniform mat4 u_view_projection;
+uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
 
 out vec2 v_uv;
-out float v_shade;
+out vec3 v_normal;
+out float v_face_shade;
+out float v_ao;
+out float v_sky_light;
+out float v_block_light;
 out float v_distance;
+out vec4 v_light_position;
 
 void main() {
     vec4 world_position = vec4(a_position, 1.0);
     gl_Position = u_view_projection * world_position;
     v_uv = a_uv;
-    v_shade = a_shade;
+    v_normal = a_normal;
+    v_face_shade = a_face_shade;
+    v_ao = a_ao;
+    v_sky_light = a_sky_light;
+    v_block_light = a_block_light;
     v_distance = distance(world_position.xyz, u_camera_position);
+    v_light_position = u_light_view_projection * world_position;
 }
 )";
 
     static constexpr auto* world_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
-in float v_shade;
+in vec3 v_normal;
+in float v_face_shade;
+in float v_ao;
+in float v_sky_light;
+in float v_block_light;
 in float v_distance;
+in vec4 v_light_position;
 
 uniform sampler2D u_atlas;
-uniform vec3 u_sky_color;
+uniform sampler2D u_shadow_map;
+uniform vec3 u_sun_direction;
+uniform vec3 u_sun_color;
+uniform vec3 u_ambient_color;
+uniform vec3 u_fog_color;
+uniform float u_daylight_factor;
+uniform float u_sun_visibility;
+uniform int u_shadows_enabled;
 
 out vec4 frag_color;
 
+float sample_shadow(vec3 normal) {
+    if (u_sun_visibility < 0.5 || u_shadows_enabled == 0) {
+        return 1.0;
+    }
+
+    vec3 projected = v_light_position.xyz / max(v_light_position.w, 0.0001);
+    projected = projected * 0.5 + 0.5;
+    if (projected.z > 1.0 || projected.x < 0.0 || projected.x > 1.0 || projected.y < 0.0 || projected.y > 1.0) {
+        return 1.0;
+    }
+
+    vec2 texel_size = 1.0 / vec2(textureSize(u_shadow_map, 0));
+    float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
+    float bias = max(0.00065 * (1.0 - ndotl), 0.00012);
+    float shadow = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float sampled_depth = texture(u_shadow_map, projected.xy + vec2(x, y) * texel_size).r;
+            shadow += (projected.z - bias) <= sampled_depth ? 1.0 : 0.0;
+        }
+    }
+    return shadow / 9.0;
+}
+
 void main() {
-    vec3 base_color = texture(u_atlas, v_uv).rgb * v_shade;
+    vec3 albedo = texture(u_atlas, v_uv).rgb;
+    vec3 normal = normalize(v_normal);
+
+    float ambient_strength = mix(0.30, 1.00, clamp(v_sky_light, 0.0, 1.0));
+    vec3 ambient = u_ambient_color * ambient_strength * clamp(v_ao, 0.0, 1.0);
+
+    float sun_ndotl = max(dot(normal, normalize(u_sun_direction)), 0.0);
+    float shadow = sample_shadow(normal);
+    vec3 sunlight = u_sun_color * (sun_ndotl * shadow * u_sun_visibility * clamp(u_daylight_factor, 0.0, 1.0));
+
+    vec3 torch_light = vec3(1.00, 0.74, 0.42) * clamp(v_block_light, 0.0, 1.0) * 1.35;
+
+    vec3 lit_color = albedo * v_face_shade * (ambient + sunlight + torch_light);
     float fog = clamp(v_distance / 180.0, 0.0, 1.0);
     fog = fog * fog;
-    frag_color = vec4(mix(base_color, u_sky_color, fog), 1.0);
+    frag_color = vec4(mix(lit_color, u_fog_color, fog), 1.0);
+}
+)";
+
+    static constexpr auto* shadow_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec3 a_position;
+
+uniform mat4 u_light_view_projection;
+
+void main() {
+    gl_Position = u_light_view_projection * vec4(a_position, 1.0);
+}
+)";
+
+    static constexpr auto* shadow_fragment_shader = R"(#version 330 core
+void main() {
 }
 )";
 
@@ -332,9 +621,27 @@ void main() {
     world_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, world_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
+    shadow_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, shadow_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, shadow_fragment_shader));
     crosshair_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, crosshair_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, crosshair_fragment_shader));
+
+    world_uniforms_.view_projection = glGetUniformLocation(world_program_, "u_view_projection");
+    world_uniforms_.light_view_projection = glGetUniformLocation(world_program_, "u_light_view_projection");
+    world_uniforms_.camera_position = glGetUniformLocation(world_program_, "u_camera_position");
+    world_uniforms_.sun_direction = glGetUniformLocation(world_program_, "u_sun_direction");
+    world_uniforms_.sun_color = glGetUniformLocation(world_program_, "u_sun_color");
+    world_uniforms_.ambient_color = glGetUniformLocation(world_program_, "u_ambient_color");
+    world_uniforms_.fog_color = glGetUniformLocation(world_program_, "u_fog_color");
+    world_uniforms_.daylight_factor = glGetUniformLocation(world_program_, "u_daylight_factor");
+    world_uniforms_.sun_visibility = glGetUniformLocation(world_program_, "u_sun_visibility");
+    world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
+    world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
+    world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
+
+    shadow_uniforms_.light_view_projection = glGetUniformLocation(shadow_program_, "u_light_view_projection");
 }
 
 void Renderer::create_atlas_texture() {
@@ -376,6 +683,14 @@ void Renderer::create_atlas_texture() {
         const auto shade = ((x + y) % 5 == 0) ? 40 : 0;
         return std::array<std::uint8_t, 3> {45, static_cast<std::uint8_t>(130 - shade), 55};
     });
+    fill_tile(pixels, 0, 2, [](int x, int y) {
+        const auto glow = (x > 5 && x < 10 && y < 6) ? 48 : 0;
+        return std::array<std::uint8_t, 3> {
+            static_cast<std::uint8_t>(154 + glow),
+            static_cast<std::uint8_t>(96 + glow / 2),
+            42,
+        };
+    });
 
     glGenTextures(1, &atlas_texture_);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
@@ -385,6 +700,49 @@ void Renderer::create_atlas_texture() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void Renderer::create_shadow_map() {
+    glGenTextures(1, &shadow_map_);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+
+    if (!options_.shadows_enabled) {
+        const float depth_value = 1.0F;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth_value);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        return;
+    }
+
+    const auto shadow_map_size = std::max(options_.shadow_map_size, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_DEPTH_COMPONENT24,
+        shadow_map_size,
+        shadow_map_size,
+        0,
+        GL_DEPTH_COMPONENT,
+        GL_FLOAT,
+        nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    const std::array<float, 4> border_color {{1.0F, 1.0F, 1.0F, 1.0F}};
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border_color.data());
+
+    glGenFramebuffers(1, &shadow_framebuffer_);
+    glBindFramebuffer(GL_FRAMEBUFFER, shadow_framebuffer_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadow_map_, 0);
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        throw std::runtime_error("Shadow framebuffer is incomplete");
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void Renderer::create_crosshair_geometry() {

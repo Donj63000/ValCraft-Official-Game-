@@ -146,14 +146,24 @@ auto PlayerController::try_place_block(World& world, float max_distance) const -
     if (!hit.hit) {
         return false;
     }
-    if (!is_world_y_valid(hit.adjacent.y)) {
-        return false;
-    }
-    if (is_block_solid(world.get_block(hit.adjacent.x, hit.adjacent.y, hit.adjacent.z))) {
-        return false;
-    }
-    if (block_overlaps_player(hit.adjacent)) {
-        return false;
+
+    if (selected_block_ == to_block_id(BlockType::Torch)) {
+        if (hit.adjacent.y != hit.block.y + 1) {
+            return false;
+        }
+        if (!world.can_place_torch_at(hit.adjacent)) {
+            return false;
+        }
+    } else {
+        if (!is_world_y_valid(hit.adjacent.y)) {
+            return false;
+        }
+        if (is_block_solid(world.get_block(hit.adjacent.x, hit.adjacent.y, hit.adjacent.z))) {
+            return false;
+        }
+        if (block_overlaps_player(hit.adjacent)) {
+            return false;
+        }
     }
 
     world.set_block(hit.adjacent.x, hit.adjacent.y, hit.adjacent.z, selected_block_);
@@ -175,7 +185,7 @@ auto PlayerController::collides_at(const World& world, const glm::vec3& feet_pos
     for (int y = min_y; y <= max_y; ++y) {
         for (int z = min_z; z <= max_z; ++z) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (is_block_solid(world.get_block(x, y, z))) {
+                if (is_block_collidable(world.get_block(x, y, z))) {
                     return true;
                 }
             }
@@ -208,7 +218,7 @@ void PlayerController::move_axis(float delta, int axis, const World& world) {
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int z = min_z; z <= max_z; ++z) {
-                if (!is_block_solid(world.get_block(block_x, y, z))) {
+                if (!is_block_collidable(world.get_block(block_x, y, z))) {
                     continue;
                 }
                 next_position.x = delta > 0.0F
@@ -230,7 +240,7 @@ void PlayerController::move_axis(float delta, int axis, const World& world) {
 
         for (int z = min_z; z <= max_z; ++z) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_solid(world.get_block(x, block_y, z))) {
+                if (!is_block_collidable(world.get_block(x, block_y, z))) {
                     continue;
                 }
                 if (delta > 0.0F) {
@@ -255,7 +265,7 @@ void PlayerController::move_axis(float delta, int axis, const World& world) {
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_solid(world.get_block(x, y, block_z))) {
+                if (!is_block_collidable(world.get_block(x, y, block_z))) {
                     continue;
                 }
                 next_position.z = delta > 0.0F

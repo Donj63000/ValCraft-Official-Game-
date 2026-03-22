@@ -98,6 +98,40 @@ function(valcraft_enable_coverage_for target)
     target_link_options(${target} PRIVATE --coverage)
 endfunction()
 
+function(valcraft_copy_runtime_dlls target)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:${target}>
+                $<TARGET_FILE_DIR:${target}>
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
+endfunction()
+
+function(valcraft_copy_mingw_runtime_dlls target)
+    if(NOT MINGW)
+        return()
+    endif()
+
+    get_filename_component(VALCRAFT_COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(runtime_dll IN ITEMS libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
+        if(EXISTS "${VALCRAFT_COMPILER_BIN_DIR}/${runtime_dll}")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${VALCRAFT_COMPILER_BIN_DIR}/${runtime_dll}"
+                    $<TARGET_FILE_DIR:${target}>
+            )
+        endif()
+    endforeach()
+endfunction()
+
+if(WIN32)
+    set(VALCRAFT_POWERSHELL_EXECUTABLE powershell)
+else()
+    set(VALCRAFT_POWERSHELL_EXECUTABLE pwsh)
+endif()
+
 if(TARGET glm::glm)
     set(VALCRAFT_GLM_TARGET glm::glm)
 elseif(TARGET glm)
@@ -114,10 +148,12 @@ endif()
 glad_add_library(valcraft_glad REPRODUCIBLE API gl:core=3.3)
 
 add_library(valcraft_core
+    src/app/GameOptions.cpp
     src/world/Chunk.cpp
     src/world/World.cpp
     src/world/WorldGenerator.cpp
     src/world/ChunkMesher.cpp
+    src/world/Environment.cpp
     src/gameplay/PlayerController.cpp
 )
 
@@ -135,6 +171,7 @@ target_link_libraries(valcraft_core
 target_compile_definitions(valcraft_core
     PUBLIC
         NOMINMAX
+        VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
 )
 valcraft_apply_strict_warnings(valcraft_core)
 valcraft_enable_coverage_for(valcraft_core)
@@ -151,6 +188,7 @@ target_link_libraries(ValCraft
         SDL2::SDL2
         valcraft_glad
 )
+target_compile_definitions(ValCraft PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 
 if(WIN32)
     target_link_libraries(ValCraft PRIVATE opengl32)
@@ -158,17 +196,12 @@ endif()
 valcraft_apply_strict_warnings(ValCraft)
 valcraft_enable_coverage_for(ValCraft)
 
-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
-    add_custom_command(TARGET ValCraft POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_RUNTIME_DLLS:ValCraft>
-            $<TARGET_FILE_DIR:ValCraft>
-        COMMAND_EXPAND_LISTS
-    )
-endif()
+valcraft_copy_runtime_dlls(ValCraft)
+valcraft_copy_mingw_runtime_dlls(ValCraft)
 
 add_executable(valcraft_tests
     tests/main.cpp
+    tests/AppTests.cpp
     tests/WorldTests.cpp
     tests/PlayerTests.cpp
 )
@@ -178,8 +211,10 @@ target_link_libraries(valcraft_tests
         valcraft_core
         doctest::doctest
 )
+target_compile_definitions(valcraft_tests PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 valcraft_apply_strict_warnings(valcraft_tests)
 valcraft_enable_coverage_for(valcraft_tests)
+valcraft_copy_mingw_runtime_dlls(valcraft_tests)
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(valcraft_tests)
@@ -197,7 +232,29 @@ add_custom_target(valcraft_check_tests
 )
 
 add_custom_target(valcraft_check_smoke
-    COMMAND $<TARGET_FILE:ValCraft> --smoke-test --smoke-frames=60 --hidden-window
+    COMMAND $<TARGET_FILE:ValCraft> --smoke-test --smoke-frames=360 --hidden-window
+    DEPENDS ValCraft
+    USES_TERMINAL
+)
+
+add_custom_target(valcraft_check_perf_smoke
+    COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
+        -BuildDir ${CMAKE_BINARY_DIR}
+        -NoConfigure
+        -NoBuild
+        -SmokeFrames 180
+        -Scenarios baseline
+    DEPENDS ValCraft
+    USES_TERMINAL
+)
+
+add_custom_target(valcraft_perf_suite
+    COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
+        -BuildDir ${CMAKE_BINARY_DIR}
+        -NoConfigure
+        -NoBuild
     DEPENDS ValCraft
     USES_TERMINAL
 )

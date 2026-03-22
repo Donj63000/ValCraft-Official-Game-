@@ -2,6 +2,8 @@
 
 #include "world/World.h"
 
+#include <limits>
+
 namespace valcraft::test {
 
 inline void make_chunk_empty(World& world, const ChunkCoord& coord) {
@@ -18,6 +20,20 @@ inline void make_flat_floor(World& world, int min_x, int max_x, int y, int min_z
             world.set_block(x, y, z, block_id);
         }
     }
+}
+
+inline void flush_pending_work(
+    World& world,
+    WorldWorkBudget budget = {
+        64,
+        64,
+        std::numeric_limits<std::size_t>::max() / 8U,
+    }) {
+    while (world.has_pending_work()) {
+        const auto stats = world.process_pending_work(budget);
+        (void)stats;
+    }
+    world.rebuild_dirty_meshes();
 }
 
 } // namespace valcraft::test
