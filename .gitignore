@@ -9,6 +9,15 @@ coverage-report/
 
 compile_commands.json
 CMakeUserPresets.json
+perf-artifacts/
+
+*compile*.txt
+build-errors*.txt
+compile-out*.txt
+configure-*.txt
+test-output.txt
+test-summary*.txt
+valcraft-performance-patch.diff
 
 *.gcda
 *.gcno
