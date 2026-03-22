@@ -1,12 +1,20 @@
 #include "app/PerformanceReport.h"
 #include "world/World.h"
+#include "world/BlockVisuals.h"
+#include "world/ChunkMesher.h"
 #include "world/Environment.h"
+#include "world/WorldGenerator.h"
 
 #include "TestUtils.h"
 
+#include <glm/geometric.hpp>
+
 #include <algorithm>
+#include <array>
 #include <doctest/doctest.h>
+#include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace valcraft {
 
@@ -31,6 +39,30 @@ TEST_CASE("chunk set_local throws when coordinates are out of bounds") {
     CHECK_THROWS_AS(chunk.set_local(kChunkSizeX, 0, 0, to_block_id(BlockType::Stone)), std::out_of_range);
     CHECK_THROWS_AS(chunk.set_local(0, -1, 0, to_block_id(BlockType::Stone)), std::out_of_range);
     CHECK_THROWS_AS(chunk.set_local(0, 0, -1, to_block_id(BlockType::Stone)), std::out_of_range);
+}
+
+TEST_CASE("chunk tracks meshable y bounds as blocks are added and removed") {
+    Chunk chunk({0, 0});
+    CHECK_FALSE(chunk.has_meshable_blocks());
+    CHECK(chunk.max_mesh_y() < chunk.min_mesh_y());
+
+    chunk.set_local(1, 12, 1, to_block_id(BlockType::Stone));
+    CHECK(chunk.has_meshable_blocks());
+    CHECK(chunk.min_mesh_y() == 12);
+    CHECK(chunk.max_mesh_y() == 12);
+
+    chunk.set_local(2, 27, 2, to_block_id(BlockType::Torch));
+    CHECK(chunk.min_mesh_y() == 12);
+    CHECK(chunk.max_mesh_y() == 27);
+
+    chunk.set_local(1, 12, 1, to_block_id(BlockType::Air));
+    CHECK(chunk.has_meshable_blocks());
+    CHECK(chunk.min_mesh_y() == 27);
+    CHECK(chunk.max_mesh_y() == 27);
+
+    chunk.set_local(2, 27, 2, to_block_id(BlockType::Air));
+    CHECK_FALSE(chunk.has_meshable_blocks());
+    CHECK(chunk.max_mesh_y() < chunk.min_mesh_y());
 }
 
 TEST_CASE("world converts negative coordinates into chunk and local positions") {
@@ -85,6 +117,119 @@ TEST_CASE("torch block properties are non opaque non collidable and emissive") {
     CHECK(properties.emissive_level == 14);
 }
 
+TEST_CASE("decorative flora blocks are replaceable cross meshes and do not count as ground") {
+    const auto properties = block_properties(to_block_id(BlockType::TallGrass));
+
+    CHECK_FALSE(properties.opaque);
+    CHECK_FALSE(properties.collidable);
+    CHECK_FALSE(properties.surface_support);
+    CHECK(properties.replaceable);
+    CHECK(properties.mesh_type == BlockMeshType::Cross);
+}
+
+TEST_CASE("water block properties are translucent replaceable and non collidable") {
+    const auto properties = block_properties(to_block_id(BlockType::Water));
+
+    CHECK_FALSE(properties.opaque);
+    CHECK_FALSE(properties.collidable);
+    CHECK_FALSE(properties.surface_support);
+    CHECK(properties.replaceable);
+    CHECK(properties.mesh_type == BlockMeshType::Water);
+}
+
+TEST_CASE("block atlas expands to 128 square pixels and preserves transparent decorative tiles") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto tall_grass_tile = block_atlas_tile(to_block_id(BlockType::TallGrass), BlockVisualFace::Cross);
+    const auto tile_origin_x = tall_grass_tile.x * kBlockAtlasTileSize;
+    const auto tile_origin_y = tall_grass_tile.y * kBlockAtlasTileSize;
+    const auto transparent_alpha_index =
+        static_cast<std::size_t>(((tile_origin_y + 0) * kBlockAtlasSize + (tile_origin_x + 0)) * 4 + 3);
+    const auto opaque_alpha_index =
+        static_cast<std::size_t>(((tile_origin_y + 10) * kBlockAtlasSize + (tile_origin_x + 7)) * 4 + 3);
+
+    CHECK(pixels[transparent_alpha_index] == 0);
+    CHECK(pixels[opaque_alpha_index] == 255);
+}
+
+TEST_CASE("block atlas includes a translucent water tile") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto water_tile = block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveY);
+    const auto sample_x = water_tile.x * kBlockAtlasTileSize + 8;
+    const auto sample_y = water_tile.y * kBlockAtlasTileSize + 8;
+    const auto alpha_index = static_cast<std::size_t>((sample_y * kBlockAtlasSize + sample_x) * 4 + 3);
+
+    CHECK(pixels[alpha_index] > 0);
+    CHECK(pixels[alpha_index] < 255);
+}
+
+TEST_CASE("tree foliage atlas tiles stay dense enough to read as full canopies while keeping cutout edges") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto count_opaque_pixels = [&](BlockId block_id) {
+        const auto tile = block_atlas_tile(block_id, BlockVisualFace::PositiveX);
+        const auto tile_origin_x = tile.x * kBlockAtlasTileSize;
+        const auto tile_origin_y = tile.y * kBlockAtlasTileSize;
+        auto opaque_pixels = 0;
+        auto transparent_pixels = 0;
+        for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto alpha_index =
+                    static_cast<std::size_t>(((tile_origin_y + y) * kBlockAtlasSize + (tile_origin_x + x)) * 4 + 3);
+                if (pixels[alpha_index] >= 250) {
+                    ++opaque_pixels;
+                } else if (pixels[alpha_index] <= 5) {
+                    ++transparent_pixels;
+                }
+            }
+        }
+        return std::pair {opaque_pixels, transparent_pixels};
+    };
+
+    const auto [oak_opaque, oak_transparent] = count_opaque_pixels(to_block_id(BlockType::Leaves));
+    const auto [pine_opaque, pine_transparent] = count_opaque_pixels(to_block_id(BlockType::PineLeaves));
+
+    CHECK(oak_opaque >= 150);
+    CHECK(oak_opaque <= 235);
+    CHECK(oak_transparent >= 20);
+    CHECK(pine_opaque >= 120);
+    CHECK(pine_opaque <= 230);
+    CHECK(pine_transparent >= 20);
+}
+
+TEST_CASE("block visual material classification keeps key terrain families distinct") {
+    CHECK(block_visual_material(to_block_id(BlockType::Grass)) == BlockVisualMaterial::Terrain);
+    CHECK(block_visual_material(to_block_id(BlockType::Stone)) == BlockVisualMaterial::Rock);
+    CHECK(block_visual_material(to_block_id(BlockType::Wood)) == BlockVisualMaterial::Wood);
+    CHECK(block_visual_material(to_block_id(BlockType::Leaves)) == BlockVisualMaterial::Foliage);
+    CHECK(block_visual_material(to_block_id(BlockType::TallGrass)) == BlockVisualMaterial::Flora);
+    CHECK(block_visual_material(to_block_id(BlockType::Water)) == BlockVisualMaterial::Water);
+    CHECK(block_visual_material(to_block_id(BlockType::Torch)) == BlockVisualMaterial::Emissive);
+    CHECK(block_visual_material(to_block_id(BlockType::Snow)) == BlockVisualMaterial::Snow);
+}
+
+TEST_CASE("accent atlas keeps authored celestial sprites within expected dimensions and alpha ranges") {
+    const auto pixels = build_accent_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kAccentAtlasSize * kAccentAtlasSize * 4));
+
+    const auto star_tile = accent_atlas_tile(AccentAtlasSprite::Star);
+    const auto cloud_tile = accent_atlas_tile(AccentAtlasSprite::Cloud);
+    const auto sample_alpha = [&](const AccentAtlasTile& tile, int local_x, int local_y) {
+        const auto x = tile.x * kAccentAtlasTileSize + local_x;
+        const auto y = tile.y * kAccentAtlasTileSize + local_y;
+        return pixels[static_cast<std::size_t>((y * kAccentAtlasSize + x) * 4 + 3)];
+    };
+
+    CHECK(sample_alpha(star_tile, 8, 8) > 0);
+    CHECK(sample_alpha(star_tile, 0, 0) == 0);
+    CHECK(sample_alpha(cloud_tile, 8, 8) > 0);
+    CHECK(sample_alpha(cloud_tile, 15, 0) == 0);
+}
+
 TEST_CASE("generation is deterministic for identical seeds") {
     World first(98765, 1);
     World second(98765, 1);
@@ -115,6 +260,58 @@ TEST_CASE("surface_height returns the highest solid block in a column") {
     world.set_block(3, 7, 5, to_block_id(BlockType::Stone));
 
     CHECK(world.surface_height(3, 5) == 9);
+}
+
+TEST_CASE("surface height ignores decorative plants and tree foliage") {
+    World world(181, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(3, 4, 5, to_block_id(BlockType::Stone));
+    world.set_block(3, 5, 5, to_block_id(BlockType::TallGrass));
+    world.set_block(3, 8, 5, to_block_id(BlockType::Leaves));
+
+    CHECK(world.surface_height(3, 5) == 4);
+    CHECK(world.loaded_surface_height(3, 5).value_or(-1) == 4);
+}
+
+TEST_CASE("surface height ignores water columns above solid ground") {
+    World world(182, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(3, 4, 5, to_block_id(BlockType::Stone));
+    world.set_block(3, 5, 5, to_block_id(BlockType::Water));
+
+    CHECK(world.surface_height(3, 5) == 4);
+    CHECK(world.loaded_surface_height(3, 5).value_or(-1) == 4);
+}
+
+TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
+    World world(183, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(3, 5, 5, to_block_id(BlockType::Water));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+
+    CHECK(mesh.face_count == 0);
+    CHECK(mesh.vertices.empty());
+    CHECK(mesh.indices.empty());
+    CHECK(mesh.water_face_count == 6);
+    CHECK(mesh.water_vertices.size() == 24);
+    CHECK(mesh.water_indices.size() == 36);
+    CHECK_FALSE(mesh.empty());
+}
+
+TEST_CASE("chunk mesher handles isolated high blocks without losing geometry") {
+    World world(184, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(2, 96, 2, to_block_id(BlockType::Torch));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+
+    CHECK(mesh.face_count == 6);
+    CHECK(mesh.vertices.size() == 24);
+    CHECK(mesh.indices.size() == 36);
+    CHECK(mesh.water_face_count == 0);
 }
 
 TEST_CASE("sky light stays at 15 until the first opaque block and 0 below it") {
@@ -307,6 +504,20 @@ TEST_CASE("mesher computes full ambient occlusion for an isolated block and dark
     CHECK(darkest_top_ao < 1.0F);
 }
 
+TEST_CASE("mesher renders crossed decorative quads for flora blocks") {
+    World world(178, 1);
+    const ChunkCoord coord {0, 0};
+    test::make_chunk_empty(world, coord);
+    world.set_block(2, 1, 2, to_block_id(BlockType::TallGrass));
+    world.rebuild_dirty_meshes();
+
+    const auto* mesh = world.mesh_for(coord);
+    REQUIRE(mesh != nullptr);
+    CHECK(mesh->face_count == 4);
+    CHECK(mesh->vertices.size() == 16);
+    CHECK(mesh->indices.size() == 24);
+}
+
 TEST_CASE("raycast returns first solid block and adjacent placement cell") {
     World world(11, 1);
     const ChunkCoord coord {0, 0};
@@ -340,6 +551,34 @@ TEST_CASE("raycast returns the current block immediately when starting inside a 
     REQUIRE(hit.hit);
     CHECK(hit.block == expected_current);
     CHECK(hit.adjacent == expected_current);
+}
+
+TEST_CASE("raycast can target decorative plants") {
+    World world(131, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 10, 0, to_block_id(BlockType::TallGrass));
+
+    const auto hit = world.raycast({0.5F, 10.5F, 0.5F}, {1.0F, 0.0F, 0.0F}, 8.0F);
+    REQUIRE(hit.hit);
+    CHECK(hit.block == BlockCoord {1, 10, 0});
+    CHECK(hit.block_id == to_block_id(BlockType::TallGrass));
+}
+
+TEST_CASE("generator exposes all major biome families across a wide sample") {
+    WorldGenerator generator(1337);
+    std::set<BiomeType> biomes;
+
+    for (int z = -2048; z <= 2048; z += 64) {
+        for (int x = -2048; x <= 2048; x += 64) {
+            biomes.insert(generator.biome_at(x, z));
+        }
+    }
+
+    CHECK(biomes.contains(BiomeType::Meadow));
+    CHECK(biomes.contains(BiomeType::Forest));
+    CHECK(biomes.contains(BiomeType::Desert));
+    CHECK(biomes.contains(BiomeType::RockyPeaks));
+    CHECK(biomes.contains(BiomeType::Taiga));
 }
 
 TEST_CASE("boundary block edits remesh both chunks touching the border") {
@@ -538,7 +777,22 @@ TEST_CASE("environment curve is brightest at noon and remains readable at midnig
 
     CHECK(noon.daylight_factor > dusk.daylight_factor);
     CHECK(dusk.daylight_factor > midnight.daylight_factor);
-    CHECK(midnight.daylight_factor >= 0.18F);
+    CHECK(midnight.daylight_factor >= 0.15F);
+}
+
+TEST_CASE("environment state exposes stylized sky and post-process controls across the day cycle") {
+    const auto noon = EnvironmentClock::compute_state(12.0F);
+    const auto dusk = EnvironmentClock::compute_state(18.5F);
+    const auto midnight = EnvironmentClock::compute_state(0.0F);
+
+    CHECK(noon.star_intensity < 0.05F);
+    CHECK(midnight.star_intensity > 0.50F);
+    CHECK(dusk.horizon_glow_color.r > midnight.horizon_glow_color.r);
+    CHECK(noon.exposure > midnight.exposure);
+    CHECK(midnight.vignette_strength > noon.vignette_strength);
+    CHECK(dusk.glow_strength >= noon.glow_strength);
+    CHECK(glm::length(noon.sky_zenith_color - noon.sky_horizon_color) > 0.10F);
+    CHECK(glm::length(midnight.distant_fog_color - midnight.night_tint_color) > 0.02F);
 }
 
 TEST_CASE("environment clock respects freeze mode") {
@@ -554,6 +808,7 @@ TEST_CASE("environment clock respects freeze mode") {
 TEST_CASE("performance report formatting includes frame and scheduler counters") {
     PerformanceReportMetadata metadata {};
     metadata.scenario = "baseline";
+    metadata.post_process_enabled = false;
     std::vector<FramePerformanceSample> samples {
         {0, 13.0, 1.0, 1.0, 2.0, 3.0, 0.4, 0.1, 0.3, 3, 4, 42, 6, 8, 3, 2, 3, 12, 3, 2, 7, 30, 20, 30, PerformanceStage::Unattributed},
         {1, 20.0, 0.8, 1.5, 2.5, 2.0, 0.2, 0.15, 0.35, 2, 3, 21, 3, 10, 2, 1, 2, 0, 0, 0, 0, 26, 18, 26, PerformanceStage::Unattributed},
@@ -563,6 +818,7 @@ TEST_CASE("performance report formatting includes frame and scheduler counters")
 
     CHECK(report.find("frame_total_ms_avg=") != std::string::npos);
     CHECK(report.find("p95=") != std::string::npos);
+    CHECK(report.find("render_flags shadows=on post_process=off") != std::string::npos);
     CHECK(report.find("pending_generation_avg=") != std::string::npos);
     CHECK(report.find("lag_frames_16_7=") != std::string::npos);
     CHECK(report.find("scheduler_stream_changes=") != std::string::npos);

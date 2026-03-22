@@ -16,16 +16,33 @@ enum class BlockType : BlockId {
     Wood = 5,
     Leaves = 6,
     Torch = 7,
+    Cobblestone = 8,
+    Planks = 9,
+    Gravel = 10,
+    MossyStone = 11,
+    Snow = 12,
+    PineWood = 13,
+    PineLeaves = 14,
+    TallGrass = 15,
+    RedFlower = 16,
+    YellowFlower = 17,
+    DeadShrub = 18,
+    Cactus = 19,
+    Water = 20,
 };
 
 enum class BlockMeshType : std::uint8_t {
     FullCube = 0,
     Torch = 1,
+    Cross = 2,
+    Water = 3,
 };
 
 struct BlockProperties {
     bool opaque = true;
     bool collidable = true;
+    bool surface_support = true;
+    bool replaceable = false;
     BlockMeshType mesh_type = BlockMeshType::FullCube;
     std::uint8_t emissive_level = 0;
 };
@@ -74,17 +91,33 @@ inline constexpr auto to_block_id(BlockType type) noexcept -> BlockId {
 inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProperties {
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Air:
-        return {false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
+        return {false, false, false, true, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     case BlockType::Torch:
-        return {false, false, BlockMeshType::Torch, static_cast<std::uint8_t>(14)};
+        return {false, false, false, false, BlockMeshType::Torch, static_cast<std::uint8_t>(14)};
+    case BlockType::Leaves:
+    case BlockType::PineLeaves:
+        return {true, true, false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
+    case BlockType::TallGrass:
+    case BlockType::RedFlower:
+    case BlockType::YellowFlower:
+    case BlockType::DeadShrub:
+        return {false, false, false, true, BlockMeshType::Cross, static_cast<std::uint8_t>(0)};
+    case BlockType::Water:
+        return {false, false, false, true, BlockMeshType::Water, static_cast<std::uint8_t>(0)};
     case BlockType::Grass:
     case BlockType::Dirt:
     case BlockType::Stone:
     case BlockType::Sand:
     case BlockType::Wood:
-    case BlockType::Leaves:
+    case BlockType::Cobblestone:
+    case BlockType::Planks:
+    case BlockType::Gravel:
+    case BlockType::MossyStone:
+    case BlockType::Snow:
+    case BlockType::PineWood:
+    case BlockType::Cactus:
     default:
-        return {true, true, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
+        return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     }
 }
 
@@ -98,6 +131,26 @@ inline constexpr auto is_block_opaque(BlockId block_id) noexcept -> bool {
 
 inline constexpr auto is_block_collidable(BlockId block_id) noexcept -> bool {
     return block_properties(block_id).collidable;
+}
+
+inline constexpr auto is_block_surface_support(BlockId block_id) noexcept -> bool {
+    return block_properties(block_id).surface_support;
+}
+
+inline constexpr auto is_block_replaceable(BlockId block_id) noexcept -> bool {
+    return block_properties(block_id).replaceable;
+}
+
+inline constexpr auto is_block_liquid(BlockId block_id) noexcept -> bool {
+    return block_id == to_block_id(BlockType::Water);
+}
+
+inline constexpr auto has_block_mesh(BlockId block_id) noexcept -> bool {
+    return block_id != to_block_id(BlockType::Air);
+}
+
+inline constexpr auto is_block_targetable(BlockId block_id) noexcept -> bool {
+    return has_block_mesh(block_id);
 }
 
 inline constexpr auto block_mesh_type(BlockId block_id) noexcept -> BlockMeshType {

@@ -149,12 +149,16 @@ glad_add_library(valcraft_glad REPRODUCIBLE API gl:core=3.3)
 
 add_library(valcraft_core
     src/app/GameOptions.cpp
+    src/creatures/CreatureGeometry.cpp
+    src/creatures/CreatureSystem.cpp
     src/world/Chunk.cpp
+    src/world/BlockVisuals.cpp
     src/world/World.cpp
     src/world/WorldGenerator.cpp
     src/world/ChunkMesher.cpp
     src/world/Environment.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/ItemDropSystem.cpp
 )
 
 target_include_directories(valcraft_core
@@ -202,6 +206,8 @@ valcraft_copy_mingw_runtime_dlls(ValCraft)
 add_executable(valcraft_tests
     tests/main.cpp
     tests/AppTests.cpp
+    tests/CreatureTests.cpp
+    tests/RenderTests.cpp
     tests/WorldTests.cpp
     tests/PlayerTests.cpp
 )
@@ -209,11 +215,13 @@ add_executable(valcraft_tests
 target_link_libraries(valcraft_tests
     PRIVATE
         valcraft_core
+        SDL2::SDL2
         doctest::doctest
 )
 target_compile_definitions(valcraft_tests PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 valcraft_apply_strict_warnings(valcraft_tests)
 valcraft_enable_coverage_for(valcraft_tests)
+valcraft_copy_runtime_dlls(valcraft_tests)
 valcraft_copy_mingw_runtime_dlls(valcraft_tests)
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)

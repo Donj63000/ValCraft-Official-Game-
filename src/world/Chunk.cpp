@@ -6,6 +6,14 @@
 
 namespace valcraft {
 
+namespace {
+
+auto contributes_to_mesh_bounds(BlockId block_id) noexcept -> bool {
+    return has_block_mesh(block_id);
+}
+
+} // namespace
+
 Chunk::Chunk(ChunkCoord coord)
     : coord_(coord) {
     fill(to_block_id(BlockType::Air));
@@ -54,7 +62,17 @@ void Chunk::set_local(int x, int y, int z, BlockId block_id) {
     if (block == block_id) {
         return;
     }
+
+    const auto previous_block = block;
     block = block_id;
+    const auto previous_contributes = contributes_to_mesh_bounds(previous_block);
+    const auto next_contributes = contributes_to_mesh_bounds(block_id);
+    if (!previous_contributes && next_contributes) {
+        min_mesh_y_ = std::min(min_mesh_y_, y);
+        max_mesh_y_ = std::max(max_mesh_y_, y);
+    } else if (previous_contributes && !next_contributes && (y == min_mesh_y_ || y == max_mesh_y_)) {
+        rebuild_meshable_bounds();
+    }
     dirty_ = true;
     lighting_dirty_ = true;
 }
@@ -75,6 +93,13 @@ void Chunk::set_block_light_local(int x, int y, int z, std::uint8_t light_level)
 
 void Chunk::fill(BlockId block_id) {
     std::fill(blocks_.begin(), blocks_.end(), block_id);
+    if (contributes_to_mesh_bounds(block_id)) {
+        min_mesh_y_ = kWorldMinY;
+        max_mesh_y_ = kWorldMaxY;
+    } else {
+        min_mesh_y_ = kChunkHeight;
+        max_mesh_y_ = kWorldMinY - 1;
+    }
     dirty_ = true;
     lighting_dirty_ = true;
 }
@@ -127,6 +152,18 @@ auto Chunk::block_light() const noexcept -> const std::array<std::uint8_t, kChun
     return block_light_;
 }
 
+auto Chunk::has_meshable_blocks() const noexcept -> bool {
+    return max_mesh_y_ >= min_mesh_y_;
+}
+
+auto Chunk::min_mesh_y() const noexcept -> int {
+    return has_meshable_blocks() ? min_mesh_y_ : kWorldMinY;
+}
+
+auto Chunk::max_mesh_y() const noexcept -> int {
+    return has_meshable_blocks() ? max_mesh_y_ : (kWorldMinY - 1);
+}
+
 auto Chunk::is_dirty() const noexcept -> bool {
     return dirty_;
 }
@@ -153,6 +190,23 @@ void Chunk::clear_lighting_dirty() noexcept {
 
 auto Chunk::index_of(int x, int y, int z) noexcept -> std::size_t {
     return static_cast<std::size_t>((y * kChunkSizeZ + z) * kChunkSizeX + x);
+}
+
+void Chunk::rebuild_meshable_bounds() noexcept {
+    min_mesh_y_ = kChunkHeight;
+    max_mesh_y_ = kWorldMinY - 1;
+
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                if (!contributes_to_mesh_bounds(blocks_[index_of(x, y, z)])) {
+                    continue;
+                }
+                min_mesh_y_ = std::min(min_mesh_y_, y);
+                max_mesh_y_ = std::max(max_mesh_y_, y);
+            }
+        }
+    }
 }
 
 } // namespace valcraft

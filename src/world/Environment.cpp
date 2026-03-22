@@ -54,6 +54,10 @@ auto EnvironmentClock::current_state() const -> EnvironmentState {
     return compute_state(time_of_day_);
 }
 
+auto EnvironmentClock::current_creature_cycle() const noexcept -> CreatureCycleState {
+    return classify_creature_cycle(time_of_day_);
+}
+
 auto EnvironmentClock::normalize_time_of_day(float time_of_day) noexcept -> float {
     auto wrapped = std::fmod(time_of_day, 24.0F);
     if (wrapped < 0.0F) {
@@ -73,9 +77,13 @@ auto EnvironmentClock::compute_state(float time_of_day) -> EnvironmentState {
     state.time_of_day = normalized_time;
     state.sun_direction = glm::normalize(glm::vec3 {sun_x, sun_height, sun_z});
 
-    const auto daylight = smooth_curve(-0.15F, 0.22F, sun_height);
-    const auto horizon_glow = smooth_curve(-0.18F, 0.12F, sun_height) * (1.0F - smooth_curve(0.25F, 0.85F, sun_height));
-    state.daylight_factor = glm::mix(0.18F, 1.0F, daylight);
+    const auto daylight = smooth_curve(-0.18F, 0.24F, sun_height);
+    const auto horizon_glow =
+        smooth_curve(-0.20F, 0.10F, sun_height) *
+        (1.0F - smooth_curve(0.18F, 0.82F, sun_height));
+    const auto twilight = smooth_curve(-0.12F, 0.10F, sun_height) * (1.0F - daylight);
+    const auto night_factor = 1.0F - smooth_curve(-0.20F, 0.02F, sun_height);
+    state.daylight_factor = glm::mix(0.16F, 1.0F, daylight);
 
     const auto day_sun = glm::vec3 {1.00F, 0.95F, 0.84F};
     const auto dusk_sun = glm::vec3 {1.00F, 0.62F, 0.34F};
@@ -97,7 +105,59 @@ auto EnvironmentClock::compute_state(float time_of_day) -> EnvironmentState {
     const auto night_sky = glm::vec3 {0.02F, 0.03F, 0.08F};
     state.sky_color = glm::mix(glm::mix(night_sky, dusk_sky, horizon_glow), day_sky, daylight);
 
+    const auto day_zenith = glm::vec3 {0.26F, 0.62F, 0.98F};
+    const auto dusk_zenith = glm::vec3 {0.38F, 0.30F, 0.60F};
+    const auto night_zenith = glm::vec3 {0.02F, 0.05F, 0.14F};
+    state.sky_zenith_color = glm::mix(glm::mix(night_zenith, dusk_zenith, horizon_glow), day_zenith, daylight);
+
+    const auto day_horizon = glm::vec3 {0.96F, 0.84F, 0.62F};
+    const auto dusk_horizon = glm::vec3 {1.00F, 0.52F, 0.36F};
+    const auto night_horizon = glm::vec3 {0.07F, 0.09F, 0.18F};
+    state.sky_horizon_color = glm::mix(glm::mix(night_horizon, dusk_horizon, horizon_glow), day_horizon, daylight);
+
+    state.horizon_glow_color = glm::mix(glm::vec3 {0.30F, 0.20F, 0.42F}, glm::vec3 {1.00F, 0.68F, 0.36F}, horizon_glow);
+    state.distant_fog_color = glm::mix(glm::vec3 {0.05F, 0.08F, 0.14F}, glm::vec3 {0.86F, 0.92F, 0.98F}, daylight);
+    state.night_tint_color = glm::mix(glm::vec3 {0.08F, 0.12F, 0.24F}, glm::vec3 {0.04F, 0.07F, 0.16F}, twilight);
+    state.sun_disk_color = glm::mix(glm::vec3 {0.90F, 0.48F, 0.30F}, glm::vec3 {1.00F, 0.90F, 0.62F}, daylight);
+    state.moon_disk_color = glm::mix(glm::vec3 {0.74F, 0.86F, 1.00F}, glm::vec3 {0.90F, 0.94F, 1.00F}, twilight);
+    state.star_intensity = glm::clamp(night_factor * (1.0F - horizon_glow * 0.75F), 0.0F, 1.0F);
+    state.cloud_intensity = glm::mix(0.16F, 0.52F, daylight) * (0.82F + 0.18F * twilight);
+    state.exposure = glm::mix(0.86F, 1.08F, daylight) + horizon_glow * 0.08F;
+    state.saturation_boost = glm::mix(0.94F, 1.10F, daylight) + twilight * 0.06F;
+    state.contrast = glm::mix(1.04F, 1.12F, daylight) + twilight * 0.04F;
+    state.vignette_strength = glm::mix(0.20F, 0.12F, daylight);
+    state.glow_threshold = glm::mix(0.58F, 0.78F, daylight);
+    state.glow_strength = glm::mix(0.34F, 0.22F, daylight) + twilight * 0.06F;
+
     return state;
+}
+
+auto EnvironmentClock::classify_creature_cycle(float time_of_day) noexcept -> CreatureCycleState {
+    const auto normalized_time = normalize_time_of_day(time_of_day);
+
+    if (normalized_time >= 18.0F && normalized_time < 19.0F) {
+        return {
+            CreaturePhase::DuskMorph,
+            glm::clamp(normalized_time - 18.0F, 0.0F, 1.0F),
+        };
+    }
+    if (normalized_time >= 19.0F || normalized_time < 5.0F) {
+        return {
+            CreaturePhase::Night,
+            1.0F,
+        };
+    }
+    if (normalized_time >= 5.0F && normalized_time < 6.0F) {
+        return {
+            CreaturePhase::DawnRecover,
+            glm::clamp(6.0F - normalized_time, 0.0F, 1.0F),
+        };
+    }
+
+    return {
+        CreaturePhase::Day,
+        0.0F,
+    };
 }
 
 } // namespace valcraft

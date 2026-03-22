@@ -22,15 +22,27 @@ struct ChunkVertex {
     float ao = 1.0F;
     float sky_light = 1.0F;
     float block_light = 0.0F;
+    float material_class = 0.0F;
 };
 
 struct ChunkMeshData {
     std::vector<ChunkVertex> vertices;
     std::vector<std::uint32_t> indices;
+    std::vector<ChunkVertex> water_vertices;
+    std::vector<std::uint32_t> water_indices;
     std::size_t face_count = 0;
+    std::size_t water_face_count = 0;
 
     [[nodiscard]] auto empty() const noexcept -> bool {
-        return indices.empty();
+        return indices.empty() && water_indices.empty();
+    }
+
+    [[nodiscard]] auto total_vertex_count() const noexcept -> std::size_t {
+        return vertices.size() + water_vertices.size();
+    }
+
+    [[nodiscard]] auto total_index_count() const noexcept -> std::size_t {
+        return indices.size() + water_indices.size();
     }
 };
 

@@ -16,6 +16,7 @@ struct PerformanceOptions {
     int stream_radius = kDefaultStreamRadius;
     bool shadows_enabled = true;
     int shadow_map_size = 2048;
+    bool post_process_enabled = true;
     bool report_frame_stats = false;
     std::string perf_json_path {};
     bool perf_trace_enabled = false;

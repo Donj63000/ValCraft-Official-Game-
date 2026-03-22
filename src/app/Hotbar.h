@@ -4,15 +4,17 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 
 namespace valcraft {
 
 constexpr std::size_t kHotbarSlotCount = 9;
+constexpr std::uint8_t kMaxItemStackCount = 64;
 
 struct HotbarSlot {
     BlockId block_id = to_block_id(BlockType::Air);
-    bool is_empty_utility = false;
+    std::uint8_t count = 0;
 };
 
 struct HotbarState {
@@ -24,25 +26,52 @@ struct HotbarState {
     }
 };
 
+inline constexpr auto make_item_stack(BlockId block_id, std::uint8_t count) noexcept -> HotbarSlot {
+    if (block_id == to_block_id(BlockType::Air) || count == 0) {
+        return {};
+    }
+    return {block_id, static_cast<std::uint8_t>(count > kMaxItemStackCount ? kMaxItemStackCount : count)};
+}
+
+inline constexpr auto empty_item_stack() noexcept -> HotbarSlot {
+    return {};
+}
+
+inline constexpr auto hotbar_slot_has_item(const HotbarSlot& slot) noexcept -> bool {
+    return slot.block_id != to_block_id(BlockType::Air) && slot.count > 0;
+}
+
+inline constexpr void normalize_item_stack(HotbarSlot& slot) noexcept {
+    if (!hotbar_slot_has_item(slot)) {
+        slot = {};
+        return;
+    }
+    if (slot.count > kMaxItemStackCount) {
+        slot.count = kMaxItemStackCount;
+    }
+}
+
 inline auto make_default_hotbar_state() noexcept -> HotbarState {
     HotbarState hotbar {};
     hotbar.slots = {{
-        {to_block_id(BlockType::Grass), false},
-        {to_block_id(BlockType::Dirt), false},
-        {to_block_id(BlockType::Stone), false},
-        {to_block_id(BlockType::Sand), false},
-        {to_block_id(BlockType::Wood), false},
-        {to_block_id(BlockType::Leaves), false},
-        {to_block_id(BlockType::Torch), false},
-        {to_block_id(BlockType::Air), true},
-        {to_block_id(BlockType::Air), true},
+        make_item_stack(to_block_id(BlockType::Grass), 32),
+        make_item_stack(to_block_id(BlockType::Dirt), 32),
+        make_item_stack(to_block_id(BlockType::Stone), 32),
+        make_item_stack(to_block_id(BlockType::Cobblestone), 32),
+        make_item_stack(to_block_id(BlockType::Sand), 32),
+        make_item_stack(to_block_id(BlockType::Planks), 32),
+        make_item_stack(to_block_id(BlockType::Torch), 16),
+        make_item_stack(to_block_id(BlockType::Water), 8),
+        empty_item_stack(),
     }};
     hotbar.selected_index = 0;
     return hotbar;
 }
 
 inline constexpr auto selected_hotbar_block(const HotbarState& state) noexcept -> BlockId {
-    return state.selected_slot().block_id;
+    return hotbar_slot_has_item(state.selected_slot())
+               ? state.selected_slot().block_id
+               : to_block_id(BlockType::Air);
 }
 
 inline constexpr auto hotbar_index_from_number_key(int number_key) noexcept -> std::optional<std::size_t> {

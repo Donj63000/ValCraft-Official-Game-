@@ -74,6 +74,7 @@ struct PerformanceReportMetadata {
     int stream_radius = 0;
     bool shadows_enabled = true;
     int shadow_map_size = 2048;
+    bool post_process_enabled = true;
     bool freeze_time = false;
     std::string scenario = "default";
     bool trace_included = false;
@@ -496,6 +497,7 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
     stream << "    \"stream_radius\": " << report.metadata.stream_radius << ",\n";
     stream << "    \"shadows_enabled\": " << (report.metadata.shadows_enabled ? "true" : "false") << ",\n";
     stream << "    \"shadow_map_size\": " << report.metadata.shadow_map_size << ",\n";
+    stream << "    \"post_process_enabled\": " << (report.metadata.post_process_enabled ? "true" : "false") << ",\n";
     stream << "    \"freeze_time\": " << (report.metadata.freeze_time ? "true" : "false") << ",\n";
     stream << "    \"scenario\": \"" << json_escape(report.metadata.scenario) << "\",\n";
     stream << "    \"trace_included\": " << (report.metadata.trace_included ? "true" : "false") << '\n';
@@ -601,6 +603,9 @@ inline auto format_performance_report(const PerformanceRunReport& report) -> std
         stream << " [" << report.metadata.scenario << "]";
     }
     stream << '\n';
+    stream << "  render_flags shadows=" << (report.metadata.shadows_enabled ? "on" : "off")
+           << " post_process=" << (report.metadata.post_process_enabled ? "on" : "off")
+           << " shadow_map_size=" << report.metadata.shadow_map_size << '\n';
     stream << "  frame_total_ms_avg=" << report.summary.frame_total_ms.average
            << " p95=" << report.summary.frame_total_ms.p95
            << " p99=" << report.summary.frame_total_ms.p99

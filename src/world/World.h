@@ -89,6 +89,7 @@ public:
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto stream_radius() const noexcept -> int;
     [[nodiscard]] auto surface_height(int world_x, int world_z) -> int;
+    [[nodiscard]] auto loaded_surface_height(int world_x, int world_z) const -> std::optional<int>;
     [[nodiscard]] auto pending_generation_count() const noexcept -> std::size_t;
     [[nodiscard]] auto pending_mesh_count() const noexcept -> std::size_t;
     [[nodiscard]] auto pending_lighting_count() const noexcept -> std::size_t;

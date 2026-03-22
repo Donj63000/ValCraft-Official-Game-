@@ -179,7 +179,7 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
     BlockCoord previous = current;
 
     const auto starting_block = get_block(current.x, current.y, current.z);
-    if (is_block_solid(starting_block)) {
+    if (is_block_targetable(starting_block)) {
         return {
             true,
             current,
@@ -241,7 +241,7 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
         }
 
         const auto block_id = get_block(current.x, current.y, current.z);
-        if (is_block_solid(block_id)) {
+        if (is_block_targetable(block_id)) {
             return {
                 true,
                 current,
@@ -258,7 +258,9 @@ auto World::can_place_torch_at(const BlockCoord& world_coord) const -> bool {
     if (!is_world_y_valid(world_coord.y) || world_coord.y == kWorldMinY) {
         return false;
     }
-    if (get_block(world_coord.x, world_coord.y, world_coord.z) != to_block_id(BlockType::Air)) {
+    const auto current_block = get_block(world_coord.x, world_coord.y, world_coord.z);
+    if (current_block != to_block_id(BlockType::Air) &&
+        (!is_block_replaceable(current_block) || is_block_liquid(current_block))) {
         return false;
     }
 
@@ -391,7 +393,25 @@ auto World::surface_height(int world_x, int world_z) -> int {
 
     const auto& blocks = chunk->blocks();
     for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
-        if (is_block_solid(blocks[chunk_linear_index(local.x, y, local.z)])) {
+        if (is_block_surface_support(blocks[chunk_linear_index(local.x, y, local.z)])) {
+            return y;
+        }
+    }
+
+    return 0;
+}
+
+auto World::loaded_surface_height(int world_x, int world_z) const -> std::optional<int> {
+    const auto coord = world_to_chunk(world_x, world_z);
+    const auto* chunk = find_chunk(coord);
+    if (chunk == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto local = world_to_local(world_x, 0, world_z);
+    const auto& blocks = chunk->blocks();
+    for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
+        if (is_block_surface_support(blocks[chunk_linear_index(local.x, y, local.z)])) {
             return y;
         }
     }
@@ -688,9 +708,6 @@ void World::enqueue_mesh_rebuild(const ChunkCoord& coord, bool prioritize) {
         if (pending_priority_mesh_set_.contains(coord)) {
             return;
         }
-        pending_mesh_queue_.erase(
-            std::remove(pending_mesh_queue_.begin(), pending_mesh_queue_.end(), coord),
-            pending_mesh_queue_.end());
         pending_priority_mesh_queue_.push_back(coord);
         pending_priority_mesh_set_.insert(coord);
         pending_mesh_set_.insert(coord);
@@ -824,18 +841,19 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
 
 void World::process_mesh_queue(std::size_t budget, WorldWorkStats& stats) {
     auto remaining_normal = budget;
-    while (!pending_priority_mesh_queue_.empty() || (remaining_normal > 0 && !pending_mesh_queue_.empty())) {
+    while (!pending_priority_mesh_queue_.empty() ||
+           (remaining_normal > 0 && !pending_mesh_queue_.empty())) {
         const auto prioritize = !pending_priority_mesh_queue_.empty();
         const auto coord = prioritize ? pending_priority_mesh_queue_.front() : pending_mesh_queue_.front();
         if (prioritize) {
             pending_priority_mesh_queue_.pop_front();
             pending_priority_mesh_set_.erase(coord);
-            pending_mesh_queue_.erase(
-                std::remove(pending_mesh_queue_.begin(), pending_mesh_queue_.end(), coord),
-                pending_mesh_queue_.end());
+            if (!pending_mesh_set_.contains(coord)) {
+                continue;
+            }
         } else {
             pending_mesh_queue_.pop_front();
-            if (pending_priority_mesh_set_.contains(coord)) {
+            if (!pending_mesh_set_.contains(coord) || pending_priority_mesh_set_.contains(coord)) {
                 continue;
             }
         }
@@ -1143,8 +1161,8 @@ void World::rebuild_chunk_mesh(ChunkRecord& record) {
         record.chunk.coord(),
         record.mesh_vertex_capacity_hint,
         record.mesh_index_capacity_hint);
-    record.mesh_vertex_capacity_hint = std::max(record.mesh.vertices.size(), static_cast<std::size_t>(256));
-    record.mesh_index_capacity_hint = std::max(record.mesh.indices.size(), static_cast<std::size_t>(384));
+    record.mesh_vertex_capacity_hint = std::max(record.mesh.total_vertex_count(), static_cast<std::size_t>(256));
+    record.mesh_index_capacity_hint = std::max(record.mesh.total_index_count(), static_cast<std::size_t>(384));
     record.chunk.clear_dirty();
     ++record.mesh_revision;
 }

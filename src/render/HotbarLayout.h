@@ -1,18 +1,14 @@
 #pragma once
 
 #include "app/Hotbar.h"
+#include "world/BlockVisuals.h"
 
 #include <algorithm>
 #include <array>
 
 namespace valcraft {
 
-struct HotbarAtlasTile {
-    int x = 0;
-    int y = 0;
-
-    auto operator==(const HotbarAtlasTile&) const -> bool = default;
-};
+using HotbarAtlasTile = BlockAtlasTile;
 
 struct HotbarSlotLayout {
     float x = 0.0F;
@@ -37,29 +33,11 @@ struct HotbarLayout {
 };
 
 inline constexpr auto hotbar_slot_has_icon(const HotbarSlot& slot) noexcept -> bool {
-    return !slot.is_empty_utility && slot.block_id != to_block_id(BlockType::Air);
+    return hotbar_slot_has_item(slot);
 }
 
 inline constexpr auto hotbar_icon_tile(BlockId block_id) noexcept -> HotbarAtlasTile {
-    switch (static_cast<BlockType>(block_id)) {
-    case BlockType::Grass:
-        return {1, 0};
-    case BlockType::Dirt:
-        return {2, 0};
-    case BlockType::Stone:
-        return {3, 0};
-    case BlockType::Sand:
-        return {0, 1};
-    case BlockType::Wood:
-        return {1, 1};
-    case BlockType::Leaves:
-        return {3, 1};
-    case BlockType::Torch:
-        return {0, 2};
-    case BlockType::Air:
-    default:
-        return {0, 0};
-    }
+    return block_hotbar_tile(block_id);
 }
 
 inline auto build_hotbar_layout(int viewport_width, int viewport_height, const HotbarState& state) -> HotbarLayout {

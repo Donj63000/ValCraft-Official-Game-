@@ -1,5 +1,9 @@
 #include "app/Game.h"
+#include "app/GameBranding.h"
+#include "app/InputBindings.h"
 #include "app/GameLoop.h"
+
+#include <glm/geometric.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -61,6 +65,39 @@ auto hotbar_number_from_keycode(SDL_Keycode keycode) noexcept -> int {
     }
 }
 
+void stash_carried_inventory_item(InventoryMenuState& inventory, HotbarState& hotbar) noexcept {
+    if (!inventory.carrying_item || !inventory_slot_has_item(inventory.carried_slot)) {
+        return;
+    }
+
+    inventory.carried_slot = inventory_try_store_stack(inventory, hotbar, inventory.carried_slot);
+    inventory.carrying_item = inventory_slot_has_item(inventory.carried_slot);
+}
+
+void center_ui_cursor(SDL_Window* window, int window_width, int window_height, float& cursor_x, float& cursor_y) noexcept {
+    const auto mouse_x = std::max(window_width / 2, 0);
+    const auto mouse_y = std::max(window_height / 2, 0);
+    if (window != nullptr) {
+        SDL_WarpMouseInWindow(window, mouse_x, mouse_y);
+    }
+    cursor_x = static_cast<float>(mouse_x);
+    cursor_y = static_cast<float>(mouse_y);
+}
+
+void clamp_ui_cursor(float& cursor_x, float& cursor_y, int window_width, int window_height) noexcept {
+    const auto max_x = static_cast<float>(std::max(window_width - 1, 0));
+    const auto max_y = static_cast<float>(std::max(window_height - 1, 0));
+    cursor_x = std::clamp(cursor_x, 0.0F, max_x);
+    cursor_y = std::clamp(cursor_y, 0.0F, max_y);
+}
+
+auto safe_drop_direction(const glm::vec3& look_direction) noexcept -> glm::vec3 {
+    if (glm::dot(look_direction, look_direction) <= 1.0e-6F) {
+        return {0.0F, 0.0F, -1.0F};
+    }
+    return glm::normalize(look_direction);
+}
+
 } // namespace
 
 Game::Game(GameOptions options)
@@ -114,7 +151,20 @@ auto Game::run() -> int {
                 accumulator = fixed_step;
             }
 
-            renderer_.render_frame(world_, player_, hotbar_, environment_.current_state(), window_width_, window_height_);
+            const auto environment_state = environment_.current_state();
+            item_drops_.build_render_instances(world_, item_drop_render_instances_);
+            renderer_.render_frame(
+                world_,
+                player_,
+                hotbar_,
+                inventory_menu_,
+                death_screen_,
+                pause_menu_,
+                creatures_.render_instances(),
+                item_drop_render_instances_,
+                environment_state,
+                window_width_,
+                window_height_);
             const auto& render_stats = renderer_.last_frame_stats();
             frame_stats.upload_ms += render_stats.upload_ms;
             frame_stats.shadow_ms += render_stats.shadow_ms;
@@ -169,7 +219,7 @@ auto Game::initialize() -> bool {
         (options_.hidden_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE));
 
     window_ = SDL_CreateWindow(
-        "ValCraft - WASD move, Space jump, F fly, 1-9 hotbar, wheel select, LMB/RMB interact",
+        kGameWindowTitle.data(),
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         window_width_,
@@ -198,11 +248,24 @@ auto Game::initialize() -> bool {
     RendererOptions renderer_options {};
     renderer_options.shadows_enabled = options_.performance.shadows_enabled;
     renderer_options.shadow_map_size = options_.performance.shadow_map_size;
+    renderer_options.post_process_enabled = options_.performance.post_process_enabled;
     if (!renderer_.initialize(renderer_options)) {
         return false;
     }
 
     set_mouse_capture(!options_.smoke_test);
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    inventory_menu_.visible = false;
+    inventory_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    inventory_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
+    death_screen_.visible = false;
+    death_screen_.selected_action = DeathScreenAction::Respawn;
+    death_screen_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    death_screen_.cursor_y = static_cast<float>(window_height_) * 0.5F;
+    pause_menu_.visible = false;
+    pause_menu_.selected_action = PauseMenuAction::Resume;
+    pause_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    pause_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
 
     const auto preload_radius = options_.performance.spawn_preload_radius;
     const auto preload_center = world_.world_to_chunk(0, 0);
@@ -214,14 +277,17 @@ auto Game::initialize() -> bool {
     world_.rebuild_dirty_meshes();
 
     if (options_.smoke_test) {
-        player_.set_position({0.5F, 80.0F, 0.5F});
+        spawn_position_ = {0.5F, 80.0F, 0.5F};
+        player_.set_position(spawn_position_);
         player_.set_velocity({});
     } else {
-        const auto spawn_y = static_cast<float>(world_.surface_height(0, 0)) + 1.001F;
-        player_.set_position({0.5F, spawn_y, 0.5F});
+        spawn_position_ = find_initial_spawn_position();
+        player_.set_position(spawn_position_);
     }
 
     (void)world_.update_streaming(player_.position());
+    const auto environment_state = environment_.current_state();
+    creatures_.update(0.0F, world_, player_.position(), environment_state, environment_.current_creature_cycle());
     return true;
 }
 
@@ -263,15 +329,82 @@ void Game::process_events() {
             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 window_width_ = event.window.data1;
                 window_height_ = event.window.data2;
+                if (death_screen_visible_) {
+                    clamp_ui_cursor(death_screen_.cursor_x, death_screen_.cursor_y, window_width_, window_height_);
+                    refresh_death_screen_hover();
+                }
+                if (inventory_visible_) {
+                    clamp_ui_cursor(inventory_menu_.cursor_x, inventory_menu_.cursor_y, window_width_, window_height_);
+                    refresh_inventory_hover();
+                }
+                if (paused_) {
+                    clamp_ui_cursor(pause_menu_.cursor_x, pause_menu_.cursor_y, window_width_, window_height_);
+                    refresh_pause_menu_hover();
+                }
             }
             break;
         case SDL_MOUSEMOTION:
+            if (death_screen_visible_) {
+                death_screen_.cursor_x = static_cast<float>(event.motion.x);
+                death_screen_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_death_screen_hover();
+                break;
+            }
+            if (inventory_visible_) {
+                inventory_menu_.cursor_x = static_cast<float>(event.motion.x);
+                inventory_menu_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_inventory_hover();
+                break;
+            }
+            if (paused_) {
+                pause_menu_.cursor_x = static_cast<float>(event.motion.x);
+                pause_menu_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_pause_menu_hover();
+                break;
+            }
             if (mouse_captured_) {
                 pending_look_x_ += static_cast<float>(event.motion.xrel);
                 pending_look_y_ += static_cast<float>(event.motion.yrel);
             }
             break;
         case SDL_MOUSEBUTTONDOWN:
+            if (death_screen_visible_) {
+                death_screen_.cursor_x = static_cast<float>(event.button.x);
+                death_screen_.cursor_y = static_cast<float>(event.button.y);
+                refresh_death_screen_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    const auto layout = build_death_screen_layout(window_width_, window_height_, death_screen_);
+                    const auto action = death_screen_action_at(layout, death_screen_.cursor_x, death_screen_.cursor_y);
+                    if (action.has_value()) {
+                        activate_death_screen_action(*action);
+                    }
+                }
+                break;
+            }
+            if (inventory_visible_) {
+                inventory_menu_.cursor_x = static_cast<float>(event.button.x);
+                inventory_menu_.cursor_y = static_cast<float>(event.button.y);
+                refresh_inventory_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    click_inventory_slot(false);
+                } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    click_inventory_slot(true);
+                }
+                break;
+            }
+            if (paused_) {
+                pause_menu_.cursor_x = static_cast<float>(event.button.x);
+                pause_menu_.cursor_y = static_cast<float>(event.button.y);
+                refresh_pause_menu_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    const auto layout = build_pause_menu_layout(window_width_, window_height_, pause_menu_);
+                    const auto action = pause_menu_action_at(layout, pause_menu_.cursor_x, pause_menu_.cursor_y);
+                    if (action.has_value()) {
+                        activate_pause_menu_action(*action);
+                    }
+                }
+                break;
+            }
             if (!mouse_captured_) {
                 set_mouse_capture(true);
                 break;
@@ -283,6 +416,9 @@ void Game::process_events() {
             }
             break;
         case SDL_MOUSEWHEEL: {
+            if (death_screen_visible_ || paused_ || inventory_visible_) {
+                break;
+            }
             auto scroll_y = event.wheel.y;
             if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
                 scroll_y = -scroll_y;
@@ -297,8 +433,87 @@ void Game::process_events() {
                 break;
             }
 
+            if (death_screen_visible_) {
+                switch (event.key.keysym.sym) {
+                case SDLK_UP:
+                case SDLK_w:
+                    death_screen_.selected_action = next_death_screen_action(death_screen_.selected_action, -1);
+                    break;
+                case SDLK_DOWN:
+                case SDLK_s:
+                case SDLK_TAB:
+                    death_screen_.selected_action = next_death_screen_action(
+                        death_screen_.selected_action,
+                        (event.key.keysym.mod & KMOD_SHIFT) != 0 ? -1 : 1);
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                case SDLK_r:
+                    activate_death_screen_action(death_screen_.selected_action);
+                    break;
+                default:
+                    break;
+                }
+                break;
+            }
+
+            if (inventory_visible_) {
+                if (event.key.keysym.sym == SDLK_ESCAPE || event.key.keysym.sym == SDLK_e) {
+                    set_inventory_visible(false);
+                    break;
+                }
+                if (is_drop_action_key(event.key.keysym)) {
+                    const auto full_stack = (event.key.keysym.mod & KMOD_CTRL) != 0;
+                    if (inventory_menu_.carrying_item) {
+                        drop_carried_inventory_stack(full_stack);
+                    } else {
+                        drop_hovered_inventory_stack(full_stack);
+                    }
+                    break;
+                }
+
+                const auto hotbar_index = hotbar_index_from_number_key(hotbar_number_from_keycode(event.key.keysym.sym));
+                if (hotbar_index.has_value()) {
+                    assign_hovered_inventory_slot_to_hotbar(*hotbar_index);
+                }
+                break;
+            }
+
             if (event.key.keysym.sym == SDLK_ESCAPE) {
-                set_mouse_capture(!mouse_captured_);
+                set_paused(!paused_);
+                break;
+            }
+
+            if (paused_) {
+                switch (event.key.keysym.sym) {
+                case SDLK_UP:
+                case SDLK_w:
+                    pause_menu_.selected_action = next_pause_menu_action(pause_menu_.selected_action, -1);
+                    break;
+                case SDLK_DOWN:
+                case SDLK_s:
+                    pause_menu_.selected_action = next_pause_menu_action(pause_menu_.selected_action, 1);
+                    break;
+                case SDLK_TAB:
+                    pause_menu_.selected_action =
+                        next_pause_menu_action(pause_menu_.selected_action, (event.key.keysym.mod & KMOD_SHIFT) != 0 ? -1 : 1);
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    activate_pause_menu_action(pause_menu_.selected_action);
+                    break;
+                default:
+                    break;
+                }
+                break;
+            }
+
+            if (event.key.keysym.sym == SDLK_e) {
+                set_inventory_visible(true);
+            } else if (is_drop_action_key(event.key.keysym)) {
+                drop_selected_hotbar_items((event.key.keysym.mod & KMOD_CTRL) != 0);
             } else if (event.key.keysym.sym == SDLK_f) {
                 pending_toggle_fly_ = true;
             } else {
@@ -314,31 +529,64 @@ void Game::process_events() {
 void Game::update(float dt, FramePerformanceStats& frame_stats) {
     using clock = std::chrono::steady_clock;
 
+    if (!options_.smoke_test && (death_screen_visible_ || paused_)) {
+        (void)dt;
+        (void)frame_stats;
+        return;
+    }
+
     environment_.update(dt);
+    const auto environment_state = environment_.current_state();
+    const auto creature_cycle = environment_.current_creature_cycle();
 
     if (options_.smoke_test) {
         update_smoke_player(dt);
     } else {
-        const auto* keys = SDL_GetKeyboardState(nullptr);
         PlayerInput input {};
-        input.move_forward = (keys[SDL_SCANCODE_W] ? 1.0F : 0.0F) - (keys[SDL_SCANCODE_S] ? 1.0F : 0.0F);
-        input.move_right = (keys[SDL_SCANCODE_D] ? 1.0F : 0.0F) - (keys[SDL_SCANCODE_A] ? 1.0F : 0.0F);
-        input.move_up = (keys[SDL_SCANCODE_SPACE] ? 1.0F : 0.0F) -
-                        ((keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL]) ? 1.0F : 0.0F);
-        input.jump = keys[SDL_SCANCODE_SPACE] != 0;
+        if (!inventory_visible_) {
+            input = read_player_movement_input(SDL_GetKeyboardState(nullptr));
+        }
         input.toggle_fly = std::exchange(pending_toggle_fly_, false);
         input.look_delta_x = mouse_captured_ ? std::exchange(pending_look_x_, 0.0F) : 0.0F;
         input.look_delta_y = mouse_captured_ ? std::exchange(pending_look_y_, 0.0F) : 0.0F;
 
         player_.update(input, dt, world_);
 
-        if (pending_break_block_) {
-            player_.try_break_block(world_);
+        if (!inventory_visible_ && pending_break_block_) {
+            if (const auto broken_block = player_.try_break_block(world_); broken_block.has_value()) {
+                const auto drop_direction = safe_drop_direction(player_.look_direction());
+                const auto drop_origin = glm::vec3 {
+                    static_cast<float>(broken_block->block.x) + 0.5F,
+                    static_cast<float>(broken_block->block.y) + 0.28F,
+                    static_cast<float>(broken_block->block.z) + 0.5F,
+                };
+                spawn_dropped_stack(
+                    inventory_make_slot(broken_block->block_id, 1),
+                    drop_origin,
+                    drop_direction * 1.4F + glm::vec3 {0.0F, 1.8F, 0.0F});
+            }
             pending_break_block_ = false;
         }
-        if (pending_place_block_) {
-            player_.try_place_block(world_);
+        if (!inventory_visible_ && pending_place_block_) {
+            auto& selected_slot = hotbar_.slots[hotbar_.selected_index];
+            if (inventory_slot_has_item(selected_slot) && player_.try_place_block(world_)) {
+                (void)inventory_take_from_slot(selected_slot, 1);
+                normalize_inventory_state(inventory_menu_, hotbar_);
+                sync_selected_hotbar_slot();
+            }
             pending_place_block_ = false;
+        }
+        if (inventory_visible_) {
+            pending_break_block_ = false;
+            pending_place_block_ = false;
+        }
+
+        item_drops_.update(dt, world_, player_.position(), inventory_menu_, hotbar_);
+        sync_selected_hotbar_slot();
+
+        if (player_.is_dead()) {
+            set_death_screen_visible(true, player_.state().death_cause);
+            return;
         }
     }
 
@@ -363,6 +611,8 @@ void Game::update(float dt, FramePerformanceStats& frame_stats) {
     frame_stats.pending_lighting = std::max(frame_stats.pending_lighting, world_stats.pending_lighting);
     frame_stats.lighting_jobs_completed += world_stats.lighting_jobs_completed;
 
+    creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
+
     if (options_.smoke_test) {
         validate_smoke_frame(options_.performance.world_budget(), world_stats);
     }
@@ -370,8 +620,262 @@ void Game::update(float dt, FramePerformanceStats& frame_stats) {
 
 void Game::set_mouse_capture(bool captured) {
     mouse_captured_ = captured;
+    pending_look_x_ = 0.0F;
+    pending_look_y_ = 0.0F;
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
     SDL_ShowCursor(captured ? SDL_DISABLE : SDL_ENABLE);
+}
+
+void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
+    if (options_.smoke_test) {
+        return;
+    }
+    if (death_screen_visible_ == visible && (!visible || death_screen_.cause == cause)) {
+        return;
+    }
+
+    death_screen_visible_ = visible;
+    death_screen_.visible = visible;
+    pending_toggle_fly_ = false;
+    pending_break_block_ = false;
+    pending_place_block_ = false;
+
+    if (death_screen_visible_) {
+        if (inventory_visible_) {
+            set_inventory_visible(false);
+        }
+        if (paused_) {
+            paused_ = false;
+            pause_menu_.visible = false;
+        }
+        death_screen_.selected_action = DeathScreenAction::Respawn;
+        death_screen_.cause = cause;
+        set_mouse_capture(false);
+        center_ui_cursor(window_, window_width_, window_height_, death_screen_.cursor_x, death_screen_.cursor_y);
+        refresh_death_screen_hover();
+        return;
+    }
+
+    death_screen_.cause = PlayerDeathCause::None;
+    if (!paused_ && !inventory_visible_) {
+        set_mouse_capture(true);
+    }
+}
+
+void Game::set_paused(bool paused) {
+    if (options_.smoke_test) {
+        return;
+    }
+    if (death_screen_visible_) {
+        return;
+    }
+
+    paused_ = paused;
+    pause_menu_.visible = paused;
+    pause_menu_.selected_action = PauseMenuAction::Resume;
+    pending_toggle_fly_ = false;
+    pending_break_block_ = false;
+    pending_place_block_ = false;
+
+    if (paused_) {
+        if (inventory_visible_) {
+            set_inventory_visible(false);
+        }
+        set_mouse_capture(false);
+        center_ui_cursor(window_, window_width_, window_height_, pause_menu_.cursor_x, pause_menu_.cursor_y);
+        refresh_pause_menu_hover();
+    } else if (!inventory_visible_) {
+        set_mouse_capture(true);
+    }
+}
+
+void Game::set_inventory_visible(bool visible) {
+    if (options_.smoke_test) {
+        return;
+    }
+    if (visible && (paused_ || death_screen_visible_)) {
+        return;
+    }
+    if (inventory_visible_ == visible) {
+        return;
+    }
+
+    inventory_visible_ = visible;
+    inventory_menu_.visible = visible;
+    pending_toggle_fly_ = false;
+    pending_break_block_ = false;
+    pending_place_block_ = false;
+
+    if (inventory_visible_) {
+        set_mouse_capture(false);
+        center_ui_cursor(window_, window_width_, window_height_, inventory_menu_.cursor_x, inventory_menu_.cursor_y);
+        refresh_inventory_hover();
+        return;
+    }
+
+    stash_carried_inventory_item(inventory_menu_, hotbar_);
+    if (inventory_menu_.carrying_item && inventory_slot_has_item(inventory_menu_.carried_slot)) {
+        drop_carried_inventory_stack(true);
+    }
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    inventory_menu_.hovered_slot.reset();
+    if (!paused_) {
+        set_mouse_capture(true);
+    }
+    sync_selected_hotbar_slot();
+}
+
+void Game::activate_death_screen_action(DeathScreenAction action) {
+    switch (action) {
+    case DeathScreenAction::Respawn:
+        respawn_player();
+        break;
+    case DeathScreenAction::Quit:
+        running_ = false;
+        break;
+    default:
+        break;
+    }
+}
+
+void Game::activate_pause_menu_action(PauseMenuAction action) {
+    switch (action) {
+    case PauseMenuAction::Resume:
+        set_paused(false);
+        break;
+    case PauseMenuAction::Options:
+        break;
+    case PauseMenuAction::Quit:
+        running_ = false;
+        break;
+    default:
+        break;
+    }
+}
+
+void Game::refresh_death_screen_hover() noexcept {
+    if (!death_screen_visible_) {
+        return;
+    }
+
+    const auto layout = build_death_screen_layout(window_width_, window_height_, death_screen_);
+    const auto hovered_action = death_screen_action_at(layout, death_screen_.cursor_x, death_screen_.cursor_y);
+    if (hovered_action.has_value()) {
+        death_screen_.selected_action = *hovered_action;
+    }
+}
+
+void Game::refresh_pause_menu_hover() noexcept {
+    const auto layout = build_pause_menu_layout(window_width_, window_height_, pause_menu_);
+    const auto hovered_action = pause_menu_action_at(layout, pause_menu_.cursor_x, pause_menu_.cursor_y);
+    if (hovered_action.has_value()) {
+        pause_menu_.selected_action = *hovered_action;
+    }
+}
+
+void Game::refresh_inventory_hover() noexcept {
+    if (!inventory_visible_) {
+        inventory_menu_.hovered_slot.reset();
+        return;
+    }
+
+    const auto layout = build_inventory_menu_layout(window_width_, window_height_, inventory_menu_, hotbar_);
+    inventory_menu_.hovered_slot = inventory_slot_at(layout, inventory_menu_.cursor_x, inventory_menu_.cursor_y);
+}
+
+void Game::click_inventory_slot(bool secondary) {
+    refresh_inventory_hover();
+    if (!inventory_menu_.hovered_slot.has_value()) {
+        if (inventory_menu_.carrying_item && inventory_slot_has_item(inventory_menu_.carried_slot)) {
+            drop_carried_inventory_stack(!secondary);
+        }
+        return;
+    }
+
+    if (secondary) {
+        inventory_secondary_click(inventory_menu_, hotbar_, *inventory_menu_.hovered_slot);
+    } else {
+        inventory_primary_click(inventory_menu_, hotbar_, *inventory_menu_.hovered_slot);
+    }
+    refresh_inventory_hover();
+    sync_selected_hotbar_slot();
+}
+
+void Game::assign_hovered_inventory_slot_to_hotbar(std::size_t hotbar_index) noexcept {
+    refresh_inventory_hover();
+    if (!inventory_menu_.hovered_slot.has_value()) {
+        return;
+    }
+
+    inventory_swap_with_hotbar(inventory_menu_, hotbar_, *inventory_menu_.hovered_slot, hotbar_index);
+    refresh_inventory_hover();
+    sync_selected_hotbar_slot();
+}
+
+void Game::drop_selected_hotbar_items(bool full_stack) noexcept {
+    if (death_screen_visible_ || paused_ || inventory_visible_) {
+        return;
+    }
+
+    auto& selected_slot = hotbar_.slots[hotbar_.selected_index];
+    const auto removed = inventory_take_from_slot(
+        selected_slot,
+        full_stack ? selected_slot.count : static_cast<std::uint8_t>(1));
+    if (!inventory_slot_has_item(removed)) {
+        return;
+    }
+
+    const auto drop_direction = safe_drop_direction(player_.look_direction());
+    spawn_dropped_stack(
+        removed,
+        player_.eye_position() + drop_direction * 0.55F + glm::vec3 {0.0F, -0.35F, 0.0F},
+        drop_direction * (full_stack ? 4.3F : 3.3F) + glm::vec3 {0.0F, 1.6F, 0.0F});
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    sync_selected_hotbar_slot();
+}
+
+void Game::drop_hovered_inventory_stack(bool full_stack) noexcept {
+    refresh_inventory_hover();
+    if (!inventory_menu_.hovered_slot.has_value()) {
+        return;
+    }
+
+    const auto removed = inventory_take_from_ref(
+        inventory_menu_,
+        hotbar_,
+        *inventory_menu_.hovered_slot,
+        full_stack ? kMaxItemStackCount : static_cast<std::uint8_t>(1));
+    if (!inventory_slot_has_item(removed)) {
+        return;
+    }
+
+    const auto drop_direction = safe_drop_direction(player_.look_direction());
+    spawn_dropped_stack(
+        removed,
+        player_.eye_position() + drop_direction * 0.48F + glm::vec3 {0.0F, -0.38F, 0.0F},
+        drop_direction * (full_stack ? 4.0F : 3.0F) + glm::vec3 {0.0F, 1.4F, 0.0F});
+    refresh_inventory_hover();
+    sync_selected_hotbar_slot();
+}
+
+void Game::drop_carried_inventory_stack(bool full_stack) noexcept {
+    auto removed = inventory_take_from_slot(
+        inventory_menu_.carried_slot,
+        full_stack ? inventory_menu_.carried_slot.count : static_cast<std::uint8_t>(1));
+    inventory_menu_.carrying_item = inventory_slot_has_item(inventory_menu_.carried_slot);
+    if (!inventory_slot_has_item(removed)) {
+        return;
+    }
+
+    const auto drop_direction = safe_drop_direction(player_.look_direction());
+    spawn_dropped_stack(
+        removed,
+        player_.eye_position() + drop_direction * 0.45F + glm::vec3 {0.0F, -0.40F, 0.0F},
+        drop_direction * (full_stack ? 3.8F : 2.7F) + glm::vec3 {0.0F, 1.3F, 0.0F});
+}
+
+void Game::spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin, const glm::vec3& initial_velocity) noexcept {
+    item_drops_.spawn_drop(stack, origin, initial_velocity);
 }
 
 void Game::sync_selected_hotbar_slot() noexcept {
@@ -394,6 +898,50 @@ void Game::select_hotbar_slot_from_keycode(SDL_Keycode keycode) {
         return;
     }
     select_hotbar_slot(*slot_index);
+}
+
+auto Game::find_initial_spawn_position() -> glm::vec3 {
+    constexpr int kSpawnSearchRadius = 12;
+
+    for (int radius = 0; radius <= kSpawnSearchRadius; ++radius) {
+        for (int z = -radius; z <= radius; ++z) {
+            for (int x = -radius; x <= radius; ++x) {
+                if (radius > 0 && std::abs(x) != radius && std::abs(z) != radius) {
+                    continue;
+                }
+
+                const auto surface_y = world_.surface_height(x, z);
+                const auto surface_block = world_.get_block(x, surface_y, z);
+                if (is_block_liquid(surface_block)) {
+                    continue;
+                }
+                if (world_.get_block(x, surface_y + 1, z) != to_block_id(BlockType::Air)) {
+                    continue;
+                }
+                if (!is_world_y_valid(surface_y + 2) || world_.get_block(x, surface_y + 2, z) != to_block_id(BlockType::Air)) {
+                    continue;
+                }
+
+                return {
+                    static_cast<float>(x) + 0.5F,
+                    static_cast<float>(surface_y) + 1.001F,
+                    static_cast<float>(z) + 0.5F,
+                };
+            }
+        }
+    }
+
+    const auto spawn_y = static_cast<float>(world_.surface_height(0, 0)) + 1.001F;
+    return {0.5F, spawn_y, 0.5F};
+}
+
+void Game::respawn_player() {
+    spawn_position_ = find_initial_spawn_position();
+    player_.respawn(spawn_position_);
+    sync_selected_hotbar_slot();
+    set_death_screen_visible(false);
+    (void)world_.update_streaming(player_.position());
+    creatures_.update(0.0F, world_, player_.position(), environment_.current_state(), environment_.current_creature_cycle());
 }
 
 void Game::update_smoke_player(float dt) {
@@ -486,6 +1034,7 @@ auto Game::build_performance_report() const -> PerformanceRunReport {
     metadata.stream_radius = options_.performance.stream_radius;
     metadata.shadows_enabled = options_.performance.shadows_enabled;
     metadata.shadow_map_size = options_.performance.shadow_map_size;
+    metadata.post_process_enabled = options_.performance.post_process_enabled;
     metadata.freeze_time = options_.freeze_time || options_.smoke_test;
     metadata.scenario = options_.performance.perf_scenario.empty() ? "smoke" : options_.performance.perf_scenario;
     return valcraft::build_performance_report(metadata, frame_samples_, options_.performance.perf_trace_enabled);

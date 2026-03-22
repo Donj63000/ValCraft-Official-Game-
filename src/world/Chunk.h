@@ -28,6 +28,9 @@ public:
     [[nodiscard]] auto blocks() const noexcept -> const std::array<BlockId, kChunkVolume>&;
     [[nodiscard]] auto sky_light() const noexcept -> const std::array<std::uint8_t, kChunkVolume>&;
     [[nodiscard]] auto block_light() const noexcept -> const std::array<std::uint8_t, kChunkVolume>&;
+    [[nodiscard]] auto has_meshable_blocks() const noexcept -> bool;
+    [[nodiscard]] auto min_mesh_y() const noexcept -> int;
+    [[nodiscard]] auto max_mesh_y() const noexcept -> int;
 
     [[nodiscard]] auto is_dirty() const noexcept -> bool;
     [[nodiscard]] auto is_lighting_dirty() const noexcept -> bool;
@@ -38,11 +41,14 @@ public:
 
 private:
     [[nodiscard]] static auto index_of(int x, int y, int z) noexcept -> std::size_t;
+    void rebuild_meshable_bounds() noexcept;
 
     ChunkCoord coord_ {};
     std::array<BlockId, kChunkVolume> blocks_ {};
     std::array<std::uint8_t, kChunkVolume> sky_light_ {};
     std::array<std::uint8_t, kChunkVolume> block_light_ {};
+    int min_mesh_y_ = kChunkHeight;
+    int max_mesh_y_ = kWorldMinY - 1;
     bool dirty_ = true;
     bool lighting_dirty_ = true;
 };

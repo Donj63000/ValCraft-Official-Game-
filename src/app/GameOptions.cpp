@@ -45,6 +45,10 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             result.options.performance.shadows_enabled = false;
             continue;
         }
+        if (argument == "--disable-post-process") {
+            result.options.performance.post_process_enabled = false;
+            continue;
+        }
         if (argument == "--perf-report") {
             result.options.performance.report_frame_stats = true;
             continue;
