@@ -4,7 +4,7 @@ param(
     [ValidateSet("RelWithDebInfo", "Release", "Debug")]
     [string]$Configuration = "RelWithDebInfo",
     [int]$SmokeFrames = 720,
-    [string[]]$Scenarios = @("baseline", "world_stress", "no_shadows"),
+    [string[]]$Scenarios = @("baseline", "world_stress", "no_shadows", "no_post_process"),
     [switch]$Trace,
     [switch]$NoConfigure,
     [switch]$NoBuild,
@@ -131,6 +131,10 @@ function Get-ScenarioDefinition {
     "no_shadows" {
         $arguments += "--stream-radius=10"
         $arguments += "--disable-shadows"
+    }
+    "no_post_process" {
+        $arguments += "--stream-radius=10"
+        $arguments += "--disable-post-process"
     }
     default {
         throw "Unknown perf scenario '$Name'."

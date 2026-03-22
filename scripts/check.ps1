@@ -236,8 +236,16 @@ if ($testCount -lt $MinimumTests) {
     throw "Strict gate failed: expected at least $MinimumTests tests, found $testCount."
 }
 
-Write-Host "==> Running smoke mode"
-Invoke-External -FilePath (Join-Path $strictBuildDir "bin\ValCraft.exe") -Arguments @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window") -WorkingDirectory $strictBuildDir
+Write-Host "==> Running smoke mode across day-cycle checkpoints"
+$smokeScenarios = @(
+    @{ Name = "day"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--initial-time=8") },
+    @{ Name = "dusk"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--initial-time=18.5") },
+    @{ Name = "night"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--initial-time=0") }
+)
+foreach ($scenario in $smokeScenarios) {
+    Write-Host ("   -> smoke checkpoint '{0}'" -f $scenario.Name)
+    Invoke-External -FilePath (Join-Path $strictBuildDir "bin\ValCraft.exe") -Arguments $scenario.Arguments -WorkingDirectory $strictBuildDir
+}
 
 Write-Host "==> Configuring coverage build"
 Invoke-External -FilePath $cmakeExe -Arguments @(
