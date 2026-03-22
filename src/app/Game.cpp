@@ -27,6 +27,40 @@ constexpr std::string_view kPerformanceBuildType = VALCRAFT_BUILD_TYPE;
 constexpr std::string_view kPerformanceBuildType = "unknown";
 #endif
 
+auto hotbar_number_from_keycode(SDL_Keycode keycode) noexcept -> int {
+    switch (keycode) {
+    case SDLK_1:
+    case SDLK_KP_1:
+        return 1;
+    case SDLK_2:
+    case SDLK_KP_2:
+        return 2;
+    case SDLK_3:
+    case SDLK_KP_3:
+        return 3;
+    case SDLK_4:
+    case SDLK_KP_4:
+        return 4;
+    case SDLK_5:
+    case SDLK_KP_5:
+        return 5;
+    case SDLK_6:
+    case SDLK_KP_6:
+        return 6;
+    case SDLK_7:
+    case SDLK_KP_7:
+        return 7;
+    case SDLK_8:
+    case SDLK_KP_8:
+        return 8;
+    case SDLK_9:
+    case SDLK_KP_9:
+        return 9;
+    default:
+        return 0;
+    }
+}
+
 } // namespace
 
 Game::Game(GameOptions options)
@@ -37,6 +71,7 @@ Game::Game(GameOptions options)
     if (should_capture_performance()) {
         frame_samples_.reserve(static_cast<std::size_t>(std::max(options_.smoke_frames, 0)));
     }
+    sync_selected_hotbar_slot();
 }
 
 Game::~Game() {
@@ -67,12 +102,19 @@ auto Game::run() -> int {
             const auto frame_time = resolve_simulation_frame_time(options_.smoke_test, measured_frame_time, fixed_step);
             accumulator += frame_time;
 
-            while (accumulator >= fixed_step) {
+            constexpr int kMaxFixedUpdatesPerFrame = 4;
+            int fixed_updates = 0;
+            while (accumulator >= fixed_step && fixed_updates < kMaxFixedUpdatesPerFrame) {
                 update(static_cast<float>(fixed_step.count()), frame_stats);
                 accumulator -= fixed_step;
+                ++fixed_updates;
             }
 
-            renderer_.render_frame(world_, player_, environment_.current_state(), window_width_, window_height_);
+            if (fixed_updates == kMaxFixedUpdatesPerFrame && accumulator > fixed_step) {
+                accumulator = fixed_step;
+            }
+
+            renderer_.render_frame(world_, player_, hotbar_, environment_.current_state(), window_width_, window_height_);
             const auto& render_stats = renderer_.last_frame_stats();
             frame_stats.upload_ms += render_stats.upload_ms;
             frame_stats.shadow_ms += render_stats.shadow_ms;
@@ -127,7 +169,7 @@ auto Game::initialize() -> bool {
         (options_.hidden_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE));
 
     window_ = SDL_CreateWindow(
-        "ValCraft - WASD move, Space jump, F fly, 1-8 blocks, LMB/RMB interact",
+        "ValCraft - WASD move, Space jump, F fly, 1-9 hotbar, wheel select, LMB/RMB interact",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         window_width_,
@@ -143,7 +185,11 @@ auto Game::initialize() -> bool {
     }
 
     SDL_GL_MakeCurrent(window_, gl_context_);
-    SDL_GL_SetSwapInterval(options_.smoke_test ? 0 : 1);
+    if (options_.smoke_test) {
+        SDL_GL_SetSwapInterval(0);
+    } else if (SDL_GL_SetSwapInterval(-1) != 0) {
+        SDL_GL_SetSwapInterval(1);
+    }
 
     if (gladLoadGL(reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress)) == 0) {
         return false;
@@ -236,6 +282,16 @@ void Game::process_events() {
                 pending_place_block_ = true;
             }
             break;
+        case SDL_MOUSEWHEEL: {
+            auto scroll_y = event.wheel.y;
+            if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+                scroll_y = -scroll_y;
+            }
+            if (scroll_y != 0) {
+                cycle_hotbar_selection(-scroll_y);
+            }
+            break;
+        }
         case SDL_KEYDOWN:
             if (event.key.repeat != 0) {
                 break;
@@ -246,7 +302,7 @@ void Game::process_events() {
             } else if (event.key.keysym.sym == SDLK_f) {
                 pending_toggle_fly_ = true;
             } else {
-                select_block_from_key(event.key.keysym.sym);
+                select_hotbar_slot_from_keycode(event.key.keysym.sym);
             }
             break;
         default:
@@ -318,35 +374,26 @@ void Game::set_mouse_capture(bool captured) {
     SDL_ShowCursor(captured ? SDL_DISABLE : SDL_ENABLE);
 }
 
-void Game::select_block_from_key(SDL_Keycode keycode) {
-    switch (keycode) {
-    case SDLK_1:
-        player_.set_selected_block(to_block_id(BlockType::Grass));
-        break;
-    case SDLK_2:
-        player_.set_selected_block(to_block_id(BlockType::Dirt));
-        break;
-    case SDLK_3:
-        player_.set_selected_block(to_block_id(BlockType::Stone));
-        break;
-    case SDLK_4:
-        player_.set_selected_block(to_block_id(BlockType::Sand));
-        break;
-    case SDLK_5:
-        player_.set_selected_block(to_block_id(BlockType::Wood));
-        break;
-    case SDLK_6:
-        player_.set_selected_block(to_block_id(BlockType::Leaves));
-        break;
-    case SDLK_7:
-        player_.set_selected_block(to_block_id(BlockType::Air));
-        break;
-    case SDLK_8:
-        player_.set_selected_block(to_block_id(BlockType::Torch));
-        break;
-    default:
-        break;
+void Game::sync_selected_hotbar_slot() noexcept {
+    player_.set_selected_block(selected_hotbar_block(hotbar_));
+}
+
+void Game::select_hotbar_slot(std::size_t index) noexcept {
+    valcraft::select_hotbar_index(hotbar_, index);
+    sync_selected_hotbar_slot();
+}
+
+void Game::cycle_hotbar_selection(int delta) noexcept {
+    valcraft::cycle_hotbar_selection(hotbar_, delta);
+    sync_selected_hotbar_slot();
+}
+
+void Game::select_hotbar_slot_from_keycode(SDL_Keycode keycode) {
+    const auto slot_index = hotbar_index_from_number_key(hotbar_number_from_keycode(keycode));
+    if (!slot_index.has_value()) {
+        return;
     }
+    select_hotbar_slot(*slot_index);
 }
 
 void Game::update_smoke_player(float dt) {

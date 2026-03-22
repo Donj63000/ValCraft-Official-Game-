@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/Hotbar.h"
 #include "gameplay/PlayerController.h"
 #include "world/Environment.h"
 #include "world/World.h"
@@ -38,7 +39,12 @@ public:
 
     auto initialize(const RendererOptions& options = {}) -> bool;
     void shutdown();
-    void render_frame(const World& world, const PlayerController& player, const EnvironmentState& environment, int width, int height);
+    void render_frame(const World& world,
+                      const PlayerController& player,
+                      const HotbarState& hotbar,
+                      const EnvironmentState& environment,
+                      int width,
+                      int height);
     [[nodiscard]] auto last_frame_stats() const noexcept -> const RendererFrameStats&;
 
 private:
@@ -71,6 +77,10 @@ private:
         GLint light_view_projection = -1;
     };
 
+    struct HudUniformLocations {
+        GLint atlas = -1;
+    };
+
     struct VisibleChunk {
         ChunkCoord coord {};
         const GpuMesh* mesh = nullptr;
@@ -87,20 +97,27 @@ private:
     void create_atlas_texture();
     void create_shadow_map();
     void create_crosshair_geometry();
+    void create_hud_geometry();
+    void draw_hotbar(const HotbarState& hotbar, int width, int height);
     void draw_crosshair();
 
     GLuint world_program_ = 0;
     GLuint shadow_program_ = 0;
+    GLuint hud_program_ = 0;
     GLuint crosshair_program_ = 0;
     GLuint atlas_texture_ = 0;
     GLuint shadow_map_ = 0;
     GLuint shadow_framebuffer_ = 0;
+    GLuint hud_vao_ = 0;
+    GLuint hud_vbo_ = 0;
     GLuint crosshair_vao_ = 0;
     GLuint crosshair_vbo_ = 0;
     RendererOptions options_ {};
     WorldUniformLocations world_uniforms_ {};
     ShadowUniformLocations shadow_uniforms_ {};
+    HudUniformLocations hud_uniforms_ {};
     std::unordered_map<ChunkCoord, GpuMesh, ChunkCoordHash> gpu_meshes_ {};
+    std::vector<VisibleChunk> visible_chunks_cache_ {};
     RendererFrameStats last_frame_stats_ {};
     bool gl_api_ready_ = false;
     bool initialized_ = false;

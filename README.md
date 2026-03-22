@@ -28,7 +28,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-hero.png" alt="ValCraft hero screenshot" width="920">
+  <img src="docs/images/github-showcase.png" alt="ValCraft gameplay screenshot with the current world rendering and in-game hotbar" width="920">
+  <br>
+  <em>Capture recente en jeu avec le rendu actuel, la barre rapide 9 slots et les torches posables.</em>
 </p>
 
 ## Apercu
@@ -40,6 +42,7 @@ Le projet vise une base technique solide et evolutive:
 - monde procedural par chunks
 - deplacement FPS avec collisions et gravite
 - casse et pose de blocs en temps reel
+- hotbar 9 slots avec selection clavier et roulette
 - generation deterministe et streaming du monde
 - pipeline de verification strict pour limiter les regressions
 
@@ -49,7 +52,7 @@ Le projet vise une base technique solide et evolutive:
 
 | Monde voxel | Gameplay FPS | Qualite logicielle |
 | --- | --- | --- |
-| Chunks `16 x 128 x 16`, terrain procedural, biomes legers, caves et arbres. | Controle souris/clavier, saut, collisions, mode fly debug, raycast bloc par bloc. | `21` tests automatises, smoke test, warnings stricts, couverture critique et CI GitHub. |
+| Chunks `16 x 128 x 16`, terrain procedural, biomes legers, caves et arbres. | Controle souris/clavier, saut, collisions, mode fly debug, raycast bloc par bloc et hotbar scrollable. | `21` tests automatises, smoke test, warnings stricts, couverture critique et CI GitHub. |
 
 ## Captures
 
@@ -79,7 +82,7 @@ Le projet vise une base technique solide et evolutive:
 - chunks streames autour du joueur
 - seed deterministe
 - generation de relief et de surface par bruit
-- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`
+- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`, `Torch`
 - maillage de chunks avec suppression des faces cachees
 
 ### Gameplay
@@ -91,6 +94,7 @@ Le projet vise une base technique solide et evolutive:
 - mode fly debug
 - casse de blocs au clic gauche
 - pose de blocs au clic droit
+- hotbar `9` slots avec selection a la roulette
 - prevention de pose dans le volume du joueur
 
 ### Pipeline de qualite
@@ -159,7 +163,7 @@ Cette verification controle:
 | Liberer / reprendre la souris | `Escape` |
 | Casser un bloc | `Clic gauche` |
 | Poser un bloc | `Clic droit` |
-| Selection du bloc actif | `1` a `7` |
+| Selection du bloc actif | `1` a `9` / `roulette souris` |
 
 ## Stack technique
 
@@ -217,7 +221,7 @@ Les choix techniques, l'integration dans le projet, les validations et la direct
 ## Roadmap
 
 - sauvegarde et chargement des modifications monde
-- HUD et hotbar en jeu
+- inventaire complet et HUD etendu
 - optimisation du meshing
 - frustum culling plus fin
 - generation plus riche

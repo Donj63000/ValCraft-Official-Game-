@@ -50,11 +50,25 @@ auto sky_column_index(int local_x, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>(local_z * kChunkSizeX + local_x);
 }
 
+auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
+    return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
+}
+
 } // namespace
 
 World::World(int seed, int stream_radius)
     : stream_radius_(stream_radius),
       generator_(seed) {
+    const auto loaded_side = static_cast<std::size_t>(std::max(stream_radius_, 0) * 2 + 3);
+    const auto max_loaded_chunks = loaded_side * loaded_side;
+    chunks_.reserve(max_loaded_chunks);
+    pending_generation_set_.reserve(max_loaded_chunks);
+    pending_mesh_set_.reserve(max_loaded_chunks);
+    pending_priority_mesh_set_.reserve(max_loaded_chunks);
+    deferred_mesh_invalidation_set_.reserve(max_loaded_chunks);
+    pending_lighting_set_.reserve(max_loaded_chunks);
+    pending_lighting_coverage_.reserve(max_loaded_chunks);
+    active_lighting_coverage_.reserve(1U + kNeighborOffsets.size());
 }
 
 auto World::get_block(int x, int y, int z) const -> BlockId {
@@ -291,9 +305,6 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
     process_generation_queue(budget.chunk_generation_budget, stats);
     stats.generation_ms =
         std::chrono::duration<double, std::milli>(clock::now() - generation_start).count();
-    if (stats.generated_chunks > 0) {
-        enqueue_dirty_chunks();
-    }
 
     const auto lighting_start = clock::now();
     process_lighting_queue(budget.light_node_budget, stats);
@@ -378,8 +389,9 @@ auto World::surface_height(int world_x, int world_z) -> int {
         return 0;
     }
 
+    const auto& blocks = chunk->blocks();
     for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
-        if (is_block_solid(chunk->get_local(local.x, y, local.z))) {
+        if (is_block_solid(blocks[chunk_linear_index(local.x, y, local.z)])) {
             return y;
         }
     }
@@ -650,7 +662,10 @@ void World::enqueue_lighting_update(const ChunkCoord& coord) {
     }
 
     pending_lighting_queue_.push_back({coord, coverage});
-    rebuild_pending_lighting_metadata();
+    pending_lighting_set_.insert(coord);
+    for (const auto& covered_coord : coverage) {
+        pending_lighting_coverage_.insert(covered_coord);
+    }
 }
 
 void World::rebuild_pending_lighting_metadata() {
@@ -729,7 +744,10 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
             while (!pending_lighting_queue_.empty()) {
                 const auto pending_update = std::move(pending_lighting_queue_.front());
                 pending_lighting_queue_.pop_front();
-                rebuild_pending_lighting_metadata();
+                pending_lighting_set_.erase(pending_update.anchor);
+                for (const auto& covered_coord : pending_update.coverage) {
+                    pending_lighting_coverage_.erase(covered_coord);
+                }
 
                 LightingJob job {};
                 job.anchor = pending_update.anchor;
@@ -756,7 +774,6 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
             finalize_lighting_job(job);
             active_lighting_job_.reset();
             ++stats.lighting_jobs_completed;
-            enqueue_dirty_chunks();
             continue;
         }
 
@@ -1151,10 +1168,11 @@ void World::remove_unsupported_torch_above(int x, int y, int z) {
 
 void World::refresh_chunk_emissive_cache(ChunkRecord& record) {
     record.emissive_blocks.clear();
+    const auto& blocks = record.chunk.blocks();
     for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
         for (int z = 0; z < kChunkSizeZ; ++z) {
             for (int x = 0; x < kChunkSizeX; ++x) {
-                const auto block_id = record.chunk.get_local(x, y, z);
+                const auto block_id = blocks[chunk_linear_index(x, y, z)];
                 if (block_emissive_level(block_id) == 0) {
                     continue;
                 }

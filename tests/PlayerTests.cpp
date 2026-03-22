@@ -1,3 +1,4 @@
+#include "app/Hotbar.h"
 #include "gameplay/PlayerController.h"
 
 #include "TestUtils.h"
@@ -89,6 +90,43 @@ TEST_CASE("player cannot place a block above the world ceiling") {
 
     CHECK_FALSE(player.try_place_block(world, 4.0F));
     CHECK(world.get_block(0, kWorldMaxY, -1) == to_block_id(BlockType::Stone));
+}
+
+TEST_CASE("hotbar torch slot places a torch that emits light") {
+    World world(35, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    auto hotbar = make_default_hotbar_state();
+    select_hotbar_index(hotbar, 6);
+    player.set_selected_block(selected_hotbar_block(hotbar));
+
+    const auto hit = player.current_target(world, 4.0F);
+    REQUIRE(hit.hit);
+    CHECK(hit.block == BlockCoord {0, 4, -1});
+    CHECK(hit.adjacent == BlockCoord {0, 5, -1});
+
+    REQUIRE(player.try_place_block(world, 4.0F));
+    world.rebuild_lighting();
+
+    CHECK(world.get_block(0, 5, -1) == to_block_id(BlockType::Torch));
+    CHECK(world.get_block_light(0, 5, -1) == 14);
+}
+
+TEST_CASE("hotbar utility slot maps to an empty hand and does not place blocks") {
+    World world(36, 1);
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    auto hotbar = make_default_hotbar_state();
+    select_hotbar_index(hotbar, 7);
+    player.set_selected_block(selected_hotbar_block(hotbar));
+
+    CHECK(player.selected_block() == to_block_id(BlockType::Air));
+    CHECK_FALSE(player.try_place_block(world, 4.0F));
 }
 
 } // namespace valcraft

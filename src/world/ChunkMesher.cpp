@@ -37,6 +37,10 @@ constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
 
+auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
+    return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
+}
+
 struct Neighborhood {
     std::array<const Chunk*, 9> chunks {};
     std::array<BlockId, kCachedNeighborhoodVolume> blocks {};
@@ -71,9 +75,13 @@ struct Neighborhood {
                         continue;
                     }
 
-                    blocks[index] = chunk->get_local(local_x, y, local_z);
-                    sky_light[index] = chunk->get_sky_light_local(local_x, y, local_z);
-                    block_light[index] = chunk->get_block_light_local(local_x, y, local_z);
+                    const auto local_index = chunk_linear_index(local_x, y, local_z);
+                    const auto& chunk_blocks = chunk->blocks();
+                    const auto& chunk_sky_light = chunk->sky_light();
+                    const auto& chunk_block_light = chunk->block_light();
+                    blocks[index] = chunk_blocks[local_index];
+                    sky_light[index] = chunk_sky_light[local_index];
+                    block_light[index] = chunk_block_light[local_index];
                 }
             }
         }
@@ -448,11 +456,12 @@ auto ChunkMesher::build_mesh(const World& world,
     const auto neighborhood = build_neighborhood(world, coord);
     const auto chunk_world_x = coord.x * kChunkSizeX;
     const auto chunk_world_z = coord.z * kChunkSizeZ;
+    const auto& chunk_blocks = chunk->blocks();
 
     for (int y = 0; y < kChunkHeight; ++y) {
         for (int z = 0; z < kChunkSizeZ; ++z) {
             for (int x = 0; x < kChunkSizeX; ++x) {
-                const auto block_id = chunk->get_local(x, y, z);
+                const auto block_id = chunk_blocks[chunk_linear_index(x, y, z)];
                 if (!is_block_solid(block_id)) {
                     continue;
                 }

@@ -1,6 +1,8 @@
+#include "app/Hotbar.h"
 #include "app/GameOptions.h"
 #include "app/GameLoop.h"
 #include "app/PerformanceReport.h"
+#include "render/HotbarLayout.h"
 
 #include <doctest/doctest.h>
 
@@ -141,6 +143,55 @@ TEST_CASE("normal mode clamps very large frame times without forcing the fixed s
 
     CHECK(resolved.count() == doctest::Approx(0.25));
     CHECK(resolved != fixed_step);
+}
+
+TEST_CASE("default hotbar contains nine slots with torch and utility empties") {
+    const auto hotbar = make_default_hotbar_state();
+
+    CHECK(hotbar.slots.size() == kHotbarSlotCount);
+    CHECK(hotbar.selected_index == 0);
+    CHECK(hotbar.slots[0].block_id == to_block_id(BlockType::Grass));
+    CHECK(hotbar.slots[6].block_id == to_block_id(BlockType::Torch));
+    CHECK_FALSE(hotbar.slots[6].is_empty_utility);
+    CHECK(hotbar.slots[7].block_id == to_block_id(BlockType::Air));
+    CHECK(hotbar.slots[7].is_empty_utility);
+    CHECK(hotbar.slots[8].block_id == to_block_id(BlockType::Air));
+    CHECK(hotbar.slots[8].is_empty_utility);
+}
+
+TEST_CASE("hotbar selection supports number keys and mouse wheel wrap") {
+    HotbarState hotbar = make_default_hotbar_state();
+
+    CHECK(hotbar_index_from_number_key(1) == 0);
+    CHECK(hotbar_index_from_number_key(9) == 8);
+    CHECK_FALSE(hotbar_index_from_number_key(0).has_value());
+
+    select_hotbar_index(hotbar, 6);
+    CHECK(selected_hotbar_block(hotbar) == to_block_id(BlockType::Torch));
+
+    select_hotbar_index(hotbar, 8);
+    cycle_hotbar_selection(hotbar, 1);
+    CHECK(hotbar.selected_index == 0);
+
+    cycle_hotbar_selection(hotbar, -1);
+    CHECK(hotbar.selected_index == 8);
+    CHECK(selected_hotbar_block(hotbar) == to_block_id(BlockType::Air));
+}
+
+TEST_CASE("hotbar layout stays centered and keeps torch and utility visuals distinct") {
+    auto hotbar = make_default_hotbar_state();
+    select_hotbar_index(hotbar, 6);
+
+    const auto layout = build_hotbar_layout(1600, 900, hotbar);
+
+    CHECK(layout.slots.size() == kHotbarSlotCount);
+    CHECK(layout.bar_left + layout.bar_width * 0.5F == doctest::Approx(800.0F));
+    CHECK(layout.bar_bottom >= layout.safe_margin);
+    CHECK(layout.slots[6].is_selected);
+    CHECK(layout.slots[6].has_icon);
+    CHECK(layout.slots[6].icon_tile == HotbarAtlasTile {0, 2});
+    CHECK_FALSE(layout.slots[7].has_icon);
+    CHECK_FALSE(layout.slots[8].has_icon);
 }
 
 } // namespace valcraft

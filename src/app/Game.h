@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/Hotbar.h"
 #include "app/GameOptions.h"
 #include "app/PerformanceReport.h"
 #include "gameplay/PlayerController.h"
@@ -52,7 +53,10 @@ private:
     void process_events();
     void update(float dt, FramePerformanceStats& frame_stats);
     void set_mouse_capture(bool captured);
-    void select_block_from_key(SDL_Keycode keycode);
+    void sync_selected_hotbar_slot() noexcept;
+    void select_hotbar_slot(std::size_t index) noexcept;
+    void cycle_hotbar_selection(int delta) noexcept;
+    void select_hotbar_slot_from_keycode(SDL_Keycode keycode);
     void update_smoke_player(float dt);
     void validate_smoke_frame(const WorldWorkBudget& budget, const WorldWorkStats& stats) const;
     void record_frame_stats(const FramePerformanceStats& frame_stats);
@@ -78,6 +82,7 @@ private:
     Renderer renderer_ {};
     World world_ {};
     PlayerController player_ {};
+    HotbarState hotbar_ = make_default_hotbar_state();
     GameOptions options_ {};
     std::vector<FramePerformanceSample> frame_samples_ {};
 };

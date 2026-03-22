@@ -1,4 +1,5 @@
 #include "render/Renderer.h"
+#include "render/HotbarLayout.h"
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -20,13 +21,27 @@ namespace {
 
 constexpr auto kAtlasSize = 64;
 constexpr auto kTileSize = 16;
+constexpr auto kAtlasTilesPerAxis = 4.0F;
 constexpr auto kShadowDistance = 96.0F;
 constexpr auto kInitialVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(ChunkVertex) * 256U);
 constexpr auto kInitialIndexBufferBytes = static_cast<GLsizeiptr>(sizeof(std::uint32_t) * 384U);
+constexpr auto kInitialHudBufferBytes = static_cast<GLsizeiptr>(sizeof(float) * 9U * 6U * 32U);
 
 struct FrustumPlane {
     glm::vec3 normal {0.0F, 1.0F, 0.0F};
     float distance = 0.0F;
+};
+
+struct HudVertex {
+    float x = 0.0F;
+    float y = 0.0F;
+    float u = 0.0F;
+    float v = 0.0F;
+    float r = 1.0F;
+    float g = 1.0F;
+    float b = 1.0F;
+    float a = 1.0F;
+    float textured = 0.0F;
 };
 
 void set_texel(std::vector<std::uint8_t>& pixels, int x, int y, std::array<std::uint8_t, 3> color) {
@@ -94,6 +109,82 @@ auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, G
     return capacity;
 }
 
+auto pixel_to_ndc_x(float x, float viewport_width) -> float {
+    return (x / viewport_width) * 2.0F - 1.0F;
+}
+
+auto pixel_to_ndc_y(float y, float viewport_height) -> float {
+    return (y / viewport_height) * 2.0F - 1.0F;
+}
+
+auto atlas_uv_rect(const HotbarAtlasTile& tile) -> std::array<float, 4> {
+    const auto uv_step = 1.0F / kAtlasTilesPerAxis;
+    const auto u0 = static_cast<float>(tile.x) * uv_step;
+    const auto v0 = static_cast<float>(tile.y) * uv_step;
+    return {u0, v0, u0 + uv_step, v0 + uv_step};
+}
+
+void append_hud_quad(std::vector<HudVertex>& vertices,
+                     float viewport_width,
+                     float viewport_height,
+                     float x,
+                     float y,
+                     float width,
+                     float height,
+                     const std::array<float, 4>& color,
+                     const std::array<float, 4>& uv_rect,
+                     float textured) {
+    const auto left = pixel_to_ndc_x(x, viewport_width);
+    const auto right = pixel_to_ndc_x(x + width, viewport_width);
+    const auto bottom = pixel_to_ndc_y(y, viewport_height);
+    const auto top = pixel_to_ndc_y(y + height, viewport_height);
+    const auto u0 = uv_rect[0];
+    const auto v0 = uv_rect[1];
+    const auto u1 = uv_rect[2];
+    const auto v1 = uv_rect[3];
+
+    vertices.insert(vertices.end(), {
+        {left, bottom, u0, v0, color[0], color[1], color[2], color[3], textured},
+        {right, bottom, u1, v0, color[0], color[1], color[2], color[3], textured},
+        {right, top, u1, v1, color[0], color[1], color[2], color[3], textured},
+        {left, bottom, u0, v0, color[0], color[1], color[2], color[3], textured},
+        {right, top, u1, v1, color[0], color[1], color[2], color[3], textured},
+        {left, top, u0, v1, color[0], color[1], color[2], color[3], textured},
+    });
+}
+
+void append_hud_rect(std::vector<HudVertex>& vertices,
+                     float viewport_width,
+                     float viewport_height,
+                     float x,
+                     float y,
+                     float width,
+                     float height,
+                     const std::array<float, 4>& color) {
+    append_hud_quad(vertices, viewport_width, viewport_height, x, y, width, height, color, {0.0F, 0.0F, 0.0F, 0.0F}, 0.0F);
+}
+
+void append_hud_frame(std::vector<HudVertex>& vertices,
+                      float viewport_width,
+                      float viewport_height,
+                      float x,
+                      float y,
+                      float width,
+                      float height,
+                      float border_thickness,
+                      const std::array<float, 4>& border_color,
+                      const std::array<float, 4>& fill_color) {
+    append_hud_rect(vertices, viewport_width, viewport_height, x, y, width, height, border_color);
+
+    const auto inner_x = x + border_thickness;
+    const auto inner_y = y + border_thickness;
+    const auto inner_width = std::max(0.0F, width - border_thickness * 2.0F);
+    const auto inner_height = std::max(0.0F, height - border_thickness * 2.0F);
+    if (inner_width > 0.0F && inner_height > 0.0F) {
+        append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, inner_width, inner_height, fill_color);
+    }
+}
+
 } // namespace
 
 Renderer::~Renderer() {
@@ -114,6 +205,7 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
     create_programs();
     create_atlas_texture();
     create_shadow_map();
+    create_hud_geometry();
     create_crosshair_geometry();
     initialized_ = true;
     return true;
@@ -131,6 +223,12 @@ void Renderer::shutdown() {
         if (crosshair_vao_ != 0) {
             glDeleteVertexArrays(1, &crosshair_vao_);
         }
+        if (hud_vbo_ != 0) {
+            glDeleteBuffers(1, &hud_vbo_);
+        }
+        if (hud_vao_ != 0) {
+            glDeleteVertexArrays(1, &hud_vao_);
+        }
         if (atlas_texture_ != 0) {
             glDeleteTextures(1, &atlas_texture_);
         }
@@ -146,28 +244,41 @@ void Renderer::shutdown() {
         if (shadow_program_ != 0) {
             glDeleteProgram(shadow_program_);
         }
+        if (hud_program_ != 0) {
+            glDeleteProgram(hud_program_);
+        }
         if (crosshair_program_ != 0) {
             glDeleteProgram(crosshair_program_);
         }
     }
 
     gpu_meshes_.clear();
+    visible_chunks_cache_.clear();
     crosshair_vbo_ = 0;
     crosshair_vao_ = 0;
+    hud_vbo_ = 0;
+    hud_vao_ = 0;
     atlas_texture_ = 0;
     shadow_map_ = 0;
     shadow_framebuffer_ = 0;
     world_program_ = 0;
     shadow_program_ = 0;
+    hud_program_ = 0;
     crosshair_program_ = 0;
     world_uniforms_ = {};
     shadow_uniforms_ = {};
+    hud_uniforms_ = {};
     last_frame_stats_ = {};
     gl_api_ready_ = false;
     initialized_ = false;
 }
 
-void Renderer::render_frame(const World& world, const PlayerController& player, const EnvironmentState& environment, int width, int height) {
+void Renderer::render_frame(const World& world,
+                            const PlayerController& player,
+                            const HotbarState& hotbar,
+                            const EnvironmentState& environment,
+                            int width,
+                            int height) {
     if (!initialized_) {
         return;
     }
@@ -193,8 +304,14 @@ void Renderer::render_frame(const World& world, const PlayerController& player, 
     }
 
     const auto draw_distance = static_cast<float>((world.stream_radius() + 2) * kChunkSizeX);
-    std::vector<VisibleChunk> visible_chunks;
-    visible_chunks.reserve(gpu_meshes_.size());
+    const auto draw_distance_sq = draw_distance * draw_distance;
+    constexpr float kBackCullStartDistance = 20.0F;
+    constexpr float kBackCullStartDistanceSq = kBackCullStartDistance * kBackCullStartDistance;
+    auto& visible_chunks = visible_chunks_cache_;
+    visible_chunks.clear();
+    if (visible_chunks.capacity() < gpu_meshes_.size()) {
+        visible_chunks.reserve(gpu_meshes_.size());
+    }
 
     for (const auto& [coord, gpu_mesh] : gpu_meshes_) {
         if (gpu_mesh.index_count == 0) {
@@ -217,19 +334,20 @@ void Renderer::render_frame(const World& world, const PlayerController& player, 
 
         const auto center = (min_corner + max_corner) * 0.5F;
         const auto horizontal = glm::vec3 {center.x - eye.x, 0.0F, center.z - eye.z};
-        const auto distance = glm::length(horizontal);
-        if (distance > draw_distance) {
+        const auto distance_sq = glm::dot(horizontal, horizontal);
+        if (distance_sq > draw_distance_sq) {
             continue;
         }
 
-        if (distance > 20.0F && glm::dot(horizontal, horizontal) > 1.0e-6F) {
-            const auto chunk_dir = glm::normalize(horizontal);
+        if (distance_sq > kBackCullStartDistanceSq) {
+            const auto inverse_length = 1.0F / std::sqrt(distance_sq);
+            const auto chunk_dir = horizontal * inverse_length;
             if (glm::dot(forward, chunk_dir) < -0.45F) {
                 continue;
             }
         }
 
-        visible_chunks.push_back({coord, &gpu_mesh, center, distance});
+        visible_chunks.push_back({coord, &gpu_mesh, center, 0.0F});
     }
     frame_stats.visible_chunks = visible_chunks.size();
 
@@ -270,13 +388,15 @@ void Renderer::render_frame(const World& world, const PlayerController& player, 
         glUseProgram(shadow_program_);
         glUniformMatrix4fv(shadow_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
 
+        const auto max_shadow_distance = kShadowDistance + static_cast<float>(kChunkSizeX);
+        const auto max_shadow_distance_sq = max_shadow_distance * max_shadow_distance;
         for (const auto& visible_chunk : visible_chunks) {
             const auto horizontal = glm::vec3 {
                 visible_chunk.center.x - focus.x,
                 0.0F,
                 visible_chunk.center.z - focus.z,
             };
-            if (glm::length(horizontal) > kShadowDistance + static_cast<float>(kChunkSizeX)) {
+            if (glm::dot(horizontal, horizontal) > max_shadow_distance_sq) {
                 continue;
             }
 
@@ -324,6 +444,7 @@ void Renderer::render_frame(const World& world, const PlayerController& player, 
         ++frame_stats.world_chunks;
     }
 
+    draw_hotbar(hotbar, width, height);
     draw_crosshair();
     frame_stats.world_ms = std::chrono::duration<double, std::milli>(clock::now() - world_start).count();
     last_frame_stats_ = frame_stats;
@@ -335,6 +456,9 @@ auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
 
 void Renderer::sync_gpu_meshes(const World& world, RendererFrameStats& frame_stats) {
     const auto& records = world.chunk_records();
+    if (gpu_meshes_.bucket_count() < records.size()) {
+        gpu_meshes_.reserve(records.size());
+    }
 
     for (auto iterator = gpu_meshes_.begin(); iterator != gpu_meshes_.end();) {
         if (!records.contains(iterator->first)) {
@@ -602,6 +726,42 @@ void main() {
 }
 )";
 
+    static constexpr auto* hud_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in vec4 a_color;
+layout(location = 3) in float a_textured;
+
+out vec2 v_uv;
+out vec4 v_color;
+flat out float v_textured;
+
+void main() {
+    gl_Position = vec4(a_position, 0.0, 1.0);
+    v_uv = a_uv;
+    v_color = a_color;
+    v_textured = a_textured;
+}
+)";
+
+    static constexpr auto* hud_fragment_shader = R"(#version 330 core
+in vec2 v_uv;
+in vec4 v_color;
+flat in float v_textured;
+
+uniform sampler2D u_atlas;
+
+out vec4 frag_color;
+
+void main() {
+    vec4 color = v_color;
+    if (v_textured > 0.5) {
+        color *= texture(u_atlas, v_uv);
+    }
+    frag_color = color;
+}
+)";
+
     static constexpr auto* crosshair_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec2 a_position;
 
@@ -624,6 +784,9 @@ void main() {
     shadow_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, shadow_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, shadow_fragment_shader));
+    hud_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, hud_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, hud_fragment_shader));
     crosshair_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, crosshair_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, crosshair_fragment_shader));
@@ -642,6 +805,7 @@ void main() {
     world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
 
     shadow_uniforms_.light_view_projection = glGetUniformLocation(shadow_program_, "u_light_view_projection");
+    hud_uniforms_.atlas = glGetUniformLocation(hud_program_, "u_atlas");
 }
 
 void Renderer::create_atlas_texture() {
@@ -745,6 +909,22 @@ void Renderer::create_shadow_map() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void Renderer::create_hud_geometry() {
+    glGenVertexArrays(1, &hud_vao_);
+    glGenBuffers(1, &hud_vbo_);
+    glBindVertexArray(hud_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, kInitialHudBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, x)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, u)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, r)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, textured)));
+}
+
 void Renderer::create_crosshair_geometry() {
     static constexpr std::array<float, 8> kCrosshairVertices {{
         -0.015F, 0.0F,
@@ -760,6 +940,108 @@ void Renderer::create_crosshair_geometry() {
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(kCrosshairVertices.size() * sizeof(float)), kCrosshairVertices.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, nullptr);
+}
+
+void Renderer::draw_hotbar(const HotbarState& hotbar, int width, int height) {
+    if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto layout = build_hotbar_layout(width, height, hotbar);
+    std::vector<HudVertex> vertices;
+    vertices.reserve(6U * (3U + static_cast<std::size_t>(kHotbarSlotCount) * 4U));
+
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    const auto bar_border_thickness = std::max(2.0F, layout.slot_size * 0.06F);
+    append_hud_frame(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.bar_left,
+        layout.bar_bottom,
+        layout.bar_width,
+        layout.bar_height,
+        bar_border_thickness,
+        {0.02F, 0.03F, 0.04F, 0.90F},
+        {0.07F, 0.08F, 0.10F, 0.78F});
+
+    const auto slot_border_thickness = std::max(2.0F, layout.slot_size * 0.07F);
+    const auto glow_padding = std::max(2.0F, layout.slot_size * 0.05F);
+    for (const auto& slot : layout.slots) {
+        if (slot.is_selected) {
+            append_hud_rect(
+                vertices,
+                viewport_width,
+                viewport_height,
+                slot.x - glow_padding,
+                slot.y - glow_padding,
+                slot.size + glow_padding * 2.0F,
+                slot.size + glow_padding * 2.0F,
+                {1.00F, 0.84F, 0.42F, 0.18F});
+        }
+
+        const auto border_color = slot.is_selected
+                                      ? std::array<float, 4> {0.97F, 0.88F, 0.52F, 1.0F}
+                                      : std::array<float, 4> {0.28F, 0.31F, 0.35F, 0.92F};
+        const auto fill_color = slot.is_selected
+                                    ? std::array<float, 4> {0.20F, 0.22F, 0.25F, 0.95F}
+                                    : (slot.slot.is_empty_utility
+                                           ? std::array<float, 4> {0.09F, 0.10F, 0.12F, 0.66F}
+                                           : std::array<float, 4> {0.12F, 0.13F, 0.15F, 0.84F});
+        append_hud_frame(
+            vertices,
+            viewport_width,
+            viewport_height,
+            slot.x,
+            slot.y,
+            slot.size,
+            slot.size,
+            slot_border_thickness,
+            border_color,
+            fill_color);
+
+        if (!slot.has_icon) {
+            continue;
+        }
+
+        const auto icon_size = std::max(8.0F, slot.size - layout.icon_inset * 2.0F);
+        const auto icon_offset = (slot.size - icon_size) * 0.5F;
+        append_hud_quad(
+            vertices,
+            viewport_width,
+            viewport_height,
+            slot.x + icon_offset,
+            slot.y + icon_offset,
+            icon_size,
+            icon_size,
+            {1.0F, 1.0F, 1.0F, slot.is_selected ? 1.0F : 0.95F},
+            atlas_uv_rect(slot.icon_tile),
+            1.0F);
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+
+    glBindVertexArray(hud_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
+        vertices.data(),
+        GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
 }
 
 void Renderer::draw_crosshair() {
