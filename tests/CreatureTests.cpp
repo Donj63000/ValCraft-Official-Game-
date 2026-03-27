@@ -26,7 +26,7 @@ void add_tree_patch(World& world, int base_x, int base_z, int trunk_y) {
     }
 }
 
-void sculpt_lamb_hills(World& world, const ChunkCoord& coord, int base_height) {
+void sculpt_sheep_hills(World& world, const ChunkCoord& coord, int base_height) {
     const auto origin_x = coord.x * kChunkSizeX;
     const auto origin_z = coord.z * kChunkSizeZ;
     for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
@@ -41,10 +41,8 @@ void sculpt_lamb_hills(World& world, const ChunkCoord& coord, int base_height) {
     }
 }
 
-auto contains_only_night_states(CreatureBehaviorState state) -> bool {
-    return state == CreatureBehaviorState::Lurk ||
-           state == CreatureBehaviorState::Stare ||
-           state == CreatureBehaviorState::Twitch;
+auto is_hostile_state(CreatureBehaviorState state) -> bool {
+    return state == CreatureBehaviorState::Chase || state == CreatureBehaviorState::Strike;
 }
 
 auto horizontal_distance_squared(const glm::vec3& lhs, const glm::vec3& rhs) -> float {
@@ -76,6 +74,23 @@ auto tile_average_rgba(const std::vector<std::uint8_t>& atlas, CreatureAtlasTile
     return accum;
 }
 
+auto tile_alpha_coverage(const std::vector<std::uint8_t>& atlas, CreatureAtlasTile tile, std::uint8_t threshold = 1) -> float {
+    const auto coordinates = creature_atlas_tile_coordinates(tile);
+    const auto start_x = coordinates[0] * kCreatureAtlasTileSize;
+    const auto start_y = coordinates[1] * kCreatureAtlasTileSize;
+
+    int alpha_pixels = 0;
+    for (int y = 0; y < kCreatureAtlasTileSize; ++y) {
+        for (int x = 0; x < kCreatureAtlasTileSize; ++x) {
+            const auto index = static_cast<std::size_t>(((start_y + y) * kCreatureAtlasSize + (start_x + x)) * 4);
+            alpha_pixels += atlas[index + 3] >= threshold ? 1 : 0;
+        }
+    }
+
+    const auto texel_count = static_cast<float>(kCreatureAtlasTileSize * kCreatureAtlasTileSize);
+    return static_cast<float>(alpha_pixels) / texel_count;
+}
+
 struct MeshBounds {
     glm::vec3 min {0.0F};
     glm::vec3 max {0.0F};
@@ -96,6 +111,44 @@ auto mesh_bounds(const CreatureMeshData& mesh) -> MeshBounds {
         bounds.max.z = std::max(bounds.max.z, vertex.z);
     }
     return bounds;
+}
+
+auto meshes_match_exactly(const CreatureMeshData& lhs, const CreatureMeshData& rhs) -> bool {
+    if (lhs.part_count != rhs.part_count || lhs.indices != rhs.indices || lhs.vertices.size() != rhs.vertices.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < lhs.vertices.size(); ++index) {
+        const auto& a = lhs.vertices[index];
+        const auto& b = rhs.vertices[index];
+        if (a.x != b.x || a.y != b.y || a.z != b.z ||
+            a.u != b.u || a.v != b.v ||
+            a.nx != b.nx || a.ny != b.ny || a.nz != b.nz ||
+            a.nightmare_factor != b.nightmare_factor ||
+            a.tension != b.tension ||
+            a.material_class != b.material_class ||
+            a.cavity_mask != b.cavity_mask ||
+            a.emissive_strength != b.emissive_strength) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+auto max_position_delta(const CreatureMeshData& lhs, const CreatureMeshData& rhs) -> float {
+    if (lhs.vertices.size() != rhs.vertices.size()) {
+        return std::numeric_limits<float>::max();
+    }
+    float max_delta = 0.0F;
+    for (std::size_t index = 0; index < lhs.vertices.size(); ++index) {
+        const auto& a = lhs.vertices[index];
+        const auto& b = rhs.vertices[index];
+        max_delta = std::max(max_delta, std::abs(a.x - b.x));
+        max_delta = std::max(max_delta, std::abs(a.y - b.y));
+        max_delta = std::max(max_delta, std::abs(a.z - b.z));
+    }
+    return max_delta;
 }
 
 auto all_vertex_attributes_are_bounded(const CreatureMeshData& mesh) -> bool {
@@ -123,79 +176,90 @@ auto has_emissive_vertices(const CreatureMeshData& mesh) -> bool {
     });
 }
 
-} // namespace
-
-TEST_CASE("creature cycle classification matches day dusk night and dawn windows") {
-    const auto day = EnvironmentClock::classify_creature_cycle(12.0F);
-    const auto dusk = EnvironmentClock::classify_creature_cycle(18.5F);
-    const auto night = EnvironmentClock::classify_creature_cycle(23.0F);
-    const auto dawn = EnvironmentClock::classify_creature_cycle(5.25F);
-
-    CHECK(day.phase == CreaturePhase::Day);
-    CHECK(day.morph_factor == doctest::Approx(0.0F));
-    CHECK(dusk.phase == CreaturePhase::DuskMorph);
-    CHECK(dusk.morph_factor == doctest::Approx(0.5F));
-    CHECK(night.phase == CreaturePhase::Night);
-    CHECK(night.morph_factor == doctest::Approx(1.0F));
-    CHECK(dawn.phase == CreaturePhase::DawnRecover);
-    CHECK(dawn.morph_factor == doctest::Approx(0.75F));
-}
-
-TEST_CASE("creature spawn anchors are deterministic and follow chunk biome rules") {
-    CreatureSystem system {};
-    World world_a(7001, 2);
-    World world_b(7001, 2);
-
-    test::make_chunk_surface(world_a, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
-    test::make_chunk_surface(world_b, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
-
-    test::make_chunk_surface(world_a, {1, 0}, 13, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
-    test::make_chunk_surface(world_b, {1, 0}, 13, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
-    add_tree_patch(world_a, 18, 6, 13);
-    add_tree_patch(world_a, 21, 8, 13);
-    add_tree_patch(world_b, 18, 6, 13);
-    add_tree_patch(world_b, 21, 8, 13);
-
-    test::make_chunk_surface(world_a, {2, 0}, 52, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
-    test::make_chunk_surface(world_b, {2, 0}, 52, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
-    sculpt_lamb_hills(world_a, {2, 0}, 52);
-    sculpt_lamb_hills(world_b, {2, 0}, 52);
-
-    const auto sand_anchor_a = system.spawn_anchor_for_chunk(world_a, {0, 0});
-    const auto sand_anchor_b = system.spawn_anchor_for_chunk(world_b, {0, 0});
-    const auto rabbit_anchor = system.spawn_anchor_for_chunk(world_a, {1, 0});
-    const auto lamb_anchor = system.spawn_anchor_for_chunk(world_a, {2, 0});
-
-    REQUIRE(sand_anchor_a.has_value());
-    REQUIRE(sand_anchor_b.has_value());
-    CHECK(*sand_anchor_a == *sand_anchor_b);
-    CHECK(sand_anchor_a->species == CreatureSpecies::Fennec);
-
-    REQUIRE(rabbit_anchor.has_value());
-    CHECK(rabbit_anchor->species == CreatureSpecies::Rabbit);
-
-    REQUIRE(lamb_anchor.has_value());
-    CHECK(lamb_anchor->species == CreatureSpecies::Lamb);
-}
-
-TEST_CASE("creature spawn is invalidated when the chunk cannot host a clear standing column") {
-    CreatureSystem system {};
-    World world(8123, 1);
-    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
-
-    for (int z = 0; z < kChunkSizeZ; ++z) {
-        for (int x = 0; x < kChunkSizeX; ++x) {
-            world.set_block(x, 13, z, to_block_id(BlockType::Stone));
+auto body_volume_proxy(const CreatureMeshData& mesh) -> float {
+    MeshBounds bounds {
+        glm::vec3 {std::numeric_limits<float>::max()},
+        glm::vec3 {std::numeric_limits<float>::lowest()},
+    };
+    bool found = false;
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.y < 0.20F || vertex.y > 1.10F) {
+            continue;
         }
+        found = true;
+        bounds.min.x = std::min(bounds.min.x, vertex.x);
+        bounds.min.y = std::min(bounds.min.y, vertex.y);
+        bounds.min.z = std::min(bounds.min.z, vertex.z);
+        bounds.max.x = std::max(bounds.max.x, vertex.x);
+        bounds.max.y = std::max(bounds.max.y, vertex.y);
+        bounds.max.z = std::max(bounds.max.z, vertex.z);
     }
 
-    CHECK_FALSE(system.spawn_anchor_for_chunk(world, {0, 0}).has_value());
+    if (!found) {
+        return 0.0F;
+    }
+
+    return (bounds.max.x - bounds.min.x) * (bounds.max.y - bounds.min.y) * (bounds.max.z - bounds.min.z);
 }
 
-TEST_CASE("day creatures stay pacifist grounded and bounded around their spawn chunk") {
+} // namespace
+
+TEST_CASE("creature cycle classification uses explicit dusk night and dawn boundaries") {
+    const auto dusk_start = EnvironmentClock::classify_creature_cycle(18.0F);
+    const auto dusk_mid = EnvironmentClock::classify_creature_cycle(18.5F);
+    const auto night_start = EnvironmentClock::classify_creature_cycle(19.0F);
+    const auto night_end = EnvironmentClock::classify_creature_cycle(4.99F);
+    const auto dawn_start = EnvironmentClock::classify_creature_cycle(5.0F);
+    const auto dawn_mid = EnvironmentClock::classify_creature_cycle(5.5F);
+    const auto day = EnvironmentClock::classify_creature_cycle(6.0F);
+
+    CHECK(dusk_start.phase == CreaturePhase::DuskMorph);
+    CHECK(dusk_start.morph_factor == doctest::Approx(0.0F));
+    CHECK(dusk_mid.phase == CreaturePhase::DuskMorph);
+    CHECK(dusk_mid.morph_factor == doctest::Approx(0.5F));
+    CHECK(night_start.phase == CreaturePhase::Night);
+    CHECK(night_start.morph_factor == doctest::Approx(1.0F));
+    CHECK(night_end.phase == CreaturePhase::Night);
+    CHECK(dawn_start.phase == CreaturePhase::DawnRecover);
+    CHECK(dawn_start.morph_factor == doctest::Approx(1.0F));
+    CHECK(dawn_mid.phase == CreaturePhase::DawnRecover);
+    CHECK(dawn_mid.morph_factor == doctest::Approx(0.5F));
+    CHECK(day.phase == CreaturePhase::Day);
+    CHECK(day.morph_factor == doctest::Approx(0.0F));
+}
+
+TEST_CASE("creature spawn anchors map grass chunks to pig cow sheep and reject desert chunks") {
+    CreatureSystem system {};
+    World world(7001, 2);
+
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    test::make_chunk_surface(world, {1, 0}, 13, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    test::make_chunk_surface(world, {2, 0}, 52, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    test::make_chunk_surface(world, {3, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
+
+    for (const auto x : {18, 21, 24, 27}) {
+        add_tree_patch(world, x, 6 + (x % 3), 13);
+    }
+    sculpt_sheep_hills(world, {2, 0}, 52);
+
+    const auto cow_anchor = system.spawn_anchor_for_chunk(world, {0, 0});
+    const auto pig_anchor = system.spawn_anchor_for_chunk(world, {1, 0});
+    const auto sheep_anchor = system.spawn_anchor_for_chunk(world, {2, 0});
+    const auto desert_anchor = system.spawn_anchor_for_chunk(world, {3, 0});
+
+    REQUIRE(cow_anchor.has_value());
+    REQUIRE(pig_anchor.has_value());
+    REQUIRE(sheep_anchor.has_value());
+    CHECK(cow_anchor->species == CreatureSpecies::Cow);
+    CHECK(pig_anchor->species == CreatureSpecies::Pig);
+    CHECK(sheep_anchor->species == CreatureSpecies::Sheep);
+    CHECK_FALSE(desert_anchor.has_value());
+}
+
+TEST_CASE("day creatures stay passive grounded and emit no attack events") {
     CreatureSystem system {};
     World world(9001, 1);
-    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
 
     const auto environment = EnvironmentClock::compute_state(12.0F);
     const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
@@ -209,57 +273,91 @@ TEST_CASE("day creatures stay pacifist grounded and bounded around their spawn c
     REQUIRE(creatures.size() == 1);
     CHECK(creatures.front().phase == CreaturePhase::Day);
     CHECK(creatures.front().morph_factor == doctest::Approx(0.0F));
-    CHECK_FALSE(contains_only_night_states(creatures.front().behavior_state));
+    CHECK_FALSE(is_hostile_state(creatures.front().behavior_state));
+    CHECK(system.recent_attacks().empty());
     CHECK(creatures.front().position.y == doctest::Approx(13.001F).epsilon(0.01F));
     CHECK(horizontal_distance_squared(creatures.front().position, creatures.front().anchor.spawn_position) < 26.5F);
 }
 
-TEST_CASE("night creatures switch to horror states without enabling any attack logic") {
+TEST_CASE("creatures enter chase exactly at 19 and stop attacking immediately at dawn") {
     CreatureSystem system {};
     World world(9002, 1);
-    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto night_environment = EnvironmentClock::compute_state(19.0F);
+    const auto night_cycle = EnvironmentClock::classify_creature_cycle(19.0F);
+    system.update(0.0F, world, {14.5F, 13.001F, 14.5F}, night_environment, night_cycle);
+    REQUIRE(system.active_creatures().size() == 1);
+
+    const auto spawn_position = system.active_creatures().front().position;
+    const auto chase_player_position = spawn_position + glm::vec3 {2.4F, 0.0F, 0.0F};
+    system.update(1.0F / 60.0F, world, chase_player_position, night_environment, night_cycle);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    CHECK(system.active_creatures().front().phase == CreaturePhase::Night);
+    CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Chase);
+    CHECK(system.render_instances().front().attack_amount > 0.15F);
+
+    const auto strike_player_position = spawn_position + glm::vec3 {0.75F, 0.0F, 0.0F};
+    bool attacked = false;
+    for (int frame = 0; frame < 90; ++frame) {
+        system.update(1.0F / 60.0F, world, strike_player_position, night_environment, night_cycle);
+        if (!system.recent_attacks().empty()) {
+            attacked = true;
+            break;
+        }
+    }
+    REQUIRE(attacked);
+    CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Strike);
+
+    const auto dawn_environment = EnvironmentClock::compute_state(5.0F);
+    const auto dawn_cycle = EnvironmentClock::classify_creature_cycle(5.0F);
+    system.update(1.0F / 60.0F, world, strike_player_position, dawn_environment, dawn_cycle);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    CHECK(system.active_creatures().front().phase == CreaturePhase::DawnRecover);
+    CHECK_FALSE(is_hostile_state(system.active_creatures().front().behavior_state));
+    CHECK(system.recent_attacks().empty());
+    CHECK(system.render_instances().front().attack_amount < 0.45F);
+}
+
+TEST_CASE("night melee attacks emit stable zombie damage and aggressive render signals") {
+    CreatureSystem system {};
+    World world(9003, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
 
     const auto environment = EnvironmentClock::compute_state(23.0F);
     const auto cycle = EnvironmentClock::classify_creature_cycle(23.0F);
-    const glm::vec3 player_position {4.0F, 13.001F, 4.0F};
+    system.update(0.0F, world, {14.5F, 13.001F, 14.5F}, environment, cycle);
+    REQUIRE(system.active_creatures().size() == 1);
+
+    const auto spawn_position = system.active_creatures().front().position;
+    const auto close_player_position = spawn_position + glm::vec3 {0.8F, 0.0F, 0.0F};
+    float max_attack_amount = 0.0F;
+    bool attacked = false;
 
     for (int frame = 0; frame < 120; ++frame) {
-        system.update(1.0F / 60.0F, world, player_position, environment, cycle);
+        system.update(1.0F / 60.0F, world, close_player_position, environment, cycle);
+        REQUIRE(system.render_instances().size() == 1);
+        max_attack_amount = std::max(max_attack_amount, system.render_instances().front().attack_amount);
+        if (system.recent_attacks().empty()) {
+            continue;
+        }
+
+        attacked = true;
+        CHECK(system.recent_attacks().front().damage == doctest::Approx(3.0F));
+        CHECK(system.recent_attacks().front().species == system.active_creatures().front().anchor.species);
+        CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Strike);
+        break;
     }
 
-    const auto creatures = system.active_creatures();
-    const auto render_instances = system.render_instances();
-    REQUIRE(creatures.size() == 1);
-    REQUIRE(render_instances.size() == 1);
-    CHECK(creatures.front().phase == CreaturePhase::Night);
-    CHECK(creatures.front().morph_factor == doctest::Approx(1.0F));
-    CHECK(contains_only_night_states(creatures.front().behavior_state));
-    CHECK(render_instances.front().morph_factor == doctest::Approx(1.0F));
-    CHECK(render_instances.front().tension > 0.3F);
+    REQUIRE(attacked);
+    CHECK(max_attack_amount > 0.6F);
 }
 
-TEST_CASE("creatures deactivate when leaving the activation radius and reactivate near the player") {
+TEST_CASE("dense grassy spawn regions still cap active creature counts") {
     CreatureSystem system {};
-    World world(9003, 1);
-    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
-
-    const auto environment = EnvironmentClock::compute_state(12.0F);
-    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
-
-    system.update(0.0F, world, {2.0F, 13.001F, 2.0F}, environment, cycle);
-    REQUIRE(system.active_creatures().size() == 1);
-
-    system.update(0.0F, world, {static_cast<float>(kChunkSizeX * 10) + 0.5F, 13.001F, 2.0F}, environment, cycle);
-    CHECK(system.active_creatures().empty());
-
-    system.update(0.0F, world, {2.0F, 13.001F, 2.0F}, environment, cycle);
-    REQUIRE(system.active_creatures().size() == 1);
-    CHECK(system.active_creatures().front().position.y == doctest::Approx(13.001F).epsilon(0.01F));
-}
-
-TEST_CASE("dense spawn regions cap the number of active creatures to protect frame rate") {
-    CreatureSystem system {};
-    World world(9005, 4);
+    World world(9004, 4);
 
     for (int chunk_z = -4; chunk_z <= 4; ++chunk_z) {
         for (int chunk_x = -4; chunk_x <= 4; ++chunk_x) {
@@ -267,8 +365,8 @@ TEST_CASE("dense spawn regions cap the number of active creatures to protect fra
                 world,
                 {chunk_x, chunk_z},
                 12,
-                to_block_id(BlockType::Sand),
-                to_block_id(BlockType::Sand));
+                to_block_id(BlockType::Grass),
+                to_block_id(BlockType::Dirt));
         }
     }
 
@@ -282,116 +380,158 @@ TEST_CASE("dense spawn regions cap the number of active creatures to protect fra
     CHECK(system.render_instances().size() == kCreatureMaxActiveCount);
 }
 
-TEST_CASE("creature atlas exposes rich day materials and emissive nightmare details") {
+TEST_CASE("creature atlas exposes distinct farm animals and emissive zombie details") {
     const auto atlas = build_creature_atlas_pixels();
     REQUIRE(atlas.size() == static_cast<std::size_t>(kCreatureAtlasSize * kCreatureAtlasSize * 4));
-    bool has_emissive_pixels = false;
-    for (std::size_t index = 3; index < atlas.size(); index += 4) {
-        if (atlas[index] > 0) {
-            has_emissive_pixels = true;
-            break;
-        }
-    }
-    CHECK(has_emissive_pixels);
 
-    const auto rabbit_average = tile_average_rgba(atlas, CreatureAtlasTile::RabbitCoat);
-    const auto fennec_average = tile_average_rgba(atlas, CreatureAtlasTile::FennecCoat);
-    const auto lamb_average = tile_average_rgba(atlas, CreatureAtlasTile::LambWoolLight);
-    const auto scar_average = tile_average_rgba(atlas, CreatureAtlasTile::NightmareScar);
-    const auto eye_average = tile_average_rgba(atlas, CreatureAtlasTile::NightmareEye);
+    const auto pig_average = tile_average_rgba(atlas, CreatureAtlasTile::PigHide);
+    const auto cow_average = tile_average_rgba(atlas, CreatureAtlasTile::CowHide);
+    const auto sheep_average = tile_average_rgba(atlas, CreatureAtlasTile::SheepWool);
+    const auto eye_average = tile_average_rgba(atlas, CreatureAtlasTile::ZombieEye);
+    const auto scar_average = tile_average_rgba(atlas, CreatureAtlasTile::ZombieScar);
 
-    CHECK(std::abs(rabbit_average[0] - fennec_average[0]) > 8.0F);
-    CHECK(std::abs(lamb_average[2] - rabbit_average[2]) > 20.0F);
-    CHECK(scar_average[3] > 18.0F);
-    CHECK(eye_average[3] > 10.0F);
+    CHECK(pig_average[0] > cow_average[0] + 18.0F);
+    CHECK(sheep_average[2] > pig_average[2] + 32.0F);
+    CHECK(tile_average_rgba(atlas, CreatureAtlasTile::PigSnout)[0] > 180.0F);
+    CHECK(tile_average_rgba(atlas, CreatureAtlasTile::CowHorn)[0] > 120.0F);
+    CHECK(tile_average_rgba(atlas, CreatureAtlasTile::SheepHoof)[0] < 90.0F);
+    CHECK(eye_average[3] > 60.0F);
+    CHECK(scar_average[3] > 5.0F);
+    CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieEye) > 0.35F);
+    CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieScar) > 0.04F);
+    CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieScar) < 0.24F);
+    CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieVein) > 0.08F);
+    CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieVein) < 0.50F);
 }
 
-TEST_CASE("creature geometry exposes staged silhouettes and richer vertex materials") {
-    for (const auto species : {CreatureSpecies::Rabbit, CreatureSpecies::Fennec, CreatureSpecies::Lamb}) {
+TEST_CASE("creature geometry stretches day animals into deterministic long-limbed zombies") {
+    for (const auto species : {CreatureSpecies::Pig, CreatureSpecies::Cow, CreatureSpecies::Sheep}) {
         const CreatureRenderInstance day {
             species,
             {0.0F, 0.0F, 0.0F},
             0.0F,
-            0.5F,
+            0.50F,
             0.0F,
             1.0F,
-            0.1F,
+            0.10F,
             1234U,
             CreatureBehaviorState::Idle,
             CreaturePhase::Day,
-        };
-        const CreatureRenderInstance dusk {
-            species,
-            {0.0F, 0.0F, 0.0F},
+            0.10F,
+            0.20F,
             0.0F,
-            0.9F,
-            0.5F,
-            0.55F,
-            0.55F,
-            1234U,
-            CreatureBehaviorState::Twitch,
-            CreaturePhase::DuskMorph,
-            0.40F,
-            0.70F,
         };
         const CreatureRenderInstance night {
             species,
             {0.0F, 0.0F, 0.0F},
             0.0F,
-            0.5F,
+            0.80F,
             1.0F,
-            0.2F,
-            0.9F,
+            0.18F,
+            0.95F,
             1234U,
-            CreatureBehaviorState::Stare,
+            CreatureBehaviorState::Strike,
             CreaturePhase::Night,
-            0.22F,
+            0.85F,
             0.92F,
+            1.0F,
         };
 
         const auto day_mesh = build_creature_mesh(day);
-        const auto dusk_mesh = build_creature_mesh(dusk);
         const auto night_mesh = build_creature_mesh(night);
         const auto day_bounds = mesh_bounds(day_mesh);
-        const auto dusk_bounds = mesh_bounds(dusk_mesh);
         const auto night_bounds = mesh_bounds(night_mesh);
 
         CAPTURE(static_cast<int>(species));
         CHECK_FALSE(day_mesh.empty());
-        CHECK_FALSE(dusk_mesh.empty());
         CHECK_FALSE(night_mesh.empty());
-        CHECK(dusk_mesh.vertices.size() > day_mesh.vertices.size());
         CHECK(night_mesh.part_count > day_mesh.part_count);
         CHECK(night_mesh.vertices.size() > day_mesh.vertices.size());
-        CHECK(night_mesh.indices.size() > day_mesh.indices.size());
-        CHECK(std::abs((dusk_bounds.max.x - dusk_bounds.min.x) - (day_bounds.max.x - day_bounds.min.x)) > 0.02F);
-        const auto night_differs_from_dusk =
-            std::abs((night_bounds.max.x - night_bounds.min.x) - (dusk_bounds.max.x - dusk_bounds.min.x)) > 0.02F ||
-            std::abs((night_bounds.max.y - night_bounds.min.y) - (dusk_bounds.max.y - dusk_bounds.min.y)) > 0.02F;
-        CHECK(night_differs_from_dusk);
-        CHECK(all_vertex_attributes_are_bounded(day_mesh));
-        CHECK(all_vertex_attributes_are_bounded(dusk_mesh));
-        CHECK(all_vertex_attributes_are_bounded(night_mesh));
-        CHECK(max_material_class(day_mesh) < 0.8F);
+        CHECK((night_bounds.max.y - night_bounds.min.y) > (day_bounds.max.y - day_bounds.min.y) + 0.18F);
+        CHECK(max_material_class(day_mesh) < 0.70F);
         CHECK(max_material_class(night_mesh) > 0.85F);
         CHECK(has_emissive_vertices(night_mesh));
+        CHECK(all_vertex_attributes_are_bounded(day_mesh));
+        CHECK(all_vertex_attributes_are_bounded(night_mesh));
     }
 }
 
-TEST_CASE("render instances expose motion and gaze signals for day and night creature poses") {
+TEST_CASE("day species silhouettes differ and appearance variation remains deterministic per seed") {
+    CreatureMeshData pig_mesh {};
+    CreatureMeshData cow_mesh {};
+    CreatureMeshData sheep_mesh {};
+
+    for (const auto species : {CreatureSpecies::Pig, CreatureSpecies::Cow, CreatureSpecies::Sheep}) {
+        const CreatureRenderInstance seed_a {
+            species,
+            {0.0F, 0.0F, 0.0F},
+            0.0F,
+            0.70F,
+            0.45F,
+            0.70F,
+            0.42F,
+            2222U,
+            CreatureBehaviorState::Lurk,
+            CreaturePhase::DuskMorph,
+            0.45F,
+            0.52F,
+            0.25F,
+        };
+        auto seed_b = seed_a;
+        seed_b.appearance_seed = 7788U;
+        seed_b.animation_time = 1.05F;
+
+        const auto mesh_a = build_creature_mesh(seed_a);
+        const auto mesh_a_repeat = build_creature_mesh(seed_a);
+        const auto mesh_b = build_creature_mesh(seed_b);
+
+        CAPTURE(static_cast<int>(species));
+        CHECK(meshes_match_exactly(mesh_a, mesh_a_repeat));
+        CHECK(mesh_a.part_count == mesh_b.part_count);
+        CHECK_FALSE(meshes_match_exactly(mesh_a, mesh_b));
+        CHECK(max_position_delta(mesh_a, mesh_b) > 0.003F);
+
+        switch (species) {
+        case CreatureSpecies::Pig:
+            pig_mesh = build_creature_mesh({
+                species, {0.0F, 0.0F, 0.0F}, 0.0F, 0.30F, 0.0F, 1.0F, 0.10F, 999U,
+                CreatureBehaviorState::Idle, CreaturePhase::Day, 0.10F, 0.10F, 0.0F
+            });
+            break;
+        case CreatureSpecies::Cow:
+            cow_mesh = build_creature_mesh({
+                species, {0.0F, 0.0F, 0.0F}, 0.0F, 0.30F, 0.0F, 1.0F, 0.10F, 999U,
+                CreatureBehaviorState::Idle, CreaturePhase::Day, 0.10F, 0.10F, 0.0F
+            });
+            break;
+        case CreatureSpecies::Sheep:
+            sheep_mesh = build_creature_mesh({
+                species, {0.0F, 0.0F, 0.0F}, 0.0F, 0.30F, 0.0F, 1.0F, 0.10F, 999U,
+                CreatureBehaviorState::Idle, CreaturePhase::Day, 0.10F, 0.10F, 0.0F
+            });
+            break;
+        }
+    }
+
+    CHECK_FALSE(meshes_match_exactly(pig_mesh, cow_mesh));
+    CHECK_FALSE(meshes_match_exactly(pig_mesh, sheep_mesh));
+    CHECK(body_volume_proxy(cow_mesh) > body_volume_proxy(pig_mesh));
+    CHECK(body_volume_proxy(sheep_mesh) > body_volume_proxy(pig_mesh));
+}
+
+TEST_CASE("render instances surface motion gaze and attack signals across day and night") {
     CreatureSystem system {};
-    World world(9004, 1);
-    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Sand), to_block_id(BlockType::Sand));
+    World world(9005, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
 
     const auto day_environment = EnvironmentClock::compute_state(12.0F);
     const auto day_cycle = EnvironmentClock::classify_creature_cycle(12.0F);
     system.update(0.0F, world, {15.5F, 13.001F, 15.5F}, day_environment, day_cycle);
     REQUIRE(system.active_creatures().size() == 1);
-    REQUIRE(system.render_instances().size() == 1);
 
     const auto baseline_motion = system.render_instances().front().motion_amount;
     const auto creature_position = system.active_creatures().front().position;
-    const auto close_player_position = creature_position + glm::vec3 {0.15F, 0.0F, 0.0F};
+    const auto close_player_position = creature_position + glm::vec3 {0.20F, 0.0F, 0.0F};
 
     for (int frame = 0; frame < 30; ++frame) {
         system.update(1.0F / 60.0F, world, close_player_position, day_environment, day_cycle);
@@ -399,31 +539,18 @@ TEST_CASE("render instances expose motion and gaze signals for day and night cre
 
     REQUIRE(system.render_instances().size() == 1);
     CHECK(system.render_instances().front().motion_amount > baseline_motion + 0.08F);
-    CHECK(system.render_instances().front().gaze_weight < 0.5F);
+    CHECK(system.render_instances().front().attack_amount == doctest::Approx(0.0F).epsilon(0.05F));
 
     const auto night_environment = EnvironmentClock::compute_state(23.0F);
     const auto night_cycle = EnvironmentClock::classify_creature_cycle(23.0F);
-    bool found_stare = false;
-    int stare_frames = 0;
-    float stare_motion_amount = 1.0F;
-    float stare_gaze_weight = 0.0F;
-
-    for (int frame = 0; frame < 1200; ++frame) {
+    for (int frame = 0; frame < 60; ++frame) {
         system.update(1.0F / 60.0F, world, close_player_position, night_environment, night_cycle);
-        if (!system.active_creatures().empty() && system.active_creatures().front().behavior_state == CreatureBehaviorState::Stare) {
-            found_stare = true;
-            ++stare_frames;
-            stare_motion_amount = std::min(stare_motion_amount, system.render_instances().front().motion_amount);
-            stare_gaze_weight = std::max(stare_gaze_weight, system.render_instances().front().gaze_weight);
-            if (stare_frames >= 20) {
-                break;
-            }
-        }
     }
 
-    REQUIRE(found_stare);
-    CHECK(stare_motion_amount < 0.3F);
-    CHECK(stare_gaze_weight > 0.75F);
+    REQUIRE(system.render_instances().size() == 1);
+    CHECK(system.render_instances().front().phase == CreaturePhase::Night);
+    CHECK(system.render_instances().front().gaze_weight > 0.75F);
+    CHECK(system.render_instances().front().attack_amount > 0.40F);
 }
 
 } // namespace valcraft

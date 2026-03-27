@@ -8,6 +8,9 @@ namespace valcraft {
 
 namespace {
 
+constexpr float kFullTurnRadians = 6.28318530718F;
+constexpr float kTileEdgeSpan = static_cast<float>(kBlockAtlasTileSize - 1);
+
 auto saturate(float value) noexcept -> float {
     return std::clamp(value, 0.0F, 1.0F);
 }
@@ -202,19 +205,23 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
         const auto lobe_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 11.1F, 5.7F, 6.1F);
         const auto lobe_c = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.8F, 11.1F, 6.4F);
         const auto canopy = std::max({lobe_a, lobe_b * 0.96F, lobe_c * 0.92F});
-        const auto notch =
-            ((x < 2 && y < 4) || (x > 13 && y < 3) || (x < 3 && y > 12) || (x > 12 && y > 12)) ? 0.18F : 0.0F;
-        const auto shell = canopy - notch + leaf * 0.18F;
+        const auto canopy_density = saturate(canopy * 0.78F + leaf * 0.34F);
         const auto branch = ((std::abs(x - 7) <= 1) && y > 7) ||
                             (y >= 7 && y <= 9 && x >= 4 && x <= 11 && ((x + y) % 3 != 0));
-        const auto alpha = branch || shell > 0.38F ? 255.0F : 0.0F;
         const auto top_light = 1.0F - static_cast<float>(y) / 15.0F;
-        const auto shadow = std::abs(x - 8) > 4 ? 6.0F : 0.0F;
+        const auto rim_shadow = saturate((0.42F - canopy) * 1.8F);
+        const auto vein = ((x + y) % 5 == 0) ? 1.0F : 0.0F;
+        const auto sparkle = tile_noise(x + 4, y + 7, 33);
+        const auto base_r = 42.0F + canopy_density * 16.0F + top_light * 7.0F - rim_shadow * 8.0F;
+        const auto base_g = 88.0F + canopy_density * 44.0F + top_light * 20.0F - rim_shadow * 18.0F;
+        const auto base_b = 31.0F + canopy_density * 14.0F + top_light * 5.0F - rim_shadow * 5.0F;
+        const auto branch_shadow = branch ? 16.0F : 0.0F;
+        const auto vein_highlight = vein * (3.0F + sparkle * 3.0F);
         return make_rgba(
-            46.0F + leaf * 16.0F + top_light * 10.0F - shadow * 0.25F,
-            92.0F + leaf * 42.0F + top_light * 22.0F - shadow,
-            34.0F + leaf * 14.0F + top_light * 4.0F,
-            alpha);
+            base_r - branch_shadow * 0.35F + vein_highlight * 0.25F,
+            base_g - branch_shadow + vein_highlight,
+            base_b - branch_shadow * 0.22F,
+            255.0F);
     });
     fill_tile(pixels, 4, 1, [](int x, int y) {
         const auto bark = bark_value(x, y, 14, 72.0F);
@@ -240,16 +247,19 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
         } else if (y >= 13) {
             half_width = 3.8F;
         }
-        const auto profile = 1.0F - std::abs(static_cast<float>(x) - 7.5F) / std::max(half_width, 0.001F);
-        const auto twig = (std::abs(x - 7) <= 1) && y > 2;
-        const auto edge_hole = (profile < 0.18F) && (((x + y) % 3) == 0);
-        const auto alpha = twig || (profile > 0.08F && leaf > 0.10F && !edge_hole) ? 255.0F : 0.0F;
+        const auto profile = saturate(1.0F - std::abs(static_cast<float>(x) - 7.5F) / std::max(half_width, 0.001F));
         const auto top_light = 1.0F - static_cast<float>(y) / 15.0F;
+        const auto spine = saturate(1.0F - std::abs(static_cast<float>(x) - 7.5F) / 2.4F);
+        const auto needle_bands = 0.5F + 0.5F * std::sin((static_cast<float>(x) * 0.88F + static_cast<float>(y) * 0.52F) * 1.6F);
+        const auto layered_needles = 0.5F + 0.5F * std::cos((static_cast<float>(y) * 0.72F - static_cast<float>(x) * 0.24F) * 1.8F);
+        const auto dense_cluster = saturate(profile * 0.72F + spine * 0.20F + leaf * 0.18F);
+        const auto edge_shadow = saturate((0.34F - profile) * 2.2F);
+        const auto tip_glow = saturate((12.0F - static_cast<float>(y)) / 12.0F) * 0.22F;
         return make_rgba(
-            30.0F + leaf * 14.0F + top_light * 6.0F,
-            74.0F + leaf * 32.0F + top_light * 15.0F,
-            32.0F + leaf * 12.0F + top_light * 4.0F,
-            alpha);
+            26.0F + dense_cluster * 12.0F + needle_bands * 3.0F + tip_glow * 10.0F - edge_shadow * 7.0F,
+            70.0F + dense_cluster * 34.0F + layered_needles * 8.0F + top_light * 8.0F + tip_glow * 16.0F - edge_shadow * 16.0F,
+            28.0F + dense_cluster * 13.0F + needle_bands * 2.5F + tip_glow * 5.0F - edge_shadow * 6.0F,
+            255.0F);
     });
 
     fill_tile(pixels, 0, 2, [](int x, int y) {
@@ -346,6 +356,28 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
         const auto alpha = branch_a || branch_b || branch_c ? 255.0F : 0.0F;
         const auto noise = tile_noise(x, y, 22);
         return make_rgba(118.0F + noise * 18.0F, 88.0F + noise * 12.0F, 52.0F + noise * 8.0F, alpha);
+    });
+    fill_tile(pixels, 5, 3, [](int x, int y) {
+        const auto sample_x = x == kBlockAtlasTileSize - 1 ? 0 : x;
+        const auto sample_y = y == kBlockAtlasTileSize - 1 ? 0 : y;
+        const auto phase_x = static_cast<float>(sample_x) / kTileEdgeSpan;
+        const auto phase_y = static_cast<float>(sample_y) / kTileEdgeSpan;
+        const auto ripple_a =
+            0.5F + 0.5F * std::sin((phase_x + phase_y * 2.0F) * kFullTurnRadians);
+        const auto ripple_b =
+            0.5F + 0.5F * std::cos((phase_x * 2.0F - phase_y) * kFullTurnRadians);
+        const auto ripple_c =
+            0.5F + 0.5F * std::sin((phase_x * 3.0F + phase_y * 3.0F) * kFullTurnRadians);
+        const auto highlight = ripple_a * 0.38F + ripple_b * 0.34F + ripple_c * 0.28F;
+        const auto depth =
+            0.5F + 0.5F * std::cos((phase_x * 2.0F + phase_y * 2.0F) * kFullTurnRadians);
+        const auto caustic =
+            0.5F + 0.5F * std::sin((phase_x * 4.0F - phase_y * 4.0F) * kFullTurnRadians);
+        return make_rgba(
+            26.0F + highlight * 5.0F + caustic * 2.0F,
+            104.0F + highlight * 12.0F + depth * 6.0F,
+            170.0F + highlight * 15.0F + depth * 8.0F + caustic * 4.0F,
+            184.0F);
     });
 
     return pixels;

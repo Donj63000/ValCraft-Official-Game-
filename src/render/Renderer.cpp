@@ -27,22 +27,20 @@ namespace {
 constexpr auto kShadowDistance = 96.0F;
 constexpr auto kInitialVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(ChunkVertex) * 256U);
 constexpr auto kInitialIndexBufferBytes = static_cast<GLsizeiptr>(sizeof(std::uint32_t) * 384U);
-constexpr auto kInitialCreatureVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(CreatureVertex) * 1024U);
-constexpr auto kInitialCreatureIndexBufferBytes = static_cast<GLsizeiptr>(sizeof(std::uint32_t) * 1536U);
+constexpr std::size_t kCreatureVerticesPerBox = 24U;
+constexpr std::size_t kCreatureIndicesPerBox = 36U;
+constexpr std::size_t kCreatureDayBoxBudget = 30U;
+constexpr std::size_t kCreatureNightBoxBudget = 40U;
+constexpr std::size_t kCreatureMaxBoxBudget = kCreatureDayBoxBudget > kCreatureNightBoxBudget ? kCreatureDayBoxBudget : kCreatureNightBoxBudget;
+constexpr std::size_t kCreatureMaxRenderedCount = 12U;
+constexpr auto kInitialCreatureVertexBufferBytes =
+    static_cast<GLsizeiptr>(sizeof(CreatureVertex) * kCreatureVerticesPerBox * kCreatureMaxBoxBudget * kCreatureMaxRenderedCount);
+constexpr auto kInitialCreatureIndexBufferBytes =
+    static_cast<GLsizeiptr>(sizeof(std::uint32_t) * kCreatureIndicesPerBox * kCreatureMaxBoxBudget * kCreatureMaxRenderedCount);
 constexpr auto kInitialItemDropVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(ChunkVertex) * 768U);
 constexpr auto kInitialHudBufferBytes = static_cast<GLsizeiptr>(sizeof(float) * 9U * 6U * 32U);
-
-struct HudVertex {
-    float x = 0.0F;
-    float y = 0.0F;
-    float u = 0.0F;
-    float v = 0.0F;
-    float r = 1.0F;
-    float g = 1.0F;
-    float b = 1.0F;
-    float a = 1.0F;
-    float textured = 0.0F;
-};
+constexpr std::size_t kMaxGpuMeshEventsPerFrame = 8;
+constexpr double kMaxGpuMeshSyncMsPerFrame = 1.0;
 
 auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, GLsizeiptr minimum_bytes) -> GLsizeiptr {
     auto capacity = std::max(current_bytes, minimum_bytes);
@@ -50,6 +48,10 @@ auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, G
         capacity = std::max(capacity * 2, required_bytes);
     }
     return capacity;
+}
+
+auto quantize_hud_value(float value, float steps_per_unit) -> int {
+    return static_cast<int>(std::lround(value * steps_per_unit));
 }
 
 auto pixel_to_ndc_x(float x, float viewport_width) -> float {
@@ -148,16 +150,20 @@ void append_hud_rect(std::vector<HudVertex>& vertices,
     append_hud_quad(vertices, viewport_width, viewport_height, x, y, width, height, color, {0.0F, 0.0F, 0.0F, 0.0F}, 0.0F);
 }
 
-[[maybe_unused]] void append_hud_frame(std::vector<HudVertex>& vertices,
-                                       float viewport_width,
-                                       float viewport_height,
-                                       float x,
-                                       float y,
-                                       float width,
-                                       float height,
-                                       float border_thickness,
-                                       const std::array<float, 4>& border_color,
-                                       const std::array<float, 4>& fill_color) {
+auto bottom_to_top_left_y(float viewport_height, float bottom, float height) -> float {
+    return viewport_height - bottom - height;
+}
+
+void append_hud_frame(std::vector<HudVertex>& vertices,
+                      float viewport_width,
+                      float viewport_height,
+                      float x,
+                      float y,
+                      float width,
+                      float height,
+                      float border_thickness,
+                      const std::array<float, 4>& border_color,
+                      const std::array<float, 4>& fill_color) {
     append_hud_rect(vertices, viewport_width, viewport_height, x, y, width, height, border_color);
 
     const auto inner_x = x + border_thickness;
@@ -167,6 +173,51 @@ void append_hud_rect(std::vector<HudVertex>& vertices,
     if (inner_width > 0.0F && inner_height > 0.0F) {
         append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, inner_width, inner_height, fill_color);
     }
+}
+
+void append_hud_beveled_panel(std::vector<HudVertex>& vertices,
+                              float viewport_width,
+                              float viewport_height,
+                              float x,
+                              float y,
+                              float width,
+                              float height,
+                              float border_thickness,
+                              const std::array<float, 4>& border_color,
+                              const std::array<float, 4>& fill_color,
+                              const std::array<float, 4>& highlight_color,
+                              const std::array<float, 4>& shadow_color) {
+    append_hud_frame(vertices, viewport_width, viewport_height, x, y, width, height, border_thickness, border_color, fill_color);
+
+    const auto inner_x = x + border_thickness;
+    const auto inner_y = y + border_thickness;
+    const auto inner_width = std::max(0.0F, width - border_thickness * 2.0F);
+    const auto inner_height = std::max(0.0F, height - border_thickness * 2.0F);
+    if (inner_width <= 2.0F || inner_height <= 2.0F) {
+        return;
+    }
+
+    const auto bevel = std::max(1.0F, static_cast<float>(std::floor(border_thickness * 0.55F)));
+    append_hud_rect(
+        vertices,
+        viewport_width,
+        viewport_height,
+        inner_x,
+        inner_y + std::max(0.0F, inner_height - bevel),
+        inner_width,
+        bevel,
+        highlight_color);
+    append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, bevel, inner_height, highlight_color);
+    append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, inner_width, bevel, shadow_color);
+    append_hud_rect(
+        vertices,
+        viewport_width,
+        viewport_height,
+        inner_x + std::max(0.0F, inner_width - bevel),
+        inner_y,
+        bevel,
+        inner_height,
+        shadow_color);
 }
 
 void append_hud_quad_top_left(std::vector<HudVertex>& vertices,
@@ -259,19 +310,19 @@ void append_hud_beveled_panel_top_left(std::vector<HudVertex>& vertices,
         shadow_color);
 }
 
-void append_segmented_meter_top_left(std::vector<HudVertex>& vertices,
-                                     float viewport_width,
-                                     float viewport_height,
-                                     float x,
-                                     float y,
-                                     float width,
-                                     float height,
-                                     std::size_t segments,
-                                     float fill_ratio,
-                                     const std::array<float, 4>& border_color,
-                                     const std::array<float, 4>& background_color,
-                                     const std::array<float, 4>& empty_segment_color,
-                                     const std::array<float, 4>& fill_segment_color) {
+[[maybe_unused]] void append_segmented_meter_top_left(std::vector<HudVertex>& vertices,
+                                                      float viewport_width,
+                                                      float viewport_height,
+                                                      float x,
+                                                      float y,
+                                                      float width,
+                                                      float height,
+                                                      std::size_t segments,
+                                                      float fill_ratio,
+                                                      const std::array<float, 4>& border_color,
+                                                      const std::array<float, 4>& background_color,
+                                                      const std::array<float, 4>& empty_segment_color,
+                                                      const std::array<float, 4>& fill_segment_color) {
     append_hud_beveled_panel_top_left(
         vertices,
         viewport_width,
@@ -436,6 +487,28 @@ void append_pixel_text(std::vector<HudVertex>& vertices,
     }
 }
 
+void append_pixel_text_bottom_left(std::vector<HudVertex>& vertices,
+                                   float viewport_width,
+                                   float viewport_height,
+                                   float x,
+                                   float bottom,
+                                   float pixel_size,
+                                   std::string_view text,
+                                   const std::array<float, 4>& color,
+                                   bool centered = false) {
+    const auto text_height = pixel_size * 7.0F;
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(viewport_height, bottom, text_height),
+        pixel_size,
+        text,
+        color,
+        centered);
+}
+
 void append_stack_count(std::vector<HudVertex>& vertices,
                         float viewport_width,
                         float viewport_height,
@@ -470,6 +543,180 @@ void append_stack_count(std::vector<HudVertex>& vertices,
         pixel_size,
         count_text,
         {0.98F, 0.98F, 0.98F, 0.98F});
+}
+
+void append_stack_count_bottom_left(std::vector<HudVertex>& vertices,
+                                    float viewport_width,
+                                    float viewport_height,
+                                    float right_x,
+                                    float bottom,
+                                    float pixel_size,
+                                    std::uint8_t count) {
+    if (count <= 1) {
+        return;
+    }
+
+    const auto count_text = std::to_string(count);
+    const auto text_width = measure_pixel_text(count_text, pixel_size);
+    const auto text_x = right_x - text_width;
+
+    append_pixel_text_bottom_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        text_x + pixel_size,
+        bottom - pixel_size,
+        pixel_size,
+        count_text,
+        {0.0F, 0.0F, 0.0F, 0.62F});
+    append_pixel_text_bottom_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        text_x,
+        bottom,
+        pixel_size,
+        count_text,
+        {0.98F, 0.98F, 0.98F, 0.98F});
+}
+
+template <std::size_t RowCount>
+void append_pixel_mask_bottom_left(std::vector<HudVertex>& vertices,
+                                   float viewport_width,
+                                   float viewport_height,
+                                   float x,
+                                   float bottom,
+                                   float pixel_size,
+                                   const std::array<std::uint8_t, RowCount>& rows,
+                                   int columns,
+                                   const std::array<float, 4>& color,
+                                   int max_fill_columns = -1) {
+    const auto mask_height = pixel_size * static_cast<float>(rows.size());
+    const auto top_left_y = bottom_to_top_left_y(viewport_height, bottom, mask_height);
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+        for (int column = 0; column < columns; ++column) {
+            if (max_fill_columns >= 0 && column >= max_fill_columns) {
+                continue;
+            }
+
+            const auto bit = static_cast<std::uint8_t>(1U << (columns - 1 - column));
+            if ((rows[row] & bit) == 0U) {
+                continue;
+            }
+
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x + static_cast<float>(column) * pixel_size,
+                top_left_y + static_cast<float>(row) * pixel_size,
+                pixel_size,
+                pixel_size,
+                color);
+        }
+    }
+}
+
+void append_vital_glyph_bottom_left(std::vector<HudVertex>& vertices,
+                                    float viewport_width,
+                                    float viewport_height,
+                                    float x,
+                                    float bottom,
+                                    float size,
+                                    HudGlyphFill fill,
+                                    const std::array<std::uint8_t, 8>& rows,
+                                    const std::array<float, 4>& empty_color,
+                                    const std::array<float, 4>& fill_color,
+                                    const std::array<float, 4>& shine_color) {
+    constexpr int kGlyphColumns = 8;
+    const auto pixel_size = size / static_cast<float>(kGlyphColumns);
+    const auto shadow_offset = std::max(1.0F, pixel_size * 0.55F);
+
+    append_pixel_mask_bottom_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + shadow_offset,
+        bottom - shadow_offset,
+        pixel_size,
+        rows,
+        kGlyphColumns,
+        {0.0F, 0.0F, 0.0F, 0.46F});
+    append_pixel_mask_bottom_left(vertices, viewport_width, viewport_height, x, bottom, pixel_size, rows, kGlyphColumns, empty_color);
+
+    const auto fill_columns = fill == HudGlyphFill::Full ? kGlyphColumns : (fill == HudGlyphFill::Half ? kGlyphColumns / 2 : 0);
+    if (fill_columns > 0) {
+        append_pixel_mask_bottom_left(vertices, viewport_width, viewport_height, x, bottom, pixel_size, rows, kGlyphColumns, fill_color, fill_columns);
+        append_pixel_mask_bottom_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x,
+            bottom,
+            pixel_size,
+            rows,
+            kGlyphColumns,
+            shine_color,
+            std::min(fill_columns, kGlyphColumns / 2));
+    }
+}
+
+void append_heart_glyph_bottom_left(std::vector<HudVertex>& vertices,
+                                    float viewport_width,
+                                    float viewport_height,
+                                    const VitalGlyphLayout& glyph) {
+    constexpr std::array<std::uint8_t, 8> kHeartRows {
+        0b01100110,
+        0b11111111,
+        0b11111111,
+        0b11111111,
+        0b01111110,
+        0b00111100,
+        0b00011000,
+        0b00000000,
+    };
+
+    append_vital_glyph_bottom_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        glyph.x,
+        glyph.bottom,
+        glyph.size,
+        glyph.fill,
+        kHeartRows,
+        {0.24F, 0.08F, 0.10F, 0.80F},
+        {0.86F, 0.18F, 0.24F, 0.98F},
+        {1.0F, 0.56F, 0.60F, 0.34F});
+}
+
+void append_bubble_glyph_bottom_left(std::vector<HudVertex>& vertices,
+                                     float viewport_width,
+                                     float viewport_height,
+                                     const VitalGlyphLayout& glyph) {
+    constexpr std::array<std::uint8_t, 8> kBubbleRows {
+        0b00111100,
+        0b01111110,
+        0b11100111,
+        0b11111111,
+        0b11111111,
+        0b01111110,
+        0b00111100,
+        0b00010000,
+    };
+
+    append_vital_glyph_bottom_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        glyph.x,
+        glyph.bottom,
+        glyph.size,
+        glyph.fill,
+        kBubbleRows,
+        {0.08F, 0.17F, 0.26F, 0.74F},
+        {0.42F, 0.80F, 0.98F, 0.96F},
+        {0.92F, 0.98F, 1.0F, 0.28F});
 }
 
 auto item_stack_display_label(const HotbarSlot& slot) -> std::string {
@@ -509,6 +756,7 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
     create_atlas_texture();
     create_accent_texture();
     create_creature_atlas_texture();
+    create_player_atlas_texture();
     create_shadow_map();
     create_creature_geometry();
     create_item_drop_geometry();
@@ -551,6 +799,9 @@ void Renderer::shutdown() {
         }
         if (creature_atlas_texture_ != 0) {
             glDeleteTextures(1, &creature_atlas_texture_);
+        }
+        if (player_atlas_texture_ != 0) {
+            glDeleteTextures(1, &player_atlas_texture_);
         }
         if (shadow_map_ != 0) {
             glDeleteTextures(1, &shadow_map_);
@@ -612,6 +863,7 @@ void Renderer::shutdown() {
     atlas_texture_ = 0;
     accent_texture_ = 0;
     creature_atlas_texture_ = 0;
+    player_atlas_texture_ = 0;
     shadow_map_ = 0;
     shadow_framebuffer_ = 0;
     creature_vao_ = 0;
@@ -648,7 +900,7 @@ void Renderer::shutdown() {
     initialized_ = false;
 }
 
-void Renderer::render_frame(const World& world,
+void Renderer::render_frame(World& world,
                             const PlayerController& player,
                             const HotbarState& hotbar,
                             const InventoryMenuState& inventory_menu,
@@ -713,11 +965,11 @@ void Renderer::render_frame(const World& world,
             coord,
             &gpu_mesh,
             bounds.center,
-            std::sqrt(chunk_horizontal_distance_sq(bounds.center, eye)),
+            chunk_horizontal_distance_sq(bounds.center, eye),
         });
     }
     std::sort(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& lhs, const VisibleChunk& rhs) {
-        return lhs.distance < rhs.distance;
+        return lhs.distance_squared < rhs.distance_squared;
     });
     frame_stats.visible_chunks = visible_chunks.size();
 
@@ -837,6 +1089,7 @@ void Renderer::render_frame(const World& world,
 
     draw_item_drops(item_drops);
     draw_creatures(creatures, view_projection, light_view_projection, eye, environment);
+    draw_player_avatar(player, view_projection, light_view_projection, eye, environment);
     glUseProgram(world_program_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
@@ -885,31 +1138,38 @@ auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
     return last_frame_stats_;
 }
 
-void Renderer::sync_gpu_meshes(const World& world, RendererFrameStats& frame_stats) {
-    const auto& records = world.chunk_records();
-    if (gpu_meshes_.bucket_count() < records.size()) {
-        gpu_meshes_.reserve(records.size());
-    }
+void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats) {
+    using clock = std::chrono::steady_clock;
 
-    for (auto iterator = gpu_meshes_.begin(); iterator != gpu_meshes_.end();) {
-        if (!records.contains(iterator->first)) {
-            destroy_gpu_mesh(iterator->second);
-            iterator = gpu_meshes_.erase(iterator);
-        } else {
-            ++iterator;
-        }
-    }
-
-    for (const auto& [coord, record] : records) {
-        if (record.mesh_revision == 0) {
+    const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(kMaxGpuMeshSyncMsPerFrame);
+    std::size_t processed_events = 0;
+    while (processed_events < kMaxGpuMeshEventsPerFrame && clock::now() < deadline) {
+        const auto unloads = world.consume_pending_gpu_unloads(1);
+        if (!unloads.empty()) {
+            const auto iterator = gpu_meshes_.find(unloads.front());
+            if (iterator != gpu_meshes_.end()) {
+                destroy_gpu_mesh(iterator->second);
+                gpu_meshes_.erase(iterator);
+            }
+            ++processed_events;
             continue;
         }
 
-        const auto gpu_iterator = gpu_meshes_.find(coord);
-        if (gpu_iterator == gpu_meshes_.end() || gpu_iterator->second.revision != record.mesh_revision) {
-            upload_mesh(coord, record.mesh, record.mesh_revision);
-            ++frame_stats.uploaded_meshes;
+        const auto uploads = world.consume_pending_gpu_uploads(1);
+        if (uploads.empty()) {
+            break;
         }
+
+        const auto& records = world.chunk_records();
+        const auto record_iterator = records.find(uploads.front());
+        if (record_iterator == records.end() || record_iterator->second.mesh_revision == 0) {
+            ++processed_events;
+            continue;
+        }
+
+        upload_mesh(record_iterator->first, record_iterator->second.mesh, record_iterator->second.mesh_revision);
+        ++frame_stats.uploaded_meshes;
+        ++processed_events;
     }
 }
 
@@ -1351,32 +1611,44 @@ void main() {
     float shadow = sample_shadow(normal);
     float sky_mix = clamp(u_daylight_factor, 0.0, 1.0);
     float cavity = clamp(v_cavity_mask, 0.0, 1.0);
-    float hard_material = smoothstep(0.32, 0.95, clamp(v_material_class / 8.0, 0.0, 1.0));
+    float hard_material = smoothstep(0.44, 0.90, v_material_class);
+    float soft_fiber = 1.0 - smoothstep(0.28, 0.58, v_material_class);
+    float thin_surface = 1.0 - smoothstep(0.22, 0.50, v_material_class);
 
-    float ambient_strength = mix(0.42, 1.08, sky_mix) * mix(1.0, 0.74, cavity * (0.58 + v_nightmare_factor * 0.22));
+    float cavity_occlusion = mix(1.0, 0.54, cavity * (0.62 + 0.14 * v_nightmare_factor));
+    float ambient_strength = mix(0.36, 1.02, sky_mix) * mix(1.08, 0.84, hard_material) * cavity_occlusion;
     vec3 ambient = u_ambient_color * ambient_strength;
-    float sun_ndotl = max(dot(normal, sun_direction), 0.0);
-    vec3 sunlight = u_sun_color * (sun_ndotl * sky_mix * shadow * u_sun_visibility);
 
-    float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), 2.25);
-    vec3 day_rim = vec3(1.00, 0.92, 0.82) * rim * (1.0 - hard_material * 0.45) * sky_mix * (0.04 + 0.07 * (1.0 - v_nightmare_factor));
-    vec3 night_rim = vec3(0.46, 0.78, 0.96) * rim * (0.05 + 0.16 * v_nightmare_factor + v_tension * 0.05);
+    float wrap = mix(0.34, 0.10, hard_material);
+    float sun_wrap = clamp((dot(normal, sun_direction) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    vec3 sunlight = u_sun_color * (sun_wrap * sky_mix * shadow * u_sun_visibility);
+
+    float backlight = pow(max(dot(normal, -sun_direction), 0.0), 1.8);
+    vec3 translucency = u_sun_color * backlight * thin_surface * sky_mix * u_sun_visibility * (0.04 + 0.10 * soft_fiber);
+
+    float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), 2.45);
+    vec3 rim_light = mix(vec3(0.12, 0.10, 0.08), vec3(0.34, 0.50, 0.60), 1.0 - sky_mix);
+    rim_light *= rim * mix(0.05, 0.11, 1.0 - hard_material) * mix(0.75, 1.0, v_nightmare_factor);
 
     vec3 reflected = reflect(-sun_direction, normal);
-    float specular = pow(max(dot(reflected, view_direction), 0.0), mix(22.0, 10.0, hard_material));
-    vec3 specular_color = u_sun_color * specular * hard_material * v_nightmare_factor * shadow * 0.22;
+    float specular = pow(max(dot(reflected, view_direction), 0.0), mix(42.0, 16.0, hard_material));
+    float hard_specular = specular * smoothstep(0.52, 0.90, v_material_class);
+    vec3 specular_color = u_sun_color * hard_specular * shadow * sky_mix * u_sun_visibility * (0.03 + 0.18 * v_nightmare_factor);
 
-    float pulse = 0.66 + 0.34 * sin(u_time_of_day * 2.5 + v_distance * 0.08 + v_tension * 6.0);
+    float pulse = 0.84 + 0.16 * sin(u_time_of_day * 1.7 + v_tension * 7.0 + v_world_position.y * 2.2);
     vec3 nightmare_glow =
-        vec3(1.00, 0.18, 0.12) * emissive_mask * v_emissive_strength * v_nightmare_factor * (0.42 + v_tension * 0.58) * pulse;
+        vec3(1.00, 0.18, 0.12) * emissive_mask * v_emissive_strength * v_nightmare_factor * (0.24 + v_tension * 0.30) * pulse;
 
-    vec3 lit_color = albedo * (ambient + sunlight);
-    lit_color += day_rim + night_rim + specular_color;
+    vec3 lit_color = albedo * (ambient + sunlight + translucency);
+    lit_color *= cavity_occlusion;
+    lit_color += rim_light + specular_color;
     lit_color += u_night_tint_color * (0.07 + 0.07 * v_nightmare_factor) * (1.0 - sky_mix);
     float fog = clamp(v_distance / 160.0, 0.0, 1.0);
     fog = fog * fog;
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
-    frag_color = vec4(mix(lit_color + nightmare_glow, fog_color, fog), 1.0);
+    vec3 fogged_color = mix(lit_color, fog_color, fog);
+    vec3 fogged_glow = nightmare_glow * (1.0 - fog * 0.72);
+    frag_color = vec4(fogged_color + fogged_glow, 1.0);
 }
 )";
 
@@ -1400,9 +1672,6 @@ in vec2 v_uv;
 uniform sampler2D u_atlas;
 
 void main() {
-    if (texture(u_atlas, v_uv).a < 0.1) {
-        discard;
-    }
 }
 )";
 
@@ -1754,6 +2023,28 @@ void Renderer::create_creature_atlas_texture() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
+void Renderer::create_player_atlas_texture() {
+    const auto pixels = build_player_atlas_pixels();
+
+    glGenTextures(1, &player_atlas_texture_);
+    glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        kPlayerAtlasSize,
+        kPlayerAtlasSize,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        pixels.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
 void Renderer::create_shadow_map() {
     glGenTextures(1, &shadow_map_);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
@@ -1873,6 +2164,32 @@ void Renderer::create_hud_geometry() {
     glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, r)));
     glEnableVertexAttribArray(3);
     glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, textured)));
+    hud_vertex_buffer_bytes_ = kInitialHudBufferBytes;
+}
+
+void Renderer::ensure_hud_buffer_capacity(std::size_t vertex_count) {
+    const auto required_bytes = static_cast<GLsizeiptr>(vertex_count * sizeof(HudVertex));
+    if (hud_vertex_buffer_bytes_ >= required_bytes) {
+        return;
+    }
+
+    hud_vertex_buffer_bytes_ = grow_buffer_capacity(
+        hud_vertex_buffer_bytes_,
+        required_bytes,
+        kInitialHudBufferBytes);
+    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, hud_vertex_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
+}
+
+void Renderer::upload_hud_vertices(std::span<const HudVertex> vertices) {
+    glBindVertexArray(hud_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
+    ensure_hud_buffer_capacity(vertices.size());
+    glBufferSubData(
+        GL_ARRAY_BUFFER,
+        0,
+        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
+        vertices.data());
 }
 
 void Renderer::create_crosshair_geometry() {
@@ -2098,8 +2415,9 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
         return;
     }
 
-    std::vector<ChunkVertex> vertices;
-    vertices.reserve(item_drops.size() * 18U);
+    auto& vertices = item_drop_vertices_scratch_;
+    vertices.clear();
+    vertices.reserve(item_drops.size() * 36U);
 
     for (const auto& drop : item_drops) {
         if (drop.block_id == to_block_id(BlockType::Air) || drop.count == 0) {
@@ -2167,7 +2485,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     }
 
     constexpr float kCreatureDrawDistance = 64.0F;
-    constexpr std::size_t kMaxRenderedCreatures = 12;
+    constexpr std::size_t kMaxRenderedCreatures = kCreatureMaxRenderedCount;
     const auto draw_distance_sq = kCreatureDrawDistance * kCreatureDrawDistance;
 
     struct VisibleCreature {
@@ -2200,10 +2518,12 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
         visible_creatures.resize(kMaxRenderedCreatures);
     }
 
-    std::vector<CreatureVertex> vertices;
-    std::vector<std::uint32_t> indices;
-    vertices.reserve(visible_creatures.size() * 768U);
-    indices.reserve(visible_creatures.size() * 1152U);
+    auto& vertices = creature_vertices_scratch_;
+    auto& indices = creature_indices_scratch_;
+    vertices.clear();
+    indices.clear();
+    vertices.reserve(visible_creatures.size() * kCreatureVerticesPerBox * kCreatureMaxBoxBudget);
+    indices.reserve(visible_creatures.size() * kCreatureIndicesPerBox * kCreatureMaxBoxBudget);
 
     for (const auto& visible_creature : visible_creatures) {
         const auto mesh = build_creature_mesh(*visible_creature.creature);
@@ -2274,258 +2594,271 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& environment, int width, int height) {
+void Renderer::draw_player_avatar(const PlayerController& player,
+                                  const glm::mat4& view_projection,
+                                  const glm::mat4& light_view_projection,
+                                  const glm::vec3& camera_position,
+                                  const EnvironmentState& environment) {
+    if (player.is_dead() || creature_program_ == 0 || creature_vao_ == 0 || creature_vbo_ == 0 || creature_ebo_ == 0 || player_atlas_texture_ == 0) {
+        return;
+    }
+
+    const auto mesh = build_player_mesh(player);
+    if (mesh.empty()) {
+        return;
+    }
+
+    auto& vertices = creature_vertices_scratch_;
+    auto& indices = creature_indices_scratch_;
+    vertices.assign(mesh.vertices.begin(), mesh.vertices.end());
+    indices.assign(mesh.indices.begin(), mesh.indices.end());
+
+    glBindVertexArray(creature_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, creature_ebo_);
+
+    const auto vertex_bytes = static_cast<GLsizeiptr>(vertices.size() * sizeof(CreatureVertex));
+    const auto index_bytes = static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t));
+    if (creature_vertex_buffer_bytes_ < vertex_bytes) {
+        creature_vertex_buffer_bytes_ = grow_buffer_capacity(
+            creature_vertex_buffer_bytes_,
+            vertex_bytes,
+            kInitialCreatureVertexBufferBytes);
+        glBufferData(GL_ARRAY_BUFFER, creature_vertex_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
+    }
+    if (creature_index_buffer_bytes_ < index_bytes) {
+        creature_index_buffer_bytes_ = grow_buffer_capacity(
+            creature_index_buffer_bytes_,
+            index_bytes,
+            kInitialCreatureIndexBufferBytes);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, creature_index_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
+    }
+
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, vertices.data());
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
+
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(creature_program_);
+    glUniformMatrix4fv(creature_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
+    glUniformMatrix4fv(creature_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniform3fv(creature_uniforms_.camera_position, 1, glm::value_ptr(camera_position));
+    glUniform3fv(creature_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
+    glUniform3fv(creature_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
+    glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
+    glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
+    glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
+    glUniform3fv(creature_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
+    glUniform1f(creature_uniforms_.daylight_factor, environment.daylight_factor);
+    glUniform1f(creature_uniforms_.sun_visibility, environment.sun_direction.y > 0.0F ? 1.0F : 0.0F);
+    glUniform1i(creature_uniforms_.atlas, 0);
+    glUniform1i(creature_uniforms_.shadow_map, 1);
+    glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
+    glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& /*environment*/, int width, int height) {
     if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
         return;
     }
 
-    const auto layout = build_hotbar_layout(width, height, hotbar);
     const auto& player_state = player.state();
-    std::vector<HudVertex> vertices;
-    vertices.reserve(12288U);
-
-    const auto viewport_width = static_cast<float>(width);
-    const auto viewport_height = static_cast<float>(height);
-    const auto safe_margin = layout.safe_margin;
+    const auto max_health = std::max(player.max_health(), 0.001F);
+    const auto max_air = std::max(player.max_air_seconds(), 0.001F);
     const auto damage_flash =
         std::max(
             glm::clamp(player_state.hurt_timer / 0.35F, 0.0F, 1.0F) * 0.32F,
-            glm::clamp((8.0F - player_state.health) / 8.0F, 0.0F, 1.0F) * 0.18F);
-    if (damage_flash > 0.0F) {
-        const auto edge_size = std::clamp(std::min(viewport_width, viewport_height) * 0.09F, 28.0F, 72.0F);
-        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, edge_size, {0.48F, 0.04F, 0.05F, damage_flash});
-        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, viewport_height - edge_size, viewport_width, edge_size, {0.48F, 0.04F, 0.05F, damage_flash});
-        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, edge_size, viewport_height, {0.48F, 0.04F, 0.05F, damage_flash * 0.9F});
-        append_hud_rect_top_left(vertices, viewport_width, viewport_height, viewport_width - edge_size, 0.0F, edge_size, viewport_height, {0.48F, 0.04F, 0.05F, damage_flash * 0.9F});
-    }
+            glm::clamp((max_health - player_state.health) / max_health, 0.0F, 1.0F) * 0.18F);
+    const auto air_visible = player_state.head_underwater || player_state.air_seconds < max_air - 0.05F;
+    const auto hud_layout =
+        build_gameplay_hud_layout(width, height, hotbar, player_state.health, max_health, player_state.air_seconds, max_air, air_visible);
 
-    const auto brand_panel_width = std::clamp(viewport_width * 0.24F, 228.0F, 360.0F);
-    const auto brand_panel_height = 52.0F;
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        safe_margin,
-        safe_margin,
-        brand_panel_width,
-        brand_panel_height,
-        5.0F,
-        {0.05F, 0.06F, 0.07F, 0.96F},
-        {0.12F, 0.15F, 0.17F, 0.88F},
-        {0.52F, 0.66F, 0.76F, 0.18F},
-        {0.02F, 0.02F, 0.03F, 0.68F});
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        safe_margin + 14.0F,
-        safe_margin + 12.0F,
-        2.0F,
-        kGameDisplayNamePixel,
-        {0.90F, 0.93F, 0.96F, 0.98F});
+    HotbarHudCacheKey cache_key {};
+    cache_key.hotbar = hotbar;
+    cache_key.width = width;
+    cache_key.height = height;
+    cache_key.health_steps = quantize_hud_value(player_state.health, 16.0F);
+    cache_key.air_steps = quantize_hud_value(player_state.air_seconds, 64.0F);
+    cache_key.damage_flash_step = quantize_hud_value(damage_flash, 128.0F);
+    cache_key.air_visible = air_visible;
 
-    const auto mode_label = player_state.fly_mode ? std::string_view("MODE VOL") : std::string_view("MODE SURVIE");
-    const auto cycle_label = environment.daylight_factor > 0.60F
-                                 ? std::string_view("JOUR")
-                                 : (environment.daylight_factor > 0.22F ? std::string_view("CREPUSCULE") : std::string_view("NUIT"));
-    const auto chip_pixel_size = 2.0F;
-    const auto chip_height = 26.0F;
-    const auto mode_chip_width = measure_pixel_text(mode_label, chip_pixel_size) + 22.0F;
-    const auto cycle_chip_width = measure_pixel_text(cycle_label, chip_pixel_size) + 22.0F;
-    const auto chip_y = safe_margin;
-    const auto cycle_chip_x = viewport_width - safe_margin - cycle_chip_width;
-    const auto mode_chip_x = cycle_chip_x - mode_chip_width - 10.0F;
+    auto& cache = hotbar_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(16384U);
 
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        mode_chip_x,
-        chip_y,
-        mode_chip_width,
-        chip_height,
-        4.0F,
-        {0.05F, 0.06F, 0.07F, 0.96F},
-        {0.13F, 0.16F, 0.19F, 0.88F},
-        {0.55F, 0.77F, 0.60F, 0.15F},
-        {0.02F, 0.02F, 0.03F, 0.68F});
-    append_pixel_text(vertices, viewport_width, viewport_height, mode_chip_x + 11.0F, chip_y + 8.0F, chip_pixel_size, mode_label, {0.88F, 0.91F, 0.94F, 0.96F});
+        const auto viewport_width = static_cast<float>(width);
+        const auto viewport_height = static_cast<float>(height);
 
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        cycle_chip_x,
-        chip_y,
-        cycle_chip_width,
-        chip_height,
-        4.0F,
-        {0.05F, 0.06F, 0.07F, 0.96F},
-        {0.16F, 0.16F, 0.15F, 0.88F},
-        {0.92F, 0.76F, 0.34F, 0.15F},
-        {0.02F, 0.02F, 0.03F, 0.68F});
-    append_pixel_text(vertices, viewport_width, viewport_height, cycle_chip_x + 11.0F, chip_y + 8.0F, chip_pixel_size, cycle_label, {0.96F, 0.92F, 0.86F, 0.96F});
-
-    const auto air_visible = player_state.head_underwater || player_state.air_seconds < player.max_air_seconds() - 0.05F;
-    const auto survival_panel_width = std::clamp(viewport_width * 0.23F, 250.0F, 340.0F);
-    const auto survival_panel_height = air_visible ? 96.0F : 70.0F;
-    const auto survival_panel_bottom = layout.bar_bottom + layout.bar_height + 18.0F;
-    const auto survival_panel_y = viewport_height - survival_panel_bottom - survival_panel_height;
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        safe_margin,
-        survival_panel_y,
-        survival_panel_width,
-        survival_panel_height,
-        5.0F,
-        {0.05F, 0.05F, 0.06F, 0.96F},
-        {0.10F, 0.12F, 0.14F, 0.90F},
-        {0.50F, 0.54F, 0.60F, 0.16F},
-        {0.02F, 0.02F, 0.03F, 0.72F});
-    append_pixel_text(vertices, viewport_width, viewport_height, safe_margin + 14.0F, survival_panel_y + 12.0F, 2.0F, "VIE", {0.95F, 0.95F, 0.96F, 0.98F});
-    append_segmented_meter_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        safe_margin + 12.0F,
-        survival_panel_y + 26.0F,
-        survival_panel_width - 24.0F,
-        24.0F,
-        10,
-        player_state.health / std::max(player.max_health(), 0.001F),
-        {0.18F, 0.05F, 0.06F, 0.98F},
-        {0.16F, 0.08F, 0.09F, 0.70F},
-        {0.26F, 0.07F, 0.08F, 0.85F},
-        {0.90F, 0.18F, 0.22F, 0.98F});
-    if (air_visible) {
-        append_pixel_text(vertices, viewport_width, viewport_height, safe_margin + 14.0F, survival_panel_y + 56.0F, 2.0F, "AIR", {0.92F, 0.95F, 0.98F, 0.98F});
-        append_segmented_meter_top_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            safe_margin + 12.0F,
-            survival_panel_y + 70.0F,
-            survival_panel_width - 24.0F,
-            18.0F,
-            10,
-            player_state.air_seconds / std::max(player.max_air_seconds(), 0.001F),
-            {0.06F, 0.10F, 0.18F, 0.98F},
-            {0.07F, 0.11F, 0.17F, 0.72F},
-            {0.08F, 0.18F, 0.28F, 0.85F},
-            {0.32F, 0.72F, 0.96F, 0.98F});
-    }
-
-    const auto bar_border_thickness = std::max(2.0F, layout.slot_size * 0.06F);
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.bar_left,
-        layout.bar_bottom,
-        layout.bar_width,
-        layout.bar_height,
-        bar_border_thickness,
-        {0.02F, 0.03F, 0.04F, 0.92F},
-        {0.07F, 0.08F, 0.10F, 0.82F},
-        {0.50F, 0.52F, 0.58F, 0.14F},
-        {0.02F, 0.02F, 0.03F, 0.72F});
-
-    const auto slot_border_thickness = std::max(2.0F, layout.slot_size * 0.07F);
-    const auto glow_padding = std::max(2.0F, layout.slot_size * 0.05F);
-    for (const auto& slot : layout.slots) {
-        if (slot.is_selected) {
-            append_hud_rect(
+        if (damage_flash > 0.0F) {
+            const auto edge_size = std::clamp(std::min(viewport_width, viewport_height) * 0.09F, 28.0F, 72.0F);
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, edge_size, {0.48F, 0.04F, 0.05F, damage_flash});
+            append_hud_rect_top_left(
                 vertices,
                 viewport_width,
                 viewport_height,
-                slot.x - glow_padding,
-                slot.y - glow_padding,
-                slot.size + glow_padding * 2.0F,
-                slot.size + glow_padding * 2.0F,
-                {1.00F, 0.84F, 0.42F, 0.18F});
+                0.0F,
+                viewport_height - edge_size,
+                viewport_width,
+                edge_size,
+                {0.48F, 0.04F, 0.05F, damage_flash});
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, edge_size, viewport_height, {0.48F, 0.04F, 0.05F, damage_flash * 0.9F});
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                viewport_width - edge_size,
+                0.0F,
+                edge_size,
+                viewport_height,
+                {0.48F, 0.04F, 0.05F, damage_flash * 0.9F});
         }
 
-        const auto border_color = slot.is_selected
-                                      ? std::array<float, 4> {0.97F, 0.88F, 0.52F, 1.0F}
-                                      : std::array<float, 4> {0.28F, 0.31F, 0.35F, 0.92F};
-        const auto fill_color = slot.is_selected
-                                    ? std::array<float, 4> {0.20F, 0.22F, 0.25F, 0.95F}
-                                    : (slot.has_icon
-                                           ? std::array<float, 4> {0.12F, 0.13F, 0.15F, 0.84F}
-                                           : std::array<float, 4> {0.09F, 0.10F, 0.12F, 0.66F});
-        append_hud_beveled_panel_top_left(
+        append_hud_beveled_panel(
             vertices,
             viewport_width,
             viewport_height,
-            slot.x,
-            slot.y,
-            slot.size,
-            slot.size,
-            slot_border_thickness,
-            border_color,
-            fill_color,
-            {1.0F, 1.0F, 1.0F, slot.is_selected ? 0.16F : 0.08F},
-            {0.0F, 0.0F, 0.0F, 0.34F});
-
-        if (!slot.has_icon) {
-            continue;
-        }
-
-        const auto icon_size = std::max(8.0F, slot.size - layout.icon_inset * 2.0F);
-        const auto icon_offset = (slot.size - icon_size) * 0.5F;
-        append_hud_quad(
-            vertices,
-            viewport_width,
-            viewport_height,
-            slot.x + icon_offset,
-            slot.y + icon_offset,
-            icon_size,
-            icon_size,
-            {1.0F, 1.0F, 1.0F, slot.is_selected ? 1.0F : 0.95F},
-            atlas_uv_rect(slot.icon_tile),
-            1.0F);
-        append_stack_count(
-            vertices,
-            viewport_width,
-            viewport_height,
-            slot.x + slot.size - 5.0F,
-            viewport_height - slot.y - 4.0F,
-            2.0F,
-            slot.slot.count);
-    }
-
-    const auto selected_label = item_stack_display_label(hotbar.selected_slot());
-    if (!selected_label.empty()) {
-        const auto label_pixel_size = 2.0F;
-        const auto label_width = measure_pixel_text(selected_label, label_pixel_size) + 24.0F;
-        const auto label_height = 26.0F;
-        const auto label_x = layout.bar_left + (layout.bar_width - label_width) * 0.5F;
-        const auto label_y = viewport_height - (layout.bar_bottom + layout.bar_height + 14.0F + label_height);
-        append_hud_beveled_panel_top_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            label_x,
-            label_y,
-            label_width,
-            label_height,
+            hud_layout.hotbar_panel_x,
+            hud_layout.hotbar_panel_bottom,
+            hud_layout.hotbar_panel_width,
+            hud_layout.hotbar_panel_height,
             4.0F,
-            {0.05F, 0.06F, 0.07F, 0.96F},
-            {0.12F, 0.14F, 0.16F, 0.90F},
-            {0.60F, 0.62F, 0.66F, 0.10F},
-            {0.02F, 0.02F, 0.03F, 0.70F});
-        append_pixel_text(
+            {0.04F, 0.04F, 0.05F, 0.94F},
+            {0.10F, 0.10F, 0.11F, 0.88F},
+            {0.68F, 0.68F, 0.70F, 0.10F},
+            {0.01F, 0.01F, 0.01F, 0.70F});
+        append_hud_rect(
             vertices,
             viewport_width,
             viewport_height,
-            label_x + label_width * 0.5F,
-            label_y + 8.0F,
-            label_pixel_size,
-            selected_label,
-            {0.95F, 0.96F, 0.98F, 0.98F},
-            true);
+            hud_layout.hotbar_panel_x + 6.0F,
+            hud_layout.hotbar_panel_bottom + hud_layout.hotbar_panel_height - 6.0F,
+            std::max(0.0F, hud_layout.hotbar_panel_width - 12.0F),
+            2.0F,
+            {1.0F, 1.0F, 1.0F, 0.06F});
+
+        for (const auto& heart : hud_layout.hearts) {
+            append_heart_glyph_bottom_left(vertices, viewport_width, viewport_height, heart);
+        }
+
+        if (hud_layout.air_visible) {
+            for (const auto& bubble : hud_layout.bubbles) {
+                append_bubble_glyph_bottom_left(vertices, viewport_width, viewport_height, bubble);
+            }
+        }
+
+        const auto slot_border_thickness = std::max(2.0F, hud_layout.hotbar.slot_size * 0.07F);
+        const auto glow_padding = std::max(2.0F, hud_layout.hotbar.slot_size * 0.05F);
+        for (const auto& slot : hud_layout.slots) {
+            if (slot.is_selected) {
+                append_hud_rect(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    slot.x - glow_padding,
+                    slot.bottom - glow_padding,
+                    slot.size + glow_padding * 2.0F,
+                    slot.size + glow_padding * 2.0F,
+                    {1.00F, 0.94F, 0.68F, 0.16F});
+            }
+
+            const auto border_color = slot.is_selected
+                                          ? std::array<float, 4> {0.96F, 0.90F, 0.66F, 1.0F}
+                                          : std::array<float, 4> {0.22F, 0.22F, 0.24F, 0.98F};
+            const auto fill_color = slot.is_selected
+                                        ? std::array<float, 4> {0.26F, 0.26F, 0.28F, 0.96F}
+                                        : (slot.has_icon
+                                               ? std::array<float, 4> {0.18F, 0.18F, 0.19F, 0.90F}
+                                               : std::array<float, 4> {0.13F, 0.13F, 0.14F, 0.82F});
+            append_hud_beveled_panel(
+                vertices,
+                viewport_width,
+                viewport_height,
+                slot.x,
+                slot.bottom,
+                slot.size,
+                slot.size,
+                slot_border_thickness,
+                border_color,
+                fill_color,
+                {1.0F, 1.0F, 1.0F, slot.is_selected ? 0.14F : 0.06F},
+                {0.0F, 0.0F, 0.0F, 0.42F});
+
+            if (slot.is_selected) {
+                const auto selected_highlight_height = std::max(1.0F, slot.size * 0.06F);
+                append_hud_rect(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    slot.x + slot_border_thickness + 1.0F,
+                    slot.bottom + slot.size - slot_border_thickness - 1.0F - selected_highlight_height,
+                    std::max(0.0F, slot.size - slot_border_thickness * 2.0F - 2.0F),
+                    selected_highlight_height,
+                    {1.0F, 0.98F, 0.90F, 0.10F});
+            }
+
+            if (!slot.has_icon) {
+                continue;
+            }
+
+            append_hud_quad(
+                vertices,
+                viewport_width,
+                viewport_height,
+                slot.icon_x,
+                slot.icon_bottom,
+                slot.icon_size,
+                slot.icon_size,
+                {1.0F, 1.0F, 1.0F, slot.is_selected ? 1.0F : 0.96F},
+                atlas_uv_rect(slot.icon_tile),
+                1.0F);
+            if (slot.show_stack_count) {
+                append_stack_count_bottom_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    slot.count_right_x,
+                    slot.count_bottom,
+                    2.0F,
+                    slot.slot.count);
+            }
+        }
+
+        const auto selected_label = item_stack_display_label(hotbar.selected_slot());
+        if (!selected_label.empty()) {
+            append_pixel_text_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.label.center_x + hud_layout.label.pixel_size,
+                hud_layout.label.bottom - hud_layout.label.pixel_size,
+                hud_layout.label.pixel_size,
+                selected_label,
+                {0.0F, 0.0F, 0.0F, 0.55F},
+                true);
+            append_pixel_text_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.label.center_x,
+                hud_layout.label.bottom,
+                hud_layout.label.pixel_size,
+                selected_label,
+                {0.98F, 0.98F, 0.98F, 0.98F},
+                true);
+        }
     }
 
     glDisable(GL_DEPTH_TEST);
@@ -2538,13 +2871,7 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
 
-    glBindVertexArray(hud_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
-        vertices.data(),
-        GL_DYNAMIC_DRAW);
+    upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
 
     glDisable(GL_BLEND);
@@ -2560,9 +2887,20 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
     const auto layout = build_inventory_menu_layout(width, height, inventory_menu, hotbar);
     const auto viewport_width = static_cast<float>(width);
     const auto viewport_height = static_cast<float>(height);
+    InventoryHudCacheKey cache_key {};
+    cache_key.inventory_menu = inventory_menu;
+    cache_key.hotbar = hotbar;
+    cache_key.width = width;
+    cache_key.height = height;
 
-    std::vector<HudVertex> vertices;
-    vertices.reserve(16384U);
+    auto& cache = inventory_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(16384U);
 
     append_hud_rect_top_left(
         vertices,
@@ -2940,6 +3278,7 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
             std::max(2.0F, static_cast<float>(std::floor(layout.slot_size / 18.0F))),
             inventory_menu.carried_slot.count);
     }
+    }
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -2951,13 +3290,7 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
 
-    glBindVertexArray(hud_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
-        vertices.data(),
-        GL_DYNAMIC_DRAW);
+    upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
 
     glDisable(GL_BLEND);
@@ -2973,9 +3306,19 @@ void Renderer::draw_death_screen(const DeathScreenState& death_screen, int width
     const auto layout = build_death_screen_layout(width, height, death_screen);
     const auto viewport_width = static_cast<float>(width);
     const auto viewport_height = static_cast<float>(height);
+    DeathHudCacheKey cache_key {};
+    cache_key.death_screen = death_screen;
+    cache_key.width = width;
+    cache_key.height = height;
 
-    std::vector<HudVertex> vertices;
-    vertices.reserve(12288U);
+    auto& cache = death_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(12288U);
 
     append_hud_rect_top_left(
         vertices,
@@ -3100,6 +3443,7 @@ void Renderer::draw_death_screen(const DeathScreenState& death_screen, int width
             {1.0F, 0.96F, 0.97F, 1.0F},
             true);
     }
+    }
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -3111,13 +3455,7 @@ void Renderer::draw_death_screen(const DeathScreenState& death_screen, int width
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
 
-    glBindVertexArray(hud_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
-        vertices.data(),
-        GL_DYNAMIC_DRAW);
+    upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
 
     glDisable(GL_BLEND);
@@ -3133,9 +3471,19 @@ void Renderer::draw_pause_menu(const PauseMenuState& pause_menu, int width, int 
     const auto layout = build_pause_menu_layout(width, height, pause_menu);
     const auto viewport_width = static_cast<float>(width);
     const auto viewport_height = static_cast<float>(height);
+    PauseHudCacheKey cache_key {};
+    cache_key.pause_menu = pause_menu;
+    cache_key.width = width;
+    cache_key.height = height;
 
-    std::vector<HudVertex> vertices;
-    vertices.reserve(8192U);
+    auto& cache = pause_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(8192U);
 
     append_hud_rect_top_left(
         vertices,
@@ -3281,6 +3629,7 @@ void Renderer::draw_pause_menu(const PauseMenuState& pause_menu, int width, int 
             text_color,
             true);
     }
+    }
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -3292,13 +3641,7 @@ void Renderer::draw_pause_menu(const PauseMenuState& pause_menu, int width, int 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
 
-    glBindVertexArray(hud_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
-        vertices.data(),
-        GL_DYNAMIC_DRAW);
+    upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
 
     glDisable(GL_BLEND);

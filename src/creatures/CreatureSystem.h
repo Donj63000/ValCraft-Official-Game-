@@ -27,6 +27,7 @@ public:
         -> std::optional<CreatureSpawnAnchor>;
     [[nodiscard]] auto active_creatures() const noexcept -> std::span<const CreatureInstance>;
     [[nodiscard]] auto render_instances() const noexcept -> std::span<const CreatureRenderInstance>;
+    [[nodiscard]] auto recent_attacks() const noexcept -> std::span<const CreatureAttackEvent>;
 
 private:
     void sync_active_creatures(const World& world, const glm::vec3& player_position, const CreatureCycleState& cycle);
@@ -35,7 +36,7 @@ private:
                          const World& world,
                          const glm::vec3& player_position,
                          const EnvironmentState& environment,
-                         const CreatureCycleState& cycle) const;
+                         const CreatureCycleState& cycle);
     void rebuild_render_instances(const EnvironmentState& environment);
 
     [[nodiscard]] auto compute_spawn_anchor(const World& world, const ChunkCoord& coord) const
@@ -45,6 +46,7 @@ private:
 
     std::vector<CreatureInstance> creatures_ {};
     std::vector<CreatureRenderInstance> render_instances_ {};
+    std::vector<CreatureAttackEvent> attacks_ {};
 };
 
 } // namespace valcraft

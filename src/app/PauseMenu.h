@@ -21,6 +21,8 @@ struct PauseMenuState {
     PauseMenuAction selected_action = PauseMenuAction::Resume;
     float cursor_x = 0.0F;
     float cursor_y = 0.0F;
+
+    auto operator==(const PauseMenuState&) const -> bool = default;
 };
 
 struct PauseMenuButtonLayout {

@@ -26,6 +26,7 @@ constexpr float kHurtFlashDuration = 0.35F;
 constexpr float kRegenerationDelay = 6.0F;
 constexpr float kRegenerationInterval = 2.5F;
 constexpr float kDrowningDamageInterval = 1.0F;
+constexpr float kMaxCollisionStep = 0.45F;
 
 auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
     const auto horizontal = glm::vec3 {vector.x, 0.0F, vector.z};
@@ -86,15 +87,31 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     } else {
         state_.velocity.x = wish.x * kMoveSpeed;
         state_.velocity.z = wish.z * kMoveSpeed;
-        state_.velocity.y -= kGravity * dt;
+        state_.velocity.y -= kGravity * clamped_dt;
         if (input.jump && collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F})) {
             state_.velocity.y = kJumpVelocity;
         }
     }
 
-    move_axis(state_.velocity.x * dt, 0, world);
-    move_axis(state_.velocity.y * dt, 1, world);
-    move_axis(state_.velocity.z * dt, 2, world);
+    const auto move_axis_safely = [&](float delta, int axis) {
+        auto remaining = delta;
+        while (std::abs(remaining) > 1.0e-6F) {
+            const auto step = std::clamp(remaining, -kMaxCollisionStep, kMaxCollisionStep);
+            const auto before = state_.position[axis];
+            move_axis(step, axis, world);
+
+            const auto moved = state_.position[axis] - before;
+            if (std::abs(moved) + 1.0e-5F < std::abs(step)) {
+                break;
+            }
+
+            remaining -= step;
+        }
+    };
+
+    move_axis_safely(state_.velocity.x * clamped_dt, 0);
+    move_axis_safely(state_.velocity.y * clamped_dt, 1);
+    move_axis_safely(state_.velocity.z * clamped_dt, 2);
 
     if (!state_.fly_mode) {
         state_.on_ground = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
@@ -178,6 +195,10 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
     state_ = {};
     state_.position = position;
     state_.fall_start_y = position.y;
+}
+
+void PlayerController::apply_external_damage(float amount, PlayerDeathCause cause) noexcept {
+    apply_damage(amount, cause, false);
 }
 
 auto PlayerController::current_target(const World& world, float max_distance) const -> RaycastHit {

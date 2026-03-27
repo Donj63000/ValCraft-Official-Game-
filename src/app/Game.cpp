@@ -142,7 +142,7 @@ auto Game::run() -> int {
             constexpr int kMaxFixedUpdatesPerFrame = 4;
             int fixed_updates = 0;
             while (accumulator >= fixed_step && fixed_updates < kMaxFixedUpdatesPerFrame) {
-                update(static_cast<float>(fixed_step.count()), frame_stats);
+                update_simulation(static_cast<float>(fixed_step.count()), frame_stats);
                 accumulator -= fixed_step;
                 ++fixed_updates;
             }
@@ -150,6 +150,8 @@ auto Game::run() -> int {
             if (fixed_updates == kMaxFixedUpdatesPerFrame && accumulator > fixed_step) {
                 accumulator = fixed_step;
             }
+
+            update_world_pipeline(frame_stats);
 
             const auto environment_state = environment_.current_state();
             item_drops_.build_render_instances(world_, item_drop_render_instances_);
@@ -526,9 +528,7 @@ void Game::process_events() {
     }
 }
 
-void Game::update(float dt, FramePerformanceStats& frame_stats) {
-    using clock = std::chrono::steady_clock;
-
+void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
     if (!options_.smoke_test && (death_screen_visible_ || paused_)) {
         (void)dt;
         (void)frame_stats;
@@ -583,11 +583,28 @@ void Game::update(float dt, FramePerformanceStats& frame_stats) {
 
         item_drops_.update(dt, world_, player_.position(), inventory_menu_, hotbar_);
         sync_selected_hotbar_slot();
+    }
+
+    creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
+
+    if (!options_.smoke_test) {
+        for (const auto& attack : creatures_.recent_attacks()) {
+            player_.apply_external_damage(attack.damage, PlayerDeathCause::Zombie);
+        }
 
         if (player_.is_dead()) {
             set_death_screen_visible(true, player_.state().death_cause);
             return;
         }
+    }
+}
+
+void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
+    using clock = std::chrono::steady_clock;
+
+    if (!options_.smoke_test && (death_screen_visible_ || paused_)) {
+        (void)frame_stats;
+        return;
     }
 
     const auto stream_start = clock::now();
@@ -610,8 +627,6 @@ void Game::update(float dt, FramePerformanceStats& frame_stats) {
     frame_stats.pending_mesh = std::max(frame_stats.pending_mesh, world_stats.pending_mesh);
     frame_stats.pending_lighting = std::max(frame_stats.pending_lighting, world_stats.pending_lighting);
     frame_stats.lighting_jobs_completed += world_stats.lighting_jobs_completed;
-
-    creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
 
     if (options_.smoke_test) {
         validate_smoke_frame(options_.performance.world_budget(), world_stats);

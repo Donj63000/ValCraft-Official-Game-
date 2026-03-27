@@ -23,6 +23,8 @@ struct DeathScreenState {
     PlayerDeathCause cause = PlayerDeathCause::None;
     float cursor_x = 0.0F;
     float cursor_y = 0.0F;
+
+    auto operator==(const DeathScreenState&) const -> bool = default;
 };
 
 struct DeathScreenButtonLayout {
@@ -84,6 +86,8 @@ inline constexpr auto death_screen_cause_label(PlayerDeathCause cause) noexcept 
         return "CAUSE NOYADE";
     case PlayerDeathCause::Void:
         return "CAUSE ABYSSE";
+    case PlayerDeathCause::Zombie:
+        return "CAUSE ZOMBIE";
     case PlayerDeathCause::None:
     default:
         return "CAUSE INCONNUE";

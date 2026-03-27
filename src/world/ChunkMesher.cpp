@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <utility>
 
@@ -38,6 +39,7 @@ constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
 constexpr float kWaterSurfaceHeight = 0.88F;
+constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
 
 auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
@@ -259,6 +261,11 @@ auto compute_vertex_ao(const Neighborhood& neighborhood, const BlockCoord& local
 
 auto ao_factor(int raw_ao) -> float {
     return 0.55F + static_cast<float>(raw_ao) * 0.15F;
+}
+
+auto wrap_positive(float value, float period) noexcept -> float {
+    const auto wrapped = std::fmod(value, period);
+    return wrapped < 0.0F ? wrapped + period : wrapped;
 }
 
 auto sample_vertex_light(const Neighborhood& neighborhood,
@@ -574,6 +581,7 @@ void append_water_face(ChunkMeshData& mesh,
     const auto v0 = static_cast<float>(tile.y) * uv_step;
     const auto u1 = u0 + uv_step;
     const auto v1 = v0 + uv_step;
+    const auto is_horizontal_water_face = face == Face::PositiveY || face == Face::NegativeY;
 
     std::array<std::array<float, 3>, 4> positions {};
     std::array<float, 4> ao_values {};
@@ -597,12 +605,22 @@ void append_water_face(ChunkMeshData& mesh,
     }
 
     const auto base_index = static_cast<std::uint32_t>(mesh.water_vertices.size());
-    const std::array<std::array<float, 2>, 4> uvs {{
+    std::array<std::array<float, 2>, 4> uvs {{
         {u1, v0},
         {u1, v1},
         {u0, v1},
         {u0, v0},
     }};
+    if (is_horizontal_water_face) {
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            const auto world_u = wrap_positive(positions[i][0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+            const auto world_v = wrap_positive(positions[i][2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+            uvs[i] = {
+                u0 + world_u * uv_step,
+                v0 + world_v * uv_step,
+            };
+        }
+    }
 
     for (std::size_t i = 0; i < positions.size(); ++i) {
         mesh.water_vertices.push_back({
@@ -658,6 +676,26 @@ auto ChunkMesher::build_mesh(const World& world,
                              const ChunkCoord& coord,
                              std::size_t vertex_reserve_hint,
                              std::size_t index_reserve_hint) const -> ChunkMeshData {
+    const auto* chunk = world.find_chunk(coord);
+    if (chunk == nullptr || !chunk->has_meshable_blocks()) {
+        return {};
+    }
+
+    return build_mesh_range(
+        world,
+        coord,
+        chunk->min_mesh_y(),
+        chunk->max_mesh_y(),
+        vertex_reserve_hint,
+        index_reserve_hint);
+}
+
+auto ChunkMesher::build_mesh_range(const World& world,
+                                   const ChunkCoord& coord,
+                                   int min_y,
+                                   int max_y,
+                                   std::size_t vertex_reserve_hint,
+                                   std::size_t index_reserve_hint) const -> ChunkMeshData {
     ChunkMeshData mesh {};
     const auto* chunk = world.find_chunk(coord);
     if (chunk == nullptr) {
@@ -667,19 +705,25 @@ auto ChunkMesher::build_mesh(const World& world,
         return mesh;
     }
 
+    const auto clamped_min_y = std::max(chunk->min_mesh_y(), min_y);
+    const auto clamped_max_y = std::min(chunk->max_mesh_y(), max_y);
+    if (clamped_max_y < clamped_min_y) {
+        return mesh;
+    }
+
     mesh.vertices.reserve(vertex_reserve_hint > 0 ? vertex_reserve_hint : 2048U);
     mesh.indices.reserve(index_reserve_hint > 0 ? index_reserve_hint : 3072U);
     mesh.water_vertices.reserve(512U);
     mesh.water_indices.reserve(768U);
 
-    const auto min_y = std::max(kWorldMinY, chunk->min_mesh_y() - 1);
-    const auto max_y = std::min(kWorldMaxY, chunk->max_mesh_y() + 1);
-    const auto neighborhood = build_neighborhood(world, coord, min_y, max_y);
+    const auto cached_min_y = std::max(kWorldMinY, clamped_min_y - 1);
+    const auto cached_max_y = std::min(kWorldMaxY, clamped_max_y + 1);
+    const auto neighborhood = build_neighborhood(world, coord, cached_min_y, cached_max_y);
     const auto chunk_world_x = coord.x * kChunkSizeX;
     const auto chunk_world_z = coord.z * kChunkSizeZ;
     const auto& chunk_blocks = chunk->blocks();
 
-    for (int y = chunk->min_mesh_y(); y <= chunk->max_mesh_y(); ++y) {
+    for (int y = clamped_min_y; y <= clamped_max_y; ++y) {
         for (int z = 0; z < kChunkSizeZ; ++z) {
             for (int x = 0; x < kChunkSizeX; ++x) {
                 const auto block_id = chunk_blocks[chunk_linear_index(x, y, z)];

@@ -15,11 +15,15 @@ constexpr std::uint8_t kMaxItemStackCount = 64;
 struct HotbarSlot {
     BlockId block_id = to_block_id(BlockType::Air);
     std::uint8_t count = 0;
+
+    auto operator==(const HotbarSlot&) const -> bool = default;
 };
 
 struct HotbarState {
     std::array<HotbarSlot, kHotbarSlotCount> slots {};
     std::size_t selected_index = 0;
+
+    auto operator==(const HotbarState&) const -> bool = default;
 
     [[nodiscard]] constexpr auto selected_slot() const noexcept -> const HotbarSlot& {
         return slots[selected_index];

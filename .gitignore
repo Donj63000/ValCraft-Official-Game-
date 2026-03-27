@@ -15,6 +15,10 @@ perf-artifacts/
 build-errors*.txt
 compile-out*.txt
 configure-*.txt
+*.log
+*.err
+*-log.txt
+*-gcc.json
 test-output.txt
 test-summary*.txt
 valcraft-performance-patch.diff

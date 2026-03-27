@@ -13,22 +13,22 @@ constexpr int kCreatureAtlasTileSize = 16;
 constexpr float kCreatureAtlasTilesPerAxis = 8.0F;
 
 enum class CreatureAtlasTile : std::uint8_t {
-    RabbitCoat = 0,
-    RabbitBelly = 1,
-    RabbitEarInner = 2,
-    RabbitNose = 3,
-    FennecCoat = 4,
-    FennecBack = 5,
-    FennecEarInner = 6,
-    FennecTail = 7,
-    LambWoolLight = 8,
-    LambWoolShadow = 9,
-    LambFace = 10,
-    HoofHorn = 11,
-    NightmareFlesh = 12,
-    NightmareBone = 13,
-    NightmareScar = 14,
-    NightmareEye = 15,
+    PigHide = 0,
+    PigSnout = 1,
+    PigEar = 2,
+    CowHide = 3,
+    CowMuzzle = 4,
+    CowHorn = 5,
+    SheepWool = 6,
+    SheepFace = 7,
+    SheepHoof = 8,
+    ZombieFlesh = 9,
+    ZombieBone = 10,
+    ZombieMouth = 11,
+    ZombieTeeth = 12,
+    ZombieEye = 13,
+    ZombieVein = 14,
+    ZombieScar = 15,
 };
 
 struct CreatureVertex {

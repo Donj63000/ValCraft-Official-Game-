@@ -10,8 +10,10 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace valcraft {
@@ -57,6 +59,21 @@ TEST_CASE("game option parser rejects smoke-only perf flags outside smoke mode")
 
     CHECK_FALSE(parsed.ok);
     CHECK(parsed.error_message.find("require --smoke-test") != std::string::npos);
+}
+
+TEST_CASE("default performance options favor lighter frame pacing defaults") {
+    const PerformanceOptions options {};
+
+    CHECK(options.chunk_generation_budget == 2);
+    CHECK(options.mesh_rebuild_budget == 4);
+    CHECK(options.light_node_budget == 8192);
+    CHECK(options.max_generation_ms == doctest::Approx(1.0));
+    CHECK(options.max_lighting_ms == doctest::Approx(1.5));
+    CHECK(options.max_meshing_ms == doctest::Approx(2.0));
+    CHECK(options.stream_radius == 5);
+    CHECK(options.shadows_enabled);
+    CHECK(options.shadow_map_size == 1024);
+    CHECK_FALSE(options.post_process_enabled);
 }
 
 TEST_CASE("dominant stage detection chooses the largest measured subsystem") {
@@ -230,21 +247,106 @@ TEST_CASE("hotbar selection supports number keys and mouse wheel wrap") {
     CHECK(selected_hotbar_block(hotbar) == to_block_id(BlockType::Air));
 }
 
-TEST_CASE("hotbar layout stays centered and keeps empty slots visually distinct") {
+TEST_CASE("hotbar layout stays centered and anchored to the bottom across resolutions") {
     auto hotbar = make_default_hotbar_state();
     select_hotbar_index(hotbar, 6);
 
-    const auto layout = build_hotbar_layout(1600, 900, hotbar);
+    const std::array<std::pair<int, int>, 3> viewports {{{1600, 900}, {960, 540}, {480, 320}}};
+    for (const auto& [width, height] : viewports) {
+        const auto layout = build_hotbar_layout(width, height, hotbar);
 
-    CHECK(layout.slots.size() == kHotbarSlotCount);
-    CHECK(layout.bar_left + layout.bar_width * 0.5F == doctest::Approx(800.0F));
-    CHECK(layout.bar_bottom >= layout.safe_margin);
-    CHECK(layout.slots[6].is_selected);
-    CHECK(layout.slots[6].has_icon);
-    CHECK(layout.slots[6].icon_tile == HotbarAtlasTile {0, 3});
-    CHECK(layout.slots[7].has_icon);
-    CHECK(layout.slots[7].icon_tile == HotbarAtlasTile {7, 2});
-    CHECK_FALSE(layout.slots[8].has_icon);
+        CHECK(layout.slots.size() == kHotbarSlotCount);
+        CHECK(layout.bar_left + layout.bar_width * 0.5F == doctest::Approx(static_cast<float>(width) * 0.5F));
+        CHECK(layout.bar_bottom == doctest::Approx(layout.safe_margin));
+        CHECK(layout.bar_bottom < static_cast<float>(height) * 0.5F);
+    }
+
+    const auto wide_layout = build_hotbar_layout(1600, 900, hotbar);
+    CHECK(wide_layout.slots[6].is_selected);
+    CHECK(wide_layout.slots[6].has_icon);
+    CHECK(wide_layout.slots[6].icon_tile == HotbarAtlasTile {0, 3});
+    CHECK(wide_layout.slots[7].has_icon);
+    CHECK(wide_layout.slots[7].icon_tile == HotbarAtlasTile {7, 2});
+    CHECK_FALSE(wide_layout.slots[8].has_icon);
+}
+
+TEST_CASE("gameplay hud layout keeps the gameplay cluster out of the top half across resolutions") {
+    auto hotbar = make_default_hotbar_state();
+    select_hotbar_index(hotbar, 6);
+
+    const std::array<std::pair<int, int>, 3> viewports {{{1600, 900}, {960, 540}, {480, 320}}};
+    for (const auto& [width, height] : viewports) {
+        const auto layout = build_gameplay_hud_layout(width, height, hotbar, 20.0F, 20.0F, 10.0F, 10.0F, false);
+
+        CHECK(layout.hotbar.bar_left + layout.hotbar.bar_width * 0.5F == doctest::Approx(static_cast<float>(width) * 0.5F));
+        CHECK(layout.hotbar.bar_bottom >= layout.safe_margin);
+        CHECK(layout.hotbar_panel_bottom < static_cast<float>(height) * 0.5F);
+        CHECK(layout.cluster_bottom < static_cast<float>(height) * 0.5F);
+        CHECK(layout.cluster_top < static_cast<float>(height) * 0.5F);
+        CHECK(layout.vitals_bottom > layout.hotbar_top);
+        CHECK(layout.label.center_x == doctest::Approx(static_cast<float>(width) * 0.5F));
+        CHECK(gameplay_hud_label_top(layout.label) == doctest::Approx(layout.cluster_top));
+    }
+}
+
+TEST_CASE("gameplay hud layout places hearts left bubbles right and only flags air row when needed") {
+    auto hotbar = make_default_hotbar_state();
+    select_hotbar_index(hotbar, 0);
+
+    const auto dry_layout = build_gameplay_hud_layout(1600, 900, hotbar, 17.0F, 20.0F, 10.0F, 10.0F, false);
+    CHECK_FALSE(dry_layout.air_visible);
+    CHECK(dry_layout.hearts.front().bottom > dry_layout.hotbar_top);
+    CHECK(dry_layout.hearts.back().x < dry_layout.label.center_x);
+    CHECK(dry_layout.slots[0].bottom > dry_layout.slots[1].bottom);
+    CHECK(dry_layout.slots[0].count_bottom > dry_layout.slots[0].bottom);
+    CHECK_FALSE(dry_layout.slots[8].has_icon);
+    CHECK(dry_layout.label.center_x == doctest::Approx(dry_layout.hotbar.bar_left + dry_layout.hotbar.bar_width * 0.5F));
+    CHECK(dry_layout.label.bottom > gameplay_hud_vital_top(dry_layout.hearts.front()));
+
+    const auto underwater_layout = build_gameplay_hud_layout(1600, 900, hotbar, 17.0F, 20.0F, 6.5F, 10.0F, true);
+    CHECK(underwater_layout.air_visible);
+    CHECK(underwater_layout.bubbles.front().bottom == doctest::Approx(underwater_layout.vitals_bottom));
+    CHECK(underwater_layout.bubbles.front().x > underwater_layout.label.center_x);
+    CHECK(underwater_layout.label.bottom > gameplay_hud_vital_top(underwater_layout.bubbles.front()));
+}
+
+TEST_CASE("vital glyph mapping resolves full half and empty states for hearts and bubbles") {
+    const auto full_hearts = build_vital_glyph_fills<kHudVitalGlyphCount>(20.0F, 20.0F);
+    CHECK(std::all_of(full_hearts.begin(), full_hearts.end(), [](HudGlyphFill fill) { return fill == HudGlyphFill::Full; }));
+
+    const auto wounded_hearts = build_vital_glyph_fills<kHudVitalGlyphCount>(19.0F, 20.0F);
+    CHECK(std::count(wounded_hearts.begin(), wounded_hearts.end(), HudGlyphFill::Full) == 9);
+    CHECK(std::count(wounded_hearts.begin(), wounded_hearts.end(), HudGlyphFill::Half) == 1);
+    CHECK(std::count(wounded_hearts.begin(), wounded_hearts.end(), HudGlyphFill::Empty) == 0);
+
+    const auto mid_air = build_vital_glyph_fills<kHudVitalGlyphCount>(6.5F, 10.0F);
+    CHECK(std::count(mid_air.begin(), mid_air.end(), HudGlyphFill::Full) == 6);
+    CHECK(std::count(mid_air.begin(), mid_air.end(), HudGlyphFill::Half) == 1);
+    CHECK(std::count(mid_air.begin(), mid_air.end(), HudGlyphFill::Empty) == 3);
+
+    const auto empty_row = build_vital_glyph_fills<kHudVitalGlyphCount>(0.0F, 10.0F);
+    CHECK(std::all_of(empty_row.begin(), empty_row.end(), [](HudGlyphFill fill) { return fill == HudGlyphFill::Empty; }));
+}
+
+TEST_CASE("gameplay hud slot mapping keeps empty slots and stack counters stable") {
+    HotbarState hotbar {};
+    hotbar.slots[0] = make_item_stack(to_block_id(BlockType::Stone), 1);
+    hotbar.slots[1] = make_item_stack(to_block_id(BlockType::Stone), 12);
+    hotbar.slots[2] = empty_item_stack();
+    select_hotbar_index(hotbar, 1);
+
+    const auto layout = build_gameplay_hud_layout(960, 540, hotbar, 20.0F, 20.0F, 10.0F, 10.0F, false);
+
+    CHECK(layout.slots[0].has_icon);
+    CHECK_FALSE(layout.slots[0].show_stack_count);
+    CHECK(layout.slots[1].has_icon);
+    CHECK(layout.slots[1].show_stack_count);
+    CHECK(layout.slots[1].count_bottom > layout.slots[1].bottom);
+    CHECK_FALSE(layout.slots[2].has_icon);
+    CHECK_FALSE(layout.slots[2].show_stack_count);
+    CHECK_FALSE(gameplay_hud_stack_count_visible(hotbar.slots[0]));
+    CHECK(gameplay_hud_stack_count_visible(hotbar.slots[1]));
+    CHECK_FALSE(gameplay_hud_stack_count_visible(hotbar.slots[2]));
 }
 
 TEST_CASE("pause menu layout stays centered and resolves hovered enabled buttons") {

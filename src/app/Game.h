@@ -56,7 +56,8 @@ private:
     auto initialize() -> bool;
     void shutdown();
     void process_events();
-    void update(float dt, FramePerformanceStats& frame_stats);
+    void update_simulation(float dt, FramePerformanceStats& frame_stats);
+    void update_world_pipeline(FramePerformanceStats& frame_stats);
     void set_mouse_capture(bool captured);
     void set_death_screen_visible(bool visible, PlayerDeathCause cause = PlayerDeathCause::None);
     void set_paused(bool paused);

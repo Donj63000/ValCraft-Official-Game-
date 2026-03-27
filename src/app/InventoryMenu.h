@@ -39,6 +39,8 @@ struct InventoryMenuState {
     HotbarSlot carried_slot {};
     bool carrying_item = false;
     std::optional<InventorySlotRef> hovered_slot {};
+
+    auto operator==(const InventoryMenuState&) const -> bool = default;
 };
 
 struct InventorySlotLayout {

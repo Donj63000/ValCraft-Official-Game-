@@ -45,6 +45,71 @@ constexpr std::array<BlockCoord, 6> kLightNeighborOffsets {{
 constexpr auto kUnlimitedBudget = std::numeric_limits<std::size_t>::max() / 4U;
 constexpr auto kSkyColumnCount = static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
 constexpr auto kMeshInvalidationPriorityRadius = 2;
+constexpr std::size_t kLightingTimeCheckInterval = 128;
+
+enum class LightingRegionSlot : std::uint8_t {
+    Center = 0,
+    PosX = 1,
+    NegX = 2,
+    PosZ = 3,
+    NegZ = 4,
+    Invalid = 255,
+};
+
+constexpr std::array<LightingRegionSlot, 5> kLightingRegionSlotOrder {{
+    LightingRegionSlot::Center,
+    LightingRegionSlot::PosX,
+    LightingRegionSlot::NegX,
+    LightingRegionSlot::PosZ,
+    LightingRegionSlot::NegZ,
+}};
+
+auto lighting_region_slot_index(LightingRegionSlot slot) noexcept -> std::size_t {
+    return static_cast<std::size_t>(slot);
+}
+
+auto lighting_region_slot_for(const ChunkCoord& anchor, const ChunkCoord& coord) noexcept -> LightingRegionSlot {
+    const auto dx = coord.x - anchor.x;
+    const auto dz = coord.z - anchor.z;
+    if (dx == 0 && dz == 0) {
+        return LightingRegionSlot::Center;
+    }
+    if (dx == 1 && dz == 0) {
+        return LightingRegionSlot::PosX;
+    }
+    if (dx == -1 && dz == 0) {
+        return LightingRegionSlot::NegX;
+    }
+    if (dx == 0 && dz == 1) {
+        return LightingRegionSlot::PosZ;
+    }
+    if (dx == 0 && dz == -1) {
+        return LightingRegionSlot::NegZ;
+    }
+    return LightingRegionSlot::Invalid;
+}
+
+auto lighting_region_coord_for(const ChunkCoord& anchor, LightingRegionSlot slot) noexcept -> ChunkCoord {
+    switch (slot) {
+    case LightingRegionSlot::Center:
+        return anchor;
+    case LightingRegionSlot::PosX:
+        return {anchor.x + 1, anchor.z};
+    case LightingRegionSlot::NegX:
+        return {anchor.x - 1, anchor.z};
+    case LightingRegionSlot::PosZ:
+        return {anchor.x, anchor.z + 1};
+    case LightingRegionSlot::NegZ:
+        return {anchor.x, anchor.z - 1};
+    case LightingRegionSlot::Invalid:
+        break;
+    }
+    return anchor;
+}
+
+auto has_time_budget(double max_ms) noexcept -> bool {
+    return std::isfinite(max_ms);
+}
 
 auto sky_column_index(int local_x, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>(local_z * kChunkSizeX + local_x);
@@ -52,6 +117,37 @@ auto sky_column_index(int local_x, int local_z) noexcept -> std::size_t {
 
 auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
+}
+
+auto section_min_y(std::size_t section_index) noexcept -> int {
+    return static_cast<int>(section_index * static_cast<std::size_t>(kChunkSectionHeight));
+}
+
+auto section_max_y(std::size_t section_index) noexcept -> int {
+    return std::min(kWorldMaxY, section_min_y(section_index) + kChunkSectionHeight - 1);
+}
+
+void append_chunk_mesh_section(ChunkMeshData& destination, const ChunkMeshData& section_mesh) {
+    if (!section_mesh.vertices.empty()) {
+        const auto base_index = static_cast<std::uint32_t>(destination.vertices.size());
+        destination.vertices.insert(destination.vertices.end(), section_mesh.vertices.begin(), section_mesh.vertices.end());
+        destination.indices.reserve(destination.indices.size() + section_mesh.indices.size());
+        for (const auto index : section_mesh.indices) {
+            destination.indices.push_back(base_index + index);
+        }
+    }
+
+    if (!section_mesh.water_vertices.empty()) {
+        const auto base_water_index = static_cast<std::uint32_t>(destination.water_vertices.size());
+        destination.water_vertices.insert(destination.water_vertices.end(), section_mesh.water_vertices.begin(), section_mesh.water_vertices.end());
+        destination.water_indices.reserve(destination.water_indices.size() + section_mesh.water_indices.size());
+        for (const auto index : section_mesh.water_indices) {
+            destination.water_indices.push_back(base_water_index + index);
+        }
+    }
+
+    destination.face_count += section_mesh.face_count;
+    destination.water_face_count += section_mesh.water_face_count;
 }
 
 } // namespace
@@ -68,7 +164,9 @@ World::World(int seed, int stream_radius)
     deferred_mesh_invalidation_set_.reserve(max_loaded_chunks);
     pending_lighting_set_.reserve(max_loaded_chunks);
     pending_lighting_coverage_.reserve(max_loaded_chunks);
-    active_lighting_coverage_.reserve(1U + kNeighborOffsets.size());
+    active_lighting_coverage_.reserve(kLightingRegionSlotOrder.size());
+    pending_gpu_upload_set_.reserve(max_loaded_chunks);
+    pending_gpu_unload_set_.reserve(max_loaded_chunks);
 }
 
 auto World::get_block(int x, int y, int z) const -> BlockId {
@@ -304,18 +402,18 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
     WorldWorkStats stats {};
 
     const auto generation_start = clock::now();
-    process_generation_queue(budget.chunk_generation_budget, stats);
+    process_generation_queue(budget.chunk_generation_budget, budget.max_generation_ms, stats);
     stats.generation_ms =
         std::chrono::duration<double, std::milli>(clock::now() - generation_start).count();
 
     const auto lighting_start = clock::now();
-    process_lighting_queue(budget.light_node_budget, stats);
+    process_lighting_queue(budget.light_node_budget, budget.max_lighting_ms, stats);
     stats.lighting_ms =
         std::chrono::duration<double, std::milli>(clock::now() - lighting_start).count();
     flush_deferred_mesh_invalidations();
 
     const auto meshing_start = clock::now();
-    process_mesh_queue(budget.mesh_rebuild_budget, stats);
+    process_mesh_queue(budget.mesh_rebuild_budget, budget.max_meshing_ms, stats);
     stats.meshing_ms =
         std::chrono::duration<double, std::milli>(clock::now() - meshing_start).count();
 
@@ -332,7 +430,7 @@ void World::rebuild_lighting() {
         if (!active_lighting_job_.has_value() && pending_lighting_queue_.empty()) {
             break;
         }
-        process_lighting_queue(kUnlimitedBudget, stats);
+        process_lighting_queue(kUnlimitedBudget, std::numeric_limits<double>::infinity(), stats);
     }
     flush_deferred_mesh_invalidations();
 }
@@ -346,7 +444,7 @@ void World::rebuild_dirty_meshes() {
         if (pending_priority_mesh_queue_.empty() && pending_mesh_queue_.empty()) {
             break;
         }
-        process_mesh_queue(kUnlimitedBudget, stats);
+        process_mesh_queue(kUnlimitedBudget, std::numeric_limits<double>::infinity(), stats);
     }
 }
 
@@ -374,6 +472,37 @@ auto World::chunk_records() const noexcept -> const std::unordered_map<ChunkCoor
     return chunks_;
 }
 
+auto World::consume_pending_gpu_uploads(std::size_t max_count) -> std::vector<ChunkCoord> {
+    std::vector<ChunkCoord> uploads;
+    uploads.reserve(std::min(max_count, pending_gpu_uploads_.size()));
+    while (!pending_gpu_uploads_.empty() && uploads.size() < max_count) {
+        const auto coord = pending_gpu_uploads_.front();
+        pending_gpu_uploads_.pop_front();
+        if (!pending_gpu_upload_set_.erase(coord)) {
+            continue;
+        }
+        if (!chunks_.contains(coord)) {
+            continue;
+        }
+        uploads.push_back(coord);
+    }
+    return uploads;
+}
+
+auto World::consume_pending_gpu_unloads(std::size_t max_count) -> std::vector<ChunkCoord> {
+    std::vector<ChunkCoord> unloads;
+    unloads.reserve(std::min(max_count, pending_gpu_unloads_.size()));
+    while (!pending_gpu_unloads_.empty() && unloads.size() < max_count) {
+        const auto coord = pending_gpu_unloads_.front();
+        pending_gpu_unloads_.pop_front();
+        if (!pending_gpu_unload_set_.erase(coord)) {
+            continue;
+        }
+        unloads.push_back(coord);
+    }
+    return unloads;
+}
+
 auto World::seed() const noexcept -> int {
     return generator_.seed();
 }
@@ -391,14 +520,7 @@ auto World::surface_height(int world_x, int world_z) -> int {
         return 0;
     }
 
-    const auto& blocks = chunk->blocks();
-    for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
-        if (is_block_surface_support(blocks[chunk_linear_index(local.x, y, local.z)])) {
-            return y;
-        }
-    }
-
-    return 0;
+    return std::max(0, chunk->surface_height_local(local.x, local.z));
 }
 
 auto World::loaded_surface_height(int world_x, int world_z) const -> std::optional<int> {
@@ -409,14 +531,7 @@ auto World::loaded_surface_height(int world_x, int world_z) const -> std::option
     }
 
     const auto local = world_to_local(world_x, 0, world_z);
-    const auto& blocks = chunk->blocks();
-    for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
-        if (is_block_surface_support(blocks[chunk_linear_index(local.x, y, local.z)])) {
-            return y;
-        }
-    }
-
-    return 0;
+    return std::max(0, chunk->surface_height_local(local.x, local.z));
 }
 
 auto World::pending_generation_count() const noexcept -> std::size_t {
@@ -482,27 +597,53 @@ auto World::positive_mod(int value, int divisor) noexcept -> int {
 
 void World::mark_chunk_and_neighbors_dirty(const ChunkCoord& coord, const BlockCoord& local) {
     if (auto* chunk = find_chunk(coord); chunk != nullptr) {
-        chunk->mark_dirty();
+        chunk->mark_section_dirty_for_y(local.y);
     }
 
-    if (local.x == 0) {
+    const auto touches_neg_x = local.x == 0;
+    const auto touches_pos_x = local.x == kChunkSizeX - 1;
+    const auto touches_neg_z = local.z == 0;
+    const auto touches_pos_z = local.z == kChunkSizeZ - 1;
+
+    if (touches_neg_x) {
         if (auto* neighbor = find_chunk({coord.x - 1, coord.z}); neighbor != nullptr) {
-            neighbor->mark_dirty();
+            neighbor->mark_section_dirty_for_y(local.y);
         }
     }
-    if (local.x == kChunkSizeX - 1) {
+    if (touches_pos_x) {
         if (auto* neighbor = find_chunk({coord.x + 1, coord.z}); neighbor != nullptr) {
-            neighbor->mark_dirty();
+            neighbor->mark_section_dirty_for_y(local.y);
         }
     }
-    if (local.z == 0) {
+    if (touches_neg_z) {
         if (auto* neighbor = find_chunk({coord.x, coord.z - 1}); neighbor != nullptr) {
-            neighbor->mark_dirty();
+            neighbor->mark_section_dirty_for_y(local.y);
         }
     }
-    if (local.z == kChunkSizeZ - 1) {
+    if (touches_pos_z) {
         if (auto* neighbor = find_chunk({coord.x, coord.z + 1}); neighbor != nullptr) {
-            neighbor->mark_dirty();
+            neighbor->mark_section_dirty_for_y(local.y);
+        }
+    }
+
+    if (touches_neg_x && touches_neg_z) {
+        if (auto* neighbor = find_chunk({coord.x - 1, coord.z - 1}); neighbor != nullptr) {
+            neighbor->mark_section_dirty_for_y(local.y);
+        }
+    }
+    if (touches_neg_x && touches_pos_z) {
+        if (auto* neighbor = find_chunk({coord.x - 1, coord.z + 1}); neighbor != nullptr) {
+            neighbor->mark_section_dirty_for_y(local.y);
+        }
+    }
+    if (touches_pos_x && touches_neg_z) {
+        if (auto* neighbor = find_chunk({coord.x + 1, coord.z - 1}); neighbor != nullptr) {
+            neighbor->mark_section_dirty_for_y(local.y);
+        }
+    }
+    if (touches_pos_x && touches_pos_z) {
+        if (auto* neighbor = find_chunk({coord.x + 1, coord.z + 1}); neighbor != nullptr) {
+            neighbor->mark_section_dirty_for_y(local.y);
         }
     }
 }
@@ -546,7 +687,7 @@ void World::load_chunk_immediate(const ChunkCoord& coord) {
     }
 
     generator_.generate_chunk(iterator->second.chunk);
-    refresh_chunk_emissive_cache(iterator->second);
+    iterator->second.emissive_blocks.clear();
     iterator->second.sky_columns_dirty.set();
     iterator->second.chunk.mark_dirty();
     iterator->second.chunk.mark_lighting_dirty();
@@ -628,9 +769,9 @@ void World::prune_generation_queue(WorldStreamingStats& stats) {
     pending_generation_queue_ = std::move(kept_coords);
 }
 
-void World::invalidate_loaded_mesh_neighbors_for_chunk_load(const ChunkCoord& coord) {
-    // Chunk meshes bake AO and vertex light from a 3x3 chunk neighborhood, so a newly
-    // available neighbor invalidates any already-built surrounding mesh that sampled it as air.
+void World::invalidate_loaded_mesh_neighbors(const ChunkCoord& coord, bool defer_if_lighting_pending) {
+    // Chunk meshes bake AO and vertex light from a 3x3 chunk neighborhood, so any
+    // block/light availability change must invalidate already-built surrounding meshes.
     for (const auto& offset : kMeshNeighborOffsets) {
         const ChunkCoord neighbor_coord {coord.x + offset.x, coord.z + offset.z};
         const auto iterator = chunks_.find(neighbor_coord);
@@ -638,7 +779,8 @@ void World::invalidate_loaded_mesh_neighbors_for_chunk_load(const ChunkCoord& co
             continue;
         }
 
-        if (lighting_anchor_affects(neighbor_coord, coord) || chunk_has_pending_lighting(neighbor_coord)) {
+        if (defer_if_lighting_pending &&
+            (lighting_anchor_affects(neighbor_coord, coord) || chunk_has_pending_lighting(neighbor_coord))) {
             deferred_mesh_invalidation_set_.insert(neighbor_coord);
             continue;
         }
@@ -646,6 +788,48 @@ void World::invalidate_loaded_mesh_neighbors_for_chunk_load(const ChunkCoord& co
         iterator->second.chunk.mark_dirty();
         enqueue_mesh_rebuild(neighbor_coord, should_prioritize_mesh_invalidation(neighbor_coord));
     }
+}
+
+void World::invalidate_loaded_mesh_neighbors_for_sections(
+    const ChunkCoord& coord,
+    const std::array<bool, kChunkSectionCount>& dirty_sections) {
+    for (const auto& offset : kMeshNeighborOffsets) {
+        const ChunkCoord neighbor_coord {coord.x + offset.x, coord.z + offset.z};
+        auto* neighbor = find_chunk(neighbor_coord);
+        if (neighbor == nullptr) {
+            continue;
+        }
+
+        const auto mesh_iterator = chunks_.find(neighbor_coord);
+        if (mesh_iterator == chunks_.end() || mesh_iterator->second.mesh_revision == 0) {
+            continue;
+        }
+
+        bool neighbor_dirty = false;
+        for (std::size_t section_index = 0; section_index < dirty_sections.size(); ++section_index) {
+            if (!dirty_sections[section_index]) {
+                continue;
+            }
+            neighbor->mark_section_dirty(section_index);
+            if (section_index > 0) {
+                neighbor->mark_section_dirty(section_index - 1);
+            }
+            if (section_index + 1 < dirty_sections.size()) {
+                neighbor->mark_section_dirty(section_index + 1);
+            }
+            neighbor_dirty = true;
+        }
+
+        if (!neighbor_dirty) {
+            continue;
+        }
+
+        enqueue_mesh_rebuild(neighbor_coord, should_prioritize_mesh_invalidation(neighbor_coord));
+    }
+}
+
+void World::invalidate_loaded_mesh_neighbors_for_chunk_load(const ChunkCoord& coord) {
+    invalidate_loaded_mesh_neighbors(coord, true);
 }
 
 void World::flush_deferred_mesh_invalidations() {
@@ -725,7 +909,6 @@ void World::enqueue_mesh_rebuild(const ChunkCoord& coord, bool prioritize) {
 void World::enqueue_dirty_chunks() {
     for (auto& [coord, record] : chunks_) {
         if (record.chunk.is_lighting_dirty()) {
-            refresh_chunk_emissive_cache(record);
             if (record.sky_columns_dirty.none()) {
                 record.sky_columns_dirty.set();
             }
@@ -736,9 +919,25 @@ void World::enqueue_dirty_chunks() {
     }
 }
 
-void World::process_generation_queue(std::size_t budget, WorldWorkStats& stats) {
+void World::process_generation_queue(std::size_t budget, double max_ms, WorldWorkStats& stats) {
+    using clock = std::chrono::steady_clock;
+
+    if (budget == 0) {
+        return;
+    }
+
+    const auto time_limited = has_time_budget(max_ms);
+    if (time_limited && max_ms <= 0.0) {
+        return;
+    }
+
+    const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
     auto remaining = budget;
     while (remaining > 0 && !pending_generation_queue_.empty()) {
+        if (time_limited && clock::now() >= deadline) {
+            break;
+        }
+
         const auto coord = pending_generation_queue_.front();
         pending_generation_queue_.pop_front();
         pending_generation_set_.erase(coord);
@@ -753,8 +952,17 @@ void World::process_generation_queue(std::size_t budget, WorldWorkStats& stats) 
     }
 }
 
-void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
+void World::process_lighting_queue(std::size_t budget, double max_ms, WorldWorkStats& stats) {
+    using clock = std::chrono::steady_clock;
+
     auto remaining = budget;
+    const auto time_limited = has_time_budget(max_ms);
+    if (time_limited && max_ms <= 0.0) {
+        return;
+    }
+
+    const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
+    std::size_t processed_since_deadline_check = 0;
 
     while (true) {
         if (!active_lighting_job_.has_value()) {
@@ -773,8 +981,11 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
                 }
 
                 active_lighting_coverage_.clear();
-                for (const auto& covered_coord : job.region) {
-                    active_lighting_coverage_.insert(covered_coord);
+                for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+                    if (!job.region_present[slot_index]) {
+                        continue;
+                    }
+                    active_lighting_coverage_.insert(job.region_coords[slot_index]);
                 }
                 active_lighting_job_ = std::move(job);
                 break;
@@ -797,11 +1008,18 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
         if (remaining == 0) {
             break;
         }
+        if (time_limited && processed_since_deadline_check == 0 && clock::now() >= deadline) {
+            break;
+        }
 
         const auto node = job.queue.front();
         job.queue.pop_front();
         ++stats.light_nodes_processed;
         --remaining;
+        ++processed_since_deadline_check;
+        if (processed_since_deadline_check == kLightingTimeCheckInterval) {
+            processed_since_deadline_check = 0;
+        }
 
         if (node.light_level <= 1) {
             continue;
@@ -819,7 +1037,7 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
             }
 
             const auto chunk_coord = world_to_chunk(neighbor.x, neighbor.z);
-            if (!lighting_region_contains(job.region, chunk_coord)) {
+            if (!lighting_region_contains(job, chunk_coord)) {
                 continue;
             }
 
@@ -839,11 +1057,23 @@ void World::process_lighting_queue(std::size_t budget, WorldWorkStats& stats) {
     }
 }
 
-void World::process_mesh_queue(std::size_t budget, WorldWorkStats& stats) {
+void World::process_mesh_queue(std::size_t budget, double max_ms, WorldWorkStats& stats) {
+    using clock = std::chrono::steady_clock;
+
+    const auto time_limited = has_time_budget(max_ms);
+    if (time_limited && max_ms <= 0.0) {
+        return;
+    }
+
+    const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
     auto remaining_normal = budget;
     while (!pending_priority_mesh_queue_.empty() ||
            (remaining_normal > 0 && !pending_mesh_queue_.empty())) {
         const auto prioritize = !pending_priority_mesh_queue_.empty();
+        if (!prioritize && time_limited && clock::now() >= deadline) {
+            break;
+        }
+
         const auto coord = prioritize ? pending_priority_mesh_queue_.front() : pending_mesh_queue_.front();
         if (prioritize) {
             pending_priority_mesh_queue_.pop_front();
@@ -880,16 +1110,12 @@ void World::process_mesh_queue(std::size_t budget, WorldWorkStats& stats) {
 
 auto World::collect_lighting_region(const ChunkCoord& anchor) const -> std::vector<ChunkCoord> {
     std::vector<ChunkCoord> region;
-    region.reserve(1U + kNeighborOffsets.size());
+    region.reserve(kLightingRegionSlotOrder.size());
 
-    if (find_chunk(anchor) != nullptr) {
-        region.push_back(anchor);
-    }
-
-    for (const auto& offset : kNeighborOffsets) {
-        const ChunkCoord neighbor {anchor.x + offset.x, anchor.z + offset.z};
-        if (find_chunk(neighbor) != nullptr) {
-            region.push_back(neighbor);
+    for (const auto slot : kLightingRegionSlotOrder) {
+        const auto coord = lighting_region_coord_for(anchor, slot);
+        if (find_chunk(coord) != nullptr) {
+            region.push_back(coord);
         }
     }
 
@@ -897,30 +1123,40 @@ auto World::collect_lighting_region(const ChunkCoord& anchor) const -> std::vect
 }
 
 auto World::initialize_lighting_job(LightingJob& job) -> bool {
-    job.region = collect_lighting_region(job.anchor);
-    if (job.region.empty()) {
-        return false;
+    job.queue.clear();
+    job.region_present.fill(false);
+    job.changed_chunks.fill(false);
+    job.block_light_difference_counts.fill(0U);
+    for (auto& column_bits : job.processed_sky_columns) {
+        column_bits.reset();
+    }
+    for (auto& block_light_buffer : job.block_light_buffers) {
+        block_light_buffer.assign(kChunkVolume, 0);
     }
 
-    job.block_light_buffers.clear();
-    job.block_light_buffers.reserve(job.region.size());
-    job.processed_sky_columns.clear();
-    job.processed_sky_columns.reserve(job.region.size());
-    job.changed_chunks.assign(job.region.size(), false);
-    for (const auto& coord : job.region) {
-        (void)coord;
-        job.block_light_buffers.emplace_back(kChunkVolume, 0);
-    }
-
-    for (const auto& coord : job.region) {
+    bool has_loaded_chunk = false;
+    for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+        const auto coord = lighting_region_coord_for(job.anchor, kLightingRegionSlotOrder[slot_index]);
+        job.region_coords[slot_index] = coord;
         const auto iterator = chunks_.find(coord);
         if (iterator == chunks_.end()) {
-            job.processed_sky_columns.emplace_back();
             continue;
         }
 
-        job.processed_sky_columns.push_back(iterator->second.sky_columns_dirty);
+        has_loaded_chunk = true;
+        job.region_present[slot_index] = true;
+        job.block_light_difference_counts[slot_index] = static_cast<std::size_t>(std::count_if(
+            iterator->second.chunk.block_light().begin(),
+            iterator->second.chunk.block_light().end(),
+            [](std::uint8_t light_level) {
+                return light_level != 0;
+            }));
+        job.processed_sky_columns[slot_index] = iterator->second.sky_columns_dirty;
         iterator->second.sky_columns_dirty.reset();
+    }
+
+    if (!has_loaded_chunk) {
+        return false;
     }
 
     rebuild_local_sky_light(job);
@@ -929,13 +1165,19 @@ auto World::initialize_lighting_job(LightingJob& job) -> bool {
 }
 
 void World::rebuild_local_sky_light(LightingJob& job) {
-    for (std::size_t chunk_index = 0; chunk_index < job.region.size(); ++chunk_index) {
-        auto* chunk = find_chunk(job.region[chunk_index]);
-        if (chunk == nullptr) {
+    for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+        if (!job.region_present[slot_index]) {
             continue;
         }
 
-        auto column_bits = job.processed_sky_columns[chunk_index];
+        const auto coord = job.region_coords[slot_index];
+        auto iterator = chunks_.find(coord);
+        if (iterator == chunks_.end()) {
+            continue;
+        }
+
+        auto& chunk = iterator->second.chunk;
+        auto column_bits = job.processed_sky_columns[slot_index];
         for (std::size_t bit_index = 0; bit_index < kSkyColumnCount; ++bit_index) {
             if (!column_bits.test(bit_index)) {
                 continue;
@@ -943,16 +1185,20 @@ void World::rebuild_local_sky_light(LightingJob& job) {
 
             const auto local_x = static_cast<int>(bit_index % static_cast<std::size_t>(kChunkSizeX));
             const auto local_z = static_cast<int>(bit_index / static_cast<std::size_t>(kChunkSizeX));
-            if (chunk->rebuild_sky_light_column(local_x, local_z)) {
-                mark_lighting_chunk_changed(job, job.region[chunk_index]);
+            if (chunk.rebuild_sky_light_column(local_x, local_z)) {
+                mark_lighting_chunk_changed(job, coord);
             }
         }
     }
 }
 
 void World::seed_local_block_lighting(LightingJob& job) {
-    for (std::size_t chunk_index = 0; chunk_index < job.region.size(); ++chunk_index) {
-        const auto coord = job.region[chunk_index];
+    for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+        if (!job.region_present[slot_index]) {
+            continue;
+        }
+
+        const auto coord = job.region_coords[slot_index];
         const auto iterator = chunks_.find(coord);
         if (iterator == chunks_.end()) {
             continue;
@@ -965,8 +1211,10 @@ void World::seed_local_block_lighting(LightingJob& job) {
                 continue;
             }
 
-            job.block_light_buffers[chunk_index][lighting_buffer_index(local_emitter)] = emissive;
-            job.queue.push_back({local_to_world(coord, local_emitter), emissive});
+            const auto world_coord = local_to_world(coord, local_emitter);
+            if (set_job_block_light(job, world_coord, emissive)) {
+                job.queue.push_back({world_coord, emissive});
+            }
         }
     }
 
@@ -975,9 +1223,9 @@ void World::seed_local_block_lighting(LightingJob& job) {
                                                  int y,
                                                  int local_z,
                                                  const ChunkCoord& neighbor_coord,
-                                                 int neighbor_x,
-                                                 int neighbor_z) {
-        if (lighting_region_contains(job.region, neighbor_coord)) {
+                                                  int neighbor_x,
+                                                  int neighbor_z) {
+        if (lighting_region_contains(job, neighbor_coord)) {
             return;
         }
 
@@ -1009,7 +1257,12 @@ void World::seed_local_block_lighting(LightingJob& job) {
         }
     };
 
-    for (const auto& coord : job.region) {
+    for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+        if (!job.region_present[slot_index]) {
+            continue;
+        }
+
+        const auto coord = job.region_coords[slot_index];
         for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
             for (int z = 0; z < kChunkSizeZ; ++z) {
                 seed_boundary_from_neighbor(coord, 0, y, z, {coord.x - 1, coord.z}, kChunkSizeX - 1, z);
@@ -1024,25 +1277,55 @@ void World::seed_local_block_lighting(LightingJob& job) {
 }
 
 void World::finalize_lighting_job(const LightingJob& job) {
-    for (std::size_t chunk_index = 0; chunk_index < job.region.size(); ++chunk_index) {
-        const auto coord = job.region[chunk_index];
+    for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+        if (!job.region_present[slot_index]) {
+            continue;
+        }
+
+        const auto coord = job.region_coords[slot_index];
         auto iterator = chunks_.find(coord);
         if (iterator == chunks_.end()) {
             continue;
         }
 
         auto& record = iterator->second;
-        const auto block_light_changed =
-            !std::equal(job.block_light_buffers[chunk_index].begin(),
-                        job.block_light_buffers[chunk_index].end(),
-                        record.chunk.block_light().begin());
+        const auto block_light_changed = job.block_light_difference_counts[slot_index] > 0;
+        std::array<bool, kChunkSectionCount> changed_sections {};
         if (block_light_changed) {
-            record.chunk.copy_block_light_from(job.block_light_buffers[chunk_index].data(), job.block_light_buffers[chunk_index].size());
+            const auto& current_block_light = record.chunk.block_light();
+            for (std::size_t section_index = 0; section_index < kChunkSectionCount; ++section_index) {
+                const auto min_y = section_min_y(section_index);
+                const auto max_y = section_max_y(section_index);
+                bool section_changed = false;
+                for (int y = min_y; y <= max_y && !section_changed; ++y) {
+                    for (int z = 0; z < kChunkSizeZ && !section_changed; ++z) {
+                        for (int x = 0; x < kChunkSizeX; ++x) {
+                            const auto buffer_index = chunk_linear_index(x, y, z);
+                            if (current_block_light[buffer_index] != job.block_light_buffers[slot_index][buffer_index]) {
+                                section_changed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                changed_sections[section_index] = section_changed;
+            }
+            record.chunk.copy_block_light_from(job.block_light_buffers[slot_index].data(), job.block_light_buffers[slot_index].size());
         }
 
-        const auto lighting_changed = block_light_changed || job.changed_chunks[chunk_index];
+        const auto lighting_changed = block_light_changed || job.changed_chunks[slot_index];
         if (lighting_changed) {
-            record.chunk.mark_dirty();
+            if (job.changed_chunks[slot_index]) {
+                record.chunk.mark_dirty();
+                invalidate_loaded_mesh_neighbors(coord, false);
+            } else {
+                for (std::size_t section_index = 0; section_index < changed_sections.size(); ++section_index) {
+                    if (changed_sections[section_index]) {
+                        record.chunk.mark_section_dirty(section_index);
+                    }
+                }
+                invalidate_loaded_mesh_neighbors_for_sections(coord, changed_sections);
+            }
         }
 
         record.chunk.clear_lighting_dirty();
@@ -1075,7 +1358,16 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
     };
 
     if (active_lighting_job_.has_value()) {
-        const auto overlaps_removed = std::any_of(active_lighting_job_->region.begin(), active_lighting_job_->region.end(), should_remove_coord);
+        bool overlaps_removed = false;
+        for (std::size_t slot_index = 0; slot_index < kLightingRegionSlotOrder.size(); ++slot_index) {
+            if (!active_lighting_job_->region_present[slot_index]) {
+                continue;
+            }
+            if (should_remove_coord(active_lighting_job_->region_coords[slot_index])) {
+                overlaps_removed = true;
+                break;
+            }
+        }
         if (overlaps_removed) {
             active_lighting_job_.reset();
             active_lighting_coverage_.clear();
@@ -1098,7 +1390,9 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
         pending_lighting_set_.erase(coord);
         pending_lighting_coverage_.erase(coord);
         active_lighting_coverage_.erase(coord);
+        enqueue_gpu_unload(coord);
         chunks_.erase(coord);
+        invalidate_loaded_mesh_neighbors(coord, true);
     }
 
     std::deque<ChunkCoord> kept_priority_meshes;
@@ -1156,15 +1450,59 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
 }
 
 void World::rebuild_chunk_mesh(ChunkRecord& record) {
-    record.mesh = mesher_.build_mesh(
-        *this,
-        record.chunk.coord(),
-        record.mesh_vertex_capacity_hint,
-        record.mesh_index_capacity_hint);
+    auto rebuilt_any_section = false;
+    for (std::size_t section_index = 0; section_index < kChunkSectionCount; ++section_index) {
+        if (!record.chunk.is_section_dirty(section_index)) {
+            continue;
+        }
+
+        record.section_meshes[section_index] = mesher_.build_mesh_range(
+            *this,
+            record.chunk.coord(),
+            section_min_y(section_index),
+            section_max_y(section_index),
+            record.section_mesh_vertex_capacity_hints[section_index],
+            record.section_mesh_index_capacity_hints[section_index]);
+        record.section_mesh_vertex_capacity_hints[section_index] =
+            std::max(record.section_meshes[section_index].total_vertex_count(), static_cast<std::size_t>(128));
+        record.section_mesh_index_capacity_hints[section_index] =
+            std::max(record.section_meshes[section_index].total_index_count(), static_cast<std::size_t>(192));
+        record.chunk.clear_section_dirty(section_index);
+        rebuilt_any_section = true;
+    }
+
+    if (!rebuilt_any_section) {
+        return;
+    }
+
+    ChunkMeshData merged_mesh {};
+    merged_mesh.vertices.reserve(record.mesh_vertex_capacity_hint > 0 ? record.mesh_vertex_capacity_hint : 256U);
+    merged_mesh.indices.reserve(record.mesh_index_capacity_hint > 0 ? record.mesh_index_capacity_hint : 384U);
+    merged_mesh.water_vertices.reserve(128U);
+    merged_mesh.water_indices.reserve(192U);
+    for (const auto& section_mesh : record.section_meshes) {
+        append_chunk_mesh_section(merged_mesh, section_mesh);
+    }
+
+    record.mesh = std::move(merged_mesh);
     record.mesh_vertex_capacity_hint = std::max(record.mesh.total_vertex_count(), static_cast<std::size_t>(256));
     record.mesh_index_capacity_hint = std::max(record.mesh.total_index_count(), static_cast<std::size_t>(384));
-    record.chunk.clear_dirty();
     ++record.mesh_revision;
+    enqueue_gpu_upload(record.chunk.coord());
+}
+
+void World::enqueue_gpu_upload(const ChunkCoord& coord) {
+    pending_gpu_unload_set_.erase(coord);
+    if (chunks_.contains(coord) && pending_gpu_upload_set_.insert(coord).second) {
+        pending_gpu_uploads_.push_back(coord);
+    }
+}
+
+void World::enqueue_gpu_unload(const ChunkCoord& coord) {
+    pending_gpu_upload_set_.erase(coord);
+    if (pending_gpu_unload_set_.insert(coord).second) {
+        pending_gpu_unloads_.push_back(coord);
+    }
 }
 
 void World::remove_unsupported_torch_above(int x, int y, int z) {
@@ -1219,25 +1557,25 @@ void World::update_chunk_emissive_cache(ChunkRecord& record,
     }
 }
 
-auto World::lighting_region_contains(const std::vector<ChunkCoord>& region, const ChunkCoord& coord) const noexcept -> bool {
-    return std::find(region.begin(), region.end(), coord) != region.end();
-}
-
-auto World::lighting_job_chunk_index(const LightingJob& job, const ChunkCoord& coord) const -> std::optional<std::size_t> {
-    for (std::size_t index = 0; index < job.region.size(); ++index) {
-        if (job.region[index] == coord) {
-            return index;
-        }
+auto World::lighting_region_contains(const LightingJob& job, const ChunkCoord& coord) const noexcept -> bool {
+    const auto slot = lighting_region_slot_for(job.anchor, coord);
+    if (slot == LightingRegionSlot::Invalid) {
+        return false;
     }
-    return std::nullopt;
+    return job.region_present[lighting_region_slot_index(slot)];
 }
 
 void World::mark_lighting_chunk_changed(LightingJob& job, const ChunkCoord& coord) {
-    const auto chunk_index = lighting_job_chunk_index(job, coord);
-    if (!chunk_index.has_value()) {
+    const auto slot = lighting_region_slot_for(job.anchor, coord);
+    if (slot == LightingRegionSlot::Invalid) {
         return;
     }
-    job.changed_chunks[*chunk_index] = true;
+
+    const auto slot_index = lighting_region_slot_index(slot);
+    if (!job.region_present[slot_index]) {
+        return;
+    }
+    job.changed_chunks[slot_index] = true;
 }
 
 auto World::lighting_buffer_index(const BlockCoord& local_coord) const noexcept -> std::size_t {
@@ -1246,30 +1584,54 @@ auto World::lighting_buffer_index(const BlockCoord& local_coord) const noexcept 
 
 auto World::get_job_block_light(const LightingJob& job, const BlockCoord& world_coord) const -> std::uint8_t {
     const auto chunk_coord = world_to_chunk(world_coord.x, world_coord.z);
-    const auto chunk_index = lighting_job_chunk_index(job, chunk_coord);
-    if (!chunk_index.has_value()) {
+    const auto slot = lighting_region_slot_for(job.anchor, chunk_coord);
+    if (slot == LightingRegionSlot::Invalid) {
+        return get_block_light(world_coord.x, world_coord.y, world_coord.z);
+    }
+
+    const auto slot_index = lighting_region_slot_index(slot);
+    if (!job.region_present[slot_index]) {
         return get_block_light(world_coord.x, world_coord.y, world_coord.z);
     }
 
     const auto local_coord = world_to_local(world_coord.x, world_coord.y, world_coord.z);
-    return job.block_light_buffers[*chunk_index][lighting_buffer_index(local_coord)];
+    return job.block_light_buffers[slot_index][lighting_buffer_index(local_coord)];
 }
 
 auto World::set_job_block_light(LightingJob& job, const BlockCoord& world_coord, std::uint8_t light_level) -> bool {
     const auto chunk_coord = world_to_chunk(world_coord.x, world_coord.z);
-    const auto chunk_index = lighting_job_chunk_index(job, chunk_coord);
-    if (!chunk_index.has_value()) {
+    const auto slot = lighting_region_slot_for(job.anchor, chunk_coord);
+    if (slot == LightingRegionSlot::Invalid) {
+        return false;
+    }
+
+    const auto slot_index = lighting_region_slot_index(slot);
+    if (!job.region_present[slot_index]) {
         return false;
     }
 
     const auto local_coord = world_to_local(world_coord.x, world_coord.y, world_coord.z);
-    auto& current_light = job.block_light_buffers[*chunk_index][lighting_buffer_index(local_coord)];
+    const auto buffer_index = lighting_buffer_index(local_coord);
+    auto& current_light = job.block_light_buffers[slot_index][buffer_index];
     const auto clamped_light = static_cast<std::uint8_t>(std::min<int>(light_level, 15));
     if (current_light == clamped_light) {
         return false;
     }
 
+    const auto iterator = chunks_.find(chunk_coord);
+    if (iterator == chunks_.end()) {
+        return false;
+    }
+
+    const auto original_light = iterator->second.chunk.block_light()[buffer_index];
+    const auto was_different = current_light != original_light;
+    const auto will_be_different = clamped_light != original_light;
     current_light = clamped_light;
+    if (!was_different && will_be_different) {
+        ++job.block_light_difference_counts[slot_index];
+    } else if (was_different && !will_be_different && job.block_light_difference_counts[slot_index] > 0) {
+        --job.block_light_difference_counts[slot_index];
+    }
     return true;
 }
 

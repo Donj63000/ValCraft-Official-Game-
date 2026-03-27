@@ -52,6 +52,12 @@ public:
                                   const ChunkCoord& coord,
                                   std::size_t vertex_reserve_hint = 0,
                                   std::size_t index_reserve_hint = 0) const -> ChunkMeshData;
+    [[nodiscard]] auto build_mesh_range(const World& world,
+                                        const ChunkCoord& coord,
+                                        int min_y,
+                                        int max_y,
+                                        std::size_t vertex_reserve_hint = 0,
+                                        std::size_t index_reserve_hint = 0) const -> ChunkMeshData;
 };
 
 } // namespace valcraft

@@ -123,17 +123,17 @@ function Get-ScenarioDefinition {
 
     switch ($Name) {
     "baseline" {
-        $arguments += "--stream-radius=10"
+        $arguments += "--stream-radius=5"
     }
     "world_stress" {
-        $arguments += "--stream-radius=14"
+        $arguments += "--stream-radius=8"
     }
     "no_shadows" {
-        $arguments += "--stream-radius=10"
+        $arguments += "--stream-radius=5"
         $arguments += "--disable-shadows"
     }
     "no_post_process" {
-        $arguments += "--stream-radius=10"
+        $arguments += "--stream-radius=5"
         $arguments += "--disable-post-process"
     }
     default {

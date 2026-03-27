@@ -12,11 +12,14 @@ struct PerformanceOptions {
     int spawn_preload_radius = 1;
     std::size_t chunk_generation_budget = 2;
     std::size_t mesh_rebuild_budget = 4;
-    std::size_t light_node_budget = 16384;
-    int stream_radius = kDefaultStreamRadius;
+    std::size_t light_node_budget = 8192;
+    double max_generation_ms = 1.0;
+    double max_lighting_ms = 1.5;
+    double max_meshing_ms = 2.0;
+    int stream_radius = 5;
     bool shadows_enabled = true;
-    int shadow_map_size = 2048;
-    bool post_process_enabled = true;
+    int shadow_map_size = 1024;
+    bool post_process_enabled = false;
     bool report_frame_stats = false;
     std::string perf_json_path {};
     bool perf_trace_enabled = false;
@@ -27,6 +30,9 @@ struct PerformanceOptions {
             chunk_generation_budget,
             mesh_rebuild_budget,
             light_node_budget,
+            max_generation_ms,
+            max_lighting_ms,
+            max_meshing_ms,
         };
     }
 };

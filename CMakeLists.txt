@@ -6,6 +6,11 @@ endif()
 
 project(ValCraft VERSION 0.1.0 LANGUAGES C CXX)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -13,9 +18,15 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 include(FetchContent)
+include(CheckIPOSupported)
 enable_testing()
 option(VALCRAFT_STRICT_WARNINGS "Enable strict warnings on project targets" ON)
 option(VALCRAFT_ENABLE_COVERAGE "Enable gcov coverage for critical modules" OFF)
+
+check_ipo_supported(RESULT VALCRAFT_IPO_SUPPORTED OUTPUT VALCRAFT_IPO_ERROR)
+if(NOT VALCRAFT_IPO_SUPPORTED AND VALCRAFT_IPO_ERROR)
+    message(STATUS "IPO/LTO disabled: ${VALCRAFT_IPO_ERROR}")
+endif()
 
 set(SDL_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_STATIC OFF CACHE BOOL "" FORCE)
@@ -98,6 +109,15 @@ function(valcraft_enable_coverage_for target)
     target_link_options(${target} PRIVATE --coverage)
 endfunction()
 
+function(valcraft_enable_ipo_for target)
+    if(NOT VALCRAFT_IPO_SUPPORTED)
+        return()
+    endif()
+
+    set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+endfunction()
+
 function(valcraft_copy_runtime_dlls target)
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
         add_custom_command(TARGET ${target} POST_BUILD
@@ -158,6 +178,7 @@ add_library(valcraft_core
     src/world/ChunkMesher.cpp
     src/world/Environment.cpp
     src/gameplay/PlayerController.cpp
+    src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp
 )
 
@@ -179,6 +200,7 @@ target_compile_definitions(valcraft_core
 )
 valcraft_apply_strict_warnings(valcraft_core)
 valcraft_enable_coverage_for(valcraft_core)
+valcraft_enable_ipo_for(valcraft_core)
 
 add_executable(ValCraft
     src/main.cpp
@@ -199,6 +221,7 @@ if(WIN32)
 endif()
 valcraft_apply_strict_warnings(ValCraft)
 valcraft_enable_coverage_for(ValCraft)
+valcraft_enable_ipo_for(ValCraft)
 
 valcraft_copy_runtime_dlls(ValCraft)
 valcraft_copy_mingw_runtime_dlls(ValCraft)

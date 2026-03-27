@@ -65,6 +65,44 @@ TEST_CASE("chunk tracks meshable y bounds as blocks are added and removed") {
     CHECK(chunk.max_mesh_y() < chunk.min_mesh_y());
 }
 
+TEST_CASE("chunk dirties only the touched mesh section and adjacent section seams") {
+    Chunk chunk({0, 0});
+    chunk.fill(to_block_id(BlockType::Air));
+    chunk.clear_dirty();
+
+    chunk.set_local(1, 8, 1, to_block_id(BlockType::Stone));
+    CHECK(chunk.dirty_section_count() == 1);
+    CHECK(chunk.is_section_dirty(0));
+    CHECK_FALSE(chunk.is_section_dirty(1));
+
+    chunk.clear_dirty();
+    chunk.set_local(1, 15, 1, to_block_id(BlockType::Stone));
+    CHECK(chunk.dirty_section_count() == 2);
+    CHECK(chunk.is_section_dirty(0));
+    CHECK(chunk.is_section_dirty(1));
+
+    chunk.clear_dirty();
+    chunk.set_local(1, 16, 1, to_block_id(BlockType::Stone));
+    CHECK(chunk.dirty_section_count() == 2);
+    CHECK(chunk.is_section_dirty(0));
+    CHECK(chunk.is_section_dirty(1));
+}
+
+TEST_CASE("chunk caches surface height per column") {
+    Chunk chunk({0, 0});
+    chunk.fill(to_block_id(BlockType::Air));
+
+    CHECK(chunk.surface_height_local(2, 3) == 0);
+    chunk.set_local(2, 4, 3, to_block_id(BlockType::Stone));
+    CHECK(chunk.surface_height_local(2, 3) == 4);
+    chunk.set_local(2, 6, 3, to_block_id(BlockType::TallGrass));
+    CHECK(chunk.surface_height_local(2, 3) == 4);
+    chunk.set_local(2, 7, 3, to_block_id(BlockType::Stone));
+    CHECK(chunk.surface_height_local(2, 3) == 7);
+    chunk.set_local(2, 7, 3, to_block_id(BlockType::Air));
+    CHECK(chunk.surface_height_local(2, 3) == 4);
+}
+
 TEST_CASE("world converts negative coordinates into chunk and local positions") {
     World world(1234, 1);
 
@@ -166,39 +204,99 @@ TEST_CASE("block atlas includes a translucent water tile") {
     CHECK(pixels[alpha_index] < 255);
 }
 
-TEST_CASE("tree foliage atlas tiles stay dense enough to read as full canopies while keeping cutout edges") {
+TEST_CASE("water top face can use a distinct atlas tile from the side faces") {
+    const auto water_top_tile = block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveY);
+
+    CHECK(water_top_tile != block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveX));
+    CHECK(water_top_tile != block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::NegativeX));
+    CHECK(water_top_tile != block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveZ));
+    CHECK(water_top_tile != block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::NegativeZ));
+}
+
+TEST_CASE("water top atlas tile wraps seamlessly across both axes") {
     const auto pixels = build_block_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
 
-    const auto count_opaque_pixels = [&](BlockId block_id) {
+    const auto water_tile = block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveY);
+    const auto sample_pixel = [&](int local_x, int local_y) {
+        const auto sample_x = water_tile.x * kBlockAtlasTileSize + local_x;
+        const auto sample_y = water_tile.y * kBlockAtlasTileSize + local_y;
+        const auto pixel_index = static_cast<std::size_t>((sample_y * kBlockAtlasSize + sample_x) * 4);
+        return std::array<int, 4> {
+            static_cast<int>(pixels[pixel_index + 0]),
+            static_cast<int>(pixels[pixel_index + 1]),
+            static_cast<int>(pixels[pixel_index + 2]),
+            static_cast<int>(pixels[pixel_index + 3]),
+        };
+    };
+
+    for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+        const auto left = sample_pixel(0, y);
+        const auto right = sample_pixel(kBlockAtlasTileSize - 1, y);
+        for (std::size_t channel = 0; channel < left.size(); ++channel) {
+            const auto difference =
+                left[channel] >= right[channel] ? left[channel] - right[channel] : right[channel] - left[channel];
+            CAPTURE(y);
+            CAPTURE(channel);
+            CAPTURE(left[channel]);
+            CAPTURE(right[channel]);
+            CHECK(difference <= 1);
+        }
+    }
+
+    for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+        const auto top = sample_pixel(x, 0);
+        const auto bottom = sample_pixel(x, kBlockAtlasTileSize - 1);
+        for (std::size_t channel = 0; channel < top.size(); ++channel) {
+            const auto difference =
+                top[channel] >= bottom[channel] ? top[channel] - bottom[channel] : bottom[channel] - top[channel];
+            CAPTURE(x);
+            CAPTURE(channel);
+            CAPTURE(top[channel]);
+            CAPTURE(bottom[channel]);
+            CHECK(difference <= 1);
+        }
+    }
+}
+
+TEST_CASE("tree foliage atlas tiles stay solid and opaque") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto check_foliage_tile = [&](BlockId block_id) {
         const auto tile = block_atlas_tile(block_id, BlockVisualFace::PositiveX);
         const auto tile_origin_x = tile.x * kBlockAtlasTileSize;
         const auto tile_origin_y = tile.y * kBlockAtlasTileSize;
-        auto opaque_pixels = 0;
-        auto transparent_pixels = 0;
+        auto min_alpha = 255;
+        auto max_alpha = 0;
+        auto red_sum = 0;
+        auto green_sum = 0;
+        auto blue_sum = 0;
         for (int y = 0; y < kBlockAtlasTileSize; ++y) {
             for (int x = 0; x < kBlockAtlasTileSize; ++x) {
-                const auto alpha_index =
-                    static_cast<std::size_t>(((tile_origin_y + y) * kBlockAtlasSize + (tile_origin_x + x)) * 4 + 3);
-                if (pixels[alpha_index] >= 250) {
-                    ++opaque_pixels;
-                } else if (pixels[alpha_index] <= 5) {
-                    ++transparent_pixels;
-                }
+                const auto pixel_index =
+                    static_cast<std::size_t>(((tile_origin_y + y) * kBlockAtlasSize + (tile_origin_x + x)) * 4);
+                const auto red = static_cast<int>(pixels[pixel_index + 0]);
+                const auto green = static_cast<int>(pixels[pixel_index + 1]);
+                const auto blue = static_cast<int>(pixels[pixel_index + 2]);
+                const auto alpha = static_cast<int>(pixels[pixel_index + 3]);
+
+                min_alpha = std::min(min_alpha, alpha);
+                max_alpha = std::max(max_alpha, alpha);
+                red_sum += red;
+                green_sum += green;
+                blue_sum += blue;
             }
         }
-        return std::pair {opaque_pixels, transparent_pixels};
+
+        CHECK(min_alpha >= 250);
+        CHECK(max_alpha == 255);
+        CHECK(green_sum > red_sum);
+        CHECK(green_sum > blue_sum);
     };
 
-    const auto [oak_opaque, oak_transparent] = count_opaque_pixels(to_block_id(BlockType::Leaves));
-    const auto [pine_opaque, pine_transparent] = count_opaque_pixels(to_block_id(BlockType::PineLeaves));
-
-    CHECK(oak_opaque >= 150);
-    CHECK(oak_opaque <= 235);
-    CHECK(oak_transparent >= 20);
-    CHECK(pine_opaque >= 120);
-    CHECK(pine_opaque <= 230);
-    CHECK(pine_transparent >= 20);
+    check_foliage_tile(to_block_id(BlockType::Leaves));
+    check_foliage_tile(to_block_id(BlockType::PineLeaves));
 }
 
 TEST_CASE("block visual material classification keeps key terrain families distinct") {
@@ -298,6 +396,63 @@ TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
     CHECK(mesh.water_vertices.size() == 24);
     CHECK(mesh.water_indices.size() == 36);
     CHECK_FALSE(mesh.empty());
+}
+
+TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") {
+    World world(185, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(0, 5, 0, to_block_id(BlockType::Water));
+    world.set_block(1, 5, 0, to_block_id(BlockType::Water));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+
+    struct WaterTopVertex {
+        float x;
+        float z;
+        float u;
+        float v;
+    };
+
+    std::vector<WaterTopVertex> top_vertices;
+    for (const auto& vertex : mesh.water_vertices) {
+        if (vertex.ny > 0.9F) {
+            top_vertices.push_back({vertex.x, vertex.z, vertex.u, vertex.v});
+        }
+    }
+
+    REQUIRE(top_vertices.size() == 8);
+
+    const auto vertices_at = [&](float x, float z) {
+        std::vector<WaterTopVertex> matches;
+        for (const auto& vertex : top_vertices) {
+            if (vertex.x == doctest::Approx(x) && vertex.z == doctest::Approx(z)) {
+                matches.push_back(vertex);
+            }
+        }
+        return matches;
+    };
+
+    const auto left_near = vertices_at(0.0F, 0.0F);
+    const auto shared_near = vertices_at(1.0F, 0.0F);
+    const auto right_near = vertices_at(2.0F, 0.0F);
+    const auto shared_far = vertices_at(1.0F, 1.0F);
+
+    REQUIRE(left_near.size() == 1);
+    REQUIRE(shared_near.size() == 2);
+    REQUIRE(right_near.size() == 1);
+    REQUIRE(shared_far.size() == 2);
+
+    CHECK(shared_near[0].u == doctest::Approx(shared_near[1].u));
+    CHECK(shared_near[0].v == doctest::Approx(shared_near[1].v));
+    CHECK(shared_far[0].u == doctest::Approx(shared_far[1].u));
+    CHECK(shared_far[0].v == doctest::Approx(shared_far[1].v));
+
+    const auto uv_step = 1.0F / static_cast<float>(kBlockAtlasTilesPerAxis);
+    const auto expected_block_delta = uv_step / 8.0F;
+
+    CHECK(shared_near[0].u == doctest::Approx(left_near[0].u + expected_block_delta));
+    CHECK(right_near[0].u == doctest::Approx(shared_near[0].u + expected_block_delta));
 }
 
 TEST_CASE("chunk mesher handles isolated high blocks without losing geometry") {
@@ -415,6 +570,25 @@ TEST_CASE("process_pending_work respects chunk generation budget and eventually 
     CHECK(world.find_chunk({1, 1}) != nullptr);
     CHECK(world.find_chunk({-1, -1}) != nullptr);
     CHECK(world.are_chunks_ready({0.5F, 70.0F, 0.5F}, 1));
+}
+
+TEST_CASE("process_pending_work respects zero generation time budget") {
+    World world(60, 1);
+    world.update_streaming({0.5F, 0.0F, 0.5F});
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 16;
+    budget.mesh_rebuild_budget = 16;
+    budget.light_node_budget = 65536;
+    budget.max_generation_ms = 0.0;
+    budget.max_lighting_ms = 10.0;
+    budget.max_meshing_ms = 10.0;
+
+    const auto stats = world.process_pending_work(budget);
+
+    CHECK(stats.generated_chunks == 0);
+    CHECK(world.chunk_records().empty());
+    CHECK(world.pending_generation_count() == 9);
 }
 
 TEST_CASE("spawn preload stays ready while outer streaming work starts") {
@@ -643,6 +817,25 @@ TEST_CASE("loading a diagonal neighbor remeshes an already meshed chunk") {
     CHECK(world.mesh_revision(origin) > origin_revision_before);
 }
 
+TEST_CASE("editing a corner block remeshes diagonal neighbors that sample it") {
+    World world(193, 2);
+    const ChunkCoord origin {0, 0};
+    const ChunkCoord diagonal {1, 1};
+
+    test::make_chunk_empty(world, origin);
+    test::make_chunk_empty(world, diagonal);
+    world.set_block(16, 0, 16, to_block_id(BlockType::Stone));
+    world.rebuild_dirty_meshes();
+
+    const auto diagonal_revision_before = world.mesh_revision(diagonal);
+    REQUIRE(diagonal_revision_before > 0);
+
+    world.set_block(15, 0, 15, to_block_id(BlockType::Stone));
+    world.rebuild_dirty_meshes();
+
+    CHECK(world.mesh_revision(diagonal) > diagonal_revision_before);
+}
+
 TEST_CASE("near-player chunk load keeps seam remeshes on the priority path") {
     World world(85, 0);
     world.update_streaming({0.5F, 80.0F, 0.5F});
@@ -682,7 +875,7 @@ TEST_CASE("far chunk load defers seam remeshes to the normal mesh budget") {
     CHECK(world.pending_mesh_count() >= 1);
 }
 
-TEST_CASE("process_pending_work respects mesh rebuild budget") {
+TEST_CASE("priority seam remeshes can bypass the normal mesh rebuild budget") {
     World world(17, 1);
     test::make_chunk_empty(world, {0, 0});
     test::make_chunk_empty(world, {1, 0});
@@ -692,8 +885,9 @@ TEST_CASE("process_pending_work respects mesh rebuild budget") {
     world.set_block(16, 10, 4, to_block_id(BlockType::Stone));
 
     const auto stats = world.process_pending_work({0, 1, 65536});
-    CHECK(stats.meshed_chunks == 1);
-    CHECK(world.pending_mesh_count() >= 1);
+    CHECK(stats.meshed_chunks == 2);
+    CHECK(stats.prioritized_meshed_chunks == 2);
+    CHECK(world.pending_mesh_count() == 0);
 }
 
 TEST_CASE("overlapping lighting updates coalesce into a single pending job") {
@@ -721,6 +915,113 @@ TEST_CASE("lighting completion enqueues mesh rebuilds without a global dirty sca
     CHECK(world.pending_mesh_count() >= 1);
 }
 
+TEST_CASE("local block lighting only dirties affected mesh sections") {
+    World world(194, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    world.set_block(1, 0, 1, to_block_id(BlockType::Stone));
+    world.set_block(1, 96, 1, to_block_id(BlockType::Stone));
+    test::flush_pending_work(world);
+
+    auto* chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->dirty_section_count() == 0);
+
+    world.set_block(1, 1, 1, to_block_id(BlockType::Torch));
+    REQUIRE(world.pending_lighting_count() == 1);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0;
+    budget.mesh_rebuild_budget = 0;
+    budget.light_node_budget = 65536;
+    budget.max_generation_ms = 10.0;
+    budget.max_lighting_ms = 10.0;
+    budget.max_meshing_ms = 0.0;
+
+    const auto stats = world.process_pending_work(budget);
+    CHECK(stats.lighting_jobs_completed == 1);
+
+    chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->is_section_dirty(0));
+    CHECK_FALSE(chunk->is_section_dirty(6));
+    CHECK(chunk->dirty_section_count() < kChunkSectionCount);
+}
+
+TEST_CASE("rebuilding a dirty chunk enqueues a GPU upload event") {
+    World world(191, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+
+    world.rebuild_dirty_meshes();
+
+    const auto uploads = world.consume_pending_gpu_uploads(8);
+    CHECK(std::find(uploads.begin(), uploads.end(), origin) != uploads.end());
+    CHECK(world.consume_pending_gpu_uploads(8).empty());
+}
+
+TEST_CASE("streaming unload enqueues a GPU unload event") {
+    World world(192, 0);
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+    const ChunkCoord origin {0, 0};
+
+    CHECK_FALSE(world.consume_pending_gpu_uploads(64).empty());
+
+    world.update_streaming({static_cast<float>(kChunkSizeX * 4) + 0.5F, 70.0F, 0.5F});
+
+    const auto unloads = world.consume_pending_gpu_unloads(8);
+    CHECK(std::find(unloads.begin(), unloads.end(), origin) != unloads.end());
+}
+
+TEST_CASE("unloading a chunk remeshes diagonal neighbors after the chunk disappears") {
+    World world(196, 0);
+    const ChunkCoord origin {0, 0};
+    const ChunkCoord diagonal {1, 1};
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::make_chunk_empty(world, origin);
+    test::make_chunk_empty(world, diagonal);
+    world.set_block(16, 0, 16, to_block_id(BlockType::Stone));
+    world.rebuild_dirty_meshes();
+
+    const auto diagonal_revision_before = world.mesh_revision(diagonal);
+    REQUIRE(diagonal_revision_before > 0);
+
+    world.update_streaming({
+        static_cast<float>(kChunkSizeX * 2) + 0.5F,
+        70.0F,
+        static_cast<float>(kChunkSizeZ * 2) + 0.5F,
+    });
+    test::flush_pending_work(world);
+
+    CHECK(world.find_chunk(origin) == nullptr);
+    CHECK(world.find_chunk(diagonal) != nullptr);
+    CHECK(world.mesh_revision(diagonal) > diagonal_revision_before);
+}
+
+TEST_CASE("zero lighting time budget defers pending lighting work") {
+    World world(87, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 0, 1, to_block_id(BlockType::Stone));
+    world.set_block(1, 1, 1, to_block_id(BlockType::Torch));
+    REQUIRE(world.pending_lighting_count() == 1);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0;
+    budget.mesh_rebuild_budget = 0;
+    budget.light_node_budget = 65536;
+    budget.max_generation_ms = 10.0;
+    budget.max_lighting_ms = 0.0;
+    budget.max_meshing_ms = 10.0;
+
+    const auto stats = world.process_pending_work(budget);
+
+    CHECK(stats.light_nodes_processed == 0);
+    CHECK(stats.lighting_jobs_completed == 0);
+    CHECK(world.pending_lighting_count() == 1);
+}
+
 TEST_CASE("local lighting updates do not remesh unrelated chunks") {
     World world(79, 2);
     const ChunkCoord origin {0, 0};
@@ -741,6 +1042,31 @@ TEST_CASE("local lighting updates do not remesh unrelated chunks") {
     CHECK(world.mesh_revision(origin) > 0);
     CHECK(world.mesh_revision(neighbor) > 0);
     CHECK(world.mesh_revision(far) == far_revision_before);
+}
+
+TEST_CASE("lighting keeps diagonal chunks outside the fixed five-slot region but still remeshes sampled diagonals") {
+    World world(190, 2);
+    const ChunkCoord origin {0, 0};
+    const ChunkCoord east {1, 0};
+    const ChunkCoord south {0, 1};
+    const ChunkCoord diagonal {1, 1};
+
+    test::make_chunk_empty(world, origin);
+    test::make_chunk_empty(world, east);
+    test::make_chunk_empty(world, south);
+    test::make_chunk_empty(world, diagonal);
+    world.set_block(16, 0, 16, to_block_id(BlockType::Stone));
+    world.rebuild_dirty_meshes();
+
+    const auto diagonal_revision_before = world.mesh_revision(diagonal);
+    REQUIRE(diagonal_revision_before > 0);
+
+    world.set_block(15, 0, 15, to_block_id(BlockType::Stone));
+    world.set_block(15, 1, 15, to_block_id(BlockType::Torch));
+    test::flush_pending_work(world);
+
+    CHECK(world.get_block_light(16, 1, 16) == 0);
+    CHECK(world.mesh_revision(diagonal) > diagonal_revision_before);
 }
 
 TEST_CASE("placing and removing a torch only remeshes nearby chunks") {
@@ -768,6 +1094,72 @@ TEST_CASE("placing and removing a torch only remeshes nearby chunks") {
 
     CHECK(world.mesh_revision(origin) > origin_revision_after_place);
     CHECK(world.mesh_revision(far) == far_revision_before);
+}
+
+TEST_CASE("zero meshing time budget defers queued mesh rebuilds") {
+    World world(89, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 1, 1, to_block_id(BlockType::Stone));
+    world.rebuild_lighting();
+    REQUIRE(world.pending_mesh_count() >= 1);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0;
+    budget.mesh_rebuild_budget = 16;
+    budget.light_node_budget = 0;
+    budget.max_generation_ms = 10.0;
+    budget.max_lighting_ms = 10.0;
+    budget.max_meshing_ms = 0.0;
+
+    const auto stats = world.process_pending_work(budget);
+
+    CHECK(stats.meshed_chunks == 0);
+    CHECK(world.pending_mesh_count() >= 1);
+}
+
+TEST_CASE("re-running unchanged lighting does not force another remesh") {
+    World world(88, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    world.set_block(1, 0, 1, to_block_id(BlockType::Stone));
+    world.set_block(1, 1, 1, to_block_id(BlockType::Torch));
+    test::flush_pending_work(world);
+
+    const auto revision_before = world.mesh_revision(origin);
+    REQUIRE(revision_before > 0);
+
+    auto* chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    chunk->mark_lighting_dirty();
+
+    world.rebuild_dirty_meshes();
+
+    CHECK(world.mesh_revision(origin) == revision_before);
+}
+
+TEST_CASE("partial section rebuild preserves untouched section geometry") {
+    World world(195, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    world.set_block(2, 4, 2, to_block_id(BlockType::Stone));
+    world.set_block(3, 96, 3, to_block_id(BlockType::Stone));
+    world.rebuild_dirty_meshes();
+
+    auto* mesh = world.mesh_for(origin);
+    REQUIRE(mesh != nullptr);
+    CHECK(mesh->face_count == 12);
+
+    const auto revision_before = world.mesh_revision(origin);
+    world.set_block(2, 4, 2, to_block_id(BlockType::Air));
+    world.rebuild_dirty_meshes();
+
+    CHECK(world.mesh_revision(origin) > revision_before);
+    mesh = world.mesh_for(origin);
+    REQUIRE(mesh != nullptr);
+    CHECK(mesh->face_count == 6);
+    CHECK(std::any_of(mesh->vertices.begin(), mesh->vertices.end(), [](const ChunkVertex& vertex) {
+        return vertex.y > 90.0F;
+    }));
 }
 
 TEST_CASE("environment curve is brightest at noon and remains readable at midnight") {

@@ -4,9 +4,11 @@
 #include "app/Hotbar.h"
 #include "app/InventoryMenu.h"
 #include "app/PauseMenu.h"
+#include "creatures/CreatureGeometry.h"
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
+#include "player/PlayerGeometry.h"
 #include "world/Environment.h"
 #include "world/World.h"
 
@@ -22,8 +24,8 @@ namespace valcraft {
 
 struct RendererOptions {
     bool shadows_enabled = true;
-    int shadow_map_size = 2048;
-    bool post_process_enabled = true;
+    int shadow_map_size = 1024;
+    bool post_process_enabled = false;
 };
 
 struct RendererFrameStats {
@@ -36,6 +38,18 @@ struct RendererFrameStats {
     std::size_t world_chunks = 0;
 };
 
+struct HudVertex {
+    float x = 0.0F;
+    float y = 0.0F;
+    float u = 0.0F;
+    float v = 0.0F;
+    float r = 1.0F;
+    float g = 1.0F;
+    float b = 1.0F;
+    float a = 1.0F;
+    float textured = 0.0F;
+};
+
 class Renderer {
 public:
     Renderer() = default;
@@ -46,7 +60,7 @@ public:
 
     auto initialize(const RendererOptions& options = {}) -> bool;
     void shutdown();
-    void render_frame(const World& world,
+    void render_frame(World& world,
                       const PlayerController& player,
                       const HotbarState& hotbar,
                       const InventoryMenuState& inventory_menu,
@@ -157,10 +171,54 @@ private:
         ChunkCoord coord {};
         const GpuMesh* mesh = nullptr;
         glm::vec3 center {0.0F};
-        float distance = 0.0F;
+        float distance_squared = 0.0F;
     };
 
-    void sync_gpu_meshes(const World& world, RendererFrameStats& frame_stats);
+    struct HotbarHudCacheKey {
+        HotbarState hotbar {};
+        int width = 0;
+        int height = 0;
+        int health_steps = 0;
+        int air_steps = 0;
+        int damage_flash_step = 0;
+        bool air_visible = false;
+
+        auto operator==(const HotbarHudCacheKey&) const -> bool = default;
+    };
+
+    struct InventoryHudCacheKey {
+        InventoryMenuState inventory_menu {};
+        HotbarState hotbar {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const InventoryHudCacheKey&) const -> bool = default;
+    };
+
+    struct DeathHudCacheKey {
+        DeathScreenState death_screen {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const DeathHudCacheKey&) const -> bool = default;
+    };
+
+    struct PauseHudCacheKey {
+        PauseMenuState pause_menu {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const PauseHudCacheKey&) const -> bool = default;
+    };
+
+    template <typename Key>
+    struct HudGeometryCache {
+        bool valid = false;
+        Key key {};
+        std::vector<HudVertex> vertices {};
+    };
+
+    void sync_gpu_meshes(World& world, RendererFrameStats& frame_stats);
     void upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision);
     void destroy_gpu_mesh(GpuMesh& mesh);
     auto compile_shader(GLenum type, const char* source) -> GLuint;
@@ -169,6 +227,7 @@ private:
     void create_atlas_texture();
     void create_accent_texture();
     void create_creature_atlas_texture();
+    void create_player_atlas_texture();
     void create_shadow_map();
     void create_creature_geometry();
     void create_item_drop_geometry();
@@ -185,11 +244,18 @@ private:
                         const glm::mat4& light_view_projection,
                         const glm::vec3& camera_position,
                         const EnvironmentState& environment);
+    void draw_player_avatar(const PlayerController& player,
+                            const glm::mat4& view_projection,
+                            const glm::mat4& light_view_projection,
+                            const glm::vec3& camera_position,
+                            const EnvironmentState& environment);
     void draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& environment, int width, int height);
     void draw_inventory_menu(const InventoryMenuState& inventory_menu, const HotbarState& hotbar, int width, int height);
     void draw_death_screen(const DeathScreenState& death_screen, int width, int height);
     void draw_pause_menu(const PauseMenuState& pause_menu, int width, int height);
     void draw_crosshair();
+    void ensure_hud_buffer_capacity(std::size_t vertex_count);
+    void upload_hud_vertices(std::span<const HudVertex> vertices);
 
     GLuint world_program_ = 0;
     GLuint creature_program_ = 0;
@@ -203,6 +269,7 @@ private:
     GLuint atlas_texture_ = 0;
     GLuint accent_texture_ = 0;
     GLuint creature_atlas_texture_ = 0;
+    GLuint player_atlas_texture_ = 0;
     GLuint shadow_map_ = 0;
     GLuint shadow_framebuffer_ = 0;
     GLuint scene_framebuffer_ = 0;
@@ -236,7 +303,15 @@ private:
     GLsizeiptr creature_vertex_buffer_bytes_ = 0;
     GLsizeiptr creature_index_buffer_bytes_ = 0;
     GLsizeiptr item_drop_vertex_buffer_bytes_ = 0;
+    GLsizeiptr hud_vertex_buffer_bytes_ = 0;
     RendererFrameStats last_frame_stats_ {};
+    std::vector<ChunkVertex> item_drop_vertices_scratch_ {};
+    std::vector<CreatureVertex> creature_vertices_scratch_ {};
+    std::vector<std::uint32_t> creature_indices_scratch_ {};
+    HudGeometryCache<HotbarHudCacheKey> hotbar_cache_ {};
+    HudGeometryCache<InventoryHudCacheKey> inventory_cache_ {};
+    HudGeometryCache<DeathHudCacheKey> death_cache_ {};
+    HudGeometryCache<PauseHudCacheKey> pause_cache_ {};
     int scene_target_width_ = 0;
     int scene_target_height_ = 0;
     int glow_target_width_ = 0;

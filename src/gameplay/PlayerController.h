@@ -17,6 +17,7 @@ enum class PlayerDeathCause : std::uint8_t {
     Fall = 1,
     Drowning = 2,
     Void = 3,
+    Zombie = 4,
 };
 
 inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept -> std::string_view {
@@ -27,6 +28,8 @@ inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept 
         return "NOYADE";
     case PlayerDeathCause::Void:
         return "ABYSSE";
+    case PlayerDeathCause::Zombie:
+        return "ZOMBIE";
     case PlayerDeathCause::None:
     default:
         return "INCONNUE";
@@ -88,6 +91,7 @@ public:
     void set_velocity(const glm::vec3& velocity) noexcept;
     void set_selected_block(BlockId block_id) noexcept;
     void respawn(const glm::vec3& position) noexcept;
+    void apply_external_damage(float amount, PlayerDeathCause cause) noexcept;
 
     [[nodiscard]] auto current_target(const World& world, float max_distance = 8.0F) const -> RaycastHit;
     auto try_break_block(World& world, float max_distance = 8.0F) const -> std::optional<BrokenBlockResult>;

@@ -129,6 +129,9 @@ enum class BlockVisualMaterial : std::uint8_t {
         }
         return {5, 2};
     case BlockType::Water:
+        if (face == BlockVisualFace::PositiveY || face == BlockVisualFace::NegativeY) {
+            return {5, 3};
+        }
         return {7, 2};
     case BlockType::Torch:
         return {0, 3};

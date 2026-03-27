@@ -10,9 +10,9 @@
 namespace valcraft {
 
 enum class CreatureSpecies : std::uint8_t {
-    Rabbit = 0,
-    Fennec = 1,
-    Lamb = 2,
+    Pig = 0,
+    Cow = 1,
+    Sheep = 2,
 };
 
 enum class CreatureBehaviorState : std::uint8_t {
@@ -23,13 +23,15 @@ enum class CreatureBehaviorState : std::uint8_t {
     Lurk = 4,
     Stare = 5,
     Twitch = 6,
+    Chase = 7,
+    Strike = 8,
 };
 
 struct CreatureSpawnAnchor {
     ChunkCoord chunk {};
     BlockCoord ground_block {};
     glm::vec3 spawn_position {0.0F};
-    CreatureSpecies species = CreatureSpecies::Rabbit;
+    CreatureSpecies species = CreatureSpecies::Pig;
 };
 
 inline auto operator==(const CreatureSpawnAnchor& lhs, const CreatureSpawnAnchor& rhs) noexcept -> bool {
@@ -56,10 +58,12 @@ struct CreatureInstance {
     float morph_factor = 0.0F;
     float motion_amount = 0.0F;
     float gaze_weight = 0.0F;
+    float attack_cooldown = 0.0F;
+    float attack_amount = 0.0F;
 };
 
 struct CreatureRenderInstance {
-    CreatureSpecies species = CreatureSpecies::Rabbit;
+    CreatureSpecies species = CreatureSpecies::Pig;
     glm::vec3 position {0.0F};
     float yaw_radians = 0.0F;
     float animation_time = 0.0F;
@@ -71,6 +75,13 @@ struct CreatureRenderInstance {
     CreaturePhase phase = CreaturePhase::Day;
     float motion_amount = 0.0F;
     float gaze_weight = 0.0F;
+    float attack_amount = 0.0F;
+};
+
+struct CreatureAttackEvent {
+    CreatureSpecies species = CreatureSpecies::Pig;
+    glm::vec3 origin {0.0F};
+    float damage = 0.0F;
 };
 
 } // namespace valcraft

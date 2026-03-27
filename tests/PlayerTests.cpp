@@ -1,13 +1,91 @@
 #include "app/InventoryMenu.h"
 #include "app/Hotbar.h"
+#include "creatures/CreatureSystem.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
+#include "player/PlayerGeometry.h"
 
 #include "TestUtils.h"
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
+#include <limits>
+
 namespace valcraft {
+
+namespace {
+
+auto player_tile_average_rgba(const std::vector<std::uint8_t>& atlas, PlayerAtlasTile tile) -> std::array<float, 4> {
+    const auto coordinates = player_atlas_tile_coordinates(tile);
+    const auto start_x = coordinates[0] * kPlayerAtlasTileSize;
+    const auto start_y = coordinates[1] * kPlayerAtlasTileSize;
+
+    std::array<float, 4> accum {{0.0F, 0.0F, 0.0F, 0.0F}};
+    for (int y = 0; y < kPlayerAtlasTileSize; ++y) {
+        for (int x = 0; x < kPlayerAtlasTileSize; ++x) {
+            const auto index = static_cast<std::size_t>(((start_y + y) * kPlayerAtlasSize + (start_x + x)) * 4);
+            accum[0] += static_cast<float>(atlas[index + 0]);
+            accum[1] += static_cast<float>(atlas[index + 1]);
+            accum[2] += static_cast<float>(atlas[index + 2]);
+            accum[3] += static_cast<float>(atlas[index + 3]);
+        }
+    }
+
+    const auto texel_count = static_cast<float>(kPlayerAtlasTileSize * kPlayerAtlasTileSize);
+    for (auto& channel : accum) {
+        channel /= texel_count;
+    }
+    return accum;
+}
+
+struct MeshBounds {
+    glm::vec3 min {0.0F};
+    glm::vec3 max {0.0F};
+};
+
+auto mesh_bounds(const CreatureMeshData& mesh) -> MeshBounds {
+    MeshBounds bounds {
+        glm::vec3 {std::numeric_limits<float>::max()},
+        glm::vec3 {std::numeric_limits<float>::lowest()},
+    };
+
+    for (const auto& vertex : mesh.vertices) {
+        bounds.min.x = std::min(bounds.min.x, vertex.x);
+        bounds.min.y = std::min(bounds.min.y, vertex.y);
+        bounds.min.z = std::min(bounds.min.z, vertex.z);
+        bounds.max.x = std::max(bounds.max.x, vertex.x);
+        bounds.max.y = std::max(bounds.max.y, vertex.y);
+        bounds.max.z = std::max(bounds.max.z, vertex.z);
+    }
+    return bounds;
+}
+
+auto meshes_match_exactly(const CreatureMeshData& lhs, const CreatureMeshData& rhs) -> bool {
+    if (lhs.part_count != rhs.part_count || lhs.indices != rhs.indices || lhs.vertices.size() != rhs.vertices.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < lhs.vertices.size(); ++index) {
+        const auto& a = lhs.vertices[index];
+        const auto& b = rhs.vertices[index];
+        if (a.x != b.x || a.y != b.y || a.z != b.z ||
+            a.u != b.u || a.v != b.v ||
+            a.nx != b.nx || a.ny != b.ny || a.nz != b.nz ||
+            a.nightmare_factor != b.nightmare_factor ||
+            a.tension != b.tension ||
+            a.material_class != b.material_class ||
+            a.cavity_mask != b.cavity_mask ||
+            a.emissive_strength != b.emissive_strength) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+} // namespace
 
 TEST_CASE("player falls onto the ground and stays grounded") {
     World world(15, 1);
@@ -23,6 +101,21 @@ TEST_CASE("player falls onto the ground and stays grounded") {
 
     CHECK(player.state().on_ground);
     CHECK(player.position().y == doctest::Approx(1.001F).epsilon(0.02));
+}
+
+TEST_CASE("large frame deltas do not tunnel the player through the ground") {
+    World world(1501, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+
+    player.update(PlayerInput {}, 0.60F, world);
+
+    CHECK(player.state().on_ground);
+    CHECK(player.position().y == doctest::Approx(1.001F).epsilon(0.02));
+    CHECK(player.state().health == doctest::Approx(player.max_health()));
+    CHECK(player.state().death_cause == PlayerDeathCause::None);
 }
 
 TEST_CASE("falling from a height deals survival damage to the player") {
@@ -322,6 +415,114 @@ TEST_CASE("respawn restores survival state after death") {
     CHECK(player.position().x == doctest::Approx(2.5F));
     CHECK(player.position().y == doctest::Approx(1.001F));
     CHECK(player.position().z == doctest::Approx(2.5F));
+}
+
+TEST_CASE("external zombie damage reuses invulnerability and death handling") {
+    World world(154, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+
+    player.apply_external_damage(3.0F, PlayerDeathCause::Zombie);
+    CHECK(player.state().health == doctest::Approx(player.max_health() - 3.0F));
+    CHECK(player.state().hurt_timer > 0.0F);
+    CHECK(player.state().damage_cooldown > 0.0F);
+    CHECK_FALSE(player.state().dead);
+
+    player.apply_external_damage(3.0F, PlayerDeathCause::Zombie);
+    CHECK(player.state().health == doctest::Approx(player.max_health() - 3.0F));
+
+    player.update(PlayerInput {}, 0.60F, world);
+    player.apply_external_damage(40.0F, PlayerDeathCause::Zombie);
+
+    CHECK(player.state().dead);
+    CHECK(player.state().death_cause == PlayerDeathCause::Zombie);
+}
+
+TEST_CASE("day creatures never damage the player but night zombies do") {
+    World world(155, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    CreatureSystem day_system {};
+    PlayerController day_player({2.5F, 13.001F, 2.5F});
+    const auto day_environment = EnvironmentClock::compute_state(12.0F);
+    const auto day_cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+
+    for (int frame = 0; frame < 180; ++frame) {
+        day_system.update(1.0F / 60.0F, world, day_player.position(), day_environment, day_cycle);
+        for (const auto& attack : day_system.recent_attacks()) {
+            day_player.apply_external_damage(attack.damage, PlayerDeathCause::Zombie);
+        }
+    }
+
+    CHECK(day_player.state().health == doctest::Approx(day_player.max_health()));
+
+    CreatureSystem night_system {};
+    PlayerController night_player({14.5F, 13.001F, 14.5F});
+    const auto night_environment = EnvironmentClock::compute_state(23.0F);
+    const auto night_cycle = EnvironmentClock::classify_creature_cycle(23.0F);
+    night_system.update(0.0F, world, night_player.position(), night_environment, night_cycle);
+    REQUIRE(night_system.active_creatures().size() == 1);
+
+    const auto close_position = night_system.active_creatures().front().position + glm::vec3 {0.8F, 0.0F, 0.0F};
+    night_player.set_position(close_position);
+
+    bool took_damage = false;
+    for (int frame = 0; frame < 120; ++frame) {
+        night_system.update(1.0F / 60.0F, world, night_player.position(), night_environment, night_cycle);
+        for (const auto& attack : night_system.recent_attacks()) {
+            night_player.apply_external_damage(attack.damage, PlayerDeathCause::Zombie);
+            took_damage = true;
+        }
+        night_player.update(PlayerInput {}, 1.0F / 60.0F, world);
+        if (took_damage) {
+            break;
+        }
+    }
+
+    REQUIRE(took_damage);
+    CHECK(night_player.state().health < night_player.max_health());
+    CHECK_FALSE(night_player.state().dead);
+}
+
+TEST_CASE("player geometry builds a deterministic Steve-like FPS body and hurt feedback") {
+    World world(156, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -4, 4, 0, -4, 4);
+
+    PlayerController looking_forward({0.5F, 1.001F, 0.5F});
+    PlayerController looking_down({0.5F, 1.001F, 0.5F});
+
+    PlayerInput look_up_input {};
+    look_up_input.look_delta_y = -400.0F;
+    looking_forward.update(look_up_input, 0.0F, world);
+
+    PlayerInput look_down_input {};
+    look_down_input.look_delta_y = 400.0F;
+    looking_down.update(look_down_input, 0.0F, world);
+
+    looking_down.set_velocity({1.2F, 0.0F, 0.0F});
+    looking_down.apply_external_damage(2.0F, PlayerDeathCause::Zombie);
+
+    const auto atlas = build_player_atlas_pixels();
+    const auto forward_mesh = build_player_mesh(looking_forward);
+    const auto down_mesh = build_player_mesh(looking_down);
+    const auto down_mesh_repeat = build_player_mesh(looking_down);
+    const auto forward_bounds = mesh_bounds(forward_mesh);
+    const auto down_bounds = mesh_bounds(down_mesh);
+
+    REQUIRE(atlas.size() == static_cast<std::size_t>(kPlayerAtlasSize * kPlayerAtlasSize * 4));
+    CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[2] > player_tile_average_rgba(atlas, PlayerAtlasTile::Pants)[2]);
+    CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hair)[0] < player_tile_average_rgba(atlas, PlayerAtlasTile::Skin)[0]);
+    CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hurt)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[0] + 80.0F);
+
+    CHECK_FALSE(forward_mesh.empty());
+    CHECK_FALSE(down_mesh.empty());
+    CHECK(meshes_match_exactly(down_mesh, down_mesh_repeat));
+    CHECK(down_mesh.part_count > forward_mesh.part_count);
+    CHECK((down_bounds.max.y - down_bounds.min.y) > (forward_bounds.max.y - forward_bounds.min.y) + 0.10F);
+    CHECK(down_bounds.min.z < looking_down.position().z - 0.20F);
 }
 
 } // namespace valcraft

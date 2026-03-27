@@ -120,21 +120,27 @@ Le projet vise une base technique solide et evolutive:
 ### Build
 
 ```powershell
-cmake -S . -B cmake-build-debug -G Ninja
-cmake --build cmake-build-debug --target ValCraft --parallel
+cmake -S . -B cmake-build-release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build cmake-build-release --target ValCraft --parallel
 ```
 
 ### Lancer le jeu
 
 ```powershell
-.\cmake-build-debug\bin\ValCraft.exe
+.\cmake-build-release\bin\ValCraft.exe
 ```
 
 ### Lancer les tests
 
 ```powershell
-cmake --build cmake-build-debug --target valcraft_tests --parallel
-ctest --test-dir cmake-build-debug --output-on-failure
+cmake --build cmake-build-release --target valcraft_tests --parallel
+ctest --test-dir cmake-build-release --output-on-failure
+```
+
+### Lancer un profilage smoke/perf
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\perf.ps1 -Configuration RelWithDebInfo
 ```
 
 ### Lancer la gate stricte complete
