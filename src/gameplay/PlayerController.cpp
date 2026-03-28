@@ -5,6 +5,7 @@
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/trigonometric.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +28,9 @@ constexpr float kRegenerationDelay = 6.0F;
 constexpr float kRegenerationInterval = 2.5F;
 constexpr float kDrowningDamageInterval = 1.0F;
 constexpr float kMaxCollisionStep = 0.45F;
+constexpr float kBodyYawMoveThreshold = 0.15F;
+constexpr float kBodyYawMoveTurnSpeed = 540.0F;
+constexpr float kBodyYawIdleTurnSpeed = 360.0F;
 
 auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
     const auto horizontal = glm::vec3 {vector.x, 0.0F, vector.z};
@@ -37,11 +41,31 @@ auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
     return horizontal / length;
 }
 
+auto wrap_degrees(float angle) noexcept -> float {
+    while (angle <= -180.0F) {
+        angle += 360.0F;
+    }
+    while (angle > 180.0F) {
+        angle -= 360.0F;
+    }
+    return angle;
+}
+
+auto rotate_towards_degrees(float current, float target, float max_delta) noexcept -> float {
+    const auto delta = wrap_degrees(target - current);
+    return wrap_degrees(current + std::clamp(delta, -max_delta, max_delta));
+}
+
+auto yaw_degrees_from_direction(const glm::vec2& direction) noexcept -> float {
+    return static_cast<float>(glm::degrees(std::atan2(direction.y, direction.x)));
+}
+
 } // namespace
 
 PlayerController::PlayerController(glm::vec3 spawn_position) {
     state_.position = spawn_position;
     state_.fall_start_y = spawn_position.y;
+    state_.body_yaw_degrees = state_.yaw_degrees;
 }
 
 void PlayerController::update(const PlayerInput& input, float dt, const World& world) {
@@ -109,9 +133,14 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         }
     };
 
+    const auto start_position = state_.position;
     move_axis_safely(state_.velocity.x * clamped_dt, 0);
     move_axis_safely(state_.velocity.y * clamped_dt, 1);
     move_axis_safely(state_.velocity.z * clamped_dt, 2);
+    const auto horizontal_displacement = glm::vec2 {
+        state_.position.x - start_position.x,
+        state_.position.z - start_position.z,
+    };
 
     if (!state_.fly_mode) {
         state_.on_ground = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
@@ -133,6 +162,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.fall_start_y = state_.position.y;
     }
 
+    update_body_yaw(clamped_dt, horizontal_displacement);
     update_survival_state(clamped_dt, world);
 }
 
@@ -195,6 +225,7 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
     state_ = {};
     state_.position = position;
     state_.fall_start_y = position.y;
+    state_.body_yaw_degrees = state_.yaw_degrees;
 }
 
 void PlayerController::apply_external_damage(float amount, PlayerDeathCause cause) noexcept {
@@ -274,6 +305,21 @@ auto PlayerController::collides_at(const World& world, const glm::vec3& feet_pos
     }
 
     return false;
+}
+
+void PlayerController::update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept {
+    if (state_.dead) {
+        return;
+    }
+
+    const auto clamped_dt = std::max(dt, 0.0F);
+    const auto horizontal_distance = glm::length(horizontal_displacement);
+    const auto horizontal_speed = clamped_dt > 1.0e-5F ? horizontal_distance / clamped_dt : 0.0F;
+
+    const auto moving = horizontal_speed > kBodyYawMoveThreshold;
+    const auto target_yaw = moving ? yaw_degrees_from_direction(horizontal_displacement) : state_.yaw_degrees;
+    const auto turn_speed = moving ? kBodyYawMoveTurnSpeed : kBodyYawIdleTurnSpeed;
+    state_.body_yaw_degrees = rotate_towards_degrees(state_.body_yaw_degrees, target_yaw, turn_speed * clamped_dt);
 }
 
 void PlayerController::update_survival_state(float dt, const World& world) {

@@ -3,6 +3,7 @@
 #include "world/Block.h"
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
 #include <optional>
@@ -51,6 +52,7 @@ struct PlayerState {
     glm::vec3 velocity {0.0F};
     float yaw_degrees = -90.0F;
     float pitch_degrees = -18.0F;
+    float body_yaw_degrees = -90.0F;
     float health = 20.0F;
     float air_seconds = 10.0F;
     float hurt_timer = 0.0F;
@@ -100,6 +102,7 @@ public:
 
 private:
     void update_survival_state(float dt, const World& world);
+    void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
     void move_axis(float delta, int axis, const World& world);
     void apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown = false) noexcept;
     void heal(float amount) noexcept;

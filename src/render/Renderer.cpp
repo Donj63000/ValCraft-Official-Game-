@@ -2638,7 +2638,8 @@ void Renderer::draw_player_avatar(const PlayerController& player,
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
 
     glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
     glUseProgram(creature_program_);
     glUniformMatrix4fv(creature_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(creature_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));

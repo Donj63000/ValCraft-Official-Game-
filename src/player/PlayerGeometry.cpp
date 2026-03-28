@@ -243,61 +243,88 @@ auto build_player_mesh(const PlayerController& player) -> CreatureMeshData {
     CreatureMeshData mesh {};
 
     const auto& state = player.state();
-    auto forward = player.look_direction();
-    forward.y = 0.0F;
-    if (glm::dot(forward, forward) <= 1.0e-6F) {
-        forward = glm::vec3 {0.0F, 0.0F, -1.0F};
-    } else {
-        forward = glm::normalize(forward);
+    const auto look_down = saturate((-state.pitch_degrees - 30.0F) / 30.0F);
+    if (look_down <= 1.0e-4F) {
+        // La je coupe totalement le corps tant que je reste dans une vraie vue FPS.
+        return mesh;
     }
+
+    auto camera_forward = player.look_direction();
+    camera_forward.y = 0.0F;
+    if (glm::dot(camera_forward, camera_forward) <= 1.0e-6F) {
+        camera_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
+    } else {
+        camera_forward = glm::normalize(camera_forward);
+    }
+    const auto camera_right = glm::normalize(glm::cross(camera_forward, glm::vec3 {0.0F, 1.0F, 0.0F}));
 
     const auto horizontal_velocity = glm::vec2 {state.velocity.x, state.velocity.z};
     const auto walk_amount = saturate(glm::length(horizontal_velocity) / 5.6F);
     const auto stride_phase = (state.position.x * 1.35F + state.position.z * 1.15F) * 2.1F;
-    const auto stride = std::sin(stride_phase) * (0.16F + walk_amount * 0.34F);
-    const auto arm_swing = stride * (0.90F + walk_amount * 0.55F);
-    const auto leg_swing = -stride * (0.95F + walk_amount * 0.35F);
-    const auto look_down = saturate((-state.pitch_degrees - 8.0F) / 42.0F);
+    const auto stride = std::sin(stride_phase);
+    const auto sway = stride * walk_amount * 0.028F * look_down;
+    const auto torso_bob = std::cos(stride_phase * 2.0F) * walk_amount * 0.012F * look_down;
+    const auto arm_swing = stride * (0.08F + walk_amount * 0.18F) * look_down;
     const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
-    const auto body_offset = forward * (0.14F + look_down * 0.06F) + glm::vec3 {0.0F, -0.03F, 0.0F};
-
-    auto root = glm::translate(glm::mat4(1.0F), state.position + body_offset);
-    root = glm::rotate(root, glm::radians(state.yaw_degrees), glm::vec3 {0.0F, 1.0F, 0.0F});
-
+    const auto presence = look_down;
     const auto torso_tile = hurt_amount > 0.12F ? PlayerAtlasTile::Hurt : PlayerAtlasTile::Shirt;
     const auto arm_tile = hurt_amount > 0.22F ? PlayerAtlasTile::Hurt : PlayerAtlasTile::Skin;
-    const auto torso_roll = hurt_amount * 0.12F;
-    const auto shoulder_twist = look_down * 0.10F;
+    const auto shoulder_tile = hurt_amount > 0.16F ? PlayerAtlasTile::Hurt : PlayerAtlasTile::Shirt;
 
-    append_box(mesh, root, glm::vec3 {0.04F, 0.98F, 0.0F}, glm::vec3 {0.18F, 0.28F, 0.12F},
-               glm::vec3 {0.0F, 0.0F, torso_roll}, torso_tile, kMaterialFabric, 0.12F, 0.0F);
-    append_box(mesh, root, glm::vec3 {-0.16F, 0.40F, -0.08F}, glm::vec3 {0.07F, 0.34F, 0.07F},
-               glm::vec3 {0.0F, 0.0F, leg_swing}, PlayerAtlasTile::Pants, kMaterialDenim, 0.08F, 0.0F);
-    append_box(mesh, root, glm::vec3 {-0.16F, 0.06F, -0.08F}, glm::vec3 {0.072F, 0.04F, 0.075F},
-               glm::vec3 {0.0F, 0.0F, leg_swing * 0.15F}, PlayerAtlasTile::Shoes, kMaterialLeather, 0.06F, 0.0F);
-    append_box(mesh, root, glm::vec3 {-0.16F, 0.40F, 0.08F}, glm::vec3 {0.07F, 0.34F, 0.07F},
-               glm::vec3 {0.0F, 0.0F, -leg_swing}, PlayerAtlasTile::Pants, kMaterialDenim, 0.08F, 0.0F);
-    append_box(mesh, root, glm::vec3 {-0.16F, 0.06F, 0.08F}, glm::vec3 {0.072F, 0.04F, 0.075F},
-               glm::vec3 {0.0F, 0.0F, -leg_swing * 0.15F}, PlayerAtlasTile::Shoes, kMaterialLeather, 0.06F, 0.0F);
-    append_box(mesh, root, glm::vec3 {0.04F, 0.94F, -0.24F}, glm::vec3 {0.060F, 0.31F, 0.060F},
-               glm::vec3 {0.0F, 0.0F, -arm_swing - shoulder_twist}, arm_tile, kMaterialSkin, 0.10F, 0.0F);
-    append_box(mesh, root, glm::vec3 {0.04F, 0.94F, 0.24F}, glm::vec3 {0.060F, 0.31F, 0.060F},
-               glm::vec3 {0.0F, 0.0F, arm_swing + shoulder_twist}, arm_tile, kMaterialSkin, 0.10F, 0.0F);
+    const auto body_anchor = player.eye_position()
+                           + camera_forward * (0.005F + presence * 0.045F)
+                           + camera_right * sway * 0.22F
+                           + glm::vec3 {0.0F, -(0.34F - presence * 0.06F) + torso_bob, 0.0F};
 
-    if (look_down > 0.02F) {
-        const auto head_center = glm::vec3 {0.28F + look_down * 0.10F, 1.46F - (1.0F - look_down) * 0.22F, 0.0F};
-        const auto head_pitch = glm::radians(glm::clamp(-state.pitch_degrees * 0.62F, -24.0F, 52.0F));
-        append_box(mesh, root, head_center, glm::vec3 {0.17F, 0.17F, 0.17F},
-                   glm::vec3 {head_pitch, 0.0F, hurt_amount * 0.06F}, PlayerAtlasTile::Skin, kMaterialSkin, 0.16F, 0.0F);
-        append_box(mesh, root, head_center + glm::vec3 {-0.02F, 0.10F, 0.0F}, glm::vec3 {0.18F, 0.08F, 0.18F},
-                   glm::vec3 {head_pitch, 0.0F, hurt_amount * 0.04F}, PlayerAtlasTile::Hair, kMaterialLeather, 0.10F, 0.0F);
-        append_box(mesh, root, head_center + glm::vec3 {0.15F, 0.02F, -0.06F}, glm::vec3 {0.012F, 0.042F, 0.032F},
-                   glm::vec3 {head_pitch, 0.0F, 0.0F}, PlayerAtlasTile::Eye, kMaterialSkin, 0.0F, 0.0F);
-        append_box(mesh, root, head_center + glm::vec3 {0.15F, 0.02F, 0.06F}, glm::vec3 {0.012F, 0.042F, 0.032F},
-                   glm::vec3 {head_pitch, 0.0F, 0.0F}, PlayerAtlasTile::Eye, kMaterialSkin, 0.0F, 0.0F);
-        append_box(mesh, root, head_center + glm::vec3 {0.16F, -0.06F, 0.0F}, glm::vec3 {0.010F, 0.020F, 0.050F},
-                   glm::vec3 {head_pitch, 0.0F, 0.0F}, PlayerAtlasTile::Mouth, kMaterialSkin, 0.0F, 0.0F);
-    }
+    // Ici je garde tout le mesh sous la ligne des yeux pour eviter que la camera traverse le modele.
+    auto root = glm::translate(glm::mat4(1.0F), body_anchor);
+    root = glm::rotate(root, glm::radians(state.body_yaw_degrees), glm::vec3 {0.0F, 1.0F, 0.0F});
+
+    append_box(mesh,
+               root,
+               glm::vec3 {-0.05F, -0.14F, 0.0F},
+               glm::vec3 {0.10F, 0.11F, 0.065F} * presence,
+               glm::vec3 {0.0F, 0.0F, hurt_amount * 0.08F + sway * 0.6F},
+               torso_tile,
+               kMaterialFabric,
+               0.10F,
+               0.0F);
+    append_box(mesh,
+               root,
+               glm::vec3 {-0.04F, -0.03F, -0.13F},
+               glm::vec3 {0.055F, 0.032F, 0.050F} * presence,
+               glm::vec3 {0.0F, 0.0F, arm_swing * 0.25F},
+               shoulder_tile,
+               kMaterialFabric,
+               0.08F,
+               0.0F);
+    append_box(mesh,
+               root,
+               glm::vec3 {-0.04F, -0.03F, 0.13F},
+               glm::vec3 {0.055F, 0.032F, 0.050F} * presence,
+               glm::vec3 {0.0F, 0.0F, -arm_swing * 0.25F},
+               shoulder_tile,
+               kMaterialFabric,
+               0.08F,
+               0.0F);
+    append_box(mesh,
+               root,
+               glm::vec3 {-0.03F, -0.18F, -0.15F},
+               glm::vec3 {0.040F, 0.12F, 0.040F} * presence,
+               glm::vec3 {0.0F, 0.0F, -arm_swing - sway * 0.4F},
+               arm_tile,
+               kMaterialSkin,
+               0.08F,
+               0.0F);
+    append_box(mesh,
+               root,
+               glm::vec3 {-0.03F, -0.18F, 0.15F},
+               glm::vec3 {0.040F, 0.12F, 0.040F} * presence,
+               glm::vec3 {0.0F, 0.0F, arm_swing + sway * 0.4F},
+               arm_tile,
+               kMaterialSkin,
+               0.08F,
+               0.0F);
 
     return mesh;
 }

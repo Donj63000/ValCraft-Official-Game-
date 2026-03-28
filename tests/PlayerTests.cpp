@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 
 namespace valcraft {
@@ -83,6 +84,10 @@ auto meshes_match_exactly(const CreatureMeshData& lhs, const CreatureMeshData& r
     }
 
     return true;
+}
+
+auto angle_distance_degrees(float lhs, float rhs) -> float {
+    return static_cast<float>(std::abs(std::remainder(lhs - rhs, 360.0F)));
 }
 
 } // namespace
@@ -486,30 +491,89 @@ TEST_CASE("day creatures never damage the player but night zombies do") {
     CHECK_FALSE(night_player.state().dead);
 }
 
-TEST_CASE("player geometry builds a deterministic Steve-like FPS body and hurt feedback") {
+TEST_CASE("player body yaw follows real movement and eases back toward the camera") {
+    World world(156, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -8, 8, 0, -8, 8);
+
+    SUBCASE("forward movement stays aligned with the current camera heading") {
+        PlayerController player({0.5F, 1.001F, 0.5F});
+        PlayerInput input {};
+        input.move_forward = 1.0F;
+
+        for (int frame = 0; frame < 10; ++frame) {
+            player.update(input, 1.0F / 60.0F, world);
+        }
+
+        CHECK(angle_distance_degrees(player.state().body_yaw_degrees, -90.0F) < 0.1F);
+    }
+
+    SUBCASE("backward movement rotates toward the real retreat direction") {
+        PlayerController player({0.5F, 1.001F, 0.5F});
+        PlayerInput input {};
+        input.move_forward = -1.0F;
+
+        for (int frame = 0; frame < 20; ++frame) {
+            player.update(input, 1.0F / 60.0F, world);
+        }
+
+        CHECK(angle_distance_degrees(player.state().body_yaw_degrees, 90.0F) < 0.1F);
+    }
+
+    SUBCASE("strafe rotation is smoothed and idle frames bring the body back to the camera") {
+        PlayerController player({0.5F, 1.001F, 0.5F});
+        PlayerInput strafe_input {};
+        strafe_input.move_right = 1.0F;
+
+        player.update(strafe_input, 1.0F / 60.0F, world);
+        CHECK(player.state().body_yaw_degrees == doctest::Approx(-81.0F));
+
+        for (int frame = 0; frame < 19; ++frame) {
+            player.update(strafe_input, 1.0F / 60.0F, world);
+        }
+        CHECK(angle_distance_degrees(player.state().body_yaw_degrees, 0.0F) < 0.1F);
+
+        PlayerInput turn_camera_input {};
+        turn_camera_input.look_delta_x = 2250.0F;
+        player.update(turn_camera_input, 1.0F / 60.0F, world);
+        CHECK(player.state().body_yaw_degrees == doctest::Approx(6.0F));
+
+        for (int frame = 0; frame < 19; ++frame) {
+            player.update(PlayerInput {}, 1.0F / 60.0F, world);
+        }
+        CHECK(angle_distance_degrees(player.state().body_yaw_degrees, 90.0F) < 0.1F);
+    }
+}
+
+TEST_CASE("player geometry only appears when looking down and stays safely below the eyes") {
     World world(156, 1);
     test::make_chunk_empty(world, {0, 0});
     test::make_flat_floor(world, -4, 4, 0, -4, 4);
 
     PlayerController looking_forward({0.5F, 1.001F, 0.5F});
+    PlayerController looking_slightly_down({0.5F, 1.001F, 0.5F});
     PlayerController looking_down({0.5F, 1.001F, 0.5F});
+    PlayerController looking_down_clean({0.5F, 1.001F, 0.5F});
 
-    PlayerInput look_up_input {};
-    look_up_input.look_delta_y = -400.0F;
-    looking_forward.update(look_up_input, 0.0F, world);
+    PlayerInput look_slightly_down_input {};
+    look_slightly_down_input.look_delta_y = 88.0F;
+    looking_slightly_down.update(look_slightly_down_input, 0.0F, world);
 
     PlayerInput look_down_input {};
-    look_down_input.look_delta_y = 400.0F;
+    look_down_input.look_delta_y = 800.0F;
     looking_down.update(look_down_input, 0.0F, world);
+    looking_down_clean.update(look_down_input, 0.0F, world);
 
     looking_down.set_velocity({1.2F, 0.0F, 0.0F});
+    looking_down_clean.set_velocity({1.2F, 0.0F, 0.0F});
     looking_down.apply_external_damage(2.0F, PlayerDeathCause::Zombie);
 
     const auto atlas = build_player_atlas_pixels();
     const auto forward_mesh = build_player_mesh(looking_forward);
+    const auto slightly_down_mesh = build_player_mesh(looking_slightly_down);
     const auto down_mesh = build_player_mesh(looking_down);
+    const auto clean_down_mesh = build_player_mesh(looking_down_clean);
     const auto down_mesh_repeat = build_player_mesh(looking_down);
-    const auto forward_bounds = mesh_bounds(forward_mesh);
     const auto down_bounds = mesh_bounds(down_mesh);
 
     REQUIRE(atlas.size() == static_cast<std::size_t>(kPlayerAtlasSize * kPlayerAtlasSize * 4));
@@ -517,12 +581,15 @@ TEST_CASE("player geometry builds a deterministic Steve-like FPS body and hurt f
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hair)[0] < player_tile_average_rgba(atlas, PlayerAtlasTile::Skin)[0]);
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hurt)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[0] + 80.0F);
 
-    CHECK_FALSE(forward_mesh.empty());
+    CHECK(forward_mesh.empty());
+    CHECK(slightly_down_mesh.empty());
     CHECK_FALSE(down_mesh.empty());
+    CHECK_FALSE(clean_down_mesh.empty());
     CHECK(meshes_match_exactly(down_mesh, down_mesh_repeat));
-    CHECK(down_mesh.part_count > forward_mesh.part_count);
-    CHECK((down_bounds.max.y - down_bounds.min.y) > (forward_bounds.max.y - forward_bounds.min.y) + 0.10F);
-    CHECK(down_bounds.min.z < looking_down.position().z - 0.20F);
+    CHECK_FALSE(meshes_match_exactly(down_mesh, clean_down_mesh));
+    CHECK(down_mesh.part_count == 5);
+    CHECK(down_bounds.max.y < looking_down.eye_position().y - 0.12F);
+    CHECK(down_bounds.min.y > looking_down.position().y + 0.80F);
 }
 
 } // namespace valcraft
