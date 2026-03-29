@@ -393,8 +393,11 @@ TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
     CHECK(mesh.vertices.empty());
     CHECK(mesh.indices.empty());
     CHECK(mesh.water_face_count == 6);
-    CHECK(mesh.water_vertices.size() == 24);
-    CHECK(mesh.water_indices.size() == 36);
+    CHECK(mesh.water_vertices.size() == 89);
+    CHECK(mesh.water_indices.size() == 294);
+    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+        return vertex.ao == doctest::Approx(1.0F);
+    }));
     CHECK_FALSE(mesh.empty());
 }
 
@@ -421,7 +424,7 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") 
         }
     }
 
-    REQUIRE(top_vertices.size() == 8);
+    REQUIRE(top_vertices.size() == 50);
 
     const auto vertices_at = [&](float x, float z) {
         std::vector<WaterTopVertex> matches;
@@ -435,16 +438,20 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") 
 
     const auto left_near = vertices_at(0.0F, 0.0F);
     const auto shared_near = vertices_at(1.0F, 0.0F);
+    const auto shared_mid = vertices_at(1.0F, 0.5F);
     const auto right_near = vertices_at(2.0F, 0.0F);
     const auto shared_far = vertices_at(1.0F, 1.0F);
 
     REQUIRE(left_near.size() == 1);
     REQUIRE(shared_near.size() == 2);
+    REQUIRE(shared_mid.size() == 2);
     REQUIRE(right_near.size() == 1);
     REQUIRE(shared_far.size() == 2);
 
     CHECK(shared_near[0].u == doctest::Approx(shared_near[1].u));
     CHECK(shared_near[0].v == doctest::Approx(shared_near[1].v));
+    CHECK(shared_mid[0].u == doctest::Approx(shared_mid[1].u));
+    CHECK(shared_mid[0].v == doctest::Approx(shared_mid[1].v));
     CHECK(shared_far[0].u == doctest::Approx(shared_far[1].u));
     CHECK(shared_far[0].v == doctest::Approx(shared_far[1].v));
 
@@ -467,7 +474,7 @@ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animat
         return vertex.wave_weight > 0.5F;
     });
 
-    CHECK(animated_vertex_count == 12);
+    CHECK(animated_vertex_count == 45);
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight == 0.0F || vertex.wave_weight == 1.0F;
     }));
@@ -485,7 +492,7 @@ TEST_CASE("stacked water only animates the topmost surface block") {
     const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight > 0.5F;
     });
-    CHECK(animated_vertex_count == 12);
+    CHECK(animated_vertex_count == 45);
 
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         if (vertex.wave_weight <= 0.5F) {

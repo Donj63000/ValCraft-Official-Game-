@@ -773,6 +773,7 @@ void Renderer::shutdown() {
             destroy_gpu_mesh(entry.second);
         }
 
+        destroy_water_scene_targets();
         destroy_post_process_targets();
 
         if (screen_quad_vao_ != 0) {
@@ -866,6 +867,9 @@ void Renderer::shutdown() {
     player_atlas_texture_ = 0;
     shadow_map_ = 0;
     shadow_framebuffer_ = 0;
+    water_scene_framebuffer_ = 0;
+    water_scene_color_texture_ = 0;
+    water_scene_depth_texture_ = 0;
     creature_vao_ = 0;
     creature_vbo_ = 0;
     creature_ebo_ = 0;
@@ -892,6 +896,8 @@ void Renderer::shutdown() {
     creature_index_buffer_bytes_ = 0;
     item_drop_vertex_buffer_bytes_ = 0;
     last_frame_stats_ = {};
+    water_scene_target_width_ = 0;
+    water_scene_target_height_ = 0;
     scene_target_width_ = 0;
     scene_target_height_ = 0;
     glow_target_width_ = 0;
@@ -1039,19 +1045,30 @@ void Renderer::render_frame(World& world,
     }
 
     const auto world_start = clock::now();
+    const auto render_width = std::max(width, 1);
     const auto render_height = std::max(height, 1);
     const auto use_post_process = options_.post_process_enabled && width > 0 && height > 0;
-    if (use_post_process) {
-        ensure_post_process_targets(width, render_height);
-        glBindFramebuffer(GL_FRAMEBUFFER, scene_framebuffer_);
-    } else {
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    const auto has_visible_water = std::any_of(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& visible_chunk) {
+        return visible_chunk.mesh->water_index_count > 0;
+    });
+
+    if (has_visible_water) {
+        ensure_water_scene_targets(render_width, render_height);
+    }
+    if (use_post_process || has_visible_water) {
+        ensure_post_process_targets(render_width, render_height);
     }
 
-    glViewport(0, 0, width, render_height);
+    const auto final_target_framebuffer = (use_post_process || has_visible_water) ? scene_framebuffer_ : 0U;
+    const auto opaque_target_framebuffer = has_visible_water ? water_scene_framebuffer_ : final_target_framebuffer;
+    const auto inverse_view_projection = glm::inverse(view_projection);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, opaque_target_framebuffer);
+    glViewport(0, 0, render_width, render_height);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
+    glDisable(GL_BLEND);
     glClearColor(environment.sky_zenith_color.r, environment.sky_zenith_color.g, environment.sky_zenith_color.b, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     draw_sky(player, environment);
@@ -1059,6 +1076,7 @@ void Renderer::render_frame(World& world,
     glUseProgram(world_program_);
     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniformMatrix4fv(world_uniforms_.inverse_view_projection, 1, GL_FALSE, glm::value_ptr(inverse_view_projection));
     glUniform3fv(world_uniforms_.camera_position, 1, glm::value_ptr(eye));
     glUniform3fv(world_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
     glUniform3fv(world_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
@@ -1071,11 +1089,17 @@ void Renderer::render_frame(World& world,
     glUniform1f(world_uniforms_.time_of_day, environment.time_of_day);
     glUniform1i(world_uniforms_.atlas, 0);
     glUniform1i(world_uniforms_.shadow_map, 1);
+    glUniform1i(world_uniforms_.scene_color, 2);
+    glUniform1i(world_uniforms_.scene_depth, 3);
     glUniform1i(world_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
 
     for (const auto& visible_chunk : visible_chunks) {
@@ -1090,34 +1114,72 @@ void Renderer::render_frame(World& world,
     draw_item_drops(item_drops);
     draw_creatures(creatures, view_projection, light_view_projection, eye, environment);
     draw_player_avatar(player, view_projection, light_view_projection, eye, environment);
-    glUseProgram(world_program_);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, shadow_map_);
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_CULL_FACE);
-    glDepthMask(GL_TRUE);
-    for (auto it = visible_chunks.rbegin(); it != visible_chunks.rend(); ++it) {
-        if (it->mesh->water_index_count == 0) {
-            continue;
+    if (has_visible_water) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, final_target_framebuffer);
+        glBlitFramebuffer(
+            0,
+            0,
+            render_width,
+            render_height,
+            0,
+            0,
+            render_width,
+            render_height,
+            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+            GL_NEAREST);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, final_target_framebuffer);
+        glViewport(0, 0, render_width, render_height);
+        glUseProgram(world_program_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, shadow_map_);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, water_scene_color_texture_);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, water_scene_depth_texture_);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glDisable(GL_CULL_FACE);
+        glDepthMask(GL_TRUE);
+
+        for (const auto& visible_chunk : visible_chunks) {
+            if (visible_chunk.mesh->water_index_count == 0) {
+                continue;
+            }
+            glBindVertexArray(visible_chunk.mesh->vao);
+            glDrawElements(
+                GL_TRIANGLES,
+                visible_chunk.mesh->water_index_count,
+                GL_UNSIGNED_INT,
+                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(visible_chunk.mesh->water_index_offset_bytes)));
         }
-        glBindVertexArray(it->mesh->vao);
-        glDrawElements(
-            GL_TRIANGLES,
-            it->mesh->water_index_count,
-            GL_UNSIGNED_INT,
-            reinterpret_cast<const void*>(static_cast<std::uintptr_t>(it->mesh->water_index_offset_bytes)));
+
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
     }
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-    glDisable(GL_BLEND);
 
     if (use_post_process) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         run_post_process(environment, width, render_height);
+    } else if (has_visible_water) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_framebuffer_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(
+            0,
+            0,
+            render_width,
+            render_height,
+            0,
+            0,
+            render_width,
+            render_height,
+            GL_COLOR_BUFFER_BIT,
+            GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
     } else {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
@@ -1403,6 +1465,8 @@ in vec4 v_light_position;
 
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadow_map;
+uniform sampler2D u_scene_color;
+uniform sampler2D u_scene_depth;
 uniform vec3 u_camera_position;
 uniform vec3 u_sun_direction;
 uniform vec3 u_sun_color;
@@ -1410,6 +1474,7 @@ uniform vec3 u_ambient_color;
 uniform vec3 u_fog_color;
 uniform vec3 u_distant_fog_color;
 uniform vec3 u_night_tint_color;
+uniform mat4 u_inverse_view_projection;
 uniform float u_daylight_factor;
 uniform float u_sun_visibility;
 uniform float u_time_of_day;
@@ -1459,6 +1524,12 @@ vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
         sin(phase_b) * 0.012 * 0.37 +
         cos(phase_c) * 0.008 * 0.29;
     return vec2(d_height_dx, d_height_dz);
+}
+
+vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
+    vec4 clip_position = vec4(screen_uv * 2.0 - 1.0, depth_sample * 2.0 - 1.0, 1.0);
+    vec4 world_position = u_inverse_view_projection * clip_position;
+    return world_position.xyz / max(world_position.w, 0.0001);
 }
 
 void main() {
@@ -1543,16 +1614,61 @@ void main() {
     float output_alpha = 1.0;
     if (water_mask > 0.5) {
         float fresnel = pow(1.0 - view_alignment, 4.5);
-        float sparkle = pow(max(dot(reflected, view_direction), 0.0), 60.0);
-        float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.24 + v_world_position.z * 0.28 + u_time_of_day * 20.0);
-        vec3 water_tint = mix(vec3(0.05, 0.18, 0.28), vec3(0.16, 0.58, 0.74), clamp(daylight * 0.78 + sky_light * 0.22, 0.0, 1.0));
-        vec3 water_light = ambient * 0.85 + bounce_light * 0.95 + sunlight * 0.58 + torch_light * 0.30;
-        vec3 water_specular =
-            mix(u_distant_fog_color, u_sun_color, 0.55) * (fresnel * (0.16 + 0.14 * daylight) + sparkle * (0.18 + 0.16 * daylight));
-        lit_color = mix(albedo, water_tint, 0.82) * water_light;
-        lit_color += water_tint * shimmer * (0.03 + 0.05 * daylight);
-        lit_color += water_specular;
-        output_alpha = clamp(max(sampled.a, 0.78 + fresnel * 0.06), 0.0, 0.92);
+        float water_time = u_time_of_day * 20.0;
+        vec2 detail_flow = vec2(
+            sin(v_world_position.x * 0.31 + v_world_position.z * 0.17 + water_time * 0.75),
+            cos(v_world_position.z * 0.29 - v_world_position.x * 0.21 - water_time * 0.66));
+
+        vec2 scene_texel = 1.0 / vec2(textureSize(u_scene_color, 0));
+        vec2 scene_uv = gl_FragCoord.xy * scene_texel;
+        vec2 refraction_offset = (normal.xz * (0.010 + 0.006 * water_surface_mask) + detail_flow * 0.0015) *
+                                 (0.28 + 0.72 * (1.0 - view_alignment));
+        vec2 refracted_uv = clamp(scene_uv + refraction_offset, scene_texel * 0.5, vec2(1.0) - scene_texel * 0.5);
+
+        float base_scene_depth = texture(u_scene_depth, scene_uv).r;
+        float refracted_scene_depth = texture(u_scene_depth, refracted_uv).r;
+        if (refracted_scene_depth + 0.00005 < gl_FragCoord.z) {
+            refracted_uv = scene_uv;
+            refracted_scene_depth = base_scene_depth;
+        }
+
+        vec3 scene_color = texture(u_scene_color, refracted_uv).rgb;
+        float water_depth = 0.0;
+        if (refracted_scene_depth < 0.9999) {
+            vec3 background_position = reconstruct_world_position(refracted_uv, refracted_scene_depth);
+            water_depth = max(distance(background_position, v_world_position), 0.0);
+        } else {
+            water_depth = 7.0 + 12.0 * fresnel;
+        }
+        water_depth = clamp(water_depth, 0.0, 48.0);
+
+        float body_depth = max(water_depth, 0.32 + 0.18 * water_surface_mask);
+        vec3 absorption = mix(vec3(0.90, 0.34, 0.12), vec3(0.72, 0.28, 0.10), daylight);
+        vec3 transmittance = exp(-absorption * body_depth);
+
+        vec3 shallow_color = mix(vec3(0.07, 0.20, 0.26), vec3(0.10, 0.42, 0.55), daylight);
+        vec3 deep_color = mix(vec3(0.02, 0.08, 0.13), vec3(0.04, 0.19, 0.30), daylight);
+        vec3 water_volume_color = mix(shallow_color, deep_color, smoothstep(0.25, 6.0, body_depth));
+        vec3 water_light = ambient * 0.82 + bounce_light * 0.95 + sunlight * 0.40 + torch_light * 0.55;
+        vec3 water_body = scene_color * transmittance + water_volume_color * water_light * (1.0 - transmittance);
+
+        vec3 reflected_view = reflect(-view_direction, normal);
+        float horizon = clamp(reflected_view.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 sky_reflection = mix(u_fog_color, u_distant_fog_color, horizon);
+        sky_reflection = mix(sky_reflection, u_sun_color, 0.08 + 0.10 * daylight);
+
+        vec3 sun_reflection = reflect(-sun_direction, normal);
+        float sparkle = pow(max(dot(sun_reflection, view_direction), 0.0), 72.0);
+        vec3 reflection = sky_reflection * fresnel * (0.18 + 0.16 * daylight);
+        reflection += u_sun_color * sparkle * shadow * (0.12 + 0.18 * daylight);
+
+        float shallow_foam = (1.0 - smoothstep(0.08, 0.70, body_depth)) * (0.40 + 0.60 * water_surface_mask);
+        vec3 foam = mix(u_fog_color, vec3(0.86, 0.94, 1.0), 0.65) * shallow_foam * (0.10 + 0.06 * daylight);
+
+        float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.26 + v_world_position.z * 0.30 + u_time_of_day * 21.0);
+        lit_color = water_body + reflection + foam;
+        lit_color += water_volume_color * shimmer * (0.018 + 0.025 * daylight) * water_surface_mask;
+        output_alpha = 1.0;
     }
 
     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
@@ -1988,6 +2104,9 @@ void main() {
     world_uniforms_.time_of_day = glGetUniformLocation(world_program_, "u_time_of_day");
     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
+    world_uniforms_.scene_color = glGetUniformLocation(world_program_, "u_scene_color");
+    world_uniforms_.scene_depth = glGetUniformLocation(world_program_, "u_scene_depth");
+    world_uniforms_.inverse_view_projection = glGetUniformLocation(world_program_, "u_inverse_view_projection");
     world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
 
     creature_uniforms_.view_projection = glGetUniformLocation(creature_program_, "u_view_projection");
@@ -2269,6 +2388,65 @@ void Renderer::create_crosshair_geometry() {
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(kCrosshairVertices.size() * sizeof(float)), kCrosshairVertices.data(), GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, nullptr);
+}
+
+void Renderer::ensure_water_scene_targets(int width, int height) {
+    const auto target_width = std::max(width, 1);
+    const auto target_height = std::max(height, 1);
+    const auto targets_match =
+        water_scene_framebuffer_ != 0 && water_scene_color_texture_ != 0 && water_scene_depth_texture_ != 0 &&
+        water_scene_target_width_ == target_width && water_scene_target_height_ == target_height;
+    if (targets_match) {
+        return;
+    }
+
+    destroy_water_scene_targets();
+
+    glGenFramebuffers(1, &water_scene_framebuffer_);
+    glBindFramebuffer(GL_FRAMEBUFFER, water_scene_framebuffer_);
+
+    glGenTextures(1, &water_scene_color_texture_);
+    glBindTexture(GL_TEXTURE_2D, water_scene_color_texture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, target_width, target_height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, water_scene_color_texture_, 0);
+
+    glGenTextures(1, &water_scene_depth_texture_);
+    glBindTexture(GL_TEXTURE_2D, water_scene_depth_texture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, target_width, target_height, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, water_scene_depth_texture_, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        throw std::runtime_error("Water scene framebuffer is incomplete");
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    water_scene_target_width_ = target_width;
+    water_scene_target_height_ = target_height;
+}
+
+void Renderer::destroy_water_scene_targets() {
+    if (water_scene_depth_texture_ != 0) {
+        glDeleteTextures(1, &water_scene_depth_texture_);
+        water_scene_depth_texture_ = 0;
+    }
+    if (water_scene_color_texture_ != 0) {
+        glDeleteTextures(1, &water_scene_color_texture_);
+        water_scene_color_texture_ = 0;
+    }
+    if (water_scene_framebuffer_ != 0) {
+        glDeleteFramebuffers(1, &water_scene_framebuffer_);
+        water_scene_framebuffer_ = 0;
+    }
+    water_scene_target_width_ = 0;
+    water_scene_target_height_ = 0;
 }
 
 void Renderer::ensure_post_process_targets(int width, int height) {

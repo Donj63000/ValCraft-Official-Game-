@@ -101,6 +101,9 @@ private:
         GLint time_of_day = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
+        GLint scene_color = -1;
+        GLint scene_depth = -1;
+        GLint inverse_view_projection = -1;
         GLint shadows_enabled = -1;
     };
 
@@ -237,6 +240,8 @@ private:
     void create_hud_geometry();
     void ensure_post_process_targets(int width, int height);
     void destroy_post_process_targets();
+    void ensure_water_scene_targets(int width, int height);
+    void destroy_water_scene_targets();
     void draw_sky(const PlayerController& player, const EnvironmentState& environment);
     void run_post_process(const EnvironmentState& environment, int width, int height);
     void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops);
@@ -273,6 +278,9 @@ private:
     GLuint player_atlas_texture_ = 0;
     GLuint shadow_map_ = 0;
     GLuint shadow_framebuffer_ = 0;
+    GLuint water_scene_framebuffer_ = 0;
+    GLuint water_scene_color_texture_ = 0;
+    GLuint water_scene_depth_texture_ = 0;
     GLuint scene_framebuffer_ = 0;
     GLuint scene_color_texture_ = 0;
     GLuint scene_depth_renderbuffer_ = 0;
@@ -313,6 +321,8 @@ private:
     HudGeometryCache<InventoryHudCacheKey> inventory_cache_ {};
     HudGeometryCache<DeathHudCacheKey> death_cache_ {};
     HudGeometryCache<PauseHudCacheKey> pause_cache_ {};
+    int water_scene_target_width_ = 0;
+    int water_scene_target_height_ = 0;
     int scene_target_width_ = 0;
     int scene_target_height_ = 0;
     int glow_target_width_ = 0;

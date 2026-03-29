@@ -38,8 +38,14 @@ struct FaceDefinition {
 constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
-constexpr float kWaterSurfaceHeight = 0.90F;
+constexpr float kWaterSurfaceHeight = 15.0F / 16.0F;
 constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
+constexpr int kWaterSurfaceSubdivisions = 4;
+constexpr int kWaterSideVerticalSubdivisions = 2;
+constexpr int kWaterSideHorizontalSubdivisions = 4;
+
+using Float2 = std::array<float, 2>;
+using Float3 = std::array<float, 3>;
 
 auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
@@ -263,6 +269,63 @@ auto ao_factor(int raw_ao) -> float {
     return 0.55F + static_cast<float>(raw_ao) * 0.15F;
 }
 
+auto lerp_float(float start, float end, float t) noexcept -> float {
+    return start + (end - start) * t;
+}
+
+auto lerp_vec2(const Float2& start, const Float2& end, float t) noexcept -> Float2 {
+    return {
+        lerp_float(start[0], end[0], t),
+        lerp_float(start[1], end[1], t),
+    };
+}
+
+auto lerp_vec3(const Float3& start, const Float3& end, float t) noexcept -> Float3 {
+    return {
+        lerp_float(start[0], end[0], t),
+        lerp_float(start[1], end[1], t),
+        lerp_float(start[2], end[2], t),
+    };
+}
+
+auto bilerp_float(const std::array<float, 4>& corners, float u, float v) noexcept -> float {
+    const auto top = lerp_float(corners[0], corners[1], u);
+    const auto bottom = lerp_float(corners[3], corners[2], u);
+    return lerp_float(top, bottom, v);
+}
+
+auto bilerp_vec2(const std::array<Float2, 4>& corners, float u, float v) noexcept -> Float2 {
+    const auto top = lerp_vec2(corners[0], corners[1], u);
+    const auto bottom = lerp_vec2(corners[3], corners[2], u);
+    return lerp_vec2(top, bottom, v);
+}
+
+auto bilerp_vec3(const std::array<Float3, 4>& corners, float u, float v) noexcept -> Float3 {
+    const auto top = lerp_vec3(corners[0], corners[1], u);
+    const auto bottom = lerp_vec3(corners[3], corners[2], u);
+    return lerp_vec3(top, bottom, v);
+}
+
+struct WaterFaceSubdivisions {
+    int u = 1;
+    int v = 1;
+};
+
+auto water_face_subdivisions(Face face) noexcept -> WaterFaceSubdivisions {
+    switch (face) {
+    case Face::PositiveY:
+        return {kWaterSurfaceSubdivisions, kWaterSurfaceSubdivisions};
+    case Face::NegativeY:
+        return {1, 1};
+    case Face::PositiveX:
+    case Face::NegativeX:
+    case Face::PositiveZ:
+    case Face::NegativeZ:
+    default:
+        return {kWaterSideVerticalSubdivisions, kWaterSideHorizontalSubdivisions};
+    }
+}
+
 auto wrap_positive(float value, float period) noexcept -> float {
     const auto wrapped = std::fmod(value, period);
     return wrapped < 0.0F ? wrapped + period : wrapped;
@@ -297,34 +360,28 @@ auto sample_vertex_light(const Neighborhood& neighborhood,
     };
 }
 
-void append_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_diagonal) {
+void append_quad_indices(std::vector<std::uint32_t>& indices,
+                         std::uint32_t index0,
+                         std::uint32_t index1,
+                         std::uint32_t index2,
+                         std::uint32_t index3,
+                         bool flip_diagonal) {
     if (flip_diagonal) {
-        mesh.indices.insert(mesh.indices.end(), {
-            base_index + 0U, base_index + 1U, base_index + 3U,
-            base_index + 1U, base_index + 2U, base_index + 3U,
+        indices.insert(indices.end(), {
+            index0, index1, index3,
+            index1, index2, index3,
         });
     } else {
-        mesh.indices.insert(mesh.indices.end(), {
-            base_index + 0U, base_index + 1U, base_index + 2U,
-            base_index + 0U, base_index + 2U, base_index + 3U,
+        indices.insert(indices.end(), {
+            index0, index1, index2,
+            index0, index2, index3,
         });
     }
-    ++mesh.face_count;
 }
 
-void append_water_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_diagonal) {
-    if (flip_diagonal) {
-        mesh.water_indices.insert(mesh.water_indices.end(), {
-            base_index + 0U, base_index + 1U, base_index + 3U,
-            base_index + 1U, base_index + 2U, base_index + 3U,
-        });
-    } else {
-        mesh.water_indices.insert(mesh.water_indices.end(), {
-            base_index + 0U, base_index + 1U, base_index + 2U,
-            base_index + 0U, base_index + 2U, base_index + 3U,
-        });
-    }
-    ++mesh.water_face_count;
+void append_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_diagonal) {
+    append_quad_indices(mesh.indices, base_index + 0U, base_index + 1U, base_index + 2U, base_index + 3U, flip_diagonal);
+    ++mesh.face_count;
 }
 
 void append_face_geometry(
@@ -583,71 +640,94 @@ void append_water_face(ChunkMeshData& mesh,
     const auto u1 = u0 + uv_step;
     const auto v1 = v0 + uv_step;
     const auto is_horizontal_water_face = face == Face::PositiveY || face == Face::NegativeY;
-
-    std::array<std::array<float, 3>, 4> positions {};
-    std::array<float, 4> ao_values {};
-    std::array<float, 4> sky_values {};
-    std::array<float, 4> block_values {};
-    std::array<float, 4> wave_weights {};
+    const auto subdivisions = water_face_subdivisions(face);
     const auto material_class = block_visual_material_value(to_block_id(BlockType::Water));
+    const auto face_shade = face == Face::PositiveY ? 1.02F : definition.face_shade;
+
+    std::array<Float3, 4> corner_positions {};
+    std::array<float, 4> corner_sky_values {};
+    std::array<float, 4> corner_block_values {};
+    const std::array<Float2, 4> corner_uvs {{{u1, v0}, {u1, v1}, {u0, v1}, {u0, v0}}};
 
     for (std::size_t i = 0; i < definition.vertices.size(); ++i) {
         const auto& vertex = definition.vertices[i];
         const auto top_vertex = vertex.position[1] > 0.5F;
         const auto y_position = top_vertex ? top_height : 0.0F;
-        positions[i] = {
+        corner_positions[i] = {
             static_cast<float>(chunk_world_x + local_coord.x) + vertex.position[0],
             static_cast<float>(local_coord.y) + y_position,
             static_cast<float>(chunk_world_z + local_coord.z) + vertex.position[2],
         };
 
-        ao_values[i] = ao_factor(compute_vertex_ao(neighborhood, local_coord, vertex));
         const auto [sky_light, block_light] = sample_vertex_light(neighborhood, local_coord, definition, vertex);
-        sky_values[i] = sky_light;
-        block_values[i] = block_light;
-        wave_weights[i] = surface_block && (face == Face::PositiveY || (face != Face::NegativeY && top_vertex)) ? 1.0F : 0.0F;
+        corner_sky_values[i] = sky_light;
+        corner_block_values[i] = block_light;
     }
 
     const auto base_index = static_cast<std::uint32_t>(mesh.water_vertices.size());
-    std::array<std::array<float, 2>, 4> uvs {{
-        {u1, v0},
-        {u1, v1},
-        {u0, v1},
-        {u0, v0},
-    }};
-    if (is_horizontal_water_face) {
-        for (std::size_t i = 0; i < positions.size(); ++i) {
-            const auto world_u = wrap_positive(positions[i][0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
-            const auto world_v = wrap_positive(positions[i][2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
-            uvs[i] = {
-                u0 + world_u * uv_step,
-                v0 + world_v * uv_step,
-            };
+    const auto row_stride = static_cast<std::uint32_t>(subdivisions.u + 1);
+
+    for (int v_index = 0; v_index <= subdivisions.v; ++v_index) {
+        const auto v_lerp = static_cast<float>(v_index) / static_cast<float>(subdivisions.v);
+        for (int u_index = 0; u_index <= subdivisions.u; ++u_index) {
+            const auto u_lerp = static_cast<float>(u_index) / static_cast<float>(subdivisions.u);
+            const auto position = bilerp_vec3(corner_positions, u_lerp, v_lerp);
+            auto uv = bilerp_vec2(corner_uvs, u_lerp, v_lerp);
+            if (is_horizontal_water_face) {
+                const auto world_u = wrap_positive(position[0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+                const auto world_v = wrap_positive(position[2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+                uv = {
+                    u0 + world_u * uv_step,
+                    v0 + world_v * uv_step,
+                };
+            }
+
+            float wave_weight = 0.0F;
+            if (surface_block) {
+                if (face == Face::PositiveY) {
+                    wave_weight = 1.0F;
+                } else if (face != Face::NegativeY) {
+                    const auto local_y = position[1] - static_cast<float>(local_coord.y);
+                    if (local_y > top_height - 0.0001F) {
+                        wave_weight = 1.0F;
+                    }
+                }
+            }
+
+            mesh.water_vertices.push_back({
+                position[0],
+                position[1],
+                position[2],
+                uv[0],
+                uv[1],
+                definition.normal[0],
+                definition.normal[1],
+                definition.normal[2],
+                face_shade,
+                1.0F,
+                bilerp_float(corner_sky_values, u_lerp, v_lerp),
+                bilerp_float(corner_block_values, u_lerp, v_lerp),
+                material_class,
+                wave_weight,
+            });
         }
     }
 
-    for (std::size_t i = 0; i < positions.size(); ++i) {
-        mesh.water_vertices.push_back({
-            positions[i][0],
-            positions[i][1],
-            positions[i][2],
-            uvs[i][0],
-            uvs[i][1],
-            definition.normal[0],
-            definition.normal[1],
-            definition.normal[2],
-            face == Face::PositiveY ? 1.02F : definition.face_shade,
-            ao_values[i],
-            sky_values[i],
-            block_values[i],
-            material_class,
-            wave_weights[i],
-        });
+    const auto diagonal_seed = local_coord.x + local_coord.y + local_coord.z + static_cast<int>(face);
+    for (int v_index = 0; v_index < subdivisions.v; ++v_index) {
+        for (int u_index = 0; u_index < subdivisions.u; ++u_index) {
+            const auto cell_base_index =
+                base_index + static_cast<std::uint32_t>(v_index * (subdivisions.u + 1) + u_index);
+            const auto index0 = cell_base_index;
+            const auto index1 = cell_base_index + 1U;
+            const auto index3 = cell_base_index + row_stride;
+            const auto index2 = index3 + 1U;
+            const auto flip_diagonal = ((diagonal_seed + u_index + v_index) & 1) != 0;
+            append_quad_indices(mesh.water_indices, index0, index1, index2, index3, flip_diagonal);
+        }
     }
 
-    const auto first_diagonal = ao_values[0] + ao_values[2];
-    const auto second_diagonal = ao_values[1] + ao_values[3];
-    append_water_indices(mesh, base_index, first_diagonal < second_diagonal);
+    ++mesh.water_face_count;
 }
 
 void append_water_mesh(ChunkMeshData& mesh,
@@ -719,8 +799,8 @@ auto ChunkMesher::build_mesh_range(const World& world,
 
     mesh.vertices.reserve(vertex_reserve_hint > 0 ? vertex_reserve_hint : 2048U);
     mesh.indices.reserve(index_reserve_hint > 0 ? index_reserve_hint : 3072U);
-    mesh.water_vertices.reserve(512U);
-    mesh.water_indices.reserve(768U);
+    mesh.water_vertices.reserve(2048U);
+    mesh.water_indices.reserve(4096U);
 
     const auto cached_min_y = std::max(kWorldMinY, clamped_min_y - 1);
     const auto cached_max_y = std::min(kWorldMaxY, clamped_max_y + 1);
