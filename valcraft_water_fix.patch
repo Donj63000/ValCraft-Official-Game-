@@ -1,0 +1,200 @@
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index f5f7b8d..bb8d5c5 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -2245,6 +2245,19 @@ vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
+     return vec2(d_height_dx, d_height_dz);
+ }
+ 
++vec2 water_detail_gradient(vec2 world_xz, float time_phase) {
++    float phase_d = world_xz.x * 1.08 - world_xz.y * 0.74 + time_phase * 2.05;
++    float phase_e = world_xz.x * 0.72 + world_xz.y * 1.16 - time_phase * 1.64;
++
++    float d_height_dx =
++        cos(phase_d) * 0.0035 * 1.08 +
++        cos(phase_e) * 0.0022 * 0.72;
++    float d_height_dz =
++        -cos(phase_d) * 0.0035 * 0.74 +
++        cos(phase_e) * 0.0022 * 1.16;
++    return vec2(d_height_dx, d_height_dz);
++}
++
+ vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
+     vec4 clip_position = vec4(screen_uv * 2.0 - 1.0, depth_sample * 2.0 - 1.0, 1.0);
+     vec4 world_position = u_inverse_view_projection * clip_position;
+@@ -2253,18 +2266,11 @@ vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
+ 
+ void main() {
+     float water_mask = material_mask(v_material_class, 6.0);
+-    float water_surface_mask = water_mask * clamp(v_wave_weight * abs(v_normal.y), 0.0, 1.0);
++    float water_surface_mask = water_mask * clamp(v_wave_weight * max(v_normal.y, 0.0), 0.0, 1.0);
+ 
++    // Je ne decale pas les UV partages de l'atlas dans le fragment pour eviter
++    // d'echantillonner les sprites transparents voisins et d'ouvrir des trous.
+     vec2 animated_uv = v_uv;
+-    if (water_mask > 0.5) {
+-        float water_time = u_time_of_day * 18.0;
+-        vec2 water_flow = vec2(
+-            sin(v_world_position.z * 0.22 + water_time * 1.10) * 0.0026 +
+-                cos(v_world_position.x * 0.17 - water_time * 0.85) * 0.0016,
+-            cos(v_world_position.x * 0.19 - water_time * 0.92) * 0.0022 +
+-                sin(v_world_position.z * 0.27 + water_time * 0.70) * 0.0014);
+-        animated_uv += water_flow;
+-    }
+ 
+     vec4 sampled = texture(u_atlas, animated_uv);
+     if (sampled.a < 0.1) {
+@@ -2274,7 +2280,9 @@ void main() {
+     vec3 albedo = sampled.rgb;
+     vec3 normal = normalize(v_normal);
+     if (water_surface_mask > 0.001) {
+-        vec2 wave_gradient = water_wave_gradient(v_world_position.xz, u_time_of_day * 36.0) * water_surface_mask;
++        vec2 wave_gradient = water_wave_gradient(v_world_position.xz, u_time_of_day * 36.0);
++        wave_gradient += water_detail_gradient(v_world_position.xz, u_time_of_day * 52.0) * 0.65;
++        wave_gradient *= water_surface_mask;
+         vec3 wave_normal = normalize(vec3(-wave_gradient.x, 1.0, -wave_gradient.y));
+         normal = normalize(mix(normal, wave_normal, water_surface_mask));
+     }
+
+diff --git a/src/world/ChunkMesher.cpp b/src/world/ChunkMesher.cpp
+index 2e377ca..dc8d9e3 100644
+--- a/src/world/ChunkMesher.cpp
++++ b/src/world/ChunkMesher.cpp
+@@ -331,6 +331,28 @@ auto wrap_positive(float value, float period) noexcept -> float {
+     return wrapped < 0.0F ? wrapped + period : wrapped;
+ }
+ 
++auto repeating_water_surface_uv(const BlockAtlasTile& tile,
++                                int block_world_x,
++                                int block_world_z,
++                                float local_x,
++                                float local_z) -> std::array<float, 2> {
++    const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
++    const auto u0 = static_cast<float>(tile.x) * uv_step;
++    const auto v0 = static_cast<float>(tile.y) * uv_step;
++
++    // Je garde exactement un huitieme de tuile par bloc pour eviter
++    // les sauts de 7/8 vers 0 au passage de la frontiere de repetition.
++    const auto block_u = wrap_positive(static_cast<float>(block_world_x), kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
++    const auto block_v = wrap_positive(static_cast<float>(block_world_z), kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
++    const auto surface_u = std::min(block_u + local_x / kWaterSurfaceRepeatBlocks, 1.0F);
++    const auto surface_v = std::min(block_v + local_z / kWaterSurfaceRepeatBlocks, 1.0F);
++
++    return {
++        u0 + surface_u * uv_step,
++        v0 + surface_v * uv_step,
++    };
++}
++
+ auto sample_vertex_light(const Neighborhood& neighborhood,
+                          const BlockCoord& local_coord,
+                          const FaceDefinition& definition,
+@@ -674,12 +696,14 @@ void append_water_face(ChunkMeshData& mesh,
+             const auto position = bilerp_vec3(corner_positions, u_lerp, v_lerp);
+             auto uv = bilerp_vec2(corner_uvs, u_lerp, v_lerp);
+             if (is_horizontal_water_face) {
+-                const auto world_u = wrap_positive(position[0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+-                const auto world_v = wrap_positive(position[2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+-                uv = {
+-                    u0 + world_u * uv_step,
+-                    v0 + world_v * uv_step,
+-                };
++                const auto block_world_x = chunk_world_x + local_coord.x;
++                const auto block_world_z = chunk_world_z + local_coord.z;
++                uv = repeating_water_surface_uv(
++                    tile,
++                    block_world_x,
++                    block_world_z,
++                    position[0] - static_cast<float>(block_world_x),
++                    position[2] - static_cast<float>(block_world_z));
+             }
+ 
+             float wave_weight = 0.0F;
+
+diff --git a/tests/WorldTests.cpp b/tests/WorldTests.cpp
+index 4fa17f8..94fcd69 100644
+--- a/tests/WorldTests.cpp
++++ b/tests/WorldTests.cpp
+@@ -466,6 +466,82 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks")
+     CHECK(right_near[0].u == doctest::Approx(shared_near[0].u + expected_block_delta));
+ }
+ 
++TEST_CASE("chunk mesher keeps water top texel density stable across the repeat boundary") {
++    World world(285, 1);
++    test::make_chunk_empty(world, {0, 0});
++    world.set_block(7, 5, 0, to_block_id(BlockType::Water));
++    world.set_block(8, 5, 0, to_block_id(BlockType::Water));
++
++    ChunkMesher mesher {};
++    const auto mesh = mesher.build_mesh(world, {0, 0});
++
++    struct WaterTopVertex {
++        float x;
++        float z;
++        float u;
++        float v;
++    };
++
++    std::vector<WaterTopVertex> top_vertices;
++    for (const auto& vertex : mesh.water_vertices) {
++        if (vertex.ny > 0.9F) {
++            top_vertices.push_back({vertex.x, vertex.z, vertex.u, vertex.v});
++        }
++    }
++
++    REQUIRE(top_vertices.size() == 50);
++
++    const auto vertices_at = [&](float x, float z) {
++        std::vector<WaterTopVertex> matches;
++        for (const auto& vertex : top_vertices) {
++            if (vertex.x == doctest::Approx(x) && vertex.z == doctest::Approx(z)) {
++                matches.push_back(vertex);
++            }
++        }
++        return matches;
++    };
++
++    const auto left_near = vertices_at(7.0F, 0.0F);
++    auto shared_near = vertices_at(8.0F, 0.0F);
++    auto shared_mid = vertices_at(8.0F, 0.5F);
++    const auto right_near = vertices_at(9.0F, 0.0F);
++    auto shared_far = vertices_at(8.0F, 1.0F);
++
++    REQUIRE(left_near.size() == 1);
++    REQUIRE(shared_near.size() == 2);
++    REQUIRE(shared_mid.size() == 2);
++    REQUIRE(right_near.size() == 1);
++    REQUIRE(shared_far.size() == 2);
++
++    std::sort(shared_near.begin(), shared_near.end(), [](const WaterTopVertex& lhs, const WaterTopVertex& rhs) {
++        return lhs.u < rhs.u;
++    });
++    std::sort(shared_mid.begin(), shared_mid.end(), [](const WaterTopVertex& lhs, const WaterTopVertex& rhs) {
++        return lhs.u < rhs.u;
++    });
++    std::sort(shared_far.begin(), shared_far.end(), [](const WaterTopVertex& lhs, const WaterTopVertex& rhs) {
++        return lhs.u < rhs.u;
++    });
++
++    const auto water_tile = block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveY);
++    const auto uv_step = 1.0F / static_cast<float>(kBlockAtlasTilesPerAxis);
++    const auto tile_u0 = static_cast<float>(water_tile.x) * uv_step;
++    const auto expected_block_delta = uv_step / 8.0F;
++
++    CHECK(left_near[0].u == doctest::Approx(tile_u0 + expected_block_delta * 7.0F));
++    CHECK(shared_near[0].u == doctest::Approx(tile_u0));
++    CHECK(shared_near[1].u == doctest::Approx(tile_u0 + uv_step));
++    CHECK(right_near[0].u == doctest::Approx(tile_u0 + expected_block_delta));
++
++    CHECK(shared_mid[0].u == doctest::Approx(tile_u0));
++    CHECK(shared_mid[1].u == doctest::Approx(tile_u0 + uv_step));
++    CHECK(shared_far[0].u == doctest::Approx(tile_u0));
++    CHECK(shared_far[1].u == doctest::Approx(tile_u0 + uv_step));
++
++    CHECK(shared_near[1].u - left_near[0].u == doctest::Approx(expected_block_delta));
++    CHECK(right_near[0].u - shared_near[0].u == doctest::Approx(expected_block_delta));
++}
++
+ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animation") {
+     World world(186, 1);
+     test::make_chunk_empty(world, {0, 0});

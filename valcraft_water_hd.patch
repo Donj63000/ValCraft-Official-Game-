@@ -1,0 +1,760 @@
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index aa90f2c..e0a36af 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -773,6 +773,7 @@ void Renderer::shutdown() {
+             destroy_gpu_mesh(entry.second);
+         }
+ 
++        destroy_water_scene_targets();
+         destroy_post_process_targets();
+ 
+         if (screen_quad_vao_ != 0) {
+@@ -866,6 +867,9 @@ void Renderer::shutdown() {
+     player_atlas_texture_ = 0;
+     shadow_map_ = 0;
+     shadow_framebuffer_ = 0;
++    water_scene_framebuffer_ = 0;
++    water_scene_color_texture_ = 0;
++    water_scene_depth_texture_ = 0;
+     creature_vao_ = 0;
+     creature_vbo_ = 0;
+     creature_ebo_ = 0;
+@@ -892,6 +896,8 @@ void Renderer::shutdown() {
+     creature_index_buffer_bytes_ = 0;
+     item_drop_vertex_buffer_bytes_ = 0;
+     last_frame_stats_ = {};
++    water_scene_target_width_ = 0;
++    water_scene_target_height_ = 0;
+     scene_target_width_ = 0;
+     scene_target_height_ = 0;
+     glow_target_width_ = 0;
+@@ -1039,19 +1045,30 @@ void Renderer::render_frame(World& world,
+     }
+ 
+     const auto world_start = clock::now();
++    const auto render_width = std::max(width, 1);
+     const auto render_height = std::max(height, 1);
+     const auto use_post_process = options_.post_process_enabled && width > 0 && height > 0;
+-    if (use_post_process) {
+-        ensure_post_process_targets(width, render_height);
+-        glBindFramebuffer(GL_FRAMEBUFFER, scene_framebuffer_);
+-    } else {
+-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    const auto has_visible_water = std::any_of(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& visible_chunk) {
++        return visible_chunk.mesh->water_index_count > 0;
++    });
++
++    if (has_visible_water) {
++        ensure_water_scene_targets(render_width, render_height);
+     }
++    if (use_post_process || has_visible_water) {
++        ensure_post_process_targets(render_width, render_height);
++    }
++
++    const auto final_target_framebuffer = (use_post_process || has_visible_water) ? scene_framebuffer_ : 0U;
++    const auto opaque_target_framebuffer = has_visible_water ? water_scene_framebuffer_ : final_target_framebuffer;
++    const auto inverse_view_projection = glm::inverse(view_projection);
+ 
+-    glViewport(0, 0, width, render_height);
++    glBindFramebuffer(GL_FRAMEBUFFER, opaque_target_framebuffer);
++    glViewport(0, 0, render_width, render_height);
+     glEnable(GL_DEPTH_TEST);
+     glEnable(GL_CULL_FACE);
+     glCullFace(GL_BACK);
++    glDisable(GL_BLEND);
+     glClearColor(environment.sky_zenith_color.r, environment.sky_zenith_color.g, environment.sky_zenith_color.b, 1.0F);
+     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+     draw_sky(player, environment);
+@@ -1059,6 +1076,7 @@ void Renderer::render_frame(World& world,
+     glUseProgram(world_program_);
+     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
+     glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
++    glUniformMatrix4fv(world_uniforms_.inverse_view_projection, 1, GL_FALSE, glm::value_ptr(inverse_view_projection));
+     glUniform3fv(world_uniforms_.camera_position, 1, glm::value_ptr(eye));
+     glUniform3fv(world_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
+     glUniform3fv(world_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
+@@ -1071,12 +1089,18 @@ void Renderer::render_frame(World& world,
+     glUniform1f(world_uniforms_.time_of_day, environment.time_of_day);
+     glUniform1i(world_uniforms_.atlas, 0);
+     glUniform1i(world_uniforms_.shadow_map, 1);
++    glUniform1i(world_uniforms_.scene_color, 2);
++    glUniform1i(world_uniforms_.scene_depth, 3);
+     glUniform1i(world_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
+ 
+     glActiveTexture(GL_TEXTURE0);
+     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+     glActiveTexture(GL_TEXTURE1);
+     glBindTexture(GL_TEXTURE_2D, shadow_map_);
++    glActiveTexture(GL_TEXTURE2);
++    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
++    glActiveTexture(GL_TEXTURE3);
++    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+ 
+     for (const auto& visible_chunk : visible_chunks) {
+         if (visible_chunk.mesh->opaque_index_count == 0) {
+@@ -1090,34 +1114,72 @@ void Renderer::render_frame(World& world,
+     draw_item_drops(item_drops);
+     draw_creatures(creatures, view_projection, light_view_projection, eye, environment);
+     draw_player_avatar(player, view_projection, light_view_projection, eye, environment);
+-    glUseProgram(world_program_);
+-    glActiveTexture(GL_TEXTURE0);
+-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+-    glActiveTexture(GL_TEXTURE1);
+-    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+ 
+-    glEnable(GL_BLEND);
+-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+-    glDisable(GL_CULL_FACE);
+-    glDepthMask(GL_TRUE);
+-    for (auto it = visible_chunks.rbegin(); it != visible_chunks.rend(); ++it) {
+-        if (it->mesh->water_index_count == 0) {
+-            continue;
++    if (has_visible_water) {
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
++        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, final_target_framebuffer);
++        glBlitFramebuffer(
++            0,
++            0,
++            render_width,
++            render_height,
++            0,
++            0,
++            render_width,
++            render_height,
++            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
++            GL_NEAREST);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, final_target_framebuffer);
++        glViewport(0, 0, render_width, render_height);
++        glUseProgram(world_program_);
++        glActiveTexture(GL_TEXTURE0);
++        glBindTexture(GL_TEXTURE_2D, atlas_texture_);
++        glActiveTexture(GL_TEXTURE1);
++        glBindTexture(GL_TEXTURE_2D, shadow_map_);
++        glActiveTexture(GL_TEXTURE2);
++        glBindTexture(GL_TEXTURE_2D, water_scene_color_texture_);
++        glActiveTexture(GL_TEXTURE3);
++        glBindTexture(GL_TEXTURE_2D, water_scene_depth_texture_);
++        glEnable(GL_DEPTH_TEST);
++        glDisable(GL_BLEND);
++        glDisable(GL_CULL_FACE);
++        glDepthMask(GL_TRUE);
++
++        for (const auto& visible_chunk : visible_chunks) {
++            if (visible_chunk.mesh->water_index_count == 0) {
++                continue;
++            }
++            glBindVertexArray(visible_chunk.mesh->vao);
++            glDrawElements(
++                GL_TRIANGLES,
++                visible_chunk.mesh->water_index_count,
++                GL_UNSIGNED_INT,
++                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(visible_chunk.mesh->water_index_offset_bytes)));
+         }
+-        glBindVertexArray(it->mesh->vao);
+-        glDrawElements(
+-            GL_TRIANGLES,
+-            it->mesh->water_index_count,
+-            GL_UNSIGNED_INT,
+-            reinterpret_cast<const void*>(static_cast<std::uintptr_t>(it->mesh->water_index_offset_bytes)));
++
++        glEnable(GL_CULL_FACE);
++        glCullFace(GL_BACK);
+     }
+-    glEnable(GL_CULL_FACE);
+-    glCullFace(GL_BACK);
+-    glDisable(GL_BLEND);
+ 
+     if (use_post_process) {
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+         run_post_process(environment, width, render_height);
++    } else if (has_visible_water) {
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_framebuffer_);
++        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
++        glBlitFramebuffer(
++            0,
++            0,
++            render_width,
++            render_height,
++            0,
++            0,
++            render_width,
++            render_height,
++            GL_COLOR_BUFFER_BIT,
++            GL_NEAREST);
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+     } else {
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+     }
+@@ -1403,6 +1465,8 @@ in vec4 v_light_position;
+ 
+ uniform sampler2D u_atlas;
+ uniform sampler2D u_shadow_map;
++uniform sampler2D u_scene_color;
++uniform sampler2D u_scene_depth;
+ uniform vec3 u_camera_position;
+ uniform vec3 u_sun_direction;
+ uniform vec3 u_sun_color;
+@@ -1410,6 +1474,7 @@ uniform vec3 u_ambient_color;
+ uniform vec3 u_fog_color;
+ uniform vec3 u_distant_fog_color;
+ uniform vec3 u_night_tint_color;
++uniform mat4 u_inverse_view_projection;
+ uniform float u_daylight_factor;
+ uniform float u_sun_visibility;
+ uniform float u_time_of_day;
+@@ -1461,6 +1526,12 @@ vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
+     return vec2(d_height_dx, d_height_dz);
+ }
+ 
++vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
++    vec4 clip_position = vec4(screen_uv * 2.0 - 1.0, depth_sample * 2.0 - 1.0, 1.0);
++    vec4 world_position = u_inverse_view_projection * clip_position;
++    return world_position.xyz / max(world_position.w, 0.0001);
++}
++
+ void main() {
+     float water_mask = material_mask(v_material_class, 6.0);
+     float water_surface_mask = water_mask * clamp(v_wave_weight * abs(v_normal.y), 0.0, 1.0);
+@@ -1543,16 +1614,61 @@ void main() {
+     float output_alpha = 1.0;
+     if (water_mask > 0.5) {
+         float fresnel = pow(1.0 - view_alignment, 4.5);
+-        float sparkle = pow(max(dot(reflected, view_direction), 0.0), 60.0);
+-        float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.24 + v_world_position.z * 0.28 + u_time_of_day * 20.0);
+-        vec3 water_tint = mix(vec3(0.05, 0.18, 0.28), vec3(0.16, 0.58, 0.74), clamp(daylight * 0.78 + sky_light * 0.22, 0.0, 1.0));
+-        vec3 water_light = ambient * 0.85 + bounce_light * 0.95 + sunlight * 0.58 + torch_light * 0.30;
+-        vec3 water_specular =
+-            mix(u_distant_fog_color, u_sun_color, 0.55) * (fresnel * (0.16 + 0.14 * daylight) + sparkle * (0.18 + 0.16 * daylight));
+-        lit_color = mix(albedo, water_tint, 0.82) * water_light;
+-        lit_color += water_tint * shimmer * (0.03 + 0.05 * daylight);
+-        lit_color += water_specular;
+-        output_alpha = clamp(max(sampled.a, 0.78 + fresnel * 0.06), 0.0, 0.92);
++        float water_time = u_time_of_day * 20.0;
++        vec2 detail_flow = vec2(
++            sin(v_world_position.x * 0.31 + v_world_position.z * 0.17 + water_time * 0.75),
++            cos(v_world_position.z * 0.29 - v_world_position.x * 0.21 - water_time * 0.66));
++
++        vec2 scene_texel = 1.0 / vec2(textureSize(u_scene_color, 0));
++        vec2 scene_uv = gl_FragCoord.xy * scene_texel;
++        vec2 refraction_offset = (normal.xz * (0.010 + 0.006 * water_surface_mask) + detail_flow * 0.0015) *
++                                 (0.28 + 0.72 * (1.0 - view_alignment));
++        vec2 refracted_uv = clamp(scene_uv + refraction_offset, scene_texel * 0.5, vec2(1.0) - scene_texel * 0.5);
++
++        float base_scene_depth = texture(u_scene_depth, scene_uv).r;
++        float refracted_scene_depth = texture(u_scene_depth, refracted_uv).r;
++        if (refracted_scene_depth + 0.00005 < gl_FragCoord.z) {
++            refracted_uv = scene_uv;
++            refracted_scene_depth = base_scene_depth;
++        }
++
++        vec3 scene_color = texture(u_scene_color, refracted_uv).rgb;
++        float water_depth = 0.0;
++        if (refracted_scene_depth < 0.9999) {
++            vec3 background_position = reconstruct_world_position(refracted_uv, refracted_scene_depth);
++            water_depth = max(distance(background_position, v_world_position), 0.0);
++        } else {
++            water_depth = 7.0 + 12.0 * fresnel;
++        }
++        water_depth = clamp(water_depth, 0.0, 48.0);
++
++        float body_depth = max(water_depth, 0.32 + 0.18 * water_surface_mask);
++        vec3 absorption = mix(vec3(0.90, 0.34, 0.12), vec3(0.72, 0.28, 0.10), daylight);
++        vec3 transmittance = exp(-absorption * body_depth);
++
++        vec3 shallow_color = mix(vec3(0.07, 0.20, 0.26), vec3(0.10, 0.42, 0.55), daylight);
++        vec3 deep_color = mix(vec3(0.02, 0.08, 0.13), vec3(0.04, 0.19, 0.30), daylight);
++        vec3 water_volume_color = mix(shallow_color, deep_color, smoothstep(0.25, 6.0, body_depth));
++        vec3 water_light = ambient * 0.82 + bounce_light * 0.95 + sunlight * 0.40 + torch_light * 0.55;
++        vec3 water_body = scene_color * transmittance + water_volume_color * water_light * (1.0 - transmittance);
++
++        vec3 reflected_view = reflect(-view_direction, normal);
++        float horizon = clamp(reflected_view.y * 0.5 + 0.5, 0.0, 1.0);
++        vec3 sky_reflection = mix(u_fog_color, u_distant_fog_color, horizon);
++        sky_reflection = mix(sky_reflection, u_sun_color, 0.08 + 0.10 * daylight);
++
++        vec3 sun_reflection = reflect(-sun_direction, normal);
++        float sparkle = pow(max(dot(sun_reflection, view_direction), 0.0), 72.0);
++        vec3 reflection = sky_reflection * fresnel * (0.18 + 0.16 * daylight);
++        reflection += u_sun_color * sparkle * shadow * (0.12 + 0.18 * daylight);
++
++        float shallow_foam = (1.0 - smoothstep(0.08, 0.70, body_depth)) * (0.40 + 0.60 * water_surface_mask);
++        vec3 foam = mix(u_fog_color, vec3(0.86, 0.94, 1.0), 0.65) * shallow_foam * (0.10 + 0.06 * daylight);
++
++        float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.26 + v_world_position.z * 0.30 + u_time_of_day * 21.0);
++        lit_color = water_body + reflection + foam;
++        lit_color += water_volume_color * shimmer * (0.018 + 0.025 * daylight) * water_surface_mask;
++        output_alpha = 1.0;
+     }
+ 
+     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
+@@ -1988,6 +2104,9 @@ void main() {
+     world_uniforms_.time_of_day = glGetUniformLocation(world_program_, "u_time_of_day");
+     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
+     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
++    world_uniforms_.scene_color = glGetUniformLocation(world_program_, "u_scene_color");
++    world_uniforms_.scene_depth = glGetUniformLocation(world_program_, "u_scene_depth");
++    world_uniforms_.inverse_view_projection = glGetUniformLocation(world_program_, "u_inverse_view_projection");
+     world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
+ 
+     creature_uniforms_.view_projection = glGetUniformLocation(creature_program_, "u_view_projection");
+@@ -2271,6 +2390,65 @@ void Renderer::create_crosshair_geometry() {
+     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 2, nullptr);
+ }
+ 
++void Renderer::ensure_water_scene_targets(int width, int height) {
++    const auto target_width = std::max(width, 1);
++    const auto target_height = std::max(height, 1);
++    const auto targets_match =
++        water_scene_framebuffer_ != 0 && water_scene_color_texture_ != 0 && water_scene_depth_texture_ != 0 &&
++        water_scene_target_width_ == target_width && water_scene_target_height_ == target_height;
++    if (targets_match) {
++        return;
++    }
++
++    destroy_water_scene_targets();
++
++    glGenFramebuffers(1, &water_scene_framebuffer_);
++    glBindFramebuffer(GL_FRAMEBUFFER, water_scene_framebuffer_);
++
++    glGenTextures(1, &water_scene_color_texture_);
++    glBindTexture(GL_TEXTURE_2D, water_scene_color_texture_);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, target_width, target_height, 0, GL_RGBA, GL_FLOAT, nullptr);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, water_scene_color_texture_, 0);
++
++    glGenTextures(1, &water_scene_depth_texture_);
++    glBindTexture(GL_TEXTURE_2D, water_scene_depth_texture_);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, target_width, target_height, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, water_scene_depth_texture_, 0);
++
++    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
++        throw std::runtime_error("Water scene framebuffer is incomplete");
++    }
++
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    water_scene_target_width_ = target_width;
++    water_scene_target_height_ = target_height;
++}
++
++void Renderer::destroy_water_scene_targets() {
++    if (water_scene_depth_texture_ != 0) {
++        glDeleteTextures(1, &water_scene_depth_texture_);
++        water_scene_depth_texture_ = 0;
++    }
++    if (water_scene_color_texture_ != 0) {
++        glDeleteTextures(1, &water_scene_color_texture_);
++        water_scene_color_texture_ = 0;
++    }
++    if (water_scene_framebuffer_ != 0) {
++        glDeleteFramebuffers(1, &water_scene_framebuffer_);
++        water_scene_framebuffer_ = 0;
++    }
++    water_scene_target_width_ = 0;
++    water_scene_target_height_ = 0;
++}
++
+ void Renderer::ensure_post_process_targets(int width, int height) {
+     const auto target_width = std::max(width, 1);
+     const auto target_height = std::max(height, 1);
+diff --git a/src/render/Renderer.h b/src/render/Renderer.h
+index 05ddfe8..5bcaeaa 100644
+--- a/src/render/Renderer.h
++++ b/src/render/Renderer.h
+@@ -101,6 +101,9 @@ private:
+         GLint time_of_day = -1;
+         GLint atlas = -1;
+         GLint shadow_map = -1;
++        GLint scene_color = -1;
++        GLint scene_depth = -1;
++        GLint inverse_view_projection = -1;
+         GLint shadows_enabled = -1;
+     };
+ 
+@@ -237,6 +240,8 @@ private:
+     void create_hud_geometry();
+     void ensure_post_process_targets(int width, int height);
+     void destroy_post_process_targets();
++    void ensure_water_scene_targets(int width, int height);
++    void destroy_water_scene_targets();
+     void draw_sky(const PlayerController& player, const EnvironmentState& environment);
+     void run_post_process(const EnvironmentState& environment, int width, int height);
+     void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops);
+@@ -273,6 +278,9 @@ private:
+     GLuint player_atlas_texture_ = 0;
+     GLuint shadow_map_ = 0;
+     GLuint shadow_framebuffer_ = 0;
++    GLuint water_scene_framebuffer_ = 0;
++    GLuint water_scene_color_texture_ = 0;
++    GLuint water_scene_depth_texture_ = 0;
+     GLuint scene_framebuffer_ = 0;
+     GLuint scene_color_texture_ = 0;
+     GLuint scene_depth_renderbuffer_ = 0;
+@@ -313,6 +321,8 @@ private:
+     HudGeometryCache<InventoryHudCacheKey> inventory_cache_ {};
+     HudGeometryCache<DeathHudCacheKey> death_cache_ {};
+     HudGeometryCache<PauseHudCacheKey> pause_cache_ {};
++    int water_scene_target_width_ = 0;
++    int water_scene_target_height_ = 0;
+     int scene_target_width_ = 0;
+     int scene_target_height_ = 0;
+     int glow_target_width_ = 0;
+diff --git a/src/world/ChunkMesher.cpp b/src/world/ChunkMesher.cpp
+index 45e4479..2e377ca 100644
+--- a/src/world/ChunkMesher.cpp
++++ b/src/world/ChunkMesher.cpp
+@@ -38,8 +38,14 @@ struct FaceDefinition {
+ constexpr auto kCachedSpanX = kChunkSizeX + 2;
+ constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
+ constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
+-constexpr float kWaterSurfaceHeight = 0.90F;
++constexpr float kWaterSurfaceHeight = 15.0F / 16.0F;
+ constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
++constexpr int kWaterSurfaceSubdivisions = 4;
++constexpr int kWaterSideVerticalSubdivisions = 2;
++constexpr int kWaterSideHorizontalSubdivisions = 4;
++
++using Float2 = std::array<float, 2>;
++using Float3 = std::array<float, 3>;
+ 
+ auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
+     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
+@@ -263,6 +269,63 @@ auto ao_factor(int raw_ao) -> float {
+     return 0.55F + static_cast<float>(raw_ao) * 0.15F;
+ }
+ 
++auto lerp_float(float start, float end, float t) noexcept -> float {
++    return start + (end - start) * t;
++}
++
++auto lerp_vec2(const Float2& start, const Float2& end, float t) noexcept -> Float2 {
++    return {
++        lerp_float(start[0], end[0], t),
++        lerp_float(start[1], end[1], t),
++    };
++}
++
++auto lerp_vec3(const Float3& start, const Float3& end, float t) noexcept -> Float3 {
++    return {
++        lerp_float(start[0], end[0], t),
++        lerp_float(start[1], end[1], t),
++        lerp_float(start[2], end[2], t),
++    };
++}
++
++auto bilerp_float(const std::array<float, 4>& corners, float u, float v) noexcept -> float {
++    const auto top = lerp_float(corners[0], corners[1], u);
++    const auto bottom = lerp_float(corners[3], corners[2], u);
++    return lerp_float(top, bottom, v);
++}
++
++auto bilerp_vec2(const std::array<Float2, 4>& corners, float u, float v) noexcept -> Float2 {
++    const auto top = lerp_vec2(corners[0], corners[1], u);
++    const auto bottom = lerp_vec2(corners[3], corners[2], u);
++    return lerp_vec2(top, bottom, v);
++}
++
++auto bilerp_vec3(const std::array<Float3, 4>& corners, float u, float v) noexcept -> Float3 {
++    const auto top = lerp_vec3(corners[0], corners[1], u);
++    const auto bottom = lerp_vec3(corners[3], corners[2], u);
++    return lerp_vec3(top, bottom, v);
++}
++
++struct WaterFaceSubdivisions {
++    int u = 1;
++    int v = 1;
++};
++
++auto water_face_subdivisions(Face face) noexcept -> WaterFaceSubdivisions {
++    switch (face) {
++    case Face::PositiveY:
++        return {kWaterSurfaceSubdivisions, kWaterSurfaceSubdivisions};
++    case Face::NegativeY:
++        return {1, 1};
++    case Face::PositiveX:
++    case Face::NegativeX:
++    case Face::PositiveZ:
++    case Face::NegativeZ:
++    default:
++        return {kWaterSideVerticalSubdivisions, kWaterSideHorizontalSubdivisions};
++    }
++}
++
+ auto wrap_positive(float value, float period) noexcept -> float {
+     const auto wrapped = std::fmod(value, period);
+     return wrapped < 0.0F ? wrapped + period : wrapped;
+@@ -297,34 +360,28 @@ auto sample_vertex_light(const Neighborhood& neighborhood,
+     };
+ }
+ 
+-void append_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_diagonal) {
++void append_quad_indices(std::vector<std::uint32_t>& indices,
++                         std::uint32_t index0,
++                         std::uint32_t index1,
++                         std::uint32_t index2,
++                         std::uint32_t index3,
++                         bool flip_diagonal) {
+     if (flip_diagonal) {
+-        mesh.indices.insert(mesh.indices.end(), {
+-            base_index + 0U, base_index + 1U, base_index + 3U,
+-            base_index + 1U, base_index + 2U, base_index + 3U,
++        indices.insert(indices.end(), {
++            index0, index1, index3,
++            index1, index2, index3,
+         });
+     } else {
+-        mesh.indices.insert(mesh.indices.end(), {
+-            base_index + 0U, base_index + 1U, base_index + 2U,
+-            base_index + 0U, base_index + 2U, base_index + 3U,
++        indices.insert(indices.end(), {
++            index0, index1, index2,
++            index0, index2, index3,
+         });
+     }
+-    ++mesh.face_count;
+ }
+ 
+-void append_water_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_diagonal) {
+-    if (flip_diagonal) {
+-        mesh.water_indices.insert(mesh.water_indices.end(), {
+-            base_index + 0U, base_index + 1U, base_index + 3U,
+-            base_index + 1U, base_index + 2U, base_index + 3U,
+-        });
+-    } else {
+-        mesh.water_indices.insert(mesh.water_indices.end(), {
+-            base_index + 0U, base_index + 1U, base_index + 2U,
+-            base_index + 0U, base_index + 2U, base_index + 3U,
+-        });
+-    }
+-    ++mesh.water_face_count;
++void append_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_diagonal) {
++    append_quad_indices(mesh.indices, base_index + 0U, base_index + 1U, base_index + 2U, base_index + 3U, flip_diagonal);
++    ++mesh.face_count;
+ }
+ 
+ void append_face_geometry(
+@@ -583,71 +640,94 @@ void append_water_face(ChunkMeshData& mesh,
+     const auto u1 = u0 + uv_step;
+     const auto v1 = v0 + uv_step;
+     const auto is_horizontal_water_face = face == Face::PositiveY || face == Face::NegativeY;
+-
+-    std::array<std::array<float, 3>, 4> positions {};
+-    std::array<float, 4> ao_values {};
+-    std::array<float, 4> sky_values {};
+-    std::array<float, 4> block_values {};
+-    std::array<float, 4> wave_weights {};
++    const auto subdivisions = water_face_subdivisions(face);
+     const auto material_class = block_visual_material_value(to_block_id(BlockType::Water));
++    const auto face_shade = face == Face::PositiveY ? 1.02F : definition.face_shade;
++
++    std::array<Float3, 4> corner_positions {};
++    std::array<float, 4> corner_sky_values {};
++    std::array<float, 4> corner_block_values {};
++    const std::array<Float2, 4> corner_uvs {{{u1, v0}, {u1, v1}, {u0, v1}, {u0, v0}}};
+ 
+     for (std::size_t i = 0; i < definition.vertices.size(); ++i) {
+         const auto& vertex = definition.vertices[i];
+         const auto top_vertex = vertex.position[1] > 0.5F;
+         const auto y_position = top_vertex ? top_height : 0.0F;
+-        positions[i] = {
++        corner_positions[i] = {
+             static_cast<float>(chunk_world_x + local_coord.x) + vertex.position[0],
+             static_cast<float>(local_coord.y) + y_position,
+             static_cast<float>(chunk_world_z + local_coord.z) + vertex.position[2],
+         };
+ 
+-        ao_values[i] = ao_factor(compute_vertex_ao(neighborhood, local_coord, vertex));
+         const auto [sky_light, block_light] = sample_vertex_light(neighborhood, local_coord, definition, vertex);
+-        sky_values[i] = sky_light;
+-        block_values[i] = block_light;
+-        wave_weights[i] = surface_block && (face == Face::PositiveY || (face != Face::NegativeY && top_vertex)) ? 1.0F : 0.0F;
++        corner_sky_values[i] = sky_light;
++        corner_block_values[i] = block_light;
+     }
+ 
+     const auto base_index = static_cast<std::uint32_t>(mesh.water_vertices.size());
+-    std::array<std::array<float, 2>, 4> uvs {{
+-        {u1, v0},
+-        {u1, v1},
+-        {u0, v1},
+-        {u0, v0},
+-    }};
+-    if (is_horizontal_water_face) {
+-        for (std::size_t i = 0; i < positions.size(); ++i) {
+-            const auto world_u = wrap_positive(positions[i][0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+-            const auto world_v = wrap_positive(positions[i][2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+-            uvs[i] = {
+-                u0 + world_u * uv_step,
+-                v0 + world_v * uv_step,
+-            };
++    const auto row_stride = static_cast<std::uint32_t>(subdivisions.u + 1);
++
++    for (int v_index = 0; v_index <= subdivisions.v; ++v_index) {
++        const auto v_lerp = static_cast<float>(v_index) / static_cast<float>(subdivisions.v);
++        for (int u_index = 0; u_index <= subdivisions.u; ++u_index) {
++            const auto u_lerp = static_cast<float>(u_index) / static_cast<float>(subdivisions.u);
++            const auto position = bilerp_vec3(corner_positions, u_lerp, v_lerp);
++            auto uv = bilerp_vec2(corner_uvs, u_lerp, v_lerp);
++            if (is_horizontal_water_face) {
++                const auto world_u = wrap_positive(position[0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
++                const auto world_v = wrap_positive(position[2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
++                uv = {
++                    u0 + world_u * uv_step,
++                    v0 + world_v * uv_step,
++                };
++            }
++
++            float wave_weight = 0.0F;
++            if (surface_block) {
++                if (face == Face::PositiveY) {
++                    wave_weight = 1.0F;
++                } else if (face != Face::NegativeY) {
++                    const auto local_y = position[1] - static_cast<float>(local_coord.y);
++                    if (local_y > top_height - 0.0001F) {
++                        wave_weight = 1.0F;
++                    }
++                }
++            }
++
++            mesh.water_vertices.push_back({
++                position[0],
++                position[1],
++                position[2],
++                uv[0],
++                uv[1],
++                definition.normal[0],
++                definition.normal[1],
++                definition.normal[2],
++                face_shade,
++                1.0F,
++                bilerp_float(corner_sky_values, u_lerp, v_lerp),
++                bilerp_float(corner_block_values, u_lerp, v_lerp),
++                material_class,
++                wave_weight,
++            });
+         }
+     }
+ 
+-    for (std::size_t i = 0; i < positions.size(); ++i) {
+-        mesh.water_vertices.push_back({
+-            positions[i][0],
+-            positions[i][1],
+-            positions[i][2],
+-            uvs[i][0],
+-            uvs[i][1],
+-            definition.normal[0],
+-            definition.normal[1],
+-            definition.normal[2],
+-            face == Face::PositiveY ? 1.02F : definition.face_shade,
+-            ao_values[i],
+-            sky_values[i],
+-            block_values[i],
+-            material_class,
+-            wave_weights[i],
+-        });
++    const auto diagonal_seed = local_coord.x + local_coord.y + local_coord.z + static_cast<int>(face);
++    for (int v_index = 0; v_index < subdivisions.v; ++v_index) {
++        for (int u_index = 0; u_index < subdivisions.u; ++u_index) {
++            const auto cell_base_index =
++                base_index + static_cast<std::uint32_t>(v_index * (subdivisions.u + 1) + u_index);
++            const auto index0 = cell_base_index;
++            const auto index1 = cell_base_index + 1U;
++            const auto index3 = cell_base_index + row_stride;
++            const auto index2 = index3 + 1U;
++            const auto flip_diagonal = ((diagonal_seed + u_index + v_index) & 1) != 0;
++            append_quad_indices(mesh.water_indices, index0, index1, index2, index3, flip_diagonal);
++        }
+     }
+ 
+-    const auto first_diagonal = ao_values[0] + ao_values[2];
+-    const auto second_diagonal = ao_values[1] + ao_values[3];
+-    append_water_indices(mesh, base_index, first_diagonal < second_diagonal);
++    ++mesh.water_face_count;
+ }
+ 
+ void append_water_mesh(ChunkMeshData& mesh,
+@@ -719,8 +799,8 @@ auto ChunkMesher::build_mesh_range(const World& world,
+ 
+     mesh.vertices.reserve(vertex_reserve_hint > 0 ? vertex_reserve_hint : 2048U);
+     mesh.indices.reserve(index_reserve_hint > 0 ? index_reserve_hint : 3072U);
+-    mesh.water_vertices.reserve(512U);
+-    mesh.water_indices.reserve(768U);
++    mesh.water_vertices.reserve(2048U);
++    mesh.water_indices.reserve(4096U);
+ 
+     const auto cached_min_y = std::max(kWorldMinY, clamped_min_y - 1);
+     const auto cached_max_y = std::min(kWorldMaxY, clamped_max_y + 1);
+diff --git a/tests/WorldTests.cpp b/tests/WorldTests.cpp
+index 8869abf..9f0a115 100644
+--- a/tests/WorldTests.cpp
++++ b/tests/WorldTests.cpp
+@@ -393,8 +393,11 @@ TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
+     CHECK(mesh.vertices.empty());
+     CHECK(mesh.indices.empty());
+     CHECK(mesh.water_face_count == 6);
+-    CHECK(mesh.water_vertices.size() == 24);
+-    CHECK(mesh.water_indices.size() == 36);
++    CHECK(mesh.water_vertices.size() == 89);
++    CHECK(mesh.water_indices.size() == 294);
++    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
++        return vertex.ao == doctest::Approx(1.0F);
++    }));
+     CHECK_FALSE(mesh.empty());
+ }
+ 
+@@ -421,7 +424,7 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks")
+         }
+     }
+ 
+-    REQUIRE(top_vertices.size() == 8);
++    REQUIRE(top_vertices.size() == 50);
+ 
+     const auto vertices_at = [&](float x, float z) {
+         std::vector<WaterTopVertex> matches;
+@@ -435,16 +438,20 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks")
+ 
+     const auto left_near = vertices_at(0.0F, 0.0F);
+     const auto shared_near = vertices_at(1.0F, 0.0F);
++    const auto shared_mid = vertices_at(1.0F, 0.5F);
+     const auto right_near = vertices_at(2.0F, 0.0F);
+     const auto shared_far = vertices_at(1.0F, 1.0F);
+ 
+     REQUIRE(left_near.size() == 1);
+     REQUIRE(shared_near.size() == 2);
++    REQUIRE(shared_mid.size() == 2);
+     REQUIRE(right_near.size() == 1);
+     REQUIRE(shared_far.size() == 2);
+ 
+     CHECK(shared_near[0].u == doctest::Approx(shared_near[1].u));
+     CHECK(shared_near[0].v == doctest::Approx(shared_near[1].v));
++    CHECK(shared_mid[0].u == doctest::Approx(shared_mid[1].u));
++    CHECK(shared_mid[0].v == doctest::Approx(shared_mid[1].v));
+     CHECK(shared_far[0].u == doctest::Approx(shared_far[1].u));
+     CHECK(shared_far[0].v == doctest::Approx(shared_far[1].v));
+ 
+@@ -467,7 +474,7 @@ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animat
+         return vertex.wave_weight > 0.5F;
+     });
+ 
+-    CHECK(animated_vertex_count == 12);
++    CHECK(animated_vertex_count == 45);
+     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+         return vertex.wave_weight == 0.0F || vertex.wave_weight == 1.0F;
+     }));
+@@ -485,7 +492,7 @@ TEST_CASE("stacked water only animates the topmost surface block") {
+     const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+         return vertex.wave_weight > 0.5F;
+     });
+-    CHECK(animated_vertex_count == 12);
++    CHECK(animated_vertex_count == 45);
+ 
+     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+         if (vertex.wave_weight <= 0.5F) {
