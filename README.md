@@ -82,14 +82,16 @@ Le projet vise une base technique solide et evolutive:
 - chunks streames autour du joueur
 - seed deterministe
 - generation de relief et de surface par bruit
-- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`, `Torch`
+- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`, `Water`, `Torch`
 - maillage de chunks avec suppression des faces cachees
+- eau translucide animee avec surface ondulante continue entre blocs
 
 ### Gameplay
 
 - deplacement `WASD`
 - vue souris en premiere personne
 - saut avec gravite
+- nage, wading et plongee dans l'eau (`Space` / `Ctrl`)
 - collisions joueur contre blocs solides
 - mode fly debug
 - casse de blocs au clic gauche
@@ -164,6 +166,7 @@ Cette verification controle:
 | Avancer / reculer | `W` / `S` |
 | Strafe gauche / droite | `A` / `D` |
 | Saut | `Space` |
+| Nager / plonger dans l'eau | `Space` / `Ctrl` |
 | Monter / descendre en fly | `Space` / `Ctrl` |
 | Basculer le mode fly | `F` |
 | Liberer / reprendre la souris | `Escape` |

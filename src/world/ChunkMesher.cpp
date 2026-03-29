@@ -38,7 +38,7 @@ struct FaceDefinition {
 constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
-constexpr float kWaterSurfaceHeight = 0.88F;
+constexpr float kWaterSurfaceHeight = 0.90F;
 constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
 
 auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
@@ -574,7 +574,8 @@ void append_water_face(ChunkMeshData& mesh,
                        const BlockCoord& local_coord,
                        int chunk_world_x,
                        int chunk_world_z,
-                       float top_height) {
+                       float top_height,
+                       bool surface_block) {
     const auto tile = block_atlas_tile(to_block_id(BlockType::Water), to_visual_face(face));
     const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
     const auto u0 = static_cast<float>(tile.x) * uv_step;
@@ -587,11 +588,13 @@ void append_water_face(ChunkMeshData& mesh,
     std::array<float, 4> ao_values {};
     std::array<float, 4> sky_values {};
     std::array<float, 4> block_values {};
+    std::array<float, 4> wave_weights {};
     const auto material_class = block_visual_material_value(to_block_id(BlockType::Water));
 
     for (std::size_t i = 0; i < definition.vertices.size(); ++i) {
         const auto& vertex = definition.vertices[i];
-        const auto y_position = vertex.position[1] > 0.5F ? top_height : 0.0F;
+        const auto top_vertex = vertex.position[1] > 0.5F;
+        const auto y_position = top_vertex ? top_height : 0.0F;
         positions[i] = {
             static_cast<float>(chunk_world_x + local_coord.x) + vertex.position[0],
             static_cast<float>(local_coord.y) + y_position,
@@ -602,6 +605,7 @@ void append_water_face(ChunkMeshData& mesh,
         const auto [sky_light, block_light] = sample_vertex_light(neighborhood, local_coord, definition, vertex);
         sky_values[i] = sky_light;
         block_values[i] = block_light;
+        wave_weights[i] = surface_block && (face == Face::PositiveY || (face != Face::NegativeY && top_vertex)) ? 1.0F : 0.0F;
     }
 
     const auto base_index = static_cast<std::uint32_t>(mesh.water_vertices.size());
@@ -637,6 +641,7 @@ void append_water_face(ChunkMeshData& mesh,
             sky_values[i],
             block_values[i],
             material_class,
+            wave_weights[i],
         });
     }
 
@@ -651,7 +656,8 @@ void append_water_mesh(ChunkMeshData& mesh,
                        int chunk_world_x,
                        int chunk_world_z) {
     const auto block_above = neighborhood.block_at(local_coord.x, local_coord.y + 1, local_coord.z);
-    const auto top_height = is_block_liquid(block_above) ? 1.0F : kWaterSurfaceHeight;
+    const auto surface_block = !is_block_liquid(block_above);
+    const auto top_height = surface_block ? kWaterSurfaceHeight : 1.0F;
 
     for (int face_index = 0; face_index < static_cast<int>(kFaceDefinitions.size()); ++face_index) {
         const auto face = static_cast<Face>(face_index);
@@ -666,7 +672,7 @@ void append_water_mesh(ChunkMeshData& mesh,
             continue;
         }
 
-        append_water_face(mesh, neighborhood, definition, face, local_coord, chunk_world_x, chunk_world_z, top_height);
+        append_water_face(mesh, neighborhood, definition, face, local_coord, chunk_world_x, chunk_world_z, top_height, surface_block);
     }
 }
 

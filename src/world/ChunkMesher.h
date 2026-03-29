@@ -23,6 +23,7 @@ struct ChunkVertex {
     float sky_light = 1.0F;
     float block_light = 0.0F;
     float material_class = 0.0F;
+    float wave_weight = 0.0F;
 };
 
 struct ChunkMeshData {

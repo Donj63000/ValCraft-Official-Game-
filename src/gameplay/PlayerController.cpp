@@ -8,6 +8,7 @@
 #include <glm/trigonometric.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace valcraft {
@@ -18,6 +19,19 @@ constexpr float kMoveSpeed = 5.6F;
 constexpr float kFlySpeed = 10.0F;
 constexpr float kJumpVelocity = 7.5F;
 constexpr float kGravity = 24.0F;
+constexpr float kWadeMoveSpeed = 4.0F;
+constexpr float kWadeGravity = 18.0F;
+constexpr float kWadeJumpVelocity = 6.2F;
+constexpr float kSwimMoveSpeed = 3.8F;
+constexpr float kSwimGravity = 5.5F;
+constexpr float kSwimBuoyancy = 7.0F;
+constexpr float kSwimVerticalAcceleration = 20.0F;
+constexpr float kSwimVerticalDamping = 6.0F;
+constexpr float kSwimSinkSpeed = 3.8F;
+constexpr float kSwimRiseSpeed = 4.6F;
+constexpr float kSwimSurfaceJumpVelocity = 5.2F;
+constexpr float kWaterFeetSampleHeight = 0.08F;
+constexpr float kWaterBodySampleHeight = 1.05F;
 constexpr float kMouseSensitivity = 0.08F;
 constexpr float kCollisionEpsilon = 0.001F;
 constexpr float kFallDamageThreshold = 3.25F;
@@ -77,6 +91,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
 
     const auto clamped_dt = std::max(dt, 0.0F);
     const auto was_on_ground = state_.on_ground;
+    const auto water_contact_before_move = sample_water_contact(world, state_.position);
     state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
     state_.damage_cooldown = std::max(0.0F, state_.damage_cooldown - clamped_dt);
     state_.regen_delay = std::max(0.0F, state_.regen_delay - clamped_dt);
@@ -102,17 +117,39 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         wish = glm::normalize(wish);
     }
 
+    const auto standing_on_solid = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
+
     if (state_.fly_mode) {
         auto fly_velocity = wish + glm::vec3 {0.0F, input.move_up, 0.0F};
         if (glm::dot(fly_velocity, fly_velocity) > 1.0e-5F) {
             fly_velocity = glm::normalize(fly_velocity) * kFlySpeed;
         }
         state_.velocity = fly_velocity;
+    } else if (water_contact_before_move.swimming) {
+        state_.velocity.x = wish.x * kSwimMoveSpeed;
+        state_.velocity.z = wish.z * kSwimMoveSpeed;
+        state_.velocity.y += (std::clamp(input.move_up, -1.0F, 1.0F) * kSwimVerticalAcceleration - kSwimGravity) * clamped_dt;
+        if (water_contact_before_move.head_in_water) {
+            state_.velocity.y += kSwimBuoyancy * clamped_dt;
+        }
+        state_.velocity.y /= 1.0F + kSwimVerticalDamping * clamped_dt;
+        state_.velocity.y = std::clamp(state_.velocity.y, -kSwimSinkSpeed, kSwimRiseSpeed);
+
+        if (!water_contact_before_move.head_in_water && input.jump && standing_on_solid) {
+            state_.velocity.y = std::max(state_.velocity.y, kSwimSurfaceJumpVelocity);
+        }
+    } else if (water_contact_before_move.feet_in_water) {
+        state_.velocity.x = wish.x * kWadeMoveSpeed;
+        state_.velocity.z = wish.z * kWadeMoveSpeed;
+        state_.velocity.y -= kWadeGravity * clamped_dt;
+        if (input.jump && standing_on_solid) {
+            state_.velocity.y = kWadeJumpVelocity;
+        }
     } else {
         state_.velocity.x = wish.x * kMoveSpeed;
         state_.velocity.z = wish.z * kMoveSpeed;
         state_.velocity.y -= kGravity * clamped_dt;
-        if (input.jump && collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F})) {
+        if (input.jump && standing_on_solid) {
             state_.velocity.y = kJumpVelocity;
         }
     }
@@ -141,19 +178,22 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.position.x - start_position.x,
         state_.position.z - start_position.z,
     };
+    const auto water_contact_after_move = sample_water_contact(world, state_.position);
 
     if (!state_.fly_mode) {
         state_.on_ground = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
         if (state_.on_ground && !was_on_ground) {
+            const auto landed_in_water =
+                water_contact_after_move.feet_in_water || water_contact_after_move.body_in_water || water_contact_after_move.head_in_water;
             const auto fall_distance = state_.fall_start_y - state_.position.y;
-            if (fall_distance > kFallDamageThreshold) {
+            if (!landed_in_water && fall_distance > kFallDamageThreshold) {
                 apply_damage(std::ceil(fall_distance - 3.0F), PlayerDeathCause::Fall, true);
             }
         }
         if (state_.on_ground && state_.velocity.y < 0.0F) {
             state_.velocity.y = 0.0F;
         }
-        if (state_.on_ground) {
+        if (state_.on_ground || water_contact_after_move.swimming) {
             state_.fall_start_y = state_.position.y;
         } else {
             state_.fall_start_y = std::max(state_.fall_start_y, state_.position.y);
@@ -327,7 +367,9 @@ void PlayerController::update_survival_state(float dt, const World& world) {
         return;
     }
 
-    state_.head_underwater = !state_.fly_mode && is_block_liquid(point_block(world, eye_position()));
+    const auto water_contact = state_.fly_mode ? WaterContactState {} : sample_water_contact(world, state_.position);
+    state_.swimming = !state_.fly_mode && water_contact.swimming;
+    state_.head_underwater = !state_.fly_mode && water_contact.head_in_water;
 
     if (state_.head_underwater) {
         state_.air_seconds = std::max(0.0F, state_.air_seconds - dt);
@@ -478,6 +520,7 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
         state_.death_cause = cause;
         state_.velocity = {};
         state_.head_underwater = false;
+        state_.swimming = false;
     }
 }
 
@@ -486,6 +529,41 @@ void PlayerController::heal(float amount) noexcept {
         return;
     }
     state_.health = std::min(kMaxHealth, state_.health + amount);
+}
+
+auto PlayerController::is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool {
+    return is_block_liquid(point_block(world, point));
+}
+
+auto PlayerController::sample_water_contact(const World& world, const glm::vec3& feet_position) const noexcept -> WaterContactState {
+    WaterContactState water_contact {};
+    if (state_.fly_mode) {
+        return water_contact;
+    }
+
+    constexpr float sample_radius = kPlayerWidth * 0.35F;
+    const std::array<glm::vec2, 5> horizontal_offsets {{
+        {0.0F, 0.0F},
+        {-sample_radius, -sample_radius},
+        {-sample_radius, sample_radius},
+        {sample_radius, -sample_radius},
+        {sample_radius, sample_radius},
+    }};
+
+    const auto any_sample_at_height_is_liquid = [&](float height) {
+        for (const auto& offset : horizontal_offsets) {
+            if (is_liquid_at(world, feet_position + glm::vec3 {offset.x, height, offset.y})) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    water_contact.feet_in_water = any_sample_at_height_is_liquid(kWaterFeetSampleHeight);
+    water_contact.body_in_water = any_sample_at_height_is_liquid(kWaterBodySampleHeight);
+    water_contact.head_in_water = any_sample_at_height_is_liquid(kEyeHeight);
+    water_contact.swimming = water_contact.body_in_water || water_contact.head_in_water;
+    return water_contact;
 }
 
 auto PlayerController::point_block(const World& world, const glm::vec3& point) const noexcept -> BlockId {

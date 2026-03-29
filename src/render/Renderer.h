@@ -182,6 +182,7 @@ private:
         int air_steps = 0;
         int damage_flash_step = 0;
         bool air_visible = false;
+        bool underwater = false;
 
         auto operator==(const HotbarHudCacheKey&) const -> bool = default;
     };

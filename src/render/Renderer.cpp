@@ -1098,7 +1098,8 @@ void Renderer::render_frame(World& world,
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glDepthMask(GL_TRUE);
     for (auto it = visible_chunks.rbegin(); it != visible_chunks.rend(); ++it) {
         if (it->mesh->water_index_count == 0) {
             continue;
@@ -1110,7 +1111,8 @@ void Renderer::render_frame(World& world,
             GL_UNSIGNED_INT,
             reinterpret_cast<const void*>(static_cast<std::uintptr_t>(it->mesh->water_index_offset_bytes)));
     }
-    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
     glDisable(GL_BLEND);
 
     if (use_post_process) {
@@ -1222,6 +1224,8 @@ void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, s
         glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
         glEnableVertexAttribArray(7);
         glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, material_class)));
+        glEnableVertexAttribArray(8);
+        glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, wave_weight)));
     } else {
         glBindVertexArray(gpu_mesh.vao);
         glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
@@ -1330,10 +1334,12 @@ layout(location = 4) in float a_ao;
 layout(location = 5) in float a_sky_light;
 layout(location = 6) in float a_block_light;
 layout(location = 7) in float a_material_class;
+layout(location = 8) in float a_wave_weight;
 
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
+uniform float u_time_of_day;
 
 out vec2 v_uv;
 out vec3 v_normal;
@@ -1342,12 +1348,31 @@ out float v_ao;
 out float v_sky_light;
 out float v_block_light;
 out float v_material_class;
+out float v_wave_weight;
 out float v_distance;
 out vec3 v_world_position;
 out vec4 v_light_position;
 
+float material_mask(float material, float expected) {
+    return 1.0 - step(0.25, abs(material - expected));
+}
+
+float water_wave_height(vec2 world_xz, float time_phase) {
+    float wave_a = sin(world_xz.x * 0.42 + world_xz.y * 0.18 + time_phase * 1.20);
+    float wave_b = cos(world_xz.y * 0.37 - world_xz.x * 0.23 + time_phase * 1.55);
+    float wave_c = sin((world_xz.x + world_xz.y) * 0.29 + time_phase * 0.95);
+    return wave_a * 0.020 + wave_b * 0.012 + wave_c * 0.008;
+}
+
 void main() {
     vec4 world_position = vec4(a_position, 1.0);
+    float water_mask = material_mask(a_material_class, 6.0);
+    float wave_weight = clamp(a_wave_weight, 0.0, 1.0) * water_mask;
+    if (wave_weight > 0.0) {
+        float wave_time = u_time_of_day * 36.0;
+        world_position.y += water_wave_height(world_position.xz, wave_time) * wave_weight;
+    }
+
     gl_Position = u_view_projection * world_position;
     v_uv = a_uv;
     v_normal = a_normal;
@@ -1356,6 +1381,7 @@ void main() {
     v_sky_light = a_sky_light;
     v_block_light = a_block_light;
     v_material_class = a_material_class;
+    v_wave_weight = wave_weight;
     v_distance = distance(world_position.xyz, u_camera_position);
     v_world_position = world_position.xyz;
     v_light_position = u_light_view_projection * world_position;
@@ -1370,6 +1396,7 @@ in float v_ao;
 in float v_sky_light;
 in float v_block_light;
 in float v_material_class;
+in float v_wave_weight;
 in float v_distance;
 in vec3 v_world_position;
 in vec4 v_light_position;
@@ -1418,13 +1445,35 @@ float sample_shadow(vec3 normal) {
     return visibility / 9.0;
 }
 
+vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
+    float phase_a = world_xz.x * 0.42 + world_xz.y * 0.18 + time_phase * 1.20;
+    float phase_b = world_xz.y * 0.37 - world_xz.x * 0.23 + time_phase * 1.55;
+    float phase_c = (world_xz.x + world_xz.y) * 0.29 + time_phase * 0.95;
+
+    float d_height_dx =
+        cos(phase_a) * 0.020 * 0.42 +
+        sin(phase_b) * 0.012 * 0.23 +
+        cos(phase_c) * 0.008 * 0.29;
+    float d_height_dz =
+        cos(phase_a) * 0.020 * 0.18 -
+        sin(phase_b) * 0.012 * 0.37 +
+        cos(phase_c) * 0.008 * 0.29;
+    return vec2(d_height_dx, d_height_dz);
+}
+
 void main() {
     float water_mask = material_mask(v_material_class, 6.0);
+    float water_surface_mask = water_mask * clamp(v_wave_weight * abs(v_normal.y), 0.0, 1.0);
+
     vec2 animated_uv = v_uv;
     if (water_mask > 0.5) {
-        float wave_a = sin(v_world_position.x * 0.33 + v_world_position.z * 0.19 + u_time_of_day * 2.2);
-        float wave_b = cos(v_world_position.z * 0.41 - v_world_position.x * 0.21 + u_time_of_day * 1.7);
-        animated_uv += vec2(wave_a, wave_b) * 0.0038;
+        float water_time = u_time_of_day * 18.0;
+        vec2 water_flow = vec2(
+            sin(v_world_position.z * 0.22 + water_time * 1.10) * 0.0026 +
+                cos(v_world_position.x * 0.17 - water_time * 0.85) * 0.0016,
+            cos(v_world_position.x * 0.19 - water_time * 0.92) * 0.0022 +
+                sin(v_world_position.z * 0.27 + water_time * 0.70) * 0.0014);
+        animated_uv += water_flow;
     }
 
     vec4 sampled = texture(u_atlas, animated_uv);
@@ -1434,6 +1483,15 @@ void main() {
 
     vec3 albedo = sampled.rgb;
     vec3 normal = normalize(v_normal);
+    if (water_surface_mask > 0.001) {
+        vec2 wave_gradient = water_wave_gradient(v_world_position.xz, u_time_of_day * 36.0) * water_surface_mask;
+        vec3 wave_normal = normalize(vec3(-wave_gradient.x, 1.0, -wave_gradient.y));
+        normal = normalize(mix(normal, wave_normal, water_surface_mask));
+    }
+    if (!gl_FrontFacing && water_mask > 0.5) {
+        normal = -normal;
+    }
+
     vec3 view_direction = normalize(u_camera_position - v_world_position);
     vec3 sun_direction = normalize(u_sun_direction);
     float daylight = clamp(u_daylight_factor, 0.0, 1.0);
@@ -1449,19 +1507,21 @@ void main() {
     float emissive_mask = material_mask(v_material_class, 7.0);
     float snow_mask = material_mask(v_material_class, 8.0);
 
+    float view_alignment = mix(max(dot(view_direction, normal), 0.0), abs(dot(view_direction, normal)), water_mask);
+    float sun_alignment = mix(max(dot(normal, sun_direction), 0.0), abs(dot(normal, sun_direction)), water_mask);
+
     float face_light = mix(0.82, 1.10, clamp(v_face_shade, 0.0, 1.0)) * mix(0.78, 1.00, clamp(v_ao, 0.0, 1.0));
     vec3 ambient = u_ambient_color * mix(0.40, 1.12, sky_light);
     ambient *= mix(0.88, 1.08, smoothstep(-0.25, 1.0, normal.y));
 
-    float direct = max(dot(normal, sun_direction), 0.0);
-    direct = mix(direct, direct * direct, 0.45);
+    float direct = mix(sun_alignment, sun_alignment * sun_alignment, 0.45);
     vec3 sunlight = u_sun_color * direct * shadow * u_sun_visibility * daylight * (0.72 + 0.28 * sky_light);
 
     float bounce_factor = smoothstep(-0.35, 1.0, normal.y) * sky_light;
     vec3 bounce_light = mix(u_fog_color, u_distant_fog_color, 0.42) * bounce_factor * (0.12 + 0.12 * daylight);
     vec3 torch_light = vec3(1.14, 0.70, 0.32) * block_light * (1.18 + emissive_mask * 0.55);
 
-    float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), mix(3.0, 1.7, water_mask + foliage_mask * 0.35 + flora_mask * 0.45));
+    float rim = pow(1.0 - view_alignment, mix(3.0, 1.7, water_mask + foliage_mask * 0.35 + flora_mask * 0.45));
     vec3 rim_color = mix(u_fog_color, u_sun_color, 0.55) * rim * (0.02 + 0.08 * daylight + 0.04 * foliage_mask + 0.05 * flora_mask);
 
     vec3 reflected = reflect(-sun_direction, normal);
@@ -1482,17 +1542,17 @@ void main() {
 
     float output_alpha = 1.0;
     if (water_mask > 0.5) {
-        float fresnel = pow(1.0 - max(dot(view_direction, normal), 0.0), 4.0);
-        float sparkle = pow(max(dot(reflected, view_direction), 0.0), 56.0);
-        float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.27 + v_world_position.z * 0.31 + u_time_of_day * 2.0);
-        vec3 water_tint = mix(vec3(0.05, 0.20, 0.30), vec3(0.16, 0.60, 0.72), clamp(daylight * 0.72 + sky_light * 0.28, 0.0, 1.0));
-        vec3 water_light = ambient * 0.76 + bounce_light * 0.90 + sunlight * 0.48 + torch_light * 0.24;
+        float fresnel = pow(1.0 - view_alignment, 4.5);
+        float sparkle = pow(max(dot(reflected, view_direction), 0.0), 60.0);
+        float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.24 + v_world_position.z * 0.28 + u_time_of_day * 20.0);
+        vec3 water_tint = mix(vec3(0.05, 0.18, 0.28), vec3(0.16, 0.58, 0.74), clamp(daylight * 0.78 + sky_light * 0.22, 0.0, 1.0));
+        vec3 water_light = ambient * 0.85 + bounce_light * 0.95 + sunlight * 0.58 + torch_light * 0.30;
         vec3 water_specular =
-            mix(u_distant_fog_color, u_sun_color, 0.52) * (fresnel * (0.14 + 0.12 * daylight) + sparkle * (0.16 + 0.12 * daylight));
-        lit_color = mix(albedo, water_tint, 0.74) * water_light;
-        lit_color += water_tint * shimmer * (0.04 + 0.04 * daylight);
+            mix(u_distant_fog_color, u_sun_color, 0.55) * (fresnel * (0.16 + 0.14 * daylight) + sparkle * (0.18 + 0.16 * daylight));
+        lit_color = mix(albedo, water_tint, 0.82) * water_light;
+        lit_color += water_tint * shimmer * (0.03 + 0.05 * daylight);
         lit_color += water_specular;
-        output_alpha = sampled.a;
+        output_alpha = clamp(max(sampled.a, 0.78 + fresnel * 0.06), 0.0, 0.92);
     }
 
     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
@@ -2142,6 +2202,8 @@ void Renderer::create_item_drop_geometry() {
     glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
     glEnableVertexAttribArray(7);
     glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, material_class)));
+    glEnableVertexAttribArray(8);
+    glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, wave_weight)));
 
     item_drop_vertex_buffer_bytes_ = kInitialItemDropVertexBufferBytes;
 }
@@ -2690,6 +2752,7 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
     cache_key.air_steps = quantize_hud_value(player_state.air_seconds, 64.0F);
     cache_key.damage_flash_step = quantize_hud_value(damage_flash, 128.0F);
     cache_key.air_visible = air_visible;
+    cache_key.underwater = player_state.head_underwater;
 
     auto& cache = hotbar_cache_;
     auto& vertices = cache.vertices;
@@ -2702,6 +2765,31 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
 
         const auto viewport_width = static_cast<float>(width);
         const auto viewport_height = static_cast<float>(height);
+
+        if (cache_key.underwater) {
+            const auto overlay_edge = std::clamp(std::min(viewport_width, viewport_height) * 0.17F, 72.0F, 180.0F);
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.03F, 0.19F, 0.24F, 0.18F});
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, overlay_edge, {0.12F, 0.42F, 0.46F, 0.08F});
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                0.0F,
+                viewport_height - overlay_edge,
+                viewport_width,
+                overlay_edge,
+                {0.02F, 0.09F, 0.15F, 0.16F});
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, overlay_edge, viewport_height, {0.02F, 0.11F, 0.17F, 0.10F});
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                viewport_width - overlay_edge,
+                0.0F,
+                overlay_edge,
+                viewport_height,
+                {0.02F, 0.11F, 0.17F, 0.10F});
+        }
 
         if (damage_flash > 0.0F) {
             const auto edge_size = std::clamp(std::min(viewport_width, viewport_height) * 0.09F, 28.0F, 72.0F);

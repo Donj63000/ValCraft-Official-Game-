@@ -64,6 +64,7 @@ struct PlayerState {
     bool on_ground = false;
     bool fly_mode = false;
     bool head_underwater = false;
+    bool swimming = false;
     bool dead = false;
     PlayerDeathCause death_cause = PlayerDeathCause::None;
 };
@@ -101,6 +102,13 @@ public:
     [[nodiscard]] auto collides_at(const World& world, const glm::vec3& feet_position) const -> bool;
 
 private:
+    struct WaterContactState {
+        bool feet_in_water = false;
+        bool body_in_water = false;
+        bool head_in_water = false;
+        bool swimming = false;
+    };
+
     void update_survival_state(float dt, const World& world);
     void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
     void move_axis(float delta, int axis, const World& world);
@@ -108,6 +116,8 @@ private:
     void heal(float amount) noexcept;
     [[nodiscard]] auto block_overlaps_player(const BlockCoord& block_coord) const noexcept -> bool;
     [[nodiscard]] auto point_block(const World& world, const glm::vec3& point) const noexcept -> BlockId;
+    [[nodiscard]] auto is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool;
+    [[nodiscard]] auto sample_water_contact(const World& world, const glm::vec3& feet_position) const noexcept -> WaterContactState;
 
     PlayerState state_ {};
     BlockId selected_block_ = to_block_id(BlockType::Grass);

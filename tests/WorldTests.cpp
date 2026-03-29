@@ -455,6 +455,46 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") 
     CHECK(right_near[0].u == doctest::Approx(shared_near[0].u + expected_block_delta));
 }
 
+TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animation") {
+    World world(186, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(3, 5, 5, to_block_id(BlockType::Water));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+
+    const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+        return vertex.wave_weight > 0.5F;
+    });
+
+    CHECK(animated_vertex_count == 12);
+    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+        return vertex.wave_weight == 0.0F || vertex.wave_weight == 1.0F;
+    }));
+}
+
+TEST_CASE("stacked water only animates the topmost surface block") {
+    World world(187, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(3, 5, 5, to_block_id(BlockType::Water));
+    world.set_block(3, 6, 5, to_block_id(BlockType::Water));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+
+    const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+        return vertex.wave_weight > 0.5F;
+    });
+    CHECK(animated_vertex_count == 12);
+
+    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+        if (vertex.wave_weight <= 0.5F) {
+            return true;
+        }
+        return vertex.y > 6.85F;
+    }));
+}
+
 TEST_CASE("chunk mesher handles isolated high blocks without losing geometry") {
     World world(184, 1);
     test::make_chunk_empty(world, {0, 0});

@@ -159,6 +159,90 @@ TEST_CASE("underwater players lose air and eventually take drowning damage") {
     CHECK(player.state().health < player.max_health());
 }
 
+TEST_CASE("deep water enables swimming and upward movement") {
+    World world(1521, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+    for (int y = 1; y <= 4; ++y) {
+        world.set_block(0, y, 0, to_block_id(BlockType::Water));
+    }
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    PlayerInput input {};
+    input.move_up = 1.0F;
+
+    const auto starting_y = player.position().y;
+    for (int i = 0; i < 30; ++i) {
+        player.update(input, 1.0F / 60.0F, world);
+    }
+
+    CHECK(player.state().swimming);
+    CHECK(player.position().y > starting_y + 0.20F);
+    CHECK(player.state().velocity.y > 0.0F);
+}
+
+TEST_CASE("partial overlap with deep water still counts as swimming") {
+    World world(1522, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 3, 0, -2, 2);
+    for (int y = 1; y <= 4; ++y) {
+        world.set_block(1, y, 0, to_block_id(BlockType::Water));
+    }
+
+    PlayerController player({0.79F, 1.001F, 0.5F});
+    player.update(PlayerInput {}, 1.0F / 60.0F, world);
+
+    CHECK(player.state().swimming);
+    CHECK(player.state().head_underwater);
+}
+
+TEST_CASE("shallow water slows movement without entering swimming state") {
+    World world(1523, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 5, 0, -10, 2);
+    for (int z = -10; z <= 2; ++z) {
+        for (int x = -1; x <= 1; ++x) {
+            world.set_block(x, 1, z, to_block_id(BlockType::Water));
+        }
+    }
+
+    PlayerController shallow_player({0.5F, 1.001F, 0.5F});
+    PlayerController dry_player({3.5F, 1.001F, 0.5F});
+    PlayerInput input {};
+    input.move_forward = 1.0F;
+
+    for (int i = 0; i < 60; ++i) {
+        shallow_player.update(input, 1.0F / 60.0F, world);
+        dry_player.update(input, 1.0F / 60.0F, world);
+    }
+
+    const auto shallow_distance = std::abs(shallow_player.position().z - 0.5F);
+    const auto dry_distance = std::abs(dry_player.position().z - 0.5F);
+
+    CHECK_FALSE(shallow_player.state().swimming);
+    CHECK_FALSE(shallow_player.state().head_underwater);
+    CHECK(shallow_distance < dry_distance - 1.0F);
+}
+
+TEST_CASE("falling into deep water prevents fall damage") {
+    World world(1524, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+    for (int y = 1; y <= 5; ++y) {
+        world.set_block(0, y, 0, to_block_id(BlockType::Water));
+    }
+
+    PlayerController player({0.5F, 12.0F, 0.5F});
+    for (int i = 0; i < 240; ++i) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world);
+    }
+
+    CHECK(player.state().on_ground);
+    CHECK(player.state().health == doctest::Approx(player.max_health()));
+    CHECK_FALSE(player.state().dead);
+    CHECK(player.state().death_cause == PlayerDeathCause::None);
+}
+
 TEST_CASE("player cannot move through a solid wall") {
     World world(22, 1);
     test::make_chunk_empty(world, {0, 0});
