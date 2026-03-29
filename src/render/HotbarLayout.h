@@ -83,6 +83,18 @@ struct GameplayHudLayout {
     float hotbar_panel_bottom = 0.0F;
     float hotbar_panel_width = 0.0F;
     float hotbar_panel_height = 0.0F;
+    float hotbar_rail_x = 0.0F;
+    float hotbar_rail_bottom = 0.0F;
+    float hotbar_rail_width = 0.0F;
+    float hotbar_rail_height = 0.0F;
+    float hearts_panel_x = 0.0F;
+    float hearts_panel_bottom = 0.0F;
+    float hearts_panel_width = 0.0F;
+    float hearts_panel_height = 0.0F;
+    float bubbles_panel_x = 0.0F;
+    float bubbles_panel_bottom = 0.0F;
+    float bubbles_panel_width = 0.0F;
+    float bubbles_panel_height = 0.0F;
     float vitals_bottom = 0.0F;
     float cluster_bottom = 0.0F;
     float cluster_top = 0.0F;
@@ -135,34 +147,34 @@ inline auto build_vital_glyph_fills(float value, float max_value) -> std::array<
 }
 
 inline auto build_hotbar_layout(int viewport_width, int viewport_height, const HotbarState& state) -> HotbarLayout {
-    constexpr float gap_ratio = 0.12F;
-    constexpr float bar_padding_x_ratio = 0.18F;
-    constexpr float bar_padding_y_ratio = 0.16F;
+    constexpr float gap_ratio = 0.10F;
+    constexpr float bar_padding_x_ratio = 0.24F;
+    constexpr float bar_padding_y_ratio = 0.20F;
     constexpr float icon_inset_ratio = 0.18F;
 
     const auto width = static_cast<float>(std::max(viewport_width, 1));
     const auto height = static_cast<float>(std::max(viewport_height, 1));
     const auto min_dimension = std::min(width, height);
-    const auto safe_margin = std::max(16.0F, min_dimension * 0.02F);
-    const auto preferred_slot_size = std::clamp(height * 0.065F, 40.0F, 58.0F);
+    const auto safe_margin = std::max(14.0F, min_dimension * 0.018F);
+    const auto preferred_slot_size = std::clamp(height * 0.064F, 38.0F, 56.0F);
     const auto available_width = std::max(width - safe_margin * 2.0F, preferred_slot_size);
     const auto slot_size = std::max(
         24.0F,
         std::min(
             preferred_slot_size,
             available_width / (static_cast<float>(kHotbarSlotCount) +
-                               static_cast<float>(kHotbarSlotCount - 1) * gap_ratio +
+                               static_cast<float>(kHotbarSlotCount - 1U) * gap_ratio +
                                bar_padding_x_ratio * 2.0F)));
     const auto slot_gap = std::max(4.0F, slot_size * gap_ratio);
-    const auto bar_padding_x = std::max(6.0F, slot_size * bar_padding_x_ratio);
-    const auto bar_padding_y = std::max(6.0F, slot_size * bar_padding_y_ratio);
+    const auto bar_padding_x = std::max(8.0F, slot_size * bar_padding_x_ratio);
+    const auto bar_padding_y = std::max(7.0F, slot_size * bar_padding_y_ratio);
     const auto bar_width =
         static_cast<float>(kHotbarSlotCount) * slot_size +
-        static_cast<float>(kHotbarSlotCount - 1) * slot_gap +
+        static_cast<float>(kHotbarSlotCount - 1U) * slot_gap +
         bar_padding_x * 2.0F;
     const auto bar_height = slot_size + bar_padding_y * 2.0F;
     const auto bar_left = (width - bar_width) * 0.5F;
-    const auto bar_bottom = safe_margin;
+    const auto bar_bottom = safe_margin + std::max(2.0F, slot_size * 0.06F);
     const auto icon_inset = std::max(4.0F, slot_size * icon_inset_ratio);
 
     HotbarLayout layout {};
@@ -198,31 +210,42 @@ inline auto build_gameplay_hud_layout(int viewport_width,
                                       float max_air_seconds,
                                       bool air_visible) -> GameplayHudLayout {
     const auto hotbar = build_hotbar_layout(viewport_width, viewport_height, state);
-    const auto slot_raise = std::max(2.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.08F)));
-    const auto panel_padding_x = std::max(5.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.12F)));
-    const auto panel_padding_y = std::max(4.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.10F)));
+    const auto slot_raise = std::max(3.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.12F)));
+    const auto panel_padding_x = std::max(12.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.26F)));
+    const auto panel_padding_y = std::max(8.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.22F)));
     const auto hotbar_top = hotbar.bar_bottom + hotbar.bar_height;
     const auto panel_x = hotbar.bar_left - panel_padding_x;
     const auto panel_bottom = hotbar.bar_bottom - panel_padding_y;
     const auto panel_width = hotbar.bar_width + panel_padding_x * 2.0F;
     const auto panel_height = hotbar.bar_height + panel_padding_y * 2.0F;
     const auto panel_top = panel_bottom + panel_height;
+    const auto rail_margin = std::max(10.0F, panel_padding_x * 0.78F);
+    const auto rail_x = panel_x + rail_margin;
+    const auto rail_width = std::max(0.0F, panel_width - rail_margin * 2.0F);
+    const auto rail_height = std::max(4.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.16F)));
+    const auto rail_bottom = panel_bottom + std::max(4.0F, panel_padding_y * 0.58F);
 
     const auto vital_size = std::clamp(static_cast<float>(std::floor(hotbar.slot_size * 0.30F)), 8.0F, 16.0F);
     const auto vital_gap = std::max(1.0F, static_cast<float>(std::floor(vital_size * 0.18F)));
     const auto vital_row_width =
-        static_cast<float>(kHudVitalGlyphCount) * vital_size + static_cast<float>(kHudVitalGlyphCount - 1U) * vital_gap;
-    const auto vitals_gap = std::max(8.0F, static_cast<float>(std::floor(vital_size * 0.85F)));
-    const auto vitals_bottom = panel_top + vitals_gap;
+        static_cast<float>(kHudVitalGlyphCount) * vital_size +
+        static_cast<float>(kHudVitalGlyphCount - 1U) * vital_gap;
+    const auto vital_panel_padding_x = std::max(8.0F, static_cast<float>(std::floor(vital_size * 0.95F)));
+    const auto vital_panel_padding_y = std::max(6.0F, static_cast<float>(std::floor(vital_size * 0.80F)));
+    const auto vital_panel_width = vital_row_width + vital_panel_padding_x * 2.0F;
+    const auto vital_panel_height = vital_size + vital_panel_padding_y * 2.0F;
+    const auto vitals_bottom = panel_top + std::max(8.0F, static_cast<float>(std::floor(vital_size * 0.95F)));
     const auto left_cluster_center = hotbar.bar_left + hotbar.bar_width * 0.25F;
     const auto right_cluster_center = hotbar.bar_left + hotbar.bar_width * 0.75F;
-    const auto hearts_x = left_cluster_center - vital_row_width * 0.5F;
-    const auto bubbles_x = right_cluster_center - vital_row_width * 0.5F;
+    const auto hearts_panel_x = left_cluster_center - vital_panel_width * 0.5F;
+    const auto bubbles_panel_x = right_cluster_center - vital_panel_width * 0.5F;
+    const auto hearts_panel_bottom = vitals_bottom - vital_panel_padding_y;
+    const auto bubbles_panel_bottom = hearts_panel_bottom;
 
-    constexpr float label_pixel_size = 2.0F;
-    constexpr float label_height = label_pixel_size * 7.0F;
-    const auto label_gap = std::max(6.0F, static_cast<float>(std::floor(vital_size * 0.50F)));
-    const auto label_bottom = vitals_bottom + vital_size + label_gap;
+    const auto label_pixel_size = std::clamp(static_cast<float>(std::floor(hotbar.slot_size / 18.0F)), 2.0F, 3.0F);
+    const auto label_height = label_pixel_size * 7.0F;
+    const auto label_gap = std::max(8.0F, static_cast<float>(std::floor(vital_size * 0.85F)));
+    const auto label_bottom = hearts_panel_bottom + vital_panel_height + label_gap;
 
     GameplayHudLayout layout {};
     layout.hotbar = hotbar;
@@ -232,6 +255,18 @@ inline auto build_gameplay_hud_layout(int viewport_width,
     layout.hotbar_panel_bottom = panel_bottom;
     layout.hotbar_panel_width = panel_width;
     layout.hotbar_panel_height = panel_height;
+    layout.hotbar_rail_x = rail_x;
+    layout.hotbar_rail_bottom = rail_bottom;
+    layout.hotbar_rail_width = rail_width;
+    layout.hotbar_rail_height = rail_height;
+    layout.hearts_panel_x = hearts_panel_x;
+    layout.hearts_panel_bottom = hearts_panel_bottom;
+    layout.hearts_panel_width = vital_panel_width;
+    layout.hearts_panel_height = vital_panel_height;
+    layout.bubbles_panel_x = bubbles_panel_x;
+    layout.bubbles_panel_bottom = bubbles_panel_bottom;
+    layout.bubbles_panel_width = vital_panel_width;
+    layout.bubbles_panel_height = vital_panel_height;
     layout.vitals_bottom = vitals_bottom;
     layout.cluster_bottom = panel_bottom;
     layout.cluster_top = label_bottom + label_height;
@@ -257,8 +292,8 @@ inline auto build_gameplay_hud_layout(int viewport_width,
         gameplay_slot.icon_x = slot.x + icon_offset;
         gameplay_slot.icon_bottom = slot_bottom + icon_offset;
         gameplay_slot.icon_size = icon_size;
-        gameplay_slot.count_right_x = slot.x + slot.size - 5.0F;
-        gameplay_slot.count_bottom = slot_bottom + slot.size - 4.0F;
+        gameplay_slot.count_right_x = slot.x + slot.size - std::max(3.0F, hotbar.slot_size * 0.08F);
+        gameplay_slot.count_bottom = slot_bottom + slot.size - std::max(3.0F, hotbar.slot_size * 0.08F);
         gameplay_slot.is_selected = slot.is_selected;
         gameplay_slot.has_icon = slot.has_icon;
         gameplay_slot.show_stack_count = gameplay_hud_stack_count_visible(slot.slot);
@@ -268,13 +303,13 @@ inline auto build_gameplay_hud_layout(int viewport_width,
 
     for (std::size_t index = 0; index < kHudVitalGlyphCount; ++index) {
         auto& heart = layout.hearts[index];
-        heart.x = hearts_x + static_cast<float>(index) * (vital_size + vital_gap);
+        heart.x = hearts_panel_x + vital_panel_padding_x + static_cast<float>(index) * (vital_size + vital_gap);
         heart.bottom = vitals_bottom;
         heart.size = vital_size;
         heart.fill = heart_fills[index];
 
         auto& bubble = layout.bubbles[index];
-        bubble.x = bubbles_x + static_cast<float>(index) * (vital_size + vital_gap);
+        bubble.x = bubbles_panel_x + vital_panel_padding_x + static_cast<float>(index) * (vital_size + vital_gap);
         bubble.bottom = vitals_bottom;
         bubble.size = vital_size;
         bubble.fill = bubble_fills[index];

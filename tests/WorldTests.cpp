@@ -18,6 +18,10 @@
 
 namespace valcraft {
 
+TEST_CASE("air uses terrain as the visual fallback material") {
+    CHECK(block_visual_material(to_block_id(BlockType::Air)) == BlockVisualMaterial::Terrain);
+}
+
 TEST_CASE("chunk stores and retrieves local blocks") {
     Chunk chunk({2, -1});
     chunk.fill(to_block_id(BlockType::Air));
@@ -460,6 +464,82 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") 
 
     CHECK(shared_near[0].u == doctest::Approx(left_near[0].u + expected_block_delta));
     CHECK(right_near[0].u == doctest::Approx(shared_near[0].u + expected_block_delta));
+}
+
+TEST_CASE("chunk mesher keeps water top texel density stable across the repeat boundary") {
+    World world(285, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(7, 5, 0, to_block_id(BlockType::Water));
+    world.set_block(8, 5, 0, to_block_id(BlockType::Water));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+
+    struct WaterTopVertex {
+        float x;
+        float z;
+        float u;
+        float v;
+    };
+
+    std::vector<WaterTopVertex> top_vertices;
+    for (const auto& vertex : mesh.water_vertices) {
+        if (vertex.ny > 0.9F) {
+            top_vertices.push_back({vertex.x, vertex.z, vertex.u, vertex.v});
+        }
+    }
+
+    REQUIRE(top_vertices.size() == 50);
+
+    const auto vertices_at = [&](float x, float z) {
+        std::vector<WaterTopVertex> matches;
+        for (const auto& vertex : top_vertices) {
+            if (vertex.x == doctest::Approx(x) && vertex.z == doctest::Approx(z)) {
+                matches.push_back(vertex);
+            }
+        }
+        return matches;
+    };
+
+    const auto left_near = vertices_at(7.0F, 0.0F);
+    auto shared_near = vertices_at(8.0F, 0.0F);
+    auto shared_mid = vertices_at(8.0F, 0.5F);
+    const auto right_near = vertices_at(9.0F, 0.0F);
+    auto shared_far = vertices_at(8.0F, 1.0F);
+
+    REQUIRE(left_near.size() == 1);
+    REQUIRE(shared_near.size() == 2);
+    REQUIRE(shared_mid.size() == 2);
+    REQUIRE(right_near.size() == 1);
+    REQUIRE(shared_far.size() == 2);
+
+    std::sort(shared_near.begin(), shared_near.end(), [](const WaterTopVertex& lhs, const WaterTopVertex& rhs) {
+        return lhs.u < rhs.u;
+    });
+    std::sort(shared_mid.begin(), shared_mid.end(), [](const WaterTopVertex& lhs, const WaterTopVertex& rhs) {
+        return lhs.u < rhs.u;
+    });
+    std::sort(shared_far.begin(), shared_far.end(), [](const WaterTopVertex& lhs, const WaterTopVertex& rhs) {
+        return lhs.u < rhs.u;
+    });
+
+    const auto water_tile = block_atlas_tile(to_block_id(BlockType::Water), BlockVisualFace::PositiveY);
+    const auto uv_step = 1.0F / static_cast<float>(kBlockAtlasTilesPerAxis);
+    const auto tile_u0 = static_cast<float>(water_tile.x) * uv_step;
+    const auto expected_block_delta = uv_step / 8.0F;
+
+    CHECK(left_near[0].u == doctest::Approx(tile_u0 + expected_block_delta * 7.0F));
+    CHECK(shared_near[0].u == doctest::Approx(tile_u0));
+    CHECK(shared_near[1].u == doctest::Approx(tile_u0 + uv_step));
+    CHECK(right_near[0].u == doctest::Approx(tile_u0 + expected_block_delta));
+
+    CHECK(shared_mid[0].u == doctest::Approx(tile_u0));
+    CHECK(shared_mid[1].u == doctest::Approx(tile_u0 + uv_step));
+    CHECK(shared_far[0].u == doctest::Approx(tile_u0));
+    CHECK(shared_far[1].u == doctest::Approx(tile_u0 + uv_step));
+
+    CHECK(shared_near[1].u - left_near[0].u == doctest::Approx(expected_block_delta));
+    CHECK(right_near[0].u - shared_near[0].u == doctest::Approx(expected_block_delta));
 }
 
 TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animation") {

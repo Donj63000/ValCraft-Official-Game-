@@ -154,72 +154,6 @@ auto bottom_to_top_left_y(float viewport_height, float bottom, float height) -> 
     return viewport_height - bottom - height;
 }
 
-void append_hud_frame(std::vector<HudVertex>& vertices,
-                      float viewport_width,
-                      float viewport_height,
-                      float x,
-                      float y,
-                      float width,
-                      float height,
-                      float border_thickness,
-                      const std::array<float, 4>& border_color,
-                      const std::array<float, 4>& fill_color) {
-    append_hud_rect(vertices, viewport_width, viewport_height, x, y, width, height, border_color);
-
-    const auto inner_x = x + border_thickness;
-    const auto inner_y = y + border_thickness;
-    const auto inner_width = std::max(0.0F, width - border_thickness * 2.0F);
-    const auto inner_height = std::max(0.0F, height - border_thickness * 2.0F);
-    if (inner_width > 0.0F && inner_height > 0.0F) {
-        append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, inner_width, inner_height, fill_color);
-    }
-}
-
-void append_hud_beveled_panel(std::vector<HudVertex>& vertices,
-                              float viewport_width,
-                              float viewport_height,
-                              float x,
-                              float y,
-                              float width,
-                              float height,
-                              float border_thickness,
-                              const std::array<float, 4>& border_color,
-                              const std::array<float, 4>& fill_color,
-                              const std::array<float, 4>& highlight_color,
-                              const std::array<float, 4>& shadow_color) {
-    append_hud_frame(vertices, viewport_width, viewport_height, x, y, width, height, border_thickness, border_color, fill_color);
-
-    const auto inner_x = x + border_thickness;
-    const auto inner_y = y + border_thickness;
-    const auto inner_width = std::max(0.0F, width - border_thickness * 2.0F);
-    const auto inner_height = std::max(0.0F, height - border_thickness * 2.0F);
-    if (inner_width <= 2.0F || inner_height <= 2.0F) {
-        return;
-    }
-
-    const auto bevel = std::max(1.0F, static_cast<float>(std::floor(border_thickness * 0.55F)));
-    append_hud_rect(
-        vertices,
-        viewport_width,
-        viewport_height,
-        inner_x,
-        inner_y + std::max(0.0F, inner_height - bevel),
-        inner_width,
-        bevel,
-        highlight_color);
-    append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, bevel, inner_height, highlight_color);
-    append_hud_rect(vertices, viewport_width, viewport_height, inner_x, inner_y, inner_width, bevel, shadow_color);
-    append_hud_rect(
-        vertices,
-        viewport_width,
-        viewport_height,
-        inner_x + std::max(0.0F, inner_width - bevel),
-        inner_y,
-        bevel,
-        inner_height,
-        shadow_color);
-}
-
 void append_hud_quad_top_left(std::vector<HudVertex>& vertices,
                               float viewport_width,
                               float viewport_height,
@@ -509,6 +443,779 @@ void append_pixel_text_bottom_left(std::vector<HudVertex>& vertices,
         centered);
 }
 
+using HudColor = std::array<float, 4>;
+
+struct HudPanelPalette {
+    HudColor frame {};
+    HudColor fill {};
+    HudColor highlight {};
+    HudColor shadow {};
+    HudColor trim {};
+};
+
+struct HudSlotPalette {
+    HudPanelPalette shell {};
+    HudColor accent {};
+    HudColor glow {};
+    HudColor motif {};
+};
+
+struct InventoryFocusItem {
+    HotbarSlot slot {};
+    bool has_item = false;
+    bool from_carried_slot = false;
+    InventorySlotGroup group = InventorySlotGroup::Storage;
+};
+
+auto hud_with_alpha(const HudColor& color, float alpha) -> HudColor {
+    return {color[0], color[1], color[2], alpha};
+}
+
+auto hud_scale_rgb(const HudColor& color, float factor) -> HudColor {
+    return {
+        std::clamp(color[0] * factor, 0.0F, 1.0F),
+        std::clamp(color[1] * factor, 0.0F, 1.0F),
+        std::clamp(color[2] * factor, 0.0F, 1.0F),
+        color[3],
+    };
+}
+
+auto hud_mix(const HudColor& lhs, const HudColor& rhs, float t) -> HudColor {
+    const auto blend = std::clamp(t, 0.0F, 1.0F);
+    const auto inverse = 1.0F - blend;
+    return {
+        lhs[0] * inverse + rhs[0] * blend,
+        lhs[1] * inverse + rhs[1] * blend,
+        lhs[2] * inverse + rhs[2] * blend,
+        lhs[3] * inverse + rhs[3] * blend,
+    };
+}
+
+auto make_slate_panel_palette() -> HudPanelPalette {
+    return {{0.06F, 0.07F, 0.08F, 0.98F},
+            {0.15F, 0.16F, 0.18F, 0.94F},
+            {0.44F, 0.46F, 0.50F, 0.22F},
+            {0.02F, 0.02F, 0.03F, 0.58F},
+            {0.72F, 0.74F, 0.78F, 0.10F}};
+}
+
+auto make_stone_panel_palette() -> HudPanelPalette {
+    return {{0.08F, 0.08F, 0.10F, 0.98F},
+            {0.22F, 0.23F, 0.26F, 0.95F},
+            {0.66F, 0.68F, 0.72F, 0.18F},
+            {0.03F, 0.03F, 0.04F, 0.62F},
+            {0.86F, 0.88F, 0.92F, 0.07F}};
+}
+
+auto make_header_panel_palette() -> HudPanelPalette {
+    return {{0.05F, 0.05F, 0.06F, 0.98F},
+            {0.28F, 0.29F, 0.32F, 0.96F},
+            {0.90F, 0.92F, 0.96F, 0.20F},
+            {0.03F, 0.03F, 0.04F, 0.68F},
+            {0.98F, 0.88F, 0.62F, 0.12F}};
+}
+
+auto make_warm_panel_palette(const HudColor& accent) -> HudPanelPalette {
+    return {
+        {0.10F, 0.08F, 0.05F, 0.98F},
+        hud_mix(HudColor {0.20F, 0.16F, 0.12F, 0.96F}, hud_with_alpha(accent, 0.96F), 0.18F),
+        hud_with_alpha(hud_scale_rgb(accent, 1.20F), 0.24F),
+        {0.02F, 0.02F, 0.02F, 0.66F},
+        hud_with_alpha(hud_scale_rgb(accent, 1.10F), 0.14F),
+    };
+}
+
+auto ui_material_accent(BlockId block_id) -> HudColor {
+    if (block_id == to_block_id(BlockType::Air)) {
+        return {0.56F, 0.60F, 0.66F, 1.0F};
+    }
+
+    switch (block_visual_material(block_id)) {
+    case BlockVisualMaterial::Terrain:
+        return {0.46F, 0.66F, 0.34F, 1.0F};
+    case BlockVisualMaterial::Rock:
+        return {0.63F, 0.67F, 0.74F, 1.0F};
+    case BlockVisualMaterial::Sand:
+        return {0.83F, 0.75F, 0.49F, 1.0F};
+    case BlockVisualMaterial::Wood:
+        return {0.71F, 0.52F, 0.29F, 1.0F};
+    case BlockVisualMaterial::Foliage:
+        return {0.36F, 0.72F, 0.38F, 1.0F};
+    case BlockVisualMaterial::Flora:
+        return {0.86F, 0.48F, 0.36F, 1.0F};
+    case BlockVisualMaterial::Water:
+        return {0.33F, 0.60F, 0.96F, 1.0F};
+    case BlockVisualMaterial::Emissive:
+        return {0.98F, 0.78F, 0.30F, 1.0F};
+    case BlockVisualMaterial::Snow:
+        return {0.90F, 0.93F, 0.98F, 1.0F};
+    default:
+        return {0.56F, 0.60F, 0.66F, 1.0F};
+    }
+}
+
+auto item_material_label(BlockId block_id) -> std::string_view {
+    if (block_id == to_block_id(BlockType::Air)) {
+        return "VIDE";
+    }
+
+    switch (block_visual_material(block_id)) {
+    case BlockVisualMaterial::Terrain:
+        return "SOL";
+    case BlockVisualMaterial::Rock:
+        return "ROCHE";
+    case BlockVisualMaterial::Sand:
+        return "SABLE";
+    case BlockVisualMaterial::Wood:
+        return "BOIS";
+    case BlockVisualMaterial::Foliage:
+        return "FEUILLAGE";
+    case BlockVisualMaterial::Flora:
+        return "FLORE";
+    case BlockVisualMaterial::Water:
+        return "EAU";
+    case BlockVisualMaterial::Emissive:
+        return "LUMIERE";
+    case BlockVisualMaterial::Snow:
+        return "NEIGE";
+    default:
+        return "VIDE";
+    }
+}
+
+auto inventory_slot_group_label(InventorySlotGroup group) -> std::string_view {
+    switch (group) {
+    case InventorySlotGroup::Hotbar:
+        return "BARRE RAPIDE";
+    case InventorySlotGroup::Storage:
+    default:
+        return "SAC";
+    }
+}
+
+void append_hud_shadow_top_left(std::vector<HudVertex>& vertices,
+                                float viewport_width,
+                                float viewport_height,
+                                float x,
+                                float y,
+                                float width,
+                                float height,
+                                float spread,
+                                const HudColor& color) {
+    if (width <= 0.0F || height <= 0.0F || spread <= 0.0F || color[3] <= 0.0F) {
+        return;
+    }
+
+    constexpr int kShadowLayerCount = 3;
+    for (int layer = 0; layer < kShadowLayerCount; ++layer) {
+        const auto layer_factor = static_cast<float>(layer + 1) / static_cast<float>(kShadowLayerCount);
+        const auto pad = spread * layer_factor;
+        const auto offset_x = pad * 0.18F;
+        const auto offset_y = pad * 0.30F;
+        const auto alpha = color[3] * (1.0F - static_cast<float>(layer) * 0.24F);
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x - pad * 0.35F + offset_x,
+            y - pad * 0.20F + offset_y,
+            width + pad * 0.70F,
+            height + pad * 0.70F,
+            {color[0], color[1], color[2], alpha});
+    }
+}
+
+void append_hud_shadow_bottom_left(std::vector<HudVertex>& vertices,
+                                   float viewport_width,
+                                   float viewport_height,
+                                   float x,
+                                   float bottom,
+                                   float width,
+                                   float height,
+                                   float spread,
+                                   const HudColor& color) {
+    append_hud_shadow_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(viewport_height, bottom, height),
+        width,
+        height,
+        spread,
+        color);
+}
+
+void append_corner_brackets_top_left(std::vector<HudVertex>& vertices,
+                                     float viewport_width,
+                                     float viewport_height,
+                                     float x,
+                                     float y,
+                                     float width,
+                                     float height,
+                                     float size,
+                                     const HudColor& color) {
+    if (width <= 0.0F || height <= 0.0F || size <= 0.0F || color[3] <= 0.0F) {
+        return;
+    }
+
+    const auto arm = std::max(1.0F, size);
+    const auto arm_length = std::min(std::min(width, height), std::max(arm * 2.4F, std::min(width, height) * 0.18F));
+
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x, y, arm_length, arm, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x, y, arm, arm_length, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x + width - arm_length, y, arm_length, arm, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x + width - arm, y, arm, arm_length, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x, y + height - arm, arm_length, arm, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x, y + height - arm_length, arm, arm_length, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x + width - arm_length, y + height - arm, arm_length, arm, color);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, x + width - arm, y + height - arm_length, arm, arm_length, color);
+}
+
+void append_empty_slot_motif_top_left(std::vector<HudVertex>& vertices,
+                                      float viewport_width,
+                                      float viewport_height,
+                                      float x,
+                                      float y,
+                                      float size,
+                                      const HudColor& color) {
+    if (size <= 0.0F || color[3] <= 0.0F) {
+        return;
+    }
+
+    const auto thickness = std::max(1.0F, size * 0.06F);
+    const auto pad = size * 0.26F;
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + pad,
+        y + size * 0.5F - thickness * 0.5F,
+        std::max(0.0F, size - pad * 2.0F),
+        thickness,
+        color);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + size * 0.5F - thickness * 0.5F,
+        y + pad,
+        thickness,
+        std::max(0.0F, size - pad * 2.0F),
+        color);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + size * 0.5F - thickness,
+        y + size * 0.5F - thickness,
+        thickness * 2.0F,
+        thickness * 2.0F,
+        hud_with_alpha(color, color[3] * 0.75F));
+}
+
+void append_stylized_panel_top_left(std::vector<HudVertex>& vertices,
+                                    float viewport_width,
+                                    float viewport_height,
+                                    float x,
+                                    float y,
+                                    float width,
+                                    float height,
+                                    float border_thickness,
+                                    const HudPanelPalette& palette,
+                                    bool cast_shadow = true) {
+    if (width <= 0.0F || height <= 0.0F) {
+        return;
+    }
+
+    if (cast_shadow) {
+        append_hud_shadow_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x,
+            y,
+            width,
+            height,
+            std::max(4.0F, border_thickness * 2.2F),
+            {0.0F, 0.0F, 0.0F, 0.18F});
+    }
+
+    append_hud_beveled_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        y,
+        width,
+        height,
+        border_thickness,
+        palette.frame,
+        palette.fill,
+        palette.highlight,
+        palette.shadow);
+
+    const auto inner_x = x + border_thickness;
+    const auto inner_y = y + border_thickness;
+    const auto inner_width = std::max(0.0F, width - border_thickness * 2.0F);
+    const auto inner_height = std::max(0.0F, height - border_thickness * 2.0F);
+    if (inner_width <= 0.0F || inner_height <= 0.0F) {
+        return;
+    }
+
+    const auto trim_height = std::max(1.0F, border_thickness * 0.72F);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, inner_x, inner_y, inner_width, trim_height, palette.trim);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        inner_x,
+        inner_y + std::max(0.0F, inner_height - trim_height),
+        inner_width,
+        trim_height,
+        {0.0F, 0.0F, 0.0F, palette.shadow[3] * 0.40F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        inner_x,
+        inner_y + trim_height + 1.0F,
+        inner_width,
+        std::max(1.0F, trim_height * 0.75F),
+        {1.0F, 1.0F, 1.0F, palette.highlight[3] * 0.28F});
+    append_corner_brackets_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + border_thickness * 0.5F,
+        y + border_thickness * 0.5F,
+        std::max(0.0F, width - border_thickness),
+        std::max(0.0F, height - border_thickness),
+        std::max(2.0F, border_thickness * 0.75F),
+        hud_with_alpha(palette.trim, palette.trim[3] * 0.85F));
+}
+
+void append_stylized_panel_bottom_left(std::vector<HudVertex>& vertices,
+                                       float viewport_width,
+                                       float viewport_height,
+                                       float x,
+                                       float bottom,
+                                       float width,
+                                       float height,
+                                       float border_thickness,
+                                       const HudPanelPalette& palette,
+                                       bool cast_shadow = true) {
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(viewport_height, bottom, height),
+        width,
+        height,
+        border_thickness,
+        palette,
+        cast_shadow);
+}
+
+auto build_slot_palette(const HotbarSlot& slot, bool selected, bool hovered, bool hotbar_slot) -> HudSlotPalette {
+    const auto accent = hotbar_slot_has_item(slot)
+                            ? ui_material_accent(slot.block_id)
+                            : HudColor {0.42F, 0.45F, 0.50F, 1.0F};
+    const auto base_frame = hotbar_slot ? HudColor {0.07F, 0.08F, 0.09F, 0.98F} : HudColor {0.08F, 0.08F, 0.10F, 0.98F};
+    const auto base_fill = hotbar_slot ? HudColor {0.16F, 0.17F, 0.19F, 0.94F} : HudColor {0.15F, 0.16F, 0.18F, 0.94F};
+    const auto empty_fill = hotbar_slot ? HudColor {0.10F, 0.11F, 0.13F, 0.86F} : HudColor {0.09F, 0.10F, 0.12F, 0.82F};
+
+    HudSlotPalette palette {};
+    palette.accent = accent;
+    palette.glow = selected
+                       ? HudColor {1.0F, 0.88F, 0.48F, hotbar_slot ? 0.16F : 0.14F}
+                       : (hovered ? hud_with_alpha(hud_scale_rgb(accent, 1.05F), 0.12F) : HudColor {0.0F, 0.0F, 0.0F, 0.0F});
+    palette.motif = hotbar_slot_has_item(slot)
+                        ? hud_with_alpha(hud_scale_rgb(accent, 1.08F), 0.16F)
+                        : HudColor {0.38F, 0.40F, 0.45F, 0.10F};
+
+    auto frame = base_frame;
+    auto fill = hotbar_slot_has_item(slot)
+                    ? hud_mix(base_fill, hud_with_alpha(accent, base_fill[3]), hotbar_slot ? 0.12F : 0.16F)
+                    : empty_fill;
+    auto highlight = hotbar_slot_has_item(slot)
+                         ? hud_with_alpha(hud_scale_rgb(accent, 1.18F), hovered ? 0.24F : 0.18F)
+                         : HudColor {0.55F, 0.58F, 0.64F, hovered ? 0.16F : 0.10F};
+    auto trim = hotbar_slot_has_item(slot)
+                    ? hud_with_alpha(hud_scale_rgb(accent, 1.08F), hotbar_slot ? 0.18F : 0.20F)
+                    : HudColor {0.42F, 0.44F, 0.48F, 0.08F};
+
+    if (selected) {
+        frame = {0.98F, 0.89F, 0.58F, 1.0F};
+        fill = hud_mix(fill, HudColor {0.28F, 0.22F, 0.15F, fill[3]}, 0.30F);
+        highlight = {1.0F, 0.97F, 0.82F, 0.28F};
+        trim = {1.0F, 0.90F, 0.58F, 0.28F};
+        palette.motif = hud_with_alpha(hud_scale_rgb(accent, 1.12F), 0.22F);
+    } else if (hovered) {
+        frame = {0.92F, 0.94F, 0.98F, 0.98F};
+        fill = hud_mix(fill, HudColor {0.22F, 0.24F, 0.28F, fill[3]}, 0.22F);
+        trim = hud_with_alpha(hud_scale_rgb(accent, 1.15F), 0.24F);
+    }
+
+    palette.shell = {frame, fill, highlight, {0.02F, 0.02F, 0.03F, 0.60F}, trim};
+    return palette;
+}
+
+void append_stylized_slot_top_left(std::vector<HudVertex>& vertices,
+                                   float viewport_width,
+                                   float viewport_height,
+                                   float x,
+                                   float y,
+                                   float size,
+                                   const HudSlotPalette& palette,
+                                   bool has_item) {
+    const auto border = std::max(2.0F, size * 0.08F);
+    const auto glow_pad = std::max(2.0F, size * 0.08F);
+
+    if (palette.glow[3] > 0.0F) {
+        append_hud_shadow_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x - glow_pad,
+            y - glow_pad,
+            size + glow_pad * 2.0F,
+            size + glow_pad * 2.0F,
+            glow_pad * 1.8F,
+            hud_with_alpha(palette.glow, palette.glow[3] * 0.65F));
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x - glow_pad,
+            y - glow_pad,
+            size + glow_pad * 2.0F,
+            size + glow_pad * 2.0F,
+            palette.glow);
+    }
+
+    append_stylized_panel_top_left(vertices, viewport_width, viewport_height, x, y, size, size, border, palette.shell);
+
+    const auto inset = border + std::max(1.0F, size * 0.06F);
+    const auto inner_size = std::max(0.0F, size - inset * 2.0F);
+    const auto inner_border = std::max(1.0F, border * 0.55F);
+    const auto well_frame = hud_with_alpha(hud_scale_rgb(palette.accent, has_item ? 0.74F : 0.45F), has_item ? 0.38F : 0.16F);
+    const auto well_fill = has_item ? hud_with_alpha(hud_scale_rgb(palette.accent, 0.28F), 0.22F) : HudColor {0.05F, 0.06F, 0.08F, 0.62F};
+    append_hud_beveled_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + inset,
+        y + inset,
+        inner_size,
+        inner_size,
+        inner_border,
+        well_frame,
+        well_fill,
+        hud_with_alpha(palette.accent, has_item ? 0.12F : 0.04F),
+        {0.0F, 0.0F, 0.0F, 0.34F});
+
+    const auto trim_height = std::max(1.0F, size * 0.06F);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + border + 1.0F,
+        y + border + 1.0F,
+        std::max(0.0F, size - border * 2.0F - 2.0F),
+        trim_height,
+        palette.shell.trim);
+    append_corner_brackets_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + 1.0F,
+        y + 1.0F,
+        std::max(0.0F, size - 2.0F),
+        std::max(0.0F, size - 2.0F),
+        std::max(2.0F, border * 0.85F),
+        hud_with_alpha(palette.accent, has_item ? 0.20F : 0.08F));
+
+    if (!has_item) {
+        append_empty_slot_motif_top_left(vertices, viewport_width, viewport_height, x + inset, y + inset, inner_size, palette.motif);
+    }
+}
+
+void append_stylized_slot_bottom_left(std::vector<HudVertex>& vertices,
+                                      float viewport_width,
+                                      float viewport_height,
+                                      float x,
+                                      float bottom,
+                                      float size,
+                                      const HudSlotPalette& palette,
+                                      bool has_item) {
+    append_stylized_slot_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(viewport_height, bottom, size),
+        size,
+        palette,
+        has_item);
+}
+
+void append_avatar_preview_art(std::vector<HudVertex>& vertices,
+                               float viewport_width,
+                               float viewport_height,
+                               const InventoryMenuLayout& layout) {
+    const auto scale = layout.silhouette_scale;
+    const auto center_x = layout.preview_center_x;
+    const auto base_y = layout.preview_base_y;
+    const auto panel_x = layout.preview_panel_x;
+    const auto panel_y = layout.preview_panel_y;
+    const auto panel_width = layout.preview_panel_width;
+    const auto panel_height = layout.preview_panel_height;
+    const auto inner_pad = std::max(12.0F, layout.slot_size * 0.26F);
+    const auto beam_width = std::clamp(panel_width * 0.38F, 42.0F, 84.0F);
+    const auto beam_x = center_x - beam_width * 0.5F;
+    const auto beam_y = panel_y + inner_pad + 10.0F;
+    const auto beam_height = std::max(0.0F, panel_height - inner_pad * 2.0F - 36.0F);
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, beam_x, beam_y, beam_width, beam_height, {1.0F, 1.0F, 1.0F, 0.04F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        beam_x + beam_width * 0.16F,
+        beam_y,
+        beam_width * 0.68F,
+        beam_height,
+        {0.82F, 0.90F, 1.0F, 0.06F});
+
+    const auto pedestal_width = std::clamp(panel_width * 0.54F, 74.0F, 124.0F);
+    const auto pedestal_height = std::max(8.0F, layout.slot_size * 0.30F);
+    const auto pedestal_x = center_x - pedestal_width * 0.5F;
+    const auto pedestal_y = base_y + scale * 0.50F;
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        pedestal_x,
+        pedestal_y,
+        pedestal_width,
+        pedestal_height + 8.0F,
+        3.0F,
+        make_slate_panel_palette(),
+        false);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - pedestal_width * 0.34F,
+        pedestal_y - scale * 0.34F,
+        pedestal_width * 0.68F,
+        std::max(2.0F, scale * 0.32F),
+        {0.0F, 0.0F, 0.0F, 0.18F});
+
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 1.40F,
+        base_y - scale * 0.05F,
+        scale * 2.80F,
+        scale * 0.24F,
+        {0.0F, 0.0F, 0.0F, 0.14F});
+
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.76F,
+        base_y - scale * 6.90F,
+        scale * 1.52F,
+        scale * 1.52F,
+        {0.20F, 0.14F, 0.10F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.68F,
+        base_y - scale * 6.58F,
+        scale * 1.36F,
+        scale * 1.16F,
+        {0.93F, 0.79F, 0.62F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.56F,
+        base_y - scale * 6.20F,
+        scale * 1.12F,
+        scale * 0.16F,
+        {1.0F, 1.0F, 1.0F, 0.06F});
+
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.96F,
+        base_y - scale * 5.25F,
+        scale * 1.92F,
+        scale * 2.48F,
+        {0.30F, 0.54F, 0.90F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.96F,
+        base_y - scale * 5.25F,
+        scale * 1.92F,
+        scale * 0.42F,
+        {0.48F, 0.72F, 0.98F, 0.64F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.72F,
+        base_y - scale * 3.12F,
+        scale * 1.44F,
+        scale * 0.34F,
+        {0.17F, 0.24F, 0.42F, 1.0F});
+
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 1.64F,
+        base_y - scale * 5.08F,
+        scale * 0.56F,
+        scale * 1.98F,
+        {0.93F, 0.79F, 0.62F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x + scale * 1.08F,
+        base_y - scale * 5.08F,
+        scale * 0.56F,
+        scale * 1.98F,
+        {0.93F, 0.79F, 0.62F, 1.0F});
+
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.82F,
+        base_y - scale * 2.90F,
+        scale * 0.66F,
+        scale * 2.52F,
+        {0.21F, 0.26F, 0.44F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x + scale * 0.16F,
+        base_y - scale * 2.90F,
+        scale * 0.66F,
+        scale * 2.52F,
+        {0.21F, 0.26F, 0.44F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - scale * 0.82F,
+        base_y - scale * 0.54F,
+        scale * 0.66F,
+        scale * 0.26F,
+        {0.10F, 0.12F, 0.16F, 1.0F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x + scale * 0.16F,
+        base_y - scale * 0.54F,
+        scale * 0.66F,
+        scale * 0.26F,
+        {0.10F, 0.12F, 0.16F, 1.0F});
+
+    append_corner_brackets_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x + inner_pad * 0.55F,
+        panel_y + inner_pad * 0.65F,
+        std::max(0.0F, panel_width - inner_pad * 1.10F),
+        std::max(0.0F, panel_height - inner_pad * 1.30F),
+        std::max(2.0F, scale * 0.22F),
+        {1.0F, 1.0F, 1.0F, 0.08F});
+}
+
+void append_keycap_top_left(std::vector<HudVertex>& vertices,
+                            float viewport_width,
+                            float viewport_height,
+                            const InventoryKeycapLayout& keycap,
+                            float pixel_size) {
+    const auto palette = keycap.selected ? make_warm_panel_palette({0.98F, 0.84F, 0.46F, 1.0F}) : make_slate_panel_palette();
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        keycap.x,
+        keycap.y,
+        keycap.width,
+        keycap.height,
+        std::max(1.0F, keycap.height * 0.18F),
+        palette,
+        false);
+
+    const auto label = std::to_string(keycap.number);
+    const auto text_y = keycap.y + std::max(0.0F, (keycap.height - pixel_size * 7.0F) * 0.5F);
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        keycap.x + keycap.width * 0.5F + pixel_size,
+        text_y + pixel_size,
+        pixel_size,
+        label,
+        {0.0F, 0.0F, 0.0F, 0.52F},
+        true);
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        keycap.x + keycap.width * 0.5F,
+        text_y,
+        pixel_size,
+        label,
+        keycap.selected ? HudColor {0.99F, 0.96F, 0.88F, 1.0F} : HudColor {0.90F, 0.92F, 0.96F, 0.94F},
+        true);
+}
+
+auto resolve_inventory_focus_item(const InventoryMenuState& inventory, const HotbarState& hotbar) -> InventoryFocusItem {
+    InventoryFocusItem focus {};
+    if (inventory.carrying_item && inventory_slot_has_item(inventory.carried_slot)) {
+        focus.slot = inventory.carried_slot;
+        focus.has_item = true;
+        focus.from_carried_slot = true;
+        return focus;
+    }
+
+    if (inventory.hovered_slot.has_value()) {
+        if (const auto* hovered_slot = inventory_slot_ptr(inventory, hotbar, *inventory.hovered_slot);
+            hovered_slot != nullptr && inventory_slot_has_item(*hovered_slot)) {
+            focus.slot = *hovered_slot;
+            focus.has_item = true;
+            focus.group = inventory.hovered_slot->group;
+            return focus;
+        }
+    }
+
+    if (inventory_slot_has_item(hotbar.selected_slot())) {
+        focus.slot = hotbar.selected_slot();
+        focus.has_item = true;
+        focus.group = InventorySlotGroup::Hotbar;
+    }
+    return focus;
+}
+
 void append_stack_count(std::vector<HudVertex>& vertices,
                         float viewport_width,
                         float viewport_height,
@@ -522,24 +1229,61 @@ void append_stack_count(std::vector<HudVertex>& vertices,
 
     const auto count_text = std::to_string(count);
     const auto text_width = measure_pixel_text(count_text, pixel_size);
-    const auto text_x = right_x - text_width;
-    const auto text_y = bottom_y - pixel_size * 7.0F;
+    const auto padding_x = std::max(2.0F, pixel_size * 1.15F);
+    const auto padding_y = std::max(1.0F, pixel_size * 0.78F);
+    const auto badge_width = text_width + padding_x * 2.0F;
+    const auto badge_height = pixel_size * 7.0F + padding_y * 2.0F;
+    const auto badge_x = right_x - badge_width;
+    const auto badge_y = bottom_y - badge_height;
+    const auto badge_border = std::max(1.0F, pixel_size * 0.55F);
 
+    append_hud_shadow_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        badge_x,
+        badge_y,
+        badge_width,
+        badge_height,
+        std::max(2.0F, pixel_size * 1.6F),
+        {0.0F, 0.0F, 0.0F, 0.20F});
+    append_hud_beveled_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        badge_x,
+        badge_y,
+        badge_width,
+        badge_height,
+        badge_border,
+        {0.04F, 0.04F, 0.05F, 0.98F},
+        {0.16F, 0.17F, 0.19F, 0.96F},
+        {0.90F, 0.92F, 0.96F, 0.10F},
+        {0.0F, 0.0F, 0.0F, 0.42F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        badge_x + badge_border,
+        badge_y + badge_border,
+        std::max(0.0F, badge_width - badge_border * 2.0F),
+        std::max(1.0F, badge_border * 0.75F),
+        {1.0F, 0.92F, 0.72F, 0.08F});
     append_pixel_text(
         vertices,
         viewport_width,
         viewport_height,
-        text_x + pixel_size,
-        text_y + pixel_size,
+        badge_x + padding_x + pixel_size,
+        badge_y + padding_y + pixel_size,
         pixel_size,
         count_text,
-        {0.0F, 0.0F, 0.0F, 0.62F});
+        {0.0F, 0.0F, 0.0F, 0.58F});
     append_pixel_text(
         vertices,
         viewport_width,
         viewport_height,
-        text_x,
-        text_y,
+        badge_x + padding_x,
+        badge_y + padding_y,
         pixel_size,
         count_text,
         {0.98F, 0.98F, 0.98F, 0.98F});
@@ -552,32 +1296,7 @@ void append_stack_count_bottom_left(std::vector<HudVertex>& vertices,
                                     float bottom,
                                     float pixel_size,
                                     std::uint8_t count) {
-    if (count <= 1) {
-        return;
-    }
-
-    const auto count_text = std::to_string(count);
-    const auto text_width = measure_pixel_text(count_text, pixel_size);
-    const auto text_x = right_x - text_width;
-
-    append_pixel_text_bottom_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        text_x + pixel_size,
-        bottom - pixel_size,
-        pixel_size,
-        count_text,
-        {0.0F, 0.0F, 0.0F, 0.62F});
-    append_pixel_text_bottom_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        text_x,
-        bottom,
-        pixel_size,
-        count_text,
-        {0.98F, 0.98F, 0.98F, 0.98F});
+    append_stack_count(vertices, viewport_width, viewport_height, right_x, viewport_height - bottom, pixel_size, count);
 }
 
 template <std::size_t RowCount>
@@ -1526,6 +2245,19 @@ vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
     return vec2(d_height_dx, d_height_dz);
 }
 
+vec2 water_detail_gradient(vec2 world_xz, float time_phase) {
+    float phase_d = world_xz.x * 1.08 - world_xz.y * 0.74 + time_phase * 2.05;
+    float phase_e = world_xz.x * 0.72 + world_xz.y * 1.16 - time_phase * 1.64;
+
+    float d_height_dx =
+        cos(phase_d) * 0.0035 * 1.08 +
+        cos(phase_e) * 0.0022 * 0.72;
+    float d_height_dz =
+        -cos(phase_d) * 0.0035 * 0.74 +
+        cos(phase_e) * 0.0022 * 1.16;
+    return vec2(d_height_dx, d_height_dz);
+}
+
 vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
     vec4 clip_position = vec4(screen_uv * 2.0 - 1.0, depth_sample * 2.0 - 1.0, 1.0);
     vec4 world_position = u_inverse_view_projection * clip_position;
@@ -1534,18 +2266,11 @@ vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
 
 void main() {
     float water_mask = material_mask(v_material_class, 6.0);
-    float water_surface_mask = water_mask * clamp(v_wave_weight * abs(v_normal.y), 0.0, 1.0);
+    float water_surface_mask = water_mask * clamp(v_wave_weight * max(v_normal.y, 0.0), 0.0, 1.0);
 
+    // Je ne decale pas les UV partages de l'atlas dans le fragment pour eviter
+    // d'echantillonner les sprites transparents voisins et d'ouvrir des trous.
     vec2 animated_uv = v_uv;
-    if (water_mask > 0.5) {
-        float water_time = u_time_of_day * 18.0;
-        vec2 water_flow = vec2(
-            sin(v_world_position.z * 0.22 + water_time * 1.10) * 0.0026 +
-                cos(v_world_position.x * 0.17 - water_time * 0.85) * 0.0016,
-            cos(v_world_position.x * 0.19 - water_time * 0.92) * 0.0022 +
-                sin(v_world_position.z * 0.27 + water_time * 0.70) * 0.0014);
-        animated_uv += water_flow;
-    }
 
     vec4 sampled = texture(u_atlas, animated_uv);
     if (sampled.a < 0.1) {
@@ -1555,7 +2280,9 @@ void main() {
     vec3 albedo = sampled.rgb;
     vec3 normal = normalize(v_normal);
     if (water_surface_mask > 0.001) {
-        vec2 wave_gradient = water_wave_gradient(v_world_position.xz, u_time_of_day * 36.0) * water_surface_mask;
+        vec2 wave_gradient = water_wave_gradient(v_world_position.xz, u_time_of_day * 36.0);
+        wave_gradient += water_detail_gradient(v_world_position.xz, u_time_of_day * 52.0) * 0.65;
+        wave_gradient *= water_surface_mask;
         vec3 wave_normal = normalize(vec3(-wave_gradient.x, 1.0, -wave_gradient.y));
         normal = normalize(mix(normal, wave_normal, water_surface_mask));
     }
@@ -2939,14 +3666,41 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
         cache.valid = true;
         cache.key = cache_key;
         vertices.clear();
-        vertices.reserve(16384U);
+        vertices.reserve(24576U);
 
         const auto viewport_width = static_cast<float>(width);
         const auto viewport_height = static_cast<float>(height);
+        const auto draw_text_bottom = [&](float x,
+                                          float bottom,
+                                          float pixel_size,
+                                          std::string_view text,
+                                          const HudColor& color,
+                                          bool centered = false) {
+            append_pixel_text_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x + pixel_size,
+                bottom - pixel_size,
+                pixel_size,
+                text,
+                {0.0F, 0.0F, 0.0F, 0.56F},
+                centered);
+            append_pixel_text_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x,
+                bottom,
+                pixel_size,
+                text,
+                color,
+                centered);
+        };
 
         if (cache_key.underwater) {
             const auto overlay_edge = std::clamp(std::min(viewport_width, viewport_height) * 0.17F, 72.0F, 180.0F);
-            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.03F, 0.19F, 0.24F, 0.18F});
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.03F, 0.18F, 0.25F, 0.18F});
             append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, overlay_edge, {0.12F, 0.42F, 0.46F, 0.08F});
             append_hud_rect_top_left(
                 vertices,
@@ -2971,6 +3725,7 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
 
         if (damage_flash > 0.0F) {
             const auto edge_size = std::clamp(std::min(viewport_width, viewport_height) * 0.09F, 28.0F, 72.0F);
+            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.44F, 0.03F, 0.05F, damage_flash * 0.12F});
             append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, edge_size, {0.48F, 0.04F, 0.05F, damage_flash});
             append_hud_rect_top_left(
                 vertices,
@@ -2993,7 +3748,22 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
                 {0.48F, 0.04F, 0.05F, damage_flash * 0.9F});
         }
 
-        append_hud_beveled_panel(
+        const auto dock_palette = make_slate_panel_palette();
+        const auto rail_palette = make_warm_panel_palette({0.70F, 0.56F, 0.30F, 1.0F});
+        const auto heart_panel_palette = make_warm_panel_palette({0.90F, 0.28F, 0.32F, 1.0F});
+        const auto bubble_panel_palette = make_warm_panel_palette({0.42F, 0.80F, 0.98F, 1.0F});
+
+        append_hud_shadow_bottom_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.hotbar_panel_x,
+            hud_layout.hotbar_panel_bottom,
+            hud_layout.hotbar_panel_width,
+            hud_layout.hotbar_panel_height,
+            14.0F,
+            {0.0F, 0.0F, 0.0F, 0.24F});
+        append_stylized_panel_bottom_left(
             vertices,
             viewport_width,
             viewport_height,
@@ -3002,79 +3772,75 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
             hud_layout.hotbar_panel_width,
             hud_layout.hotbar_panel_height,
             4.0F,
-            {0.04F, 0.04F, 0.05F, 0.94F},
-            {0.10F, 0.10F, 0.11F, 0.88F},
-            {0.68F, 0.68F, 0.70F, 0.10F},
-            {0.01F, 0.01F, 0.01F, 0.70F});
+            dock_palette,
+            false);
+        append_stylized_panel_bottom_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.hotbar_rail_x,
+            hud_layout.hotbar_rail_bottom,
+            hud_layout.hotbar_rail_width,
+            hud_layout.hotbar_rail_height,
+            2.0F,
+            rail_palette,
+            false);
         append_hud_rect(
             vertices,
             viewport_width,
             viewport_height,
-            hud_layout.hotbar_panel_x + 6.0F,
-            hud_layout.hotbar_panel_bottom + hud_layout.hotbar_panel_height - 6.0F,
-            std::max(0.0F, hud_layout.hotbar_panel_width - 12.0F),
+            hud_layout.hotbar_panel_x + 12.0F,
+            hud_layout.hotbar_panel_bottom + hud_layout.hotbar_panel_height - 8.0F,
+            std::max(0.0F, hud_layout.hotbar_panel_width - 24.0F),
             2.0F,
             {1.0F, 1.0F, 1.0F, 0.06F});
+
+        append_stylized_panel_bottom_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.hearts_panel_x,
+            hud_layout.hearts_panel_bottom,
+            hud_layout.hearts_panel_width,
+            hud_layout.hearts_panel_height,
+            3.0F,
+            heart_panel_palette,
+            false);
+        if (hud_layout.air_visible) {
+            append_stylized_panel_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.bubbles_panel_x,
+                hud_layout.bubbles_panel_bottom,
+                hud_layout.bubbles_panel_width,
+                hud_layout.bubbles_panel_height,
+                3.0F,
+                bubble_panel_palette,
+                false);
+        }
 
         for (const auto& heart : hud_layout.hearts) {
             append_heart_glyph_bottom_left(vertices, viewport_width, viewport_height, heart);
         }
-
         if (hud_layout.air_visible) {
             for (const auto& bubble : hud_layout.bubbles) {
                 append_bubble_glyph_bottom_left(vertices, viewport_width, viewport_height, bubble);
             }
         }
 
-        const auto slot_border_thickness = std::max(2.0F, hud_layout.hotbar.slot_size * 0.07F);
-        const auto glow_padding = std::max(2.0F, hud_layout.hotbar.slot_size * 0.05F);
+        const auto stack_pixel_size = std::max(2.0F, static_cast<float>(std::floor(hud_layout.hotbar.slot_size / 18.0F)));
         for (const auto& slot : hud_layout.slots) {
-            if (slot.is_selected) {
-                append_hud_rect(
-                    vertices,
-                    viewport_width,
-                    viewport_height,
-                    slot.x - glow_padding,
-                    slot.bottom - glow_padding,
-                    slot.size + glow_padding * 2.0F,
-                    slot.size + glow_padding * 2.0F,
-                    {1.00F, 0.94F, 0.68F, 0.16F});
-            }
-
-            const auto border_color = slot.is_selected
-                                          ? std::array<float, 4> {0.96F, 0.90F, 0.66F, 1.0F}
-                                          : std::array<float, 4> {0.22F, 0.22F, 0.24F, 0.98F};
-            const auto fill_color = slot.is_selected
-                                        ? std::array<float, 4> {0.26F, 0.26F, 0.28F, 0.96F}
-                                        : (slot.has_icon
-                                               ? std::array<float, 4> {0.18F, 0.18F, 0.19F, 0.90F}
-                                               : std::array<float, 4> {0.13F, 0.13F, 0.14F, 0.82F});
-            append_hud_beveled_panel(
+            const auto palette = build_slot_palette(slot.slot, slot.is_selected, false, true);
+            append_stylized_slot_bottom_left(
                 vertices,
                 viewport_width,
                 viewport_height,
                 slot.x,
                 slot.bottom,
                 slot.size,
-                slot.size,
-                slot_border_thickness,
-                border_color,
-                fill_color,
-                {1.0F, 1.0F, 1.0F, slot.is_selected ? 0.14F : 0.06F},
-                {0.0F, 0.0F, 0.0F, 0.42F});
-
-            if (slot.is_selected) {
-                const auto selected_highlight_height = std::max(1.0F, slot.size * 0.06F);
-                append_hud_rect(
-                    vertices,
-                    viewport_width,
-                    viewport_height,
-                    slot.x + slot_border_thickness + 1.0F,
-                    slot.bottom + slot.size - slot_border_thickness - 1.0F - selected_highlight_height,
-                    std::max(0.0F, slot.size - slot_border_thickness * 2.0F - 2.0F),
-                    selected_highlight_height,
-                    {1.0F, 0.98F, 0.90F, 0.10F});
-            }
+                palette,
+                slot.has_icon);
 
             if (!slot.has_icon) {
                 continue;
@@ -3088,7 +3854,7 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
                 slot.icon_bottom,
                 slot.icon_size,
                 slot.icon_size,
-                {1.0F, 1.0F, 1.0F, slot.is_selected ? 1.0F : 0.96F},
+                {1.0F, 1.0F, 1.0F, slot.is_selected ? 1.0F : 0.98F},
                 atlas_uv_rect(slot.icon_tile),
                 1.0F);
             if (slot.show_stack_count) {
@@ -3098,32 +3864,37 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
                     viewport_height,
                     slot.count_right_x,
                     slot.count_bottom,
-                    2.0F,
+                    stack_pixel_size,
                     slot.slot.count);
             }
         }
 
         const auto selected_label = item_stack_display_label(hotbar.selected_slot());
         if (!selected_label.empty()) {
-            append_pixel_text_bottom_left(
+            const auto label_padding_x = std::max(10.0F, hud_layout.label.pixel_size * 3.0F);
+            const auto label_padding_y = std::max(6.0F, hud_layout.label.pixel_size * 2.0F);
+            const auto label_width = measure_pixel_text(selected_label, hud_layout.label.pixel_size) + label_padding_x * 2.0F;
+            const auto label_height = hud_layout.label.height + label_padding_y * 2.0F;
+            const auto label_x = hud_layout.label.center_x - label_width * 0.5F;
+            const auto label_y = bottom_to_top_left_y(viewport_height, hud_layout.label.bottom, label_height);
+            const auto label_palette = make_warm_panel_palette(ui_material_accent(hotbar.selected_slot().block_id));
+            append_stylized_panel_top_left(
                 vertices,
                 viewport_width,
                 viewport_height,
-                hud_layout.label.center_x + hud_layout.label.pixel_size,
-                hud_layout.label.bottom - hud_layout.label.pixel_size,
-                hud_layout.label.pixel_size,
-                selected_label,
-                {0.0F, 0.0F, 0.0F, 0.55F},
+                label_x,
+                label_y,
+                label_width,
+                label_height,
+                3.0F,
+                label_palette,
                 true);
-            append_pixel_text_bottom_left(
-                vertices,
-                viewport_width,
-                viewport_height,
+            draw_text_bottom(
                 hud_layout.label.center_x,
-                hud_layout.label.bottom,
+                hud_layout.label.bottom + label_padding_y - 1.0F,
                 hud_layout.label.pixel_size,
                 selected_label,
-                {0.98F, 0.98F, 0.98F, 0.98F},
+                {0.98F, 0.98F, 0.96F, 0.98F},
                 true);
         }
     }
@@ -3167,384 +3938,543 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
         cache.valid = true;
         cache.key = cache_key;
         vertices.clear();
-        vertices.reserve(16384U);
+        vertices.reserve(49152U);
 
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        0.0F,
-        0.0F,
-        viewport_width,
-        viewport_height,
-        {0.02F, 0.03F, 0.04F, 0.62F});
-
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.panel_x,
-        layout.panel_y,
-        layout.panel_width,
-        layout.panel_height,
-        8.0F,
-        {0.05F, 0.05F, 0.06F, 0.96F},
-        {0.27F, 0.28F, 0.31F, 0.94F},
-        {0.55F, 0.57F, 0.61F, 0.34F},
-        {0.03F, 0.03F, 0.04F, 0.78F});
-
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.preview_x,
-        layout.preview_y,
-        layout.preview_width,
-        layout.preview_height,
-        5.0F,
-        {0.07F, 0.07F, 0.08F, 0.95F},
-        {0.17F, 0.18F, 0.20F, 0.92F},
-        {0.38F, 0.40F, 0.44F, 0.22F},
-        {0.04F, 0.04F, 0.05F, 0.64F});
-
-    append_hud_beveled_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.grid_x - 12.0F,
-        layout.grid_y - 14.0F,
-        layout.grid_width + 24.0F,
-        layout.grid_height + 28.0F,
-        5.0F,
-        {0.07F, 0.07F, 0.08F, 0.90F},
-        {0.15F, 0.16F, 0.18F, 0.72F},
-        {0.35F, 0.36F, 0.40F, 0.18F},
-        {0.03F, 0.03F, 0.04F, 0.56F});
-
-    const auto title_pixel_size = static_cast<float>(std::floor(std::clamp(viewport_width * 0.0035F, 4.0F, 6.0F)));
-    const auto subtitle_pixel_size = static_cast<float>(std::floor(std::clamp(viewport_width * 0.0019F, 2.0F, 3.0F)));
-    const auto label_pixel_size = static_cast<float>(std::floor(std::clamp(layout.slot_size / 18.0F, 2.0F, 3.0F)));
-    const auto brand_pixel_size = subtitle_pixel_size;
-
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.title_center_x,
-        layout.panel_y + 10.0F,
-        brand_pixel_size,
-        kGameDisplayNamePixel,
-        {0.72F, 0.74F, 0.78F, 0.90F},
-        true);
-
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.title_center_x + title_pixel_size,
-        layout.title_y + title_pixel_size,
-        title_pixel_size,
-        "INVENTAIRE",
-        {0.0F, 0.0F, 0.0F, 0.55F},
-        true);
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.title_center_x,
-        layout.title_y,
-        title_pixel_size,
-        "INVENTAIRE",
-        {0.96F, 0.97F, 0.99F, 1.0F},
-        true);
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.subtitle_center_x,
-        layout.subtitle_y,
-        subtitle_pixel_size,
-        "EQUIPEMENT ET SAC",
-        {0.78F, 0.80F, 0.84F, 0.92F},
-        true);
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.preview_x + layout.preview_width * 0.5F,
-        layout.preview_y + 14.0F,
-        label_pixel_size,
-        "AVATAR",
-        {0.86F, 0.88F, 0.92F, 0.92F},
-        true);
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.storage_label_x,
-        layout.storage_label_y,
-        label_pixel_size,
-        "SAC",
-        {0.86F, 0.88F, 0.92F, 0.92F});
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.hotbar_label_x,
-        layout.hotbar_label_y,
-        label_pixel_size,
-        "BARRE RAPIDE",
-        {0.86F, 0.88F, 0.92F, 0.92F});
-    append_pixel_text(
-        vertices,
-        viewport_width,
-        viewport_height,
-        layout.footer_center_x,
-        layout.footer_y,
-        subtitle_pixel_size,
-        "E OU ECHAP POUR FERMER",
-        {0.70F, 0.72F, 0.76F, 0.92F},
-        true);
-
-    const auto scale = layout.silhouette_scale;
-    const auto center_x = layout.preview_center_x;
-    const auto base_y = layout.preview_base_y;
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x - scale * 0.55F,
-        base_y - scale * 6.70F,
-        scale * 1.10F,
-        scale * 1.10F,
-        {0.92F, 0.78F, 0.60F, 1.0F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x - scale * 0.80F,
-        base_y - scale * 5.55F,
-        scale * 1.60F,
-        scale * 2.10F,
-        {0.36F, 0.58F, 0.92F, 1.0F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x - scale * 1.55F,
-        base_y - scale * 5.35F,
-        scale * 0.65F,
-        scale * 1.85F,
-        {0.92F, 0.78F, 0.60F, 1.0F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x + scale * 0.90F,
-        base_y - scale * 5.35F,
-        scale * 0.65F,
-        scale * 1.85F,
-        {0.92F, 0.78F, 0.60F, 1.0F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x - scale * 0.75F,
-        base_y - scale * 3.30F,
-        scale * 0.65F,
-        scale * 2.35F,
-        {0.20F, 0.24F, 0.40F, 1.0F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x + scale * 0.10F,
-        base_y - scale * 3.30F,
-        scale * 0.65F,
-        scale * 2.35F,
-        {0.20F, 0.24F, 0.40F, 1.0F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        center_x - scale * 1.95F,
-        base_y - scale * 6.35F,
-        scale * 3.90F,
-        scale * 0.55F,
-        {1.0F, 1.0F, 1.0F, 0.05F});
-
-    const auto slot_border_thickness = std::max(2.0F, layout.slot_size * 0.08F);
-    const auto slot_glow_padding = std::max(2.0F, layout.slot_size * 0.08F);
-    for (const auto& slot : layout.slots) {
-        if (slot.hovered) {
-            append_hud_rect_top_left(
+        const auto draw_text = [&](float x,
+                                   float y,
+                                   float pixel_size,
+                                   std::string_view text,
+                                   const HudColor& color,
+                                   bool centered = false) {
+            append_pixel_text(
                 vertices,
                 viewport_width,
                 viewport_height,
-                slot.x - slot_glow_padding,
-                slot.y - slot_glow_padding,
-                slot.size + slot_glow_padding * 2.0F,
-                slot.size + slot_glow_padding * 2.0F,
-                {1.0F, 0.96F, 0.80F, 0.18F});
-        } else if (slot.is_selected_hotbar) {
-            append_hud_rect_top_left(
+                x + pixel_size,
+                y + pixel_size,
+                pixel_size,
+                text,
+                {0.0F, 0.0F, 0.0F, 0.58F},
+                centered);
+            append_pixel_text(
                 vertices,
                 viewport_width,
                 viewport_height,
-                slot.x - slot_glow_padding,
-                slot.y - slot_glow_padding,
-                slot.size + slot_glow_padding * 2.0F,
-                slot.size + slot_glow_padding * 2.0F,
-                {1.0F, 0.84F, 0.42F, 0.12F});
-        }
+                x,
+                y,
+                pixel_size,
+                text,
+                color,
+                centered);
+        };
 
-        const auto border_color = slot.hovered
-                                      ? std::array<float, 4> {0.94F, 0.96F, 0.99F, 1.0F}
-                                      : (slot.is_selected_hotbar
-                                             ? std::array<float, 4> {0.98F, 0.88F, 0.52F, 1.0F}
-                                             : std::array<float, 4> {0.10F, 0.10F, 0.11F, 0.96F});
-        const auto fill_color = slot.has_icon
-                                    ? (slot.is_hotbar
-                                           ? std::array<float, 4> {0.19F, 0.20F, 0.23F, 0.92F}
-                                           : std::array<float, 4> {0.15F, 0.16F, 0.18F, 0.92F})
-                                    : std::array<float, 4> {0.10F, 0.10F, 0.12F, 0.82F};
-        const auto highlight_color = slot.hovered
-                                         ? std::array<float, 4> {0.82F, 0.84F, 0.90F, 0.30F}
-                                         : std::array<float, 4> {0.42F, 0.44F, 0.48F, 0.18F};
-        const auto shadow_color = slot.hovered
-                                      ? std::array<float, 4> {0.10F, 0.10F, 0.12F, 0.84F}
-                                      : std::array<float, 4> {0.03F, 0.03F, 0.04F, 0.70F};
+        const auto title_pixel_size = std::clamp(static_cast<float>(std::floor(layout.slot_size / 12.0F)), 3.0F, 4.0F);
+        const auto subtitle_pixel_size = std::clamp(static_cast<float>(std::floor(layout.slot_size / 18.0F)), 2.0F, 3.0F);
+        const auto label_pixel_size = std::clamp(static_cast<float>(std::floor(layout.slot_size / 17.0F)), 2.0F, 3.0F);
+        const auto body_pixel_size = std::max(2.0F, subtitle_pixel_size);
+        const auto stack_pixel_size = std::max(2.0F, static_cast<float>(std::floor(layout.slot_size / 18.0F)));
+        const auto focus_item = resolve_inventory_focus_item(inventory_menu, hotbar);
+        const auto focus_accent =
+            focus_item.has_item ? ui_material_accent(focus_item.slot.block_id) : HudColor {0.64F, 0.68F, 0.74F, 1.0F};
 
-        append_hud_beveled_panel_top_left(
+        const auto frame_palette = make_stone_panel_palette();
+        const auto header_palette = make_header_panel_palette();
+        const auto preview_palette = make_slate_panel_palette();
+        const auto storage_palette = make_slate_panel_palette();
+        const auto hotbar_palette = make_warm_panel_palette({0.70F, 0.56F, 0.30F, 1.0F});
+        const auto footer_palette = make_slate_panel_palette();
+        const auto detail_palette = make_warm_panel_palette(focus_accent);
+
+        append_hud_rect_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            slot.x,
-            slot.y,
-            slot.size,
-            slot.size,
-            slot_border_thickness,
-            border_color,
-            fill_color,
-            highlight_color,
-            shadow_color);
-
-        if (!slot.has_icon) {
-            continue;
-        }
-
-        const auto icon_size = std::max(8.0F, slot.size - layout.icon_inset * 2.0F);
-        const auto icon_offset = (slot.size - icon_size) * 0.5F;
-        append_hud_quad_top_left(
+            0.0F,
+            0.0F,
+            viewport_width,
+            viewport_height,
+            {0.02F, 0.03F, 0.04F, 0.66F});
+        const auto vignette_edge = std::clamp(std::min(viewport_width, viewport_height) * 0.18F, 72.0F, 180.0F);
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, vignette_edge, {0.08F, 0.10F, 0.12F, 0.10F});
+        append_hud_rect_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            slot.x + icon_offset,
-            slot.y + icon_offset,
-            icon_size,
-            icon_size,
-            {1.0F, 1.0F, 1.0F, 1.0F},
-            atlas_uv_rect(slot.icon_tile),
-            1.0F);
-        append_stack_count(
+            0.0F,
+            viewport_height - vignette_edge,
+            viewport_width,
+            vignette_edge,
+            {0.01F, 0.02F, 0.03F, 0.22F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, vignette_edge, viewport_height, {0.01F, 0.02F, 0.03F, 0.12F});
+        append_hud_rect_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            slot.x + slot.size - 5.0F,
-            slot.y + slot.size - 4.0F,
-            std::max(2.0F, static_cast<float>(std::floor(layout.slot_size / 18.0F))),
-            slot.slot.count);
-    }
+            viewport_width - vignette_edge,
+            0.0F,
+            vignette_edge,
+            viewport_height,
+            {0.01F, 0.02F, 0.03F, 0.12F});
 
-    std::string tooltip_label;
-    if (inventory_menu.carrying_item && inventory_slot_has_item(inventory_menu.carried_slot)) {
-        tooltip_label = item_stack_display_label(inventory_menu.carried_slot);
-    } else if (inventory_menu.hovered_slot.has_value()) {
-        if (const auto* slot = inventory_slot_ptr(inventory_menu, hotbar, *inventory_menu.hovered_slot);
-            slot != nullptr && inventory_slot_has_item(*slot)) {
-            tooltip_label = item_stack_display_label(*slot);
-        }
-    }
-
-    if (!tooltip_label.empty()) {
-        const auto tooltip_pixel_size = subtitle_pixel_size;
-        const auto tooltip_padding = 8.0F;
-        const auto tooltip_width = measure_pixel_text(tooltip_label, tooltip_pixel_size) + tooltip_padding * 2.0F;
-        const auto tooltip_height = tooltip_pixel_size * 7.0F + tooltip_padding * 2.0F;
-        const auto tooltip_x = std::clamp(
-            inventory_menu.cursor_x + 18.0F,
-            layout.panel_x + 12.0F,
-            layout.panel_x + layout.panel_width - tooltip_width - 12.0F);
-        const auto tooltip_y = std::clamp(
-            inventory_menu.cursor_y + 18.0F,
-            layout.panel_y + 12.0F,
-            layout.panel_y + layout.panel_height - tooltip_height - 12.0F);
-
-        append_hud_beveled_panel_top_left(
+        append_hud_shadow_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            tooltip_x,
-            tooltip_y,
-            tooltip_width,
-            tooltip_height,
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_width,
+            layout.panel_height,
+            18.0F,
+            {0.0F, 0.0F, 0.0F, 0.28F});
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_width,
+            layout.panel_height,
+            5.0F,
+            frame_palette,
+            false);
+
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.header_panel_x,
+            layout.header_panel_y,
+            layout.header_panel_width,
+            layout.header_panel_height,
             4.0F,
-            {0.06F, 0.06F, 0.07F, 0.98F},
-            {0.14F, 0.15F, 0.17F, 0.96F},
-            {0.38F, 0.40F, 0.44F, 0.20F},
-            {0.03F, 0.03F, 0.04F, 0.60F});
-        append_pixel_text(
+            header_palette,
+            false);
+        append_stylized_panel_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            tooltip_x + tooltip_width * 0.5F,
-            tooltip_y + tooltip_padding,
-            tooltip_pixel_size,
-            tooltip_label,
-            {0.96F, 0.97F, 0.99F, 1.0F},
+            layout.preview_panel_x,
+            layout.preview_panel_y,
+            layout.preview_panel_width,
+            layout.preview_panel_height,
+            3.0F,
+            preview_palette,
             true);
-    }
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.storage_panel_x,
+            layout.storage_panel_y,
+            layout.storage_panel_width,
+            layout.storage_panel_height,
+            3.0F,
+            storage_palette,
+            true);
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.hotbar_panel_x,
+            layout.hotbar_panel_y,
+            layout.hotbar_panel_width,
+            layout.hotbar_panel_height,
+            3.0F,
+            hotbar_palette,
+            true);
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.detail_panel_x,
+            layout.detail_panel_y,
+            layout.detail_panel_width,
+            layout.detail_panel_height,
+            3.0F,
+            detail_palette,
+            true);
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.footer_panel_x,
+            layout.footer_panel_y,
+            layout.footer_panel_width,
+            layout.footer_panel_height,
+            3.0F,
+            footer_palette,
+            false);
 
-    if (inventory_menu.carrying_item && inventory_slot_has_item(inventory_menu.carried_slot)) {
-        const auto carried_size = layout.slot_size;
-        const auto carried_x = inventory_menu.cursor_x - carried_size * 0.5F;
-        const auto carried_y = inventory_menu.cursor_y - carried_size * 0.5F;
-        append_hud_beveled_panel_top_left(
+        append_hud_rect_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            carried_x,
-            carried_y,
-            carried_size,
-            carried_size,
-            slot_border_thickness,
-            {0.95F, 0.96F, 0.98F, 0.98F},
-            {0.22F, 0.23F, 0.26F, 0.96F},
-            {0.74F, 0.76F, 0.82F, 0.28F},
-            {0.08F, 0.08F, 0.10F, 0.78F});
+            layout.header_panel_x + 12.0F,
+            layout.header_panel_y + layout.header_panel_height - 10.0F,
+            std::max(0.0F, layout.header_panel_width - 24.0F),
+            2.0F,
+            {1.0F, 1.0F, 1.0F, 0.06F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.preview_panel_x + 10.0F,
+            layout.preview_panel_y + 26.0F,
+            std::max(0.0F, layout.preview_panel_width - 20.0F),
+            2.0F,
+            {0.86F, 0.90F, 0.96F, 0.08F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.storage_panel_x + 10.0F,
+            layout.storage_panel_y + 26.0F,
+            std::max(0.0F, layout.storage_panel_width - 20.0F),
+            2.0F,
+            {0.86F, 0.90F, 0.96F, 0.08F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.hotbar_panel_x + 10.0F,
+            layout.hotbar_panel_y + 26.0F,
+            std::max(0.0F, layout.hotbar_panel_width - 20.0F),
+            2.0F,
+            {1.0F, 0.90F, 0.66F, 0.12F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.detail_panel_x + 10.0F,
+            layout.detail_panel_y + 26.0F,
+            std::max(0.0F, layout.detail_panel_width - 20.0F),
+            2.0F,
+            hud_with_alpha(hud_scale_rgb(focus_accent, 1.14F), 0.18F));
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.footer_panel_x + 10.0F,
+            layout.footer_panel_y + 8.0F,
+            std::max(0.0F, layout.footer_panel_width - 20.0F),
+            1.0F,
+            {1.0F, 1.0F, 1.0F, 0.05F});
 
-        const auto icon_size = std::max(8.0F, carried_size - layout.icon_inset * 2.0F);
-        const auto icon_offset = (carried_size - icon_size) * 0.5F;
-        append_hud_quad_top_left(
+        const auto title_y = layout.header_panel_y + 12.0F;
+        const auto subtitle_y = title_y + title_pixel_size * 7.0F + 4.0F;
+        draw_text(
+            layout.title_center_x,
+            title_y,
+            title_pixel_size,
+            "INVENTAIRE",
+            {0.98F, 0.98F, 0.99F, 1.0F},
+            true);
+        draw_text(
+            layout.subtitle_center_x,
+            subtitle_y,
+            subtitle_pixel_size,
+            "EQUIPEMENT ET STOCKAGE",
+            {0.82F, 0.84F, 0.88F, 0.96F},
+            true);
+        draw_text(
+            layout.preview_panel_x + layout.preview_panel_width * 0.5F,
+            layout.preview_panel_y + 10.0F,
+            label_pixel_size,
+            "AVATAR",
+            {0.90F, 0.92F, 0.96F, 0.98F},
+            true);
+        draw_text(
+            layout.storage_label_x,
+            layout.storage_label_y,
+            label_pixel_size,
+            "STOCKAGE",
+            {0.90F, 0.92F, 0.96F, 0.98F});
+        draw_text(
+            layout.hotbar_label_x,
+            layout.hotbar_label_y,
+            label_pixel_size,
+            "BARRE RAPIDE",
+            {0.98F, 0.94F, 0.84F, 0.98F});
+        draw_text(
+            layout.detail_label_x,
+            layout.detail_label_y,
+            label_pixel_size,
+            "DETAIL",
+            hud_scale_rgb(focus_accent, 1.18F));
+
+        append_avatar_preview_art(vertices, viewport_width, viewport_height, layout);
+        const auto preview_caption_y =
+            layout.preview_panel_y + layout.preview_panel_height - body_pixel_size * 7.0F - std::max(10.0F, layout.slot_size * 0.20F);
+        draw_text(
+            layout.preview_panel_x + layout.preview_panel_width * 0.5F,
+            preview_caption_y,
+            body_pixel_size,
+            "MODELE JOUEUR",
+            {0.76F, 0.79F, 0.84F, 0.88F},
+            true);
+
+        for (const auto& keycap : layout.hotbar_keycaps) {
+            append_keycap_top_left(vertices, viewport_width, viewport_height, keycap, body_pixel_size);
+        }
+
+        for (const auto& slot : layout.slots) {
+            const auto palette = build_slot_palette(slot.slot, slot.is_selected_hotbar, slot.hovered, slot.is_hotbar);
+            append_stylized_slot_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                slot.x,
+                slot.y,
+                slot.size,
+                palette,
+                slot.has_icon);
+
+            if (!slot.has_icon) {
+                continue;
+            }
+
+            const auto icon_size = std::max(8.0F, slot.size - layout.icon_inset * 2.0F);
+            const auto icon_offset = (slot.size - icon_size) * 0.5F;
+            append_hud_quad_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                slot.x + icon_offset,
+                slot.y + icon_offset,
+                icon_size,
+                icon_size,
+                {1.0F, 1.0F, 1.0F, 1.0F},
+                atlas_uv_rect(slot.icon_tile),
+                1.0F);
+            append_stack_count(
+                vertices,
+                viewport_width,
+                viewport_height,
+                slot.x + slot.size - 4.0F,
+                slot.y + slot.size - 4.0F,
+                stack_pixel_size,
+                slot.slot.count);
+        }
+
+        const auto detail_padding = std::max(10.0F, layout.slot_size * 0.26F);
+        const auto detail_content_y = layout.detail_label_y + label_pixel_size * 7.0F + std::max(10.0F, layout.slot_size * 0.22F);
+        const auto detail_slot_size = std::clamp(
+            std::min(layout.detail_panel_width - detail_padding * 2.0F, layout.slot_size * (layout.compact_detail ? 1.20F : 1.52F)),
+            layout.slot_size,
+            layout.compact_detail ? 68.0F : 84.0F);
+        const auto detail_slot_x = layout.detail_panel_x + (layout.detail_panel_width - detail_slot_size) * 0.5F;
+        const auto detail_slot_y = detail_content_y;
+        const auto detail_slot_palette = build_slot_palette(focus_item.slot, focus_item.has_item, false, false);
+        append_stylized_slot_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            carried_x + icon_offset,
-            carried_y + icon_offset,
-            icon_size,
-            icon_size,
-            {1.0F, 1.0F, 1.0F, 1.0F},
-            atlas_uv_rect(inventory_slot_icon_tile(inventory_menu.carried_slot.block_id)),
-            1.0F);
-        append_stack_count(
+            detail_slot_x,
+            detail_slot_y,
+            detail_slot_size,
+            detail_slot_palette,
+            focus_item.has_item);
+
+        if (focus_item.has_item) {
+            const auto icon_size = std::max(12.0F, detail_slot_size - detail_padding * 1.40F);
+            const auto icon_offset = (detail_slot_size - icon_size) * 0.5F;
+            append_hud_quad_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                detail_slot_x + icon_offset,
+                detail_slot_y + icon_offset,
+                icon_size,
+                icon_size,
+                {1.0F, 1.0F, 1.0F, 1.0F},
+                atlas_uv_rect(inventory_slot_icon_tile(focus_item.slot.block_id)),
+                1.0F);
+            append_stack_count(
+                vertices,
+                viewport_width,
+                viewport_height,
+                detail_slot_x + detail_slot_size - 4.0F,
+                detail_slot_y + detail_slot_size - 4.0F,
+                stack_pixel_size,
+                focus_item.slot.count);
+        }
+
+        auto detail_name = focus_item.has_item ? std::string(inventory_item_label(focus_item.slot.block_id)) : std::string("SURVOLE UN BLOC");
+        auto detail_name_pixel_size = std::clamp(label_pixel_size + (layout.compact_detail ? 0.0F : 1.0F), 2.0F, 4.0F);
+        while (detail_name_pixel_size > 2.0F &&
+               measure_pixel_text(detail_name, detail_name_pixel_size) > layout.detail_panel_width - detail_padding * 2.0F) {
+            detail_name_pixel_size -= 1.0F;
+        }
+        const auto detail_name_y = detail_slot_y + detail_slot_size + std::max(10.0F, layout.slot_size * 0.18F);
+        draw_text(
+            layout.detail_panel_x + layout.detail_panel_width * 0.5F,
+            detail_name_y,
+            detail_name_pixel_size,
+            detail_name,
+            focus_item.has_item ? hud_scale_rgb(focus_accent, 1.18F) : HudColor {0.90F, 0.92F, 0.96F, 0.98F},
+            true);
+
+        const auto detail_rule_y = detail_name_y + detail_name_pixel_size * 7.0F + 8.0F;
+        append_hud_rect_top_left(
             vertices,
             viewport_width,
             viewport_height,
-            carried_x + carried_size - 5.0F,
-            carried_y + carried_size - 4.0F,
-            std::max(2.0F, static_cast<float>(std::floor(layout.slot_size / 18.0F))),
-            inventory_menu.carried_slot.count);
-    }
+            layout.detail_panel_x + detail_padding,
+            detail_rule_y,
+            std::max(0.0F, layout.detail_panel_width - detail_padding * 2.0F),
+            1.0F,
+            hud_with_alpha(hud_scale_rgb(focus_accent, 1.10F), 0.16F));
+
+        if (focus_item.has_item) {
+            std::string pile_line = "PILE ";
+            pile_line += std::to_string(static_cast<int>(focus_item.slot.count));
+            pile_line += " SUR 64";
+
+            std::string material_line = "MATIERE ";
+            material_line += item_material_label(focus_item.slot.block_id);
+
+            std::string source_line = "SOURCE ";
+            if (focus_item.from_carried_slot) {
+                source_line += "MAIN";
+            } else {
+                source_line += inventory_slot_group_label(focus_item.group);
+            }
+
+            const auto info_y = detail_rule_y + 8.0F;
+            const auto line_step = body_pixel_size * 7.0F + 6.0F;
+            draw_text(
+                layout.detail_panel_x + layout.detail_panel_width * 0.5F,
+                info_y,
+                body_pixel_size,
+                pile_line,
+                {0.96F, 0.97F, 0.98F, 0.96F},
+                true);
+            draw_text(
+                layout.detail_panel_x + layout.detail_panel_width * 0.5F,
+                info_y + line_step,
+                body_pixel_size,
+                material_line,
+                {0.84F, 0.86F, 0.90F, 0.94F},
+                true);
+            draw_text(
+                layout.detail_panel_x + layout.detail_panel_width * 0.5F,
+                info_y + line_step * 2.0F,
+                body_pixel_size,
+                source_line,
+                {0.84F, 0.86F, 0.90F, 0.94F},
+                true);
+        } else {
+            draw_text(
+                layout.detail_panel_x + layout.detail_panel_width * 0.5F,
+                detail_rule_y + 10.0F,
+                body_pixel_size,
+                "OU PRENDS EN UN",
+                {0.76F, 0.79F, 0.84F, 0.90F},
+                true);
+        }
+
+        auto footer_text = std::string("E OU ECHAP POUR FERMER  1 A 9 POUR BARRE");
+        auto footer_pixel_size = subtitle_pixel_size;
+        while (footer_pixel_size > 2.0F &&
+               measure_pixel_text(footer_text, footer_pixel_size) > layout.footer_panel_width - 20.0F) {
+            footer_pixel_size -= 1.0F;
+        }
+        if (measure_pixel_text(footer_text, footer_pixel_size) > layout.footer_panel_width - 20.0F) {
+            footer_text = "E OU ECHAP POUR FERMER";
+        }
+        const auto footer_text_y = layout.footer_panel_y + (layout.footer_panel_height - footer_pixel_size * 7.0F) * 0.5F;
+        draw_text(
+            layout.footer_center_x,
+            footer_text_y,
+            footer_pixel_size,
+            footer_text,
+            {0.80F, 0.82F, 0.86F, 0.96F},
+            true);
+
+        std::string tooltip_label;
+        auto tooltip_accent = focus_accent;
+        if (inventory_menu.carrying_item && inventory_slot_has_item(inventory_menu.carried_slot)) {
+            tooltip_label = item_stack_display_label(inventory_menu.carried_slot);
+            tooltip_accent = ui_material_accent(inventory_menu.carried_slot.block_id);
+        } else if (inventory_menu.hovered_slot.has_value()) {
+            if (const auto* slot = inventory_slot_ptr(inventory_menu, hotbar, *inventory_menu.hovered_slot);
+                slot != nullptr && inventory_slot_has_item(*slot)) {
+                tooltip_label = item_stack_display_label(*slot);
+                tooltip_accent = ui_material_accent(slot->block_id);
+            }
+        }
+
+        if (!tooltip_label.empty()) {
+            const auto tooltip_pixel_size = subtitle_pixel_size;
+            const auto tooltip_padding_x = std::max(8.0F, tooltip_pixel_size * 2.8F);
+            const auto tooltip_padding_y = std::max(6.0F, tooltip_pixel_size * 2.0F);
+            const auto tooltip_width = measure_pixel_text(tooltip_label, tooltip_pixel_size) + tooltip_padding_x * 2.0F;
+            const auto tooltip_height = tooltip_pixel_size * 7.0F + tooltip_padding_y * 2.0F;
+            const auto tooltip_x = std::clamp(
+                inventory_menu.cursor_x + 18.0F,
+                layout.panel_x + 12.0F,
+                layout.panel_x + layout.panel_width - tooltip_width - 12.0F);
+            const auto tooltip_y = std::clamp(
+                inventory_menu.cursor_y + 18.0F,
+                layout.panel_y + 12.0F,
+                layout.panel_y + layout.panel_height - tooltip_height - 12.0F);
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                tooltip_x,
+                tooltip_y,
+                tooltip_width,
+                tooltip_height,
+                3.0F,
+                make_warm_panel_palette(tooltip_accent),
+                true);
+            draw_text(
+                tooltip_x + tooltip_width * 0.5F,
+                tooltip_y + tooltip_padding_y,
+                tooltip_pixel_size,
+                tooltip_label,
+                {0.98F, 0.98F, 0.96F, 0.98F},
+                true);
+        }
+
+        if (inventory_menu.carrying_item && inventory_slot_has_item(inventory_menu.carried_slot)) {
+            const auto carried_size = layout.slot_size;
+            const auto carried_x = inventory_menu.cursor_x - carried_size * 0.5F;
+            const auto carried_y = inventory_menu.cursor_y - carried_size * 0.5F;
+            const auto carried_palette = build_slot_palette(inventory_menu.carried_slot, true, false, false);
+            append_stylized_slot_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                carried_x,
+                carried_y,
+                carried_size,
+                carried_palette,
+                true);
+
+            const auto icon_size = std::max(8.0F, carried_size - layout.icon_inset * 2.0F);
+            const auto icon_offset = (carried_size - icon_size) * 0.5F;
+            append_hud_quad_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                carried_x + icon_offset,
+                carried_y + icon_offset,
+                icon_size,
+                icon_size,
+                {1.0F, 1.0F, 1.0F, 1.0F},
+                atlas_uv_rect(inventory_slot_icon_tile(inventory_menu.carried_slot.block_id)),
+                1.0F);
+            append_stack_count(
+                vertices,
+                viewport_width,
+                viewport_height,
+                carried_x + carried_size - 4.0F,
+                carried_y + carried_size - 4.0F,
+                stack_pixel_size,
+                inventory_menu.carried_slot.count);
+        }
     }
 
     glDisable(GL_DEPTH_TEST);

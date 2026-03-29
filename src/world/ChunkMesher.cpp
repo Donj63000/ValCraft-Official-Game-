@@ -331,6 +331,28 @@ auto wrap_positive(float value, float period) noexcept -> float {
     return wrapped < 0.0F ? wrapped + period : wrapped;
 }
 
+auto repeating_water_surface_uv(const BlockAtlasTile& tile,
+                                int block_world_x,
+                                int block_world_z,
+                                float local_x,
+                                float local_z) -> std::array<float, 2> {
+    const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
+    const auto u0 = static_cast<float>(tile.x) * uv_step;
+    const auto v0 = static_cast<float>(tile.y) * uv_step;
+
+    // Je garde exactement un huitieme de tuile par bloc pour eviter
+    // les sauts de 7/8 vers 0 au passage de la frontiere de repetition.
+    const auto block_u = wrap_positive(static_cast<float>(block_world_x), kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+    const auto block_v = wrap_positive(static_cast<float>(block_world_z), kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
+    const auto surface_u = std::min(block_u + local_x / kWaterSurfaceRepeatBlocks, 1.0F);
+    const auto surface_v = std::min(block_v + local_z / kWaterSurfaceRepeatBlocks, 1.0F);
+
+    return {
+        u0 + surface_u * uv_step,
+        v0 + surface_v * uv_step,
+    };
+}
+
 auto sample_vertex_light(const Neighborhood& neighborhood,
                          const BlockCoord& local_coord,
                          const FaceDefinition& definition,
@@ -674,12 +696,14 @@ void append_water_face(ChunkMeshData& mesh,
             const auto position = bilerp_vec3(corner_positions, u_lerp, v_lerp);
             auto uv = bilerp_vec2(corner_uvs, u_lerp, v_lerp);
             if (is_horizontal_water_face) {
-                const auto world_u = wrap_positive(position[0], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
-                const auto world_v = wrap_positive(position[2], kWaterSurfaceRepeatBlocks) / kWaterSurfaceRepeatBlocks;
-                uv = {
-                    u0 + world_u * uv_step,
-                    v0 + world_v * uv_step,
-                };
+                const auto block_world_x = chunk_world_x + local_coord.x;
+                const auto block_world_z = chunk_world_z + local_coord.z;
+                uv = repeating_water_surface_uv(
+                    tile,
+                    block_world_x,
+                    block_world_z,
+                    position[0] - static_cast<float>(block_world_x),
+                    position[2] - static_cast<float>(block_world_z));
             }
 
             float wave_weight = 0.0F;
