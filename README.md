@@ -28,9 +28,9 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/github-showcase.png" alt="ValCraft gameplay screenshot with the current world rendering and in-game hotbar" width="920">
+  <img src="Images/img.png" alt="Capture principale de ValCraft" width="920">
   <br>
-  <em>Capture recente en jeu avec le rendu actuel, la barre rapide 9 slots et les torches posables.</em>
+  <em>Capture recente du projet avec le rendu actuel en jeu.</em>
 </p>
 
 ## Apercu
@@ -59,18 +59,60 @@ Le projet vise une base technique solide et evolutive:
 <table>
   <tr>
     <td width="50%">
-      <img src="docs/images/screenshot-forest.png" alt="ValCraft screenshot forest">
+      <img src="Images/img_1.png" alt="Capture de gameplay ValCraft 1">
     </td>
     <td width="50%">
-      <img src="docs/images/screenshot-desert.png" alt="ValCraft screenshot desert">
+      <img src="Images/img_2.png" alt="Capture de gameplay ValCraft 2">
     </td>
   </tr>
   <tr>
     <td align="center">
-      <strong>Biome vert, relief vallonne, foret procedurale</strong>
+      <strong>Capture de presentation 1</strong>
     </td>
     <td align="center">
-      <strong>Zone sableuse, falaises rocheuses et grande visibilite</strong>
+      <strong>Capture de presentation 2</strong>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="Images/img_3.png" alt="Capture de gameplay ValCraft 3">
+    </td>
+    <td width="50%">
+      <img src="Images/img_4.png" alt="Capture de gameplay ValCraft 4">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Capture de presentation 3</strong>
+    </td>
+    <td align="center">
+      <strong>Capture de presentation 4</strong>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="Images/img_6.png" alt="Capture de gameplay ValCraft 5">
+    </td>
+    <td width="50%">
+      <img src="Images/img_7.png" alt="Capture de gameplay ValCraft 6">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <strong>Capture de presentation 5</strong>
+    </td>
+    <td align="center">
+      <strong>Capture de presentation 6</strong>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <img src="Images/img_5.png" alt="Capture de gameplay ValCraft 7" width="72%">
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <strong>Capture de presentation 7</strong>
     </td>
   </tr>
 </table>
