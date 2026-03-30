@@ -1,9 +1,9 @@
 # ValCraft
 
 <p align="center">
-  <strong>Prototype de jeu voxel FPS en C++20</strong>
+  <strong>Jeu sandbox voxel en vue a la premiere personne</strong>
   <br>
-  Monde procedural, rendu OpenGL, interactions voxel et pipeline strict anti-regression.
+  Explorez un monde procedural, cassez et posez des blocs, naviguez entre reliefs, eau et forets, et suivez l'evolution d'une V1 jouable en construction.
 </p>
 
 <p align="center">
@@ -21,6 +21,7 @@
 <p align="center">
   <a href="#apercu">Apercu</a> |
   <a href="#captures">Captures</a> |
+  <a href="#pour-les-joueurs">Pour les joueurs</a> |
   <a href="#fonctionnalites">Fonctionnalites</a> |
   <a href="#demarrage-rapide">Demarrage rapide</a> |
   <a href="#controles">Controles</a> |
@@ -30,103 +31,113 @@
 <p align="center">
   <img src="Images/img.png" alt="Capture principale de ValCraft" width="920">
   <br>
-  <em>Capture recente du projet avec le rendu actuel en jeu.</em>
+  <em>ValCraft propose deja une vraie boucle sandbox: explorer, modifier le terrain, poser des blocs et tester un monde voxel vivant en temps reel.</em>
 </p>
 
 ## Apercu
 
-ValCraft est un prototype de moteur/jeu voxel en vue a la premiere personne, inspire par Minecraft et developpe en `C++20` avec `SDL2` et `OpenGL 3.3 Core`.
+ValCraft est un jeu sandbox voxel en vue a la premiere personne inspire des grands classiques du genre. L'idee est simple: entrer dans un monde genere proceduralement, se deplacer librement, observer le relief, casser des blocs, en poser d'autres et voir le terrain reagir instantanement.
 
-Le projet vise une base technique solide et evolutive:
+Le projet est encore en developpement, mais il est deja pense pour etre agreable a parcourir autant pour un joueur curieux que pour une personne qui suit sa construction technique.
 
-- monde procedural par chunks
-- deplacement FPS avec collisions et gravite
-- casse et pose de blocs en temps reel
-- hotbar 9 slots avec selection clavier et roulette
-- generation deterministe et streaming du monde
-- pipeline de verification strict pour limiter les regressions
+Aujourd'hui, ValCraft met surtout l'accent sur:
 
-> ValCraft est aujourd'hui une V1 jouable du moteur: le coeur sandbox est present, et le projet est structure pour grandir proprement.
+- l'exploration libre d'un monde voxel genere automatiquement
+- les sensations de deplacement en vue FPS avec gravite, collisions et nage
+- l'interaction directe avec le decor via la casse et la pose de blocs
+- une presentation visuelle deja solide avec eau translucide, torches, hotbar et lecture claire du terrain
+- une base de projet propre pour continuer a enrichir le jeu sans casser l'existant
 
-## Pourquoi ValCraft
+> ValCraft est aujourd'hui une V1 jouable: le coeur de l'experience sandbox est deja la, meme si le contenu et la profondeur de jeu vont encore beaucoup evoluer.
 
-| Monde voxel | Gameplay FPS | Qualite logicielle |
+## Pourquoi essayer ValCraft
+
+| Explorer | Jouer tout de suite | Suivre un projet qui evolue |
 | --- | --- | --- |
-| Chunks `16 x 128 x 16`, terrain procedural, biomes legers, caves et arbres. | Controle souris/clavier, saut, collisions, mode fly debug, raycast bloc par bloc et hotbar scrollable. | `21` tests automatises, smoke test, warnings stricts, couverture critique et CI GitHub. |
+| Parcourez un monde voxel avec relief, eau, vegetation, zones ouvertes et une ambiance sandbox facile a lire tres vite. | Deplacez-vous en vue FPS, sautez, nagez, cassez des blocs, posez-en d'autres et utilisez la hotbar sans attendre un gros setup de gameplay. | Le projet avance comme un vrai jeu en construction: captures regulieres, base jouable, code teste et feuille de route claire. |
 
 ## Captures
 
 <table>
   <tr>
     <td width="50%">
-      <img src="Images/img_1.png" alt="Capture de gameplay ValCraft 1">
+      <img src="Images/img_1.png" alt="Exploration d'un environnement naturel dans ValCraft">
     </td>
     <td width="50%">
-      <img src="Images/img_2.png" alt="Capture de gameplay ValCraft 2">
+      <img src="Images/img_2.png" alt="Vue en jeu du relief et du monde voxel de ValCraft">
     </td>
   </tr>
   <tr>
     <td align="center">
-      <strong>Capture de presentation 1</strong>
+      <strong>Explorer un monde ouvert, lisible et immediatement jouable</strong>
     </td>
     <td align="center">
-      <strong>Capture de presentation 2</strong>
+      <strong>Profiter d'un relief procedural qui donne deja une vraie sensation d'aventure</strong>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="Images/img_3.png" alt="Capture de gameplay ValCraft 3">
+      <img src="Images/img_3.png" alt="Capture de gameplay avec interface et hotbar dans ValCraft">
     </td>
     <td width="50%">
-      <img src="Images/img_4.png" alt="Capture de gameplay ValCraft 4">
+      <img src="Images/img_4.png" alt="Capture montrant la construction et la lecture du terrain dans ValCraft">
     </td>
   </tr>
   <tr>
     <td align="center">
-      <strong>Capture de presentation 3</strong>
+      <strong>Retrouver les bases du sandbox voxel: observer, se reperer et agir sur le decor</strong>
     </td>
     <td align="center">
-      <strong>Capture de presentation 4</strong>
+      <strong>Construire et modifier le terrain avec une boucle simple, claire et immediate</strong>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="Images/img_6.png" alt="Capture de gameplay ValCraft 5">
+      <img src="Images/img_6.png" alt="Capture de gameplay mettant en avant l'eau et l'ambiance de ValCraft">
     </td>
     <td width="50%">
-      <img src="Images/img_7.png" alt="Capture de gameplay ValCraft 6">
+      <img src="Images/img_7.png" alt="Capture de gameplay mettant en avant la profondeur visuelle de ValCraft">
     </td>
   </tr>
   <tr>
     <td align="center">
-      <strong>Capture de presentation 5</strong>
+      <strong>Une ambiance visuelle deja posee avec eau translucide, volumes et contrastes lisibles</strong>
     </td>
     <td align="center">
-      <strong>Capture de presentation 6</strong>
+      <strong>Un prototype qui commence deja a ressembler a un vrai jeu a parcourir</strong>
     </td>
   </tr>
   <tr>
     <td colspan="2" align="center">
-      <img src="Images/img_5.png" alt="Capture de gameplay ValCraft 7" width="72%">
+      <img src="Images/img_5.png" alt="Panorama du monde voxel de ValCraft" width="72%">
     </td>
   </tr>
   <tr>
     <td colspan="2" align="center">
-      <strong>Capture de presentation 7</strong>
+      <strong>Un panorama qui montre bien la direction du projet: un sandbox voxel simple, propre et evolutif</strong>
     </td>
   </tr>
 </table>
 
+## Pour les joueurs
+
+Si vous regardez ValCraft avant tout comme un jeu, voici ce qu'il propose deja:
+
+- explorer un monde voxel genere proceduralement
+- se deplacer en vue FPS avec collisions, saut et nage
+- casser des blocs et reconstruire le decor en temps reel
+- utiliser une hotbar simple pour rester dans une boucle de jeu immediate
+- profiter d'une V1 jouable qui se concentre sur les sensations de base du sandbox
+
+Ce que ValCraft ne cherche pas encore a faire a ce stade:
+
+- raconter une campagne ou une progression longue
+- proposer du multijoueur ou un gros contenu RPG
+- remplacer un jeu complet fini du genre
+
+Le projet est plutot dans une logique de prototype jouable solide: une bonne base de jeu aujourd'hui, plus de profondeur demain.
+
 ## Fonctionnalites
-
-### Monde
-
-- chunks streames autour du joueur
-- seed deterministe
-- generation de relief et de surface par bruit
-- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`, `Water`, `Torch`
-- maillage de chunks avec suppression des faces cachees
-- eau translucide animee avec surface ondulante continue entre blocs
 
 ### Gameplay
 
@@ -141,7 +152,16 @@ Le projet vise une base technique solide et evolutive:
 - hotbar `9` slots avec selection a la roulette
 - prevention de pose dans le volume du joueur
 
-### Pipeline de qualite
+### Monde
+
+- chunks streames autour du joueur
+- seed deterministe
+- generation de relief et de surface par bruit
+- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`, `Water`, `Torch`
+- maillage de chunks avec suppression des faces cachees
+- eau translucide animee avec surface ondulante continue entre blocs
+
+### Pour les devs
 
 - build `CMake` en `C++20`
 - dependances gerees via `FetchContent`
@@ -259,6 +279,8 @@ Le developpement de ValCraft s'appuie aussi sur des outils d'IA pour accelerer c
 Les choix techniques, l'integration dans le projet, les validations et la direction globale restent pilotes par le mainteneur du depot.
 
 ## Etat du projet
+
+ValCraft avance avec une priorite simple: d'abord consolider une boucle de jeu sandbox agreable, ensuite enrichir le contenu.
 
 | Dans le perimetre actuel | Pas encore dans le perimetre |
 | --- | --- |
