@@ -385,6 +385,37 @@ TEST_CASE("surface height ignores water columns above solid ground") {
     CHECK(world.loaded_surface_height(3, 5).value_or(-1) == 4);
 }
 
+TEST_CASE("world generator fills every submerged column up to the global sea level") {
+    constexpr std::array<int, 4> seeds {{1337, 2024, 4242, 9001}};
+
+    for (const auto seed : seeds) {
+        World world(seed, 2);
+        for (int chunk_z = -2; chunk_z <= 2; ++chunk_z) {
+            for (int chunk_x = -2; chunk_x <= 2; ++chunk_x) {
+                world.ensure_chunk_loaded({chunk_x, chunk_z});
+            }
+        }
+
+        for (int z = -2 * kChunkSizeZ; z < 3 * kChunkSizeZ; ++z) {
+            for (int x = -2 * kChunkSizeX; x < 3 * kChunkSizeX; ++x) {
+                const auto surface_y = world.surface_height(x, z);
+                if (surface_y >= kSeaLevel) {
+                    continue;
+                }
+
+                CAPTURE(seed);
+                CAPTURE(x);
+                CAPTURE(z);
+                CAPTURE(surface_y);
+                CHECK(world.get_block(x, kSeaLevel, z) == to_block_id(BlockType::Water));
+                if (kSeaLevel < kWorldMaxY) {
+                    CHECK(world.get_block(x, kSeaLevel + 1, z) != to_block_id(BlockType::Water));
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
     World world(183, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -942,6 +973,50 @@ TEST_CASE("loading a diagonal neighbor remeshes an already meshed chunk") {
     world.rebuild_dirty_meshes();
 
     CHECK(world.mesh_revision(origin) > origin_revision_before);
+}
+
+TEST_CASE("water border meshing matches the eventual generated neighbor even before that chunk is loaded") {
+    ChunkMesher mesher {};
+
+    bool found_candidate = false;
+    for (const auto seed : std::array<int, 6> {{1337, 2024, 4242, 9001, 12345, 54321}}) {
+        for (int chunk_z = -6; chunk_z <= 6 && !found_candidate; ++chunk_z) {
+            for (int chunk_x = -6; chunk_x <= 6 && !found_candidate; ++chunk_x) {
+                World world(seed, 1);
+                const ChunkCoord origin {chunk_x, chunk_z};
+                const ChunkCoord east {chunk_x + 1, chunk_z};
+                world.ensure_chunk_loaded(origin);
+                REQUIRE(world.find_chunk(east) == nullptr);
+
+                bool border_extends_into_generated_neighbor = false;
+                for (int local_z = 0; local_z < kChunkSizeZ && !border_extends_into_generated_neighbor; ++local_z) {
+                    const auto world_x = origin.x * kChunkSizeX + (kChunkSizeX - 1);
+                    const auto world_z = origin.z * kChunkSizeZ + local_z;
+                    border_extends_into_generated_neighbor =
+                        world.get_block(world_x, kSeaLevel, world_z) == to_block_id(BlockType::Water) &&
+                        world.peek_block_or_generated(world_x + 1, kSeaLevel, world_z) == to_block_id(BlockType::Water);
+                }
+
+                if (!border_extends_into_generated_neighbor) {
+                    continue;
+                }
+
+                const auto mesh_before = mesher.build_mesh(world, origin);
+                world.ensure_chunk_loaded(east);
+                const auto mesh_after = mesher.build_mesh(world, origin);
+
+                CAPTURE(seed);
+                CAPTURE(origin.x);
+                CAPTURE(origin.z);
+                CHECK(mesh_before.water_face_count == mesh_after.water_face_count);
+                CHECK(mesh_before.water_vertices.size() == mesh_after.water_vertices.size());
+                CHECK(mesh_before.water_indices.size() == mesh_after.water_indices.size());
+                found_candidate = true;
+            }
+        }
+    }
+
+    REQUIRE(found_candidate);
 }
 
 TEST_CASE("editing a corner block remeshes diagonal neighbors that sample it") {

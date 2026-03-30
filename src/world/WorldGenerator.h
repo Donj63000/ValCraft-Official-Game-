@@ -29,6 +29,7 @@ public:
     void generate_chunk(Chunk& chunk);
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto biome_at(int world_x, int world_z) const noexcept -> BiomeType;
+    [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept -> BlockId;
 
 private:
     struct TerrainColumnSample {
@@ -49,7 +50,8 @@ private:
     [[nodiscard]] auto choose_surface_block(BiomeType biome, int world_x, int world_z, int surface_height) const noexcept -> BlockId;
     [[nodiscard]] auto choose_filler_block(BiomeType biome, int world_x, int world_z) const noexcept -> BlockId;
     [[nodiscard]] auto choose_surface_height(BiomeType biome, float base_noise, float detail_noise, float ridge_noise) const noexcept -> int;
-    [[nodiscard]] auto choose_water_level(BiomeType biome, float moisture, int surface_height) const noexcept -> int;
+    [[nodiscard]] auto choose_water_level(int surface_height) const noexcept -> int;
+    [[nodiscard]] auto choose_terrain_block(const TerrainColumnSample& column, int world_x, int y, int world_z) const noexcept -> BlockId;
     [[nodiscard]] auto should_place_tree(BiomeType biome, int surface_y, std::uint32_t column_hash) const noexcept -> bool;
     [[nodiscard]] auto should_place_decoration(BiomeType biome, std::uint32_t column_hash) const noexcept -> bool;
     void place_tree(Chunk& chunk, int local_x, int surface_y, int local_z, BiomeType biome, std::uint32_t column_hash) const;

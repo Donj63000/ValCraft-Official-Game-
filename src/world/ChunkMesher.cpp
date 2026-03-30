@@ -755,6 +755,7 @@ void append_water_face(ChunkMeshData& mesh,
 }
 
 void append_water_mesh(ChunkMeshData& mesh,
+                       const World& world,
                        const Neighborhood& neighborhood,
                        const BlockCoord& local_coord,
                        int chunk_world_x,
@@ -771,7 +772,18 @@ void append_water_mesh(ChunkMeshData& mesh,
             local_coord.y + definition.neighbor_offset.y,
             local_coord.z + definition.neighbor_offset.z,
         };
-        const auto neighbor_block = neighborhood.block_at(neighbor.x, neighbor.y, neighbor.z);
+
+        auto neighbor_block = neighborhood.block_at(neighbor.x, neighbor.y, neighbor.z);
+        auto neighbor_local_x = neighbor.x;
+        auto neighbor_local_z = neighbor.z;
+        const auto* neighbor_chunk = neighborhood.sample_chunk(neighbor.x, neighbor.z, neighbor_local_x, neighbor_local_z);
+        if (neighbor_chunk == nullptr && (neighbor.x < 0 || neighbor.x >= kChunkSizeX || neighbor.z < 0 || neighbor.z >= kChunkSizeZ)) {
+            // Les chunks absents autour du front de streaming ne doivent pas etre
+            // interpretes comme du vide pour l'eau, sinon on fabrique des parois
+            // verticales temporaires qui disparaissent seulement apres le chargement
+            // du voisin reel.
+            neighbor_block = world.peek_block_or_generated(chunk_world_x + neighbor.x, neighbor.y, chunk_world_z + neighbor.z);
+        }
         if (is_block_liquid(neighbor_block) || is_block_opaque(neighbor_block)) {
             continue;
         }
@@ -851,7 +863,7 @@ auto ChunkMesher::build_mesh_range(const World& world,
                     continue;
                 }
                 if (block_mesh_type(block_id) == BlockMeshType::Water) {
-                    append_water_mesh(mesh, neighborhood, local_coord, chunk_world_x, chunk_world_z);
+                    append_water_mesh(mesh, world, neighborhood, local_coord, chunk_world_x, chunk_world_z);
                     continue;
                 }
 

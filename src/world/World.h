@@ -71,6 +71,10 @@ public:
     explicit World(int seed = 1337, int stream_radius = kDefaultStreamRadius);
 
     [[nodiscard]] auto get_block(int x, int y, int z) const -> BlockId;
+    // Helper de maillage: si le chunk n'est pas encore charge, on previsualise
+    // le terrain/eau deterministe issu du generateur pour eviter les murs d'eau
+    // temporaires sur les frontieres de streaming.
+    [[nodiscard]] auto peek_block_or_generated(int x, int y, int z) const -> BlockId;
     [[nodiscard]] auto get_sky_light(int x, int y, int z) const -> std::uint8_t;
     [[nodiscard]] auto get_block_light(int x, int y, int z) const -> std::uint8_t;
     void set_block(int x, int y, int z, BlockId block_id);

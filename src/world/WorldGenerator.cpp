@@ -86,46 +86,14 @@ void WorldGenerator::generate_chunk(Chunk& chunk) {
             const auto world_x = base_world_x + local_x;
             const auto world_z = base_world_z + local_z;
             const auto column = sample_column(world_x, world_z);
+            const auto column_max_y = std::min(std::max(column.surface_height, column.water_level), kWorldMaxY);
 
-            for (int y = 0; y <= column.surface_height; ++y) {
-                auto block = to_block_id(BlockType::Stone);
-                if (column.biome == BiomeType::RockyPeaks && y >= column.surface_height - 7 && y < column.surface_height - 2) {
-                    const auto layer_hash = hash_column(world_x, world_z + y, seed_);
-                    switch (layer_hash % 5U) {
-                    case 0U:
-                        block = to_block_id(BlockType::Gravel);
-                        break;
-                    case 1U:
-                        block = to_block_id(BlockType::Cobblestone);
-                        break;
-                    case 2U:
-                        block = to_block_id(BlockType::MossyStone);
-                        break;
-                    default:
-                        block = to_block_id(BlockType::Stone);
-                        break;
-                    }
-                }
-                if (y == column.surface_height) {
-                    block = column.surface_block;
-                } else if (y >= column.surface_height - 3) {
-                    block = column.filler_block;
-                }
-
-                const auto cave_noise = cave_noise_->GetNoise(static_cast<float>(world_x), static_cast<float>(y), static_cast<float>(world_z));
-                if (y > 6 && y < column.surface_height - 4 && cave_noise > 0.58F) {
+            for (int y = kWorldMinY; y <= column_max_y; ++y) {
+                const auto block = choose_terrain_block(column, world_x, y, world_z);
+                if (block == to_block_id(BlockType::Air)) {
                     continue;
                 }
-
                 chunk.set_local(local_x, y, local_z, block);
-            }
-
-            if (column.water_level > column.surface_height) {
-                for (int y = column.surface_height + 1; y <= column.water_level && y < kChunkHeight; ++y) {
-                    if (chunk.get_local(local_x, y, local_z) == to_block_id(BlockType::Air)) {
-                        chunk.set_local(local_x, y, local_z, to_block_id(BlockType::Water));
-                    }
-                }
             }
 
             const auto column_hash = hash_column(world_x, world_z, seed_);
@@ -153,6 +121,15 @@ auto WorldGenerator::biome_at(int world_x, int world_z) const noexcept -> BiomeT
     return sample_column(world_x, world_z).biome;
 }
 
+auto WorldGenerator::sample_block(int world_x, int y, int world_z) const noexcept -> BlockId {
+    if (!is_world_y_valid(y)) {
+        return to_block_id(BlockType::Air);
+    }
+
+    const auto column = sample_column(world_x, world_z);
+    return choose_terrain_block(column, world_x, y, world_z);
+}
+
 auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> TerrainColumnSample {
     const auto base = terrain_noise_->GetNoise(static_cast<float>(world_x), static_cast<float>(world_z));
     const auto detail = detail_noise_->GetNoise(static_cast<float>(world_x), static_cast<float>(world_z));
@@ -171,7 +148,7 @@ auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> T
     sample.surface_height = choose_surface_height(biome, base, detail, ridge);
     sample.surface_block = choose_surface_block(biome, world_x, world_z, sample.surface_height);
     sample.filler_block = choose_filler_block(biome, world_x, world_z);
-    sample.water_level = choose_water_level(biome, moisture, sample.surface_height);
+    sample.water_level = choose_water_level(sample.surface_height);
     return sample;
 }
 
@@ -259,19 +236,53 @@ auto WorldGenerator::choose_surface_height(BiomeType biome, float base_noise, fl
     return std::clamp(rounded, kBaseStoneHeight, kWorldMaxY - 6);
 }
 
-auto WorldGenerator::choose_water_level(BiomeType biome, float moisture, int surface_height) const noexcept -> int {
-    switch (biome) {
-    case BiomeType::RockyPeaks:
-        return kWorldMinY - 1;
-    case BiomeType::Desert:
-        return surface_height < kSeaLevel - 3 && moisture > 0.25F ? surface_height + 1 : kWorldMinY - 1;
-    case BiomeType::Taiga:
-        return surface_height < kSeaLevel - 1 ? kSeaLevel - 1 : kWorldMinY - 1;
-    case BiomeType::Forest:
-    case BiomeType::Meadow:
-    default:
-        return surface_height < kSeaLevel ? kSeaLevel : kWorldMinY - 1;
+auto WorldGenerator::choose_water_level(int surface_height) const noexcept -> int {
+    // La ligne d'eau doit rester globale et independante du biome. Sinon deux
+    // colonnes voisines situees sous le niveau de la mer peuvent recevoir des
+    // decisions contradictoires, ce qui cree des falaises d'eau et des mers
+    // coupees net aux frontieres de biome.
+    return surface_height < kSeaLevel ? kSeaLevel : (kWorldMinY - 1);
+}
+
+auto WorldGenerator::choose_terrain_block(const TerrainColumnSample& column, int world_x, int y, int world_z) const noexcept -> BlockId {
+    if (y <= column.surface_height) {
+        auto block = to_block_id(BlockType::Stone);
+        if (column.biome == BiomeType::RockyPeaks && y >= column.surface_height - 7 && y < column.surface_height - 2) {
+            const auto layer_hash = hash_column(world_x, world_z + y, seed_);
+            switch (layer_hash % 5U) {
+            case 0U:
+                block = to_block_id(BlockType::Gravel);
+                break;
+            case 1U:
+                block = to_block_id(BlockType::Cobblestone);
+                break;
+            case 2U:
+                block = to_block_id(BlockType::MossyStone);
+                break;
+            default:
+                block = to_block_id(BlockType::Stone);
+                break;
+            }
+        }
+        if (y == column.surface_height) {
+            block = column.surface_block;
+        } else if (y >= column.surface_height - 3) {
+            block = column.filler_block;
+        }
+
+        const auto cave_noise = cave_noise_->GetNoise(static_cast<float>(world_x), static_cast<float>(y), static_cast<float>(world_z));
+        if (y > 6 && y < column.surface_height - 4 && cave_noise > 0.58F) {
+            return to_block_id(BlockType::Air);
+        }
+
+        return block;
     }
+
+    if (column.water_level > column.surface_height && y <= column.water_level) {
+        return to_block_id(BlockType::Water);
+    }
+
+    return to_block_id(BlockType::Air);
 }
 
 auto WorldGenerator::should_place_tree(BiomeType biome, int surface_y, std::uint32_t column_hash) const noexcept -> bool {

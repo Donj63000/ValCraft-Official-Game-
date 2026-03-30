@@ -183,6 +183,21 @@ auto World::get_block(int x, int y, int z) const -> BlockId {
     return chunk->get_local(local.x, local.y, local.z);
 }
 
+auto World::peek_block_or_generated(int x, int y, int z) const -> BlockId {
+    if (!is_world_y_valid(y)) {
+        return to_block_id(BlockType::Air);
+    }
+
+    const auto chunk_coord = world_to_chunk(x, z);
+    const auto local = world_to_local(x, y, z);
+    const auto* chunk = find_chunk(chunk_coord);
+    if (chunk != nullptr) {
+        return chunk->get_local(local.x, local.y, local.z);
+    }
+
+    return generator_.sample_block(x, y, z);
+}
+
 auto World::get_sky_light(int x, int y, int z) const -> std::uint8_t {
     if (!is_world_y_valid(y)) {
         return 0;
