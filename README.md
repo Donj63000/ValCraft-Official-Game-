@@ -1,9 +1,9 @@
 # ValCraft
 
 <p align="center">
-  <strong>Jeu sandbox voxel en vue a la premiere personne</strong>
+  <strong>Mon defi perso: refaire un jeu dans l'esprit de Minecraft, a ma facon, en C++</strong>
   <br>
-  Explorez un monde procedural, cassez et posez des blocs, naviguez entre reliefs, eau et forets, et suivez l'evolution d'une V1 jouable en construction.
+  ValCraft est un projet ne d'un challenge personnel: recreer une experience sandbox voxel, avec ma propre direction, mes propres choix de design et une implementation C++ maison.
 </p>
 
 <p align="center">
@@ -36,7 +36,7 @@
 
 ## Apercu
 
-ValCraft est un jeu sandbox voxel en vue a la premiere personne inspire des grands classiques du genre. L'idee est simple: entrer dans un monde genere proceduralement, se deplacer librement, observer le relief, casser des blocs, en poser d'autres et voir le terrain reagir instantanement.
+ValCraft est ne d'un defi personnel: refaire un jeu "comme Minecraft", mais a ma facon, avec ma propre vision du sandbox voxel et avec une implementation orientee C++ plutot qu'un simple assemblage dans un moteur tout fait. L'idee est simple: entrer dans un monde genere proceduralement, se deplacer librement, observer le relief, casser des blocs, en poser d'autres et voir le terrain reagir instantanement.
 
 Le projet est encore en developpement, mais il est deja pense pour etre agreable a parcourir autant pour un joueur curieux que pour une personne qui suit sa construction technique.
 
