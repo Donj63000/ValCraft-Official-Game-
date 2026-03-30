@@ -31,14 +31,14 @@
 <p align="center">
   <img src="Images/img.png" alt="Capture principale de ValCraft" width="920">
   <br>
-  <em>ValCraft propose deja une vraie boucle sandbox: explorer, modifier le terrain, poser des blocs et tester un monde voxel vivant en temps reel.</em>
+  <em>ValCraft propose deja une vraie boucle sandbox jouable, mais le projet est encore en progression active et il reste des bugs, des limites et beaucoup d'evolutions a venir.</em>
 </p>
 
 ## Apercu
 
 ValCraft est ne d'un defi personnel: refaire un jeu "comme Minecraft", mais a ma facon, avec ma propre vision du sandbox voxel et avec une implementation orientee C++ plutot qu'un simple assemblage dans un moteur tout fait. L'idee est simple: entrer dans un monde genere proceduralement, se deplacer librement, observer le relief, casser des blocs, en poser d'autres et voir le terrain reagir instantanement.
 
-Le projet est encore en developpement, mais il est deja pense pour etre agreable a parcourir autant pour un joueur curieux que pour une personne qui suit sa construction technique.
+Le projet est encore en developpement actif. Il est deja jouable et permet de ressentir la direction du jeu, mais il reste encore des bugs, des parties incompletes et des aspects a polir au fil des versions.
 
 Aujourd'hui, ValCraft met surtout l'accent sur:
 
@@ -48,7 +48,7 @@ Aujourd'hui, ValCraft met surtout l'accent sur:
 - une presentation visuelle deja solide avec eau translucide, torches, hotbar et lecture claire du terrain
 - une base de projet propre pour continuer a enrichir le jeu sans casser l'existant
 
-> ValCraft est aujourd'hui une V1 jouable: le coeur de l'experience sandbox est deja la, meme si le contenu et la profondeur de jeu vont encore beaucoup evoluer.
+> ValCraft est aujourd'hui une V1 jouable en cours de progression: le coeur de l'experience sandbox est deja la, mais le projet n'est pas fini et il faut s'attendre a croiser encore des bugs et des elements en evolution.
 
 ## Pourquoi essayer ValCraft
 
@@ -135,7 +135,7 @@ Ce que ValCraft ne cherche pas encore a faire a ce stade:
 - proposer du multijoueur ou un gros contenu RPG
 - remplacer un jeu complet fini du genre
 
-Le projet est plutot dans une logique de prototype jouable solide: une bonne base de jeu aujourd'hui, plus de profondeur demain.
+Le projet est plutot dans une logique de prototype jouable solide: une bonne base de jeu aujourd'hui, plus de profondeur demain, avec encore des bugs a corriger et des systemes a faire grandir.
 
 ## Fonctionnalites
 
@@ -281,6 +281,8 @@ Les choix techniques, l'integration dans le projet, les validations et la direct
 ## Etat du projet
 
 ValCraft avance avec une priorite simple: d'abord consolider une boucle de jeu sandbox agreable, ensuite enrichir le contenu.
+
+Le jeu est deja jouable, mais il est important de presenter les choses honnetement: le projet est encore en progression, certaines parties sont temporaires, et des bugs peuvent encore apparaitre pendant la partie.
 
 | Dans le perimetre actuel | Pas encore dans le perimetre |
 | --- | --- |
