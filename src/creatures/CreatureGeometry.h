@@ -29,6 +29,17 @@ enum class CreatureAtlasTile : std::uint8_t {
     ZombieEye = 13,
     ZombieVein = 14,
     ZombieScar = 15,
+    PigBelly = 16,
+    PigHoof = 17,
+    CowHoof = 18,
+    SheepShadow = 19,
+    TransformHide = 20,
+    TransformSinew = 21,
+    TransformGlow = 22,
+    ZombieClaw = 23,
+    ZombieWool = 24,
+    ZombieHorn = 25,
+    Count = 26,
 };
 
 struct CreatureVertex {

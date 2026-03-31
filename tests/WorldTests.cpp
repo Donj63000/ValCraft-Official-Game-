@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <doctest/doctest.h>
 #include <set>
 #include <stdexcept>
@@ -301,6 +302,106 @@ TEST_CASE("tree foliage atlas tiles stay solid and opaque") {
 
     check_foliage_tile(to_block_id(BlockType::Leaves));
     check_foliage_tile(to_block_id(BlockType::PineLeaves));
+}
+
+TEST_CASE("grass and snow side atlas tiles preserve a distinct surface layer over dirt") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto sample_region_average = [&](const BlockAtlasTile& tile, int y_begin, int y_end) {
+        std::array<float, 4> sum {0.0F, 0.0F, 0.0F, 0.0F};
+        auto sample_count = 0.0F;
+        for (int y = y_begin; y < y_end; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto atlas_x = tile.x * kBlockAtlasTileSize + x;
+                const auto atlas_y = tile.y * kBlockAtlasTileSize + y;
+                const auto pixel_index = static_cast<std::size_t>((atlas_y * kBlockAtlasSize + atlas_x) * 4);
+                sum[0] += static_cast<float>(pixels[pixel_index + 0]);
+                sum[1] += static_cast<float>(pixels[pixel_index + 1]);
+                sum[2] += static_cast<float>(pixels[pixel_index + 2]);
+                sum[3] += static_cast<float>(pixels[pixel_index + 3]);
+                sample_count += 1.0F;
+            }
+        }
+        return std::array<float, 4> {
+            sum[0] / sample_count,
+            sum[1] / sample_count,
+            sum[2] / sample_count,
+            sum[3] / sample_count,
+        };
+    };
+
+    const auto color_distance = [](const std::array<float, 4>& lhs, const std::array<float, 4>& rhs) {
+        const auto red = lhs[0] - rhs[0];
+        const auto green = lhs[1] - rhs[1];
+        const auto blue = lhs[2] - rhs[2];
+        return std::sqrt(red * red + green * green + blue * blue);
+    };
+
+    const auto dirt_tile = block_atlas_tile(to_block_id(BlockType::Dirt), BlockVisualFace::PositiveX);
+    const auto grass_side_tile = block_atlas_tile(to_block_id(BlockType::Grass), BlockVisualFace::PositiveX);
+    const auto snow_side_tile = block_atlas_tile(to_block_id(BlockType::Snow), BlockVisualFace::PositiveX);
+
+    const auto dirt_bottom = sample_region_average(dirt_tile, 10, 16);
+    const auto grass_top = sample_region_average(grass_side_tile, 0, 5);
+    const auto grass_bottom = sample_region_average(grass_side_tile, 10, 16);
+    const auto snow_top = sample_region_average(snow_side_tile, 0, 6);
+    const auto snow_bottom = sample_region_average(snow_side_tile, 10, 16);
+
+    CHECK(grass_top[1] > grass_bottom[1] + 40.0F);
+    CHECK(color_distance(grass_bottom, dirt_bottom) < 1.0F);
+
+    CHECK(snow_top[0] > snow_bottom[0] + 80.0F);
+    CHECK(snow_top[1] > snow_bottom[1] + 120.0F);
+    CHECK(snow_top[2] > snow_bottom[2] + 180.0F);
+    CHECK(color_distance(snow_bottom, dirt_bottom) < 1.0F);
+}
+
+TEST_CASE("baked wood and foliage variants stay visually differentiated") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto sample_tile_average = [&](const BlockAtlasTile& tile) {
+        std::array<float, 4> sum {0.0F, 0.0F, 0.0F, 0.0F};
+        auto sample_count = 0.0F;
+        for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto atlas_x = tile.x * kBlockAtlasTileSize + x;
+                const auto atlas_y = tile.y * kBlockAtlasTileSize + y;
+                const auto pixel_index = static_cast<std::size_t>((atlas_y * kBlockAtlasSize + atlas_x) * 4);
+                sum[0] += static_cast<float>(pixels[pixel_index + 0]);
+                sum[1] += static_cast<float>(pixels[pixel_index + 1]);
+                sum[2] += static_cast<float>(pixels[pixel_index + 2]);
+                sum[3] += static_cast<float>(pixels[pixel_index + 3]);
+                sample_count += 1.0F;
+            }
+        }
+        return std::array<float, 4> {
+            sum[0] / sample_count,
+            sum[1] / sample_count,
+            sum[2] / sample_count,
+            sum[3] / sample_count,
+        };
+    };
+
+    const auto color_distance = [](const std::array<float, 4>& lhs, const std::array<float, 4>& rhs) {
+        const auto red = lhs[0] - rhs[0];
+        const auto green = lhs[1] - rhs[1];
+        const auto blue = lhs[2] - rhs[2];
+        return std::sqrt(red * red + green * green + blue * blue);
+    };
+
+    const auto wood_side = sample_tile_average(block_atlas_tile(to_block_id(BlockType::Wood), BlockVisualFace::PositiveX));
+    const auto wood_top = sample_tile_average(block_atlas_tile(to_block_id(BlockType::Wood), BlockVisualFace::PositiveY));
+    const auto planks = sample_tile_average(block_atlas_tile(to_block_id(BlockType::Planks), BlockVisualFace::PositiveX));
+    const auto pine_side = sample_tile_average(block_atlas_tile(to_block_id(BlockType::PineWood), BlockVisualFace::PositiveX));
+    const auto leaves = sample_tile_average(block_atlas_tile(to_block_id(BlockType::Leaves), BlockVisualFace::PositiveX));
+    const auto pine_leaves = sample_tile_average(block_atlas_tile(to_block_id(BlockType::PineLeaves), BlockVisualFace::PositiveX));
+
+    CHECK(color_distance(wood_side, wood_top) > 20.0F);
+    CHECK(color_distance(wood_side, planks) > 20.0F);
+    CHECK(color_distance(wood_side, pine_side) > 10.0F);
+    CHECK(color_distance(leaves, pine_leaves) > 25.0F);
 }
 
 TEST_CASE("block visual material classification keeps key terrain families distinct") {

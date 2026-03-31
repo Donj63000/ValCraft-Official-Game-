@@ -250,6 +250,16 @@ valcraft_copy_mingw_runtime_dlls(valcraft_tests)
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(valcraft_tests)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(valcraft_regenerate_block_texture_tiles
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_block_texture_tiles.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Regenerating baked block texture tiles from Textures/*.png"
+        VERBATIM
+    )
+endif()
+
 add_custom_target(valcraft_check_build
     DEPENDS
         ValCraft

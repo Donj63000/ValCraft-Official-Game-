@@ -1,4 +1,5 @@
 #include "world/BlockVisuals.h"
+#include "world/GeneratedBlockTextureTiles.h"
 
 #include <algorithm>
 #include <array>
@@ -88,193 +89,58 @@ void fill_tile(std::vector<std::uint8_t>& pixels,
     }
 }
 
-auto bark_value(int x, int y, int seed, float base) noexcept -> float {
-    const auto stripe = std::sin((static_cast<float>(x) + tile_noise(x, y, seed) * 2.3F) * 1.3F);
-    const auto fiber = tile_noise(x, y, seed + 7) * 16.0F;
-    return base + stripe * 8.0F + fiber;
+auto unpack_packed_rgba(std::uint32_t packed_rgba) noexcept -> std::array<std::uint8_t, 4> {
+    return {
+        static_cast<std::uint8_t>((packed_rgba >> 24U) & 0xFFU),
+        static_cast<std::uint8_t>((packed_rgba >> 16U) & 0xFFU),
+        static_cast<std::uint8_t>((packed_rgba >> 8U) & 0xFFU),
+        static_cast<std::uint8_t>(packed_rgba & 0xFFU),
+    };
+}
+
+void blit_packed_tile(std::vector<std::uint8_t>& pixels,
+                      int tile_x,
+                      int tile_y,
+                      const generated_block_texture_tiles::PackedTile& tile) {
+    const auto start_x = tile_x * kBlockAtlasTileSize;
+    const auto start_y = tile_y * kBlockAtlasTileSize;
+    for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+        for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+            const auto packed = tile[static_cast<std::size_t>(y * kBlockAtlasTileSize + x)];
+            set_texel(pixels, start_x + x, start_y + y, unpack_packed_rgba(packed));
+        }
+    }
 }
 
 } // namespace
 
 auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
+    using namespace generated_block_texture_tiles;
+
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4), 0);
 
-    fill_tile(pixels, 0, 0, [](int x, int y) {
-        const auto noise = tile_noise(x, y, 1);
-        const auto flower = radial_falloff(static_cast<float>(x), static_cast<float>(y), 4.5F, 5.0F, 2.2F) * 30.0F;
-        const auto bright = radial_falloff(static_cast<float>(x), static_cast<float>(y), 11.0F, 10.0F, 2.6F) * 24.0F;
-        return make_rgba(
-            52.0F + noise * 16.0F + bright * 0.08F,
-            116.0F + noise * 38.0F + flower * 0.55F + bright * 0.80F,
-            36.0F + noise * 12.0F + flower * 0.05F,
-            255.0F);
-    });
-    fill_tile(pixels, 1, 0, [](int x, int y) {
-        if (y < 4) {
-            const auto dew = ((x + y) % 5 == 0) ? 12.0F : 0.0F;
-            return make_rgba(56.0F, 146.0F + dew, 46.0F, 255.0F);
-        }
-        const auto soil = tile_noise(x, y, 2);
-        const auto roots = (x % 5 == 0 && y > 6) ? 18.0F : 0.0F;
-        return make_rgba(
-            108.0F + soil * 26.0F,
-            78.0F + soil * 14.0F + roots * 0.15F,
-            44.0F + soil * 10.0F,
-            255.0F);
-    });
-    fill_tile(pixels, 2, 0, [](int x, int y) {
-        const auto soil = tile_noise(x, y, 3);
-        return make_rgba(101.0F + soil * 30.0F, 71.0F + soil * 19.0F, 43.0F + soil * 12.0F, 255.0F);
-    });
-    fill_tile(pixels, 3, 0, [](int x, int y) {
-        const auto stone = tile_noise(x, y, 4);
-        const auto crack = (std::abs(x - y) <= 1 || std::abs((x + y) - 14) <= 1) ? 18.0F : 0.0F;
-        return make_rgba(
-            98.0F + stone * 36.0F - crack,
-            101.0F + stone * 35.0F - crack,
-            106.0F + stone * 38.0F - crack * 0.5F,
-            255.0F);
-    });
-    fill_tile(pixels, 4, 0, [](int x, int y) {
-        const auto grain = tile_noise(x, y, 5);
-        const auto dune = std::sin((static_cast<float>(x) + static_cast<float>(y) * 0.5F) * 0.55F) * 5.0F;
-        return make_rgba(
-            198.0F + grain * 25.0F + dune,
-            183.0F + grain * 18.0F + dune * 0.6F,
-            126.0F + grain * 16.0F,
-            255.0F);
-    });
-    fill_tile(pixels, 5, 0, [](int x, int y) {
-        const auto cell_x = x / 4;
-        const auto cell_y = y / 4;
-        const auto mortar = (x % 4 == 0 || y % 4 == 0) ? 26.0F : 0.0F;
-        const auto stone = tile_noise(cell_x, cell_y, 6) * 32.0F;
-        return make_rgba(104.0F + stone - mortar, 107.0F + stone - mortar, 112.0F + stone - mortar * 0.6F, 255.0F);
-    });
-    fill_tile(pixels, 6, 0, [](int x, int y) {
-        const auto pebble = radial_falloff(static_cast<float>(x), static_cast<float>(y), 4.0F, 5.0F, 3.0F) * 22.0F;
-        const auto pebble_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 11.0F, 10.0F, 3.2F) * 18.0F;
-        const auto grain = tile_noise(x, y, 7);
-        return make_rgba(
-            116.0F + grain * 34.0F + pebble - pebble_b * 0.35F,
-            113.0F + grain * 28.0F + pebble_b * 0.45F,
-            108.0F + grain * 24.0F,
-            255.0F);
-    });
-    fill_tile(pixels, 7, 0, [](int x, int y) {
-        const auto stone = tile_noise(x, y, 8);
-        const auto moss = saturate(tile_noise(x + 3, y + 5, 9) * 1.25F - 0.42F);
-        return make_rgba(
-            90.0F + stone * 30.0F - moss * 18.0F,
-            97.0F + stone * 28.0F + moss * 44.0F,
-            94.0F + stone * 31.0F - moss * 12.0F,
-            255.0F);
-    });
+    // The terrain family below is baked from the authored PNG sources in Textures/.
+    // The renderer and mesher still consume the exact same 8x8 block atlas as before.
+    blit_packed_tile(pixels, 0, 0, kGrassTopTile);
+    blit_packed_tile(pixels, 1, 0, kGrassSideTile);
+    blit_packed_tile(pixels, 2, 0, kDirtTile);
+    blit_packed_tile(pixels, 3, 0, kStoneTile);
+    blit_packed_tile(pixels, 4, 0, kSandTile);
+    blit_packed_tile(pixels, 5, 0, kCobblestoneTile);
+    blit_packed_tile(pixels, 6, 0, kGravelTile);
+    blit_packed_tile(pixels, 7, 0, kMossyStoneTile);
 
-    fill_tile(pixels, 0, 1, [](int x, int y) {
-        const auto bark = bark_value(x, y, 10, 82.0F);
-        const auto knot = radial_falloff(static_cast<float>(x), static_cast<float>(y), 5.0F, 10.5F, 2.1F) * 10.0F;
-        const auto highlight = ((x + y) % 5 == 0) ? 4.0F : 0.0F;
-        return make_rgba(
-            bark + 30.0F - knot * 0.25F + highlight,
-            bark + 10.0F - knot * 0.45F + highlight * 0.6F,
-            bark - 22.0F - knot * 0.7F,
-            255.0F);
-    });
-    fill_tile(pixels, 1, 1, [](int x, int y) {
-        const auto dx = static_cast<float>(x) - 7.5F;
-        const auto dy = static_cast<float>(y) - 7.5F;
-        const auto rings = std::sin(std::sqrt(dx * dx + dy * dy) * 1.8F) * 7.0F;
-        const auto grain = tile_noise(x, y, 11) * 14.0F;
-        return make_rgba(150.0F + rings + grain, 111.0F + rings * 0.7F + grain * 0.7F, 70.0F + rings * 0.5F, 255.0F);
-    });
-    fill_tile(pixels, 2, 1, [](int x, int y) {
-        const auto plank_band = ((y / 5) % 2 == 0) ? 0.0F : -12.0F;
-        const auto seam = (y == 5 || y == 10) ? 24.0F : 0.0F;
-        const auto knot = radial_falloff(static_cast<float>(x), static_cast<float>(y), 4.0F, 11.0F, 2.4F) * 14.0F;
-        const auto grain = tile_noise(x, y, 12) * 12.0F;
-        return make_rgba(
-            150.0F + plank_band + grain - seam - knot * 0.35F,
-            113.0F + plank_band * 0.8F + grain * 0.8F - seam - knot * 0.28F,
-            70.0F + grain * 0.5F - knot * 0.12F,
-            255.0F);
-    });
-    fill_tile(pixels, 3, 1, [](int x, int y) {
-        const auto leaf = tile_noise(x, y, 13);
-        const auto lobe_a = radial_falloff(static_cast<float>(x), static_cast<float>(y), 4.6F, 5.2F, 6.3F);
-        const auto lobe_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 11.1F, 5.7F, 6.1F);
-        const auto lobe_c = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.8F, 11.1F, 6.4F);
-        const auto canopy = std::max({lobe_a, lobe_b * 0.96F, lobe_c * 0.92F});
-        const auto canopy_density = saturate(canopy * 0.78F + leaf * 0.34F);
-        const auto branch = ((std::abs(x - 7) <= 1) && y > 7) ||
-                            (y >= 7 && y <= 9 && x >= 4 && x <= 11 && ((x + y) % 3 != 0));
-        const auto top_light = 1.0F - static_cast<float>(y) / 15.0F;
-        const auto rim_shadow = saturate((0.42F - canopy) * 1.8F);
-        const auto vein = ((x + y) % 5 == 0) ? 1.0F : 0.0F;
-        const auto sparkle = tile_noise(x + 4, y + 7, 33);
-        const auto base_r = 42.0F + canopy_density * 16.0F + top_light * 7.0F - rim_shadow * 8.0F;
-        const auto base_g = 88.0F + canopy_density * 44.0F + top_light * 20.0F - rim_shadow * 18.0F;
-        const auto base_b = 31.0F + canopy_density * 14.0F + top_light * 5.0F - rim_shadow * 5.0F;
-        const auto branch_shadow = branch ? 16.0F : 0.0F;
-        const auto vein_highlight = vein * (3.0F + sparkle * 3.0F);
-        return make_rgba(
-            base_r - branch_shadow * 0.35F + vein_highlight * 0.25F,
-            base_g - branch_shadow + vein_highlight,
-            base_b - branch_shadow * 0.22F,
-            255.0F);
-    });
-    fill_tile(pixels, 4, 1, [](int x, int y) {
-        const auto bark = bark_value(x, y, 14, 72.0F);
-        const auto resin = radial_falloff(static_cast<float>(x), static_cast<float>(y), 10.5F, 4.0F, 1.9F) * 8.0F;
-        return make_rgba(bark + 20.0F + resin, bark + 8.0F + resin * 0.5F, bark - 18.0F - resin * 0.35F, 255.0F);
-    });
-    fill_tile(pixels, 5, 1, [](int x, int y) {
-        const auto dx = static_cast<float>(x) - 7.5F;
-        const auto dy = static_cast<float>(y) - 7.5F;
-        const auto rings = std::sin(std::sqrt(dx * dx + dy * dy) * 1.7F) * 6.0F;
-        const auto grain = tile_noise(x, y, 15) * 10.0F;
-        return make_rgba(128.0F + rings + grain, 100.0F + rings * 0.8F, 72.0F + rings * 0.5F, 255.0F);
-    });
-    fill_tile(pixels, 6, 1, [](int x, int y) {
-        const auto leaf = tile_noise(x, y, 16);
-        float half_width = 3.0F;
-        if (y >= 3 && y < 6) {
-            half_width = 4.8F;
-        } else if (y >= 6 && y < 10) {
-            half_width = 6.6F;
-        } else if (y >= 10 && y < 13) {
-            half_width = 5.4F;
-        } else if (y >= 13) {
-            half_width = 3.8F;
-        }
-        const auto profile = saturate(1.0F - std::abs(static_cast<float>(x) - 7.5F) / std::max(half_width, 0.001F));
-        const auto top_light = 1.0F - static_cast<float>(y) / 15.0F;
-        const auto spine = saturate(1.0F - std::abs(static_cast<float>(x) - 7.5F) / 2.4F);
-        const auto needle_bands = 0.5F + 0.5F * std::sin((static_cast<float>(x) * 0.88F + static_cast<float>(y) * 0.52F) * 1.6F);
-        const auto layered_needles = 0.5F + 0.5F * std::cos((static_cast<float>(y) * 0.72F - static_cast<float>(x) * 0.24F) * 1.8F);
-        const auto dense_cluster = saturate(profile * 0.72F + spine * 0.20F + leaf * 0.18F);
-        const auto edge_shadow = saturate((0.34F - profile) * 2.2F);
-        const auto tip_glow = saturate((12.0F - static_cast<float>(y)) / 12.0F) * 0.22F;
-        return make_rgba(
-            26.0F + dense_cluster * 12.0F + needle_bands * 3.0F + tip_glow * 10.0F - edge_shadow * 7.0F,
-            70.0F + dense_cluster * 34.0F + layered_needles * 8.0F + top_light * 8.0F + tip_glow * 16.0F - edge_shadow * 16.0F,
-            28.0F + dense_cluster * 13.0F + needle_bands * 2.5F + tip_glow * 5.0F - edge_shadow * 6.0F,
-            255.0F);
-    });
+    blit_packed_tile(pixels, 0, 1, kWoodSideTile);
+    blit_packed_tile(pixels, 1, 1, kWoodTopTile);
+    blit_packed_tile(pixels, 2, 1, kPlanksTile);
+    blit_packed_tile(pixels, 3, 1, kLeavesTile);
+    blit_packed_tile(pixels, 4, 1, kPineWoodSideTile);
+    blit_packed_tile(pixels, 5, 1, kPineWoodTopTile);
+    blit_packed_tile(pixels, 6, 1, kPineLeavesTile);
 
-    fill_tile(pixels, 0, 2, [](int x, int y) {
-        const auto snow = tile_noise(x, y, 17);
-        const auto sparkle = ((x + y) % 7 == 0) ? 10.0F : 0.0F;
-        return make_rgba(224.0F + snow * 26.0F + sparkle, 232.0F + snow * 20.0F + sparkle, 239.0F + snow * 18.0F, 255.0F);
-    });
-    fill_tile(pixels, 1, 2, [](int x, int y) {
-        if (y < 6) {
-            const auto snow = tile_noise(x, y, 18);
-            return make_rgba(221.0F + snow * 18.0F, 229.0F + snow * 15.0F, 236.0F + snow * 14.0F, 255.0F);
-        }
-        const auto soil = tile_noise(x, y, 19);
-        return make_rgba(106.0F + soil * 26.0F, 77.0F + soil * 16.0F, 43.0F + soil * 10.0F, 255.0F);
-    });
+    blit_packed_tile(pixels, 0, 2, kSnowTopTile);
+    blit_packed_tile(pixels, 1, 2, kSnowSideTile);
+
     fill_tile(pixels, 5, 2, [](int x, int y) {
         const auto rib = (x % 4 == 0) ? -18.0F : 0.0F;
         const auto thorn = (y % 5 == 2 && (x % 4 == 1 || x % 4 == 3)) ? 10.0F : 0.0F;
