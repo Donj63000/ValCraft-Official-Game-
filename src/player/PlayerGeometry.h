@@ -22,6 +22,15 @@ enum class PlayerAtlasTile : std::uint8_t {
     Eye = 5,
     Mouth = 6,
     Hurt = 7,
+    SkinShadow = 8,
+    HairShadow = 9,
+    ShirtShadow = 10,
+    PantsShadow = 11,
+    Sole = 12,
+    Sleeve = 13,
+    Belt = 14,
+    Face = 15,
+    Count = 16,
 };
 
 [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;

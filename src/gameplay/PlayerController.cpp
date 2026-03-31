@@ -45,6 +45,13 @@ constexpr float kMaxCollisionStep = 0.45F;
 constexpr float kBodyYawMoveThreshold = 0.15F;
 constexpr float kBodyYawMoveTurnSpeed = 540.0F;
 constexpr float kBodyYawIdleTurnSpeed = 360.0F;
+constexpr float kPrimaryActionDuration = 0.22F;
+constexpr float kSecondaryActionDuration = 0.16F;
+constexpr float kLandingAnimationDuration = 0.20F;
+constexpr float kStepPhaseGroundDistanceScale = 9.8F;
+constexpr float kStepPhaseAirDistanceScale = 4.0F;
+constexpr float kStepPhaseSwimDistanceScale = 7.4F;
+constexpr float kTwoPi = 6.28318530717958647692F;
 
 auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
     const auto horizontal = glm::vec3 {vector.x, 0.0F, vector.z};
@@ -83,18 +90,37 @@ PlayerController::PlayerController(glm::vec3 spawn_position) {
 }
 
 void PlayerController::update(const PlayerInput& input, float dt, const World& world) {
+    const auto clamped_dt = std::max(dt, 0.0F);
+
     if (state_.dead) {
         state_.velocity = {};
-        state_.hurt_timer = std::max(0.0F, state_.hurt_timer - std::max(dt, 0.0F));
+        state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
+        state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
         return;
     }
 
-    const auto clamped_dt = std::max(dt, 0.0F);
     const auto was_on_ground = state_.on_ground;
     const auto water_contact_before_move = sample_water_contact(world, state_.position);
+    state_.animation_time += clamped_dt;
     state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
     state_.damage_cooldown = std::max(0.0F, state_.damage_cooldown - clamped_dt);
     state_.regen_delay = std::max(0.0F, state_.regen_delay - clamped_dt);
+    state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
+
+    const auto advance_action_progress = [clamped_dt](float& progress, bool& active, float duration) {
+        if (!active) {
+            return;
+        }
+
+        progress = std::min(1.0F, progress + clamped_dt / std::max(duration, 1.0e-4F));
+        if (progress >= 1.0F) {
+            progress = 0.0F;
+            active = false;
+        }
+    };
+    advance_action_progress(state_.primary_action_progress, state_.primary_action_active, kPrimaryActionDuration);
+    advance_action_progress(state_.secondary_action_progress, state_.secondary_action_active, kSecondaryActionDuration);
+
     state_.on_ground = false;
 
     if (input.toggle_fly) {
@@ -178,17 +204,20 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.position.x - start_position.x,
         state_.position.z - start_position.z,
     };
+    const auto horizontal_distance = glm::length(horizontal_displacement);
     const auto water_contact_after_move = sample_water_contact(world, state_.position);
+    auto landed_in_water = false;
 
     if (!state_.fly_mode) {
         state_.on_ground = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
         if (state_.on_ground && !was_on_ground) {
-            const auto landed_in_water =
+            landed_in_water =
                 water_contact_after_move.feet_in_water || water_contact_after_move.body_in_water || water_contact_after_move.head_in_water;
             const auto fall_distance = state_.fall_start_y - state_.position.y;
             if (!landed_in_water && fall_distance > kFallDamageThreshold) {
                 apply_damage(std::ceil(fall_distance - 3.0F), PlayerDeathCause::Fall, true);
             }
+            state_.landing_impact = landed_in_water ? 0.0F : 1.0F;
         }
         if (state_.on_ground && state_.velocity.y < 0.0F) {
             state_.velocity.y = 0.0F;
@@ -200,6 +229,23 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         }
     } else {
         state_.fall_start_y = state_.position.y;
+    }
+
+    const auto step_phase_scale = water_contact_after_move.swimming
+                                      ? kStepPhaseSwimDistanceScale
+                                      : (state_.on_ground ? kStepPhaseGroundDistanceScale : kStepPhaseAirDistanceScale);
+    state_.step_phase += horizontal_distance * step_phase_scale;
+    if (state_.step_phase >= kTwoPi || state_.step_phase <= -kTwoPi) {
+        state_.step_phase = std::remainder(state_.step_phase, kTwoPi);
+    }
+    if (state_.step_phase < 0.0F) {
+        state_.step_phase += kTwoPi;
+    }
+
+    if (!state_.fly_mode && !state_.on_ground && !water_contact_after_move.swimming) {
+        state_.airborne_time += clamped_dt;
+    } else {
+        state_.airborne_time = 0.0F;
     }
 
     update_body_yaw(clamped_dt, horizontal_displacement);
@@ -259,6 +305,24 @@ void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
 
 void PlayerController::set_selected_block(BlockId block_id) noexcept {
     selected_block_ = block_id;
+}
+
+void PlayerController::trigger_primary_action() noexcept {
+    if (state_.dead) {
+        return;
+    }
+
+    state_.primary_action_active = true;
+    state_.primary_action_progress = 0.0F;
+}
+
+void PlayerController::trigger_secondary_action() noexcept {
+    if (state_.dead) {
+        return;
+    }
+
+    state_.secondary_action_active = true;
+    state_.secondary_action_progress = 0.0F;
 }
 
 void PlayerController::respawn(const glm::vec3& position) noexcept {
@@ -521,6 +585,11 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
         state_.velocity = {};
         state_.head_underwater = false;
         state_.swimming = false;
+        state_.primary_action_active = false;
+        state_.secondary_action_active = false;
+        state_.primary_action_progress = 0.0F;
+        state_.secondary_action_progress = 0.0F;
+        state_.landing_impact = 0.0F;
     }
 }
 

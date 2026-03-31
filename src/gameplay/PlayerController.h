@@ -53,6 +53,8 @@ struct PlayerState {
     float yaw_degrees = -90.0F;
     float pitch_degrees = -18.0F;
     float body_yaw_degrees = -90.0F;
+    float animation_time = 0.0F;
+    float step_phase = 0.0F;
     float health = 20.0F;
     float air_seconds = 10.0F;
     float hurt_timer = 0.0F;
@@ -61,10 +63,16 @@ struct PlayerState {
     float regen_tick_timer = 0.0F;
     float drowning_tick_timer = 0.0F;
     float fall_start_y = 70.0F;
+    float primary_action_progress = 0.0F;
+    float secondary_action_progress = 0.0F;
+    float landing_impact = 0.0F;
+    float airborne_time = 0.0F;
     bool on_ground = false;
     bool fly_mode = false;
     bool head_underwater = false;
     bool swimming = false;
+    bool primary_action_active = false;
+    bool secondary_action_active = false;
     bool dead = false;
     PlayerDeathCause death_cause = PlayerDeathCause::None;
 };
@@ -93,6 +101,8 @@ public:
     void set_position(const glm::vec3& position) noexcept;
     void set_velocity(const glm::vec3& velocity) noexcept;
     void set_selected_block(BlockId block_id) noexcept;
+    void trigger_primary_action() noexcept;
+    void trigger_secondary_action() noexcept;
     void respawn(const glm::vec3& position) noexcept;
     void apply_external_damage(float amount, PlayerDeathCause cause) noexcept;
 

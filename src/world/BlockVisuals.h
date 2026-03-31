@@ -134,7 +134,13 @@ enum class BlockVisualMaterial : std::uint8_t {
         }
         return {7, 2};
     case BlockType::Torch:
-        return {0, 3};
+        if (face == BlockVisualFace::PositiveY) {
+            return {7, 3};
+        }
+        if (face == BlockVisualFace::NegativeY) {
+            return {0, 4};
+        }
+        return {6, 3};
     case BlockType::TallGrass:
         return {1, 3};
     case BlockType::RedFlower:
@@ -159,6 +165,8 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {1, 2};
     case BlockType::Water:
         return {7, 2};
+    case BlockType::Torch:
+        return {0, 3};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }

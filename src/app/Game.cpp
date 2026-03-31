@@ -550,6 +550,13 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         input.look_delta_x = mouse_captured_ ? std::exchange(pending_look_x_, 0.0F) : 0.0F;
         input.look_delta_y = mouse_captured_ ? std::exchange(pending_look_y_, 0.0F) : 0.0F;
 
+        if (!inventory_visible_ && pending_break_block_) {
+            player_.trigger_primary_action();
+        }
+        if (!inventory_visible_ && pending_place_block_) {
+            player_.trigger_secondary_action();
+        }
+
         player_.update(input, dt, world_);
 
         if (!inventory_visible_ && pending_break_block_) {

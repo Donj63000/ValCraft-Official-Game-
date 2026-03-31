@@ -166,14 +166,91 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
     });
 
     fill_tile(pixels, 0, 3, [](int x, int y) {
-        const auto flame = (y < 5 && x > 4 && x < 11) ? 52.0F : 0.0F;
-        const auto ember = (y < 3 && x > 5 && x < 10) ? 36.0F : 0.0F;
-        const auto shaft = (x > 6 && x < 10 && y > 3) ? 1.0F : 0.0F;
+        const auto head = y >= 1 && y <= 5 && x >= 5 && x <= 10;
+        const auto shaft = y >= 6 && x >= 6 && x <= 9;
+        const auto white_core = y >= 2 && y <= 3 && x >= 6 && x <= 9;
+        const auto hot_band = y >= 3 && y <= 4 && x >= 5 && x <= 10;
+        const auto shaft_ring = shaft && (y == 9 || y == 12);
+
+        if (head) {
+            const auto edge_shadow = (x == 5 || x == 10 || y == 1 || y == 5) ? -18.0F : 0.0F;
+            if (white_core) {
+                return make_rgba(252.0F + edge_shadow * 0.35F, 244.0F + edge_shadow * 0.25F, 196.0F, 255.0F);
+            }
+            const auto glow = hot_band ? 18.0F : 0.0F;
+            return make_rgba(230.0F + glow + edge_shadow, 188.0F + glow * 0.6F + edge_shadow * 0.35F, 76.0F + glow * 0.22F, 255.0F);
+        }
+        if (shaft) {
+            const auto side_shadow = (x == 6 || x == 9) ? -18.0F : 0.0F;
+            const auto center_highlight = (x == 7 || x == 8) ? 12.0F : 0.0F;
+            const auto ring = shaft_ring ? 10.0F : 0.0F;
+            const auto grain = ((x + y) % 4 == 0) ? 5.0F : 0.0F;
+            return make_rgba(
+                86.0F + side_shadow + center_highlight + ring + grain,
+                58.0F + side_shadow * 0.45F + center_highlight * 0.32F + ring * 0.35F + grain * 0.4F,
+                30.0F + center_highlight * 0.12F + grain * 0.25F,
+                255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 6, 3, [](int x, int y) {
+        const auto head = y <= 4;
+        if (head) {
+            const auto edge_shadow = (x <= 1 || x >= 14 || y == 4) ? -24.0F : 0.0F;
+            const auto hot_core = (x >= 4 && x <= 11 && y >= 1 && y <= 3) ? 18.0F : 0.0F;
+            const auto white_core = (x >= 6 && x <= 9 && y >= 2 && y <= 3) ? 34.0F : 0.0F;
+            return make_rgba(
+                216.0F + hot_core + white_core * 0.65F + edge_shadow,
+                170.0F + hot_core * 0.72F + white_core * 0.82F + edge_shadow * 0.30F,
+                72.0F + hot_core * 0.28F + white_core * 0.55F,
+                255.0F);
+        }
+
+        const auto lower_shadow = y >= 12 ? -8.0F : 0.0F;
+        const auto side_shadow = (x <= 1 || x >= 14) ? -14.0F : 0.0F;
+        const auto center_highlight = (x >= 7 && x <= 9) ? 10.0F : 0.0F;
+        const auto strap = (y == 8 || y == 11) ? 8.0F : 0.0F;
+        const auto grain = ((x + y) % 5 == 0) ? 5.0F : 0.0F;
         return make_rgba(
-            shaft > 0.5F ? 140.0F + flame : 22.0F + flame + ember,
-            shaft > 0.5F ? 98.0F + flame * 0.4F : 18.0F + flame * 0.8F,
-            shaft > 0.5F ? 54.0F : 14.0F,
-            shaft > 0.5F || flame > 0.0F ? 255.0F : 0.0F);
+            90.0F + lower_shadow + side_shadow + center_highlight + strap + grain,
+            60.0F + lower_shadow * 0.55F + side_shadow * 0.45F + center_highlight * 0.35F + strap * 0.30F + grain * 0.4F,
+            40.0F + side_shadow * 0.18F + grain * 0.22F,
+            255.0F);
+    });
+    fill_tile(pixels, 7, 3, [](int x, int y) {
+        const auto edge = std::max(std::abs(x - 7), std::abs(y - 7));
+        const auto white_core = x >= 5 && x <= 10 && y >= 5 && y <= 10;
+        const auto hot_ring = x >= 3 && x <= 12 && y >= 3 && y <= 12;
+        const auto outer = x >= 1 && x <= 14 && y >= 1 && y <= 14;
+
+        if (white_core) {
+            const auto center_boost = edge <= 1 ? 10.0F : 0.0F;
+            return make_rgba(252.0F + center_boost, 244.0F + center_boost * 0.75F, 198.0F + center_boost * 0.45F, 255.0F);
+        }
+        if (hot_ring) {
+            const auto edge_shadow = edge >= 4 ? -12.0F : 0.0F;
+            return make_rgba(234.0F + edge_shadow, 186.0F + edge_shadow * 0.45F, 72.0F + edge_shadow * 0.18F, 255.0F);
+        }
+        if (outer) {
+            return make_rgba(158.0F, 104.0F, 36.0F, 255.0F);
+        }
+        return make_rgba(66.0F, 44.0F, 24.0F, 255.0F);
+    });
+    fill_tile(pixels, 0, 4, [](int x, int y) {
+        const auto border = x == 0 || x == 15 || y == 0 || y == 15;
+        const auto cap = x >= 4 && x <= 11 && y >= 4 && y <= 11;
+        const auto notch = x >= 6 && x <= 9 && y >= 6 && y <= 9;
+        const auto grain = ((x + y) % 6 == 0) ? 4.0F : 0.0F;
+        if (border) {
+            return make_rgba(48.0F, 30.0F, 16.0F, 255.0F);
+        }
+        if (notch) {
+            return make_rgba(60.0F, 38.0F, 18.0F, 255.0F);
+        }
+        if (cap) {
+            return make_rgba(78.0F + grain, 50.0F + grain * 0.45F, 26.0F + grain * 0.25F, 255.0F);
+        }
+        return make_rgba(68.0F + grain, 44.0F + grain * 0.45F, 22.0F + grain * 0.25F, 255.0F);
     });
     fill_tile(pixels, 1, 3, [](int x, int y) {
         const auto stem = ((x == 7) || (x == 8)) && y > 5;

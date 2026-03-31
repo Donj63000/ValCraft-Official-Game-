@@ -629,7 +629,7 @@ TEST_CASE("player body yaw follows real movement and eases back toward the camer
     }
 }
 
-TEST_CASE("player geometry only appears when looking down and stays safely below the eyes") {
+TEST_CASE("player geometry shows a presentation arm forward and a full body when looking down") {
     World world(156, 1);
     test::make_chunk_empty(world, {0, 0});
     test::make_flat_floor(world, -4, 4, 0, -4, 4);
@@ -664,16 +664,40 @@ TEST_CASE("player geometry only appears when looking down and stays safely below
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[2] > player_tile_average_rgba(atlas, PlayerAtlasTile::Pants)[2]);
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hair)[0] < player_tile_average_rgba(atlas, PlayerAtlasTile::Skin)[0]);
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hurt)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[0] + 80.0F);
+    CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Face)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::HairShadow)[0]);
 
-    CHECK(forward_mesh.empty());
-    CHECK(slightly_down_mesh.empty());
+    CHECK_FALSE(forward_mesh.empty());
+    CHECK_FALSE(slightly_down_mesh.empty());
     CHECK_FALSE(down_mesh.empty());
     CHECK_FALSE(clean_down_mesh.empty());
     CHECK(meshes_match_exactly(down_mesh, down_mesh_repeat));
     CHECK_FALSE(meshes_match_exactly(down_mesh, clean_down_mesh));
-    CHECK(down_mesh.part_count == 5);
-    CHECK(down_bounds.max.y < looking_down.eye_position().y - 0.12F);
-    CHECK(down_bounds.min.y > looking_down.position().y + 0.80F);
+    CHECK(forward_mesh.part_count >= 3);
+    CHECK(slightly_down_mesh.part_count == forward_mesh.part_count);
+    CHECK(down_mesh.part_count >= 10);
+    CHECK(down_mesh.part_count > forward_mesh.part_count);
+    CHECK(down_bounds.max.y < looking_down.eye_position().y - 0.10F);
+    CHECK(down_bounds.min.y > looking_down.position().y - 0.08F);
+}
+
+TEST_CASE("player avatar action triggers deterministically change the first person pose") {
+    PlayerController idle_player({0.5F, 1.001F, 0.5F});
+    PlayerController mining_player({0.5F, 1.001F, 0.5F});
+    PlayerController placing_player({0.5F, 1.001F, 0.5F});
+
+    mining_player.trigger_primary_action();
+    placing_player.trigger_secondary_action();
+
+    const auto idle_mesh = build_player_mesh(idle_player);
+    const auto mining_mesh = build_player_mesh(mining_player);
+    const auto placing_mesh = build_player_mesh(placing_player);
+
+    CHECK_FALSE(idle_mesh.empty());
+    CHECK_FALSE(mining_mesh.empty());
+    CHECK_FALSE(placing_mesh.empty());
+    CHECK_FALSE(meshes_match_exactly(idle_mesh, mining_mesh));
+    CHECK_FALSE(meshes_match_exactly(idle_mesh, placing_mesh));
+    CHECK_FALSE(meshes_match_exactly(mining_mesh, placing_mesh));
 }
 
 } // namespace valcraft

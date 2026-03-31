@@ -264,6 +264,69 @@ TEST_CASE("water top atlas tile wraps seamlessly across both axes") {
     }
 }
 
+TEST_CASE("torch atlas separates the icon from world faces and keeps a warm readable head") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto icon_tile = block_hotbar_tile(to_block_id(BlockType::Torch));
+    const auto side_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::PositiveX);
+    const auto top_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::PositiveY);
+    const auto bottom_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::NegativeY);
+
+    CHECK(icon_tile != side_tile);
+    CHECK(side_tile != top_tile);
+    CHECK(side_tile != bottom_tile);
+    CHECK(top_tile != bottom_tile);
+
+    const auto sample_alpha = [&](const BlockAtlasTile& tile, int local_x, int local_y) {
+        const auto atlas_x = tile.x * kBlockAtlasTileSize + local_x;
+        const auto atlas_y = tile.y * kBlockAtlasTileSize + local_y;
+        return pixels[static_cast<std::size_t>((atlas_y * kBlockAtlasSize + atlas_x) * 4 + 3)];
+    };
+    const auto sample_region_average = [&](const BlockAtlasTile& tile, int y_begin, int y_end) {
+        std::array<float, 4> sum {0.0F, 0.0F, 0.0F, 0.0F};
+        auto sample_count = 0.0F;
+        for (int y = y_begin; y < y_end; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto atlas_x = tile.x * kBlockAtlasTileSize + x;
+                const auto atlas_y = tile.y * kBlockAtlasTileSize + y;
+                const auto pixel_index = static_cast<std::size_t>((atlas_y * kBlockAtlasSize + atlas_x) * 4);
+                sum[0] += static_cast<float>(pixels[pixel_index + 0]);
+                sum[1] += static_cast<float>(pixels[pixel_index + 1]);
+                sum[2] += static_cast<float>(pixels[pixel_index + 2]);
+                sum[3] += static_cast<float>(pixels[pixel_index + 3]);
+                sample_count += 1.0F;
+            }
+        }
+        return std::array<float, 4> {
+            sum[0] / sample_count,
+            sum[1] / sample_count,
+            sum[2] / sample_count,
+            sum[3] / sample_count,
+        };
+    };
+    const auto sample_tile_average = [&](const BlockAtlasTile& tile) {
+        return sample_region_average(tile, 0, kBlockAtlasTileSize);
+    };
+
+    CHECK(sample_alpha(icon_tile, 0, 0) == 0);
+    CHECK(sample_alpha(icon_tile, 15, 15) == 0);
+    CHECK(sample_alpha(icon_tile, 8, 10) == 255);
+    CHECK(sample_alpha(icon_tile, 8, 1) == 255);
+
+    const auto side_head = sample_region_average(side_tile, 0, 5);
+    const auto side_shaft = sample_region_average(side_tile, 9, 16);
+    const auto top_average = sample_tile_average(top_tile);
+    const auto bottom_average = sample_tile_average(bottom_tile);
+
+    CHECK(side_head[0] > side_shaft[0] + 45.0F);
+    CHECK(side_head[1] > side_shaft[1] + 35.0F);
+    CHECK(top_average[0] > bottom_average[0] + 55.0F);
+    CHECK(top_average[1] > bottom_average[1] + 35.0F);
+    CHECK(bottom_average[0] > bottom_average[1]);
+    CHECK(bottom_average[1] > bottom_average[2]);
+}
+
 TEST_CASE("tree foliage atlas tiles stay solid and opaque") {
     const auto pixels = build_block_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
@@ -722,10 +785,42 @@ TEST_CASE("chunk mesher handles isolated high blocks without losing geometry") {
     ChunkMesher mesher {};
     const auto mesh = mesher.build_mesh(world, {0, 0});
 
-    CHECK(mesh.face_count == 6);
-    CHECK(mesh.vertices.size() == 24);
-    CHECK(mesh.indices.size() == 36);
+    CHECK(mesh.face_count == 10);
+    CHECK(mesh.vertices.size() == 40);
+    CHECK(mesh.indices.size() == 60);
     CHECK(mesh.water_face_count == 0);
+    REQUIRE_FALSE(mesh.vertices.empty());
+
+    auto min_x = mesh.vertices.front().x;
+    auto max_x = mesh.vertices.front().x;
+    auto min_y = mesh.vertices.front().y;
+    auto max_y = mesh.vertices.front().y;
+    auto min_z = mesh.vertices.front().z;
+    auto max_z = mesh.vertices.front().z;
+    for (const auto& vertex : mesh.vertices) {
+        min_x = std::min(min_x, vertex.x);
+        max_x = std::max(max_x, vertex.x);
+        min_y = std::min(min_y, vertex.y);
+        max_y = std::max(max_y, vertex.y);
+        min_z = std::min(min_z, vertex.z);
+        max_z = std::max(max_z, vertex.z);
+    }
+
+    const auto wood_material = block_visual_material_value(BlockVisualMaterial::Wood);
+    const auto emissive_material = block_visual_material_value(BlockVisualMaterial::Emissive);
+    CHECK(std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [&](const ChunkVertex& vertex) {
+        return vertex.material_class == doctest::Approx(wood_material);
+    }));
+    CHECK(std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [&](const ChunkVertex& vertex) {
+        return vertex.material_class == doctest::Approx(emissive_material);
+    }));
+
+    CHECK(min_x == doctest::Approx(2.375F));
+    CHECK(max_x == doctest::Approx(2.625F));
+    CHECK(min_y == doctest::Approx(96.0F));
+    CHECK(max_y == doctest::Approx(96.875F));
+    CHECK(min_z == doctest::Approx(2.375F));
+    CHECK(max_z == doctest::Approx(2.625F));
 }
 
 TEST_CASE("sky light stays at 15 until the first opaque block and 0 below it") {

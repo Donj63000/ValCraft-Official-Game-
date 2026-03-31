@@ -409,26 +409,13 @@ void append_indices(ChunkMeshData& mesh, std::uint32_t base_index, bool flip_dia
 void append_face_geometry(
     ChunkMeshData& mesh,
     const FaceDefinition& definition,
-    const BlockAtlasTile& tile,
     const std::array<std::array<float, 3>, 4>& positions,
+    const std::array<std::array<float, 2>, 4>& uvs,
     const std::array<float, 4>& ao_values,
     const std::array<float, 4>& sky_values,
     const std::array<float, 4>& block_values,
     float material_class) {
-    const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
-    const auto u0 = static_cast<float>(tile.x) * uv_step;
-    const auto v0 = static_cast<float>(tile.y) * uv_step;
-    const auto u1 = u0 + uv_step;
-    const auto v1 = v0 + uv_step;
-
     const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
-    const std::array<std::array<float, 2>, 4> uvs {{
-        {u1, v0},
-        {u1, v1},
-        {u0, v1},
-        {u0, v0},
-    }};
-
     for (std::size_t i = 0; i < positions.size(); ++i) {
         mesh.vertices.push_back({
             positions[i][0],
@@ -450,6 +437,44 @@ void append_face_geometry(
     const auto first_diagonal = ao_values[0] + ao_values[2];
     const auto second_diagonal = ao_values[1] + ao_values[3];
     append_indices(mesh, base_index, first_diagonal < second_diagonal);
+}
+
+auto tile_uvs(const BlockAtlasTile& tile, float min_u, float min_v, float max_u, float max_v) noexcept
+    -> std::array<std::array<float, 2>, 4> {
+    const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
+    const auto tile_u0 = static_cast<float>(tile.x) * uv_step;
+    const auto tile_v0 = static_cast<float>(tile.y) * uv_step;
+    const auto u0 = tile_u0 + min_u * uv_step;
+    const auto v0 = tile_v0 + min_v * uv_step;
+    const auto u1 = tile_u0 + max_u * uv_step;
+    const auto v1 = tile_v0 + max_v * uv_step;
+
+    return {{
+        {u1, v0},
+        {u1, v1},
+        {u0, v1},
+        {u0, v0},
+    }};
+}
+
+void append_face_geometry(
+    ChunkMeshData& mesh,
+    const FaceDefinition& definition,
+    const BlockAtlasTile& tile,
+    const std::array<std::array<float, 3>, 4>& positions,
+    const std::array<float, 4>& ao_values,
+    const std::array<float, 4>& sky_values,
+    const std::array<float, 4>& block_values,
+    float material_class) {
+    append_face_geometry(
+        mesh,
+        definition,
+        positions,
+        tile_uvs(tile, 0.0F, 0.0F, 1.0F, 1.0F),
+        ao_values,
+        sky_values,
+        block_values,
+        material_class);
 }
 
 void append_cube_face(ChunkMeshData& mesh,
@@ -492,12 +517,14 @@ void append_torch_mesh(ChunkMeshData& mesh,
                        const BlockCoord& local_coord,
                        int chunk_world_x,
                        int chunk_world_z) {
-    constexpr float min_x = 0.43F;
-    constexpr float max_x = 0.57F;
-    constexpr float min_z = 0.43F;
-    constexpr float max_z = 0.57F;
+    constexpr float min_x = 6.0F / 16.0F;
+    constexpr float max_x = 10.0F / 16.0F;
+    constexpr float min_z = 6.0F / 16.0F;
+    constexpr float max_z = 10.0F / 16.0F;
     constexpr float min_y = 0.0F;
-    constexpr float max_y = 0.72F;
+    constexpr float shaft_max_y = 10.0F / 16.0F;
+    constexpr float head_max_y = 14.0F / 16.0F;
+    constexpr float head_side_v_max = 5.0F / 16.0F;
     constexpr float torch_ao = 1.0F;
 
     const auto torch_light = std::max(
@@ -509,9 +536,16 @@ void append_torch_mesh(ChunkMeshData& mesh,
     const std::array<float, 4> ao_values {{torch_ao, torch_ao, torch_ao, torch_ao}};
     const std::array<float, 4> sky_values {{normalized_sky, normalized_sky, normalized_sky, normalized_sky}};
     const std::array<float, 4> block_values {{normalized_block, normalized_block, normalized_block, normalized_block}};
-    const auto material_class = block_visual_material_value(to_block_id(BlockType::Torch));
+    const auto emissive_material_class = block_visual_material_value(BlockVisualMaterial::Emissive);
+    const auto wood_material_class = block_visual_material_value(BlockVisualMaterial::Wood);
+    const auto side_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::PositiveX);
+    const auto top_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::PositiveY);
+    const auto bottom_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::NegativeY);
 
-    auto append_prism_face = [&](Face face, const std::array<std::array<float, 3>, 4>& local_positions) {
+    auto append_prism_face = [&](Face face,
+                                 const std::array<std::array<float, 3>, 4>& local_positions,
+                                 const std::array<std::array<float, 2>, 4>& uvs,
+                                 float material_class) {
         std::array<std::array<float, 3>, 4> positions {};
         for (std::size_t i = 0; i < local_positions.size(); ++i) {
             positions[i] = {
@@ -524,20 +558,70 @@ void append_torch_mesh(ChunkMeshData& mesh,
         append_face_geometry(
             mesh,
             kFaceDefinitions[static_cast<std::size_t>(face)],
-            block_atlas_tile(to_block_id(BlockType::Torch), to_visual_face(face)),
             positions,
+            uvs,
             ao_values,
             sky_values,
             block_values,
             material_class);
     };
 
-    append_prism_face(Face::PositiveX, {{{max_x, min_y, min_z}, {max_x, max_y, min_z}, {max_x, max_y, max_z}, {max_x, min_y, max_z}}});
-    append_prism_face(Face::NegativeX, {{{min_x, min_y, max_z}, {min_x, max_y, max_z}, {min_x, max_y, min_z}, {min_x, min_y, min_z}}});
-    append_prism_face(Face::PositiveY, {{{min_x, max_y, max_z}, {max_x, max_y, max_z}, {max_x, max_y, min_z}, {min_x, max_y, min_z}}});
-    append_prism_face(Face::NegativeY, {{{min_x, min_y, min_z}, {max_x, min_y, min_z}, {max_x, min_y, max_z}, {min_x, min_y, max_z}}});
-    append_prism_face(Face::PositiveZ, {{{max_x, min_y, max_z}, {max_x, max_y, max_z}, {min_x, max_y, max_z}, {min_x, min_y, max_z}}});
-    append_prism_face(Face::NegativeZ, {{{min_x, min_y, min_z}, {min_x, max_y, min_z}, {max_x, max_y, min_z}, {max_x, min_y, min_z}}});
+    // Je decoupe la meme tuile verticale entre la tete et le manche pour garder
+    // une silhouette simple tout en separant nettement les deux materiaux.
+    const auto head_side_uvs = tile_uvs(side_tile, 0.0F, 0.0F, 1.0F, head_side_v_max);
+    const auto shaft_side_uvs = tile_uvs(side_tile, 0.0F, head_side_v_max, 1.0F, 1.0F);
+
+    append_prism_face(
+        Face::PositiveX,
+        {{{max_x, min_y, min_z}, {max_x, shaft_max_y, min_z}, {max_x, shaft_max_y, max_z}, {max_x, min_y, max_z}}},
+        shaft_side_uvs,
+        wood_material_class);
+    append_prism_face(
+        Face::NegativeX,
+        {{{min_x, min_y, max_z}, {min_x, shaft_max_y, max_z}, {min_x, shaft_max_y, min_z}, {min_x, min_y, min_z}}},
+        shaft_side_uvs,
+        wood_material_class);
+    append_prism_face(
+        Face::PositiveZ,
+        {{{max_x, min_y, max_z}, {max_x, shaft_max_y, max_z}, {min_x, shaft_max_y, max_z}, {min_x, min_y, max_z}}},
+        shaft_side_uvs,
+        wood_material_class);
+    append_prism_face(
+        Face::NegativeZ,
+        {{{min_x, min_y, min_z}, {min_x, shaft_max_y, min_z}, {max_x, shaft_max_y, min_z}, {max_x, min_y, min_z}}},
+        shaft_side_uvs,
+        wood_material_class);
+    append_prism_face(
+        Face::NegativeY,
+        {{{min_x, min_y, min_z}, {max_x, min_y, min_z}, {max_x, min_y, max_z}, {min_x, min_y, max_z}}},
+        tile_uvs(bottom_tile, 0.0F, 0.0F, 1.0F, 1.0F),
+        wood_material_class);
+
+    append_prism_face(
+        Face::PositiveX,
+        {{{max_x, shaft_max_y, min_z}, {max_x, head_max_y, min_z}, {max_x, head_max_y, max_z}, {max_x, shaft_max_y, max_z}}},
+        head_side_uvs,
+        emissive_material_class);
+    append_prism_face(
+        Face::NegativeX,
+        {{{min_x, shaft_max_y, max_z}, {min_x, head_max_y, max_z}, {min_x, head_max_y, min_z}, {min_x, shaft_max_y, min_z}}},
+        head_side_uvs,
+        emissive_material_class);
+    append_prism_face(
+        Face::PositiveZ,
+        {{{max_x, shaft_max_y, max_z}, {max_x, head_max_y, max_z}, {min_x, head_max_y, max_z}, {min_x, shaft_max_y, max_z}}},
+        head_side_uvs,
+        emissive_material_class);
+    append_prism_face(
+        Face::NegativeZ,
+        {{{min_x, shaft_max_y, min_z}, {min_x, head_max_y, min_z}, {max_x, head_max_y, min_z}, {max_x, shaft_max_y, min_z}}},
+        head_side_uvs,
+        emissive_material_class);
+    append_prism_face(
+        Face::PositiveY,
+        {{{min_x, head_max_y, max_z}, {max_x, head_max_y, max_z}, {max_x, head_max_y, min_z}, {min_x, head_max_y, min_z}}},
+        tile_uvs(top_tile, 0.0F, 0.0F, 1.0F, 1.0F),
+        emissive_material_class);
 }
 
 void append_cross_quad(ChunkMeshData& mesh,
