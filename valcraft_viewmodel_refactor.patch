@@ -1,0 +1,1048 @@
+diff --git a/src/gameplay/PlayerController.cpp b/src/gameplay/PlayerController.cpp
+index 97469b0..395726f 100644
+--- a/src/gameplay/PlayerController.cpp
++++ b/src/gameplay/PlayerController.cpp
+@@ -52,6 +52,9 @@ constexpr float kStepPhaseGroundDistanceScale = 9.8F;
+ constexpr float kStepPhaseAirDistanceScale = 4.0F;
+ constexpr float kStepPhaseSwimDistanceScale = 7.4F;
+ constexpr float kTwoPi = 6.28318530717958647692F;
++constexpr float kLookSwayInputScale = 0.045F;
++constexpr float kLookSwayResponseSharpness = 18.0F;
++constexpr float kLookSwayReturnSharpness = 10.0F;
+ 
+ auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
+     const auto horizontal = glm::vec3 {vector.x, 0.0F, vector.z};
+@@ -81,6 +84,15 @@ auto yaw_degrees_from_direction(const glm::vec2& direction) noexcept -> float {
+     return static_cast<float>(glm::degrees(std::atan2(direction.y, direction.x)));
+ }
+ 
++auto damp_towards(float current, float target, float sharpness, float dt) noexcept -> float {
++    if (dt <= 1.0e-6F) {
++        return target;
++    }
++
++    const auto blend = 1.0F - std::exp(-std::max(sharpness, 0.0F) * dt);
++    return glm::mix(current, target, blend);
++}
++
+ } // namespace
+ 
+ PlayerController::PlayerController(glm::vec3 spawn_position) {
+@@ -96,6 +108,8 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
+         state_.velocity = {};
+         state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
+         state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
++        state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, 0.0F, kLookSwayReturnSharpness, clamped_dt);
++        state_.look_sway_pitch = damp_towards(state_.look_sway_pitch, 0.0F, kLookSwayReturnSharpness, clamped_dt);
+         return;
+     }
+ 
+@@ -133,6 +147,13 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
+     state_.yaw_degrees += input.look_delta_x * kMouseSensitivity;
+     state_.pitch_degrees = std::clamp(state_.pitch_degrees - input.look_delta_y * kMouseSensitivity, -89.0F, 89.0F);
+ 
++    const auto target_look_sway_yaw = glm::clamp(-input.look_delta_x * kLookSwayInputScale, -1.0F, 1.0F);
++    const auto target_look_sway_pitch = glm::clamp(input.look_delta_y * kLookSwayInputScale, -1.0F, 1.0F);
++    const auto look_input_active = std::abs(input.look_delta_x) > 1.0e-4F || std::abs(input.look_delta_y) > 1.0e-4F;
++    const auto look_sway_sharpness = look_input_active ? kLookSwayResponseSharpness : kLookSwayReturnSharpness;
++    state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, target_look_sway_yaw, look_sway_sharpness, clamped_dt);
++    state_.look_sway_pitch = damp_towards(state_.look_sway_pitch, target_look_sway_pitch, look_sway_sharpness, clamped_dt);
++
+     auto forward = normalized_horizontal(look_direction());
+     if (glm::dot(forward, forward) <= 1.0e-6F) {
+         forward = {0.0F, 0.0F, -1.0F};
+diff --git a/src/gameplay/PlayerController.h b/src/gameplay/PlayerController.h
+index cd10307..fe3bc21 100644
+--- a/src/gameplay/PlayerController.h
++++ b/src/gameplay/PlayerController.h
+@@ -67,6 +67,8 @@ struct PlayerState {
+     float secondary_action_progress = 0.0F;
+     float landing_impact = 0.0F;
+     float airborne_time = 0.0F;
++    float look_sway_yaw = 0.0F;
++    float look_sway_pitch = 0.0F;
+     bool on_ground = false;
+     bool fly_mode = false;
+     bool head_underwater = false;
+diff --git a/src/player/PlayerGeometry.cpp b/src/player/PlayerGeometry.cpp
+index cf9536a..1c6f333 100644
+--- a/src/player/PlayerGeometry.cpp
++++ b/src/player/PlayerGeometry.cpp
+@@ -30,13 +30,16 @@ struct PlayerBoxTiles {
+     std::array<PlayerAtlasTile, 6> faces {};
+ };
+ 
+-struct PlayerPoseState {
+-    glm::vec3 camera_forward {0.0F, 0.0F, -1.0F};
+-    glm::vec3 camera_right {1.0F, 0.0F, 0.0F};
++struct CameraBasis {
++    glm::vec3 forward {0.0F, 0.0F, -1.0F};
++    glm::vec3 right {1.0F, 0.0F, 0.0F};
++    glm::vec3 up {0.0F, 1.0F, 0.0F};
++};
++
++struct PlayerWorldAvatarPose {
+     glm::vec3 body_forward {0.0F, 0.0F, -1.0F};
+     glm::vec3 body_right {1.0F, 0.0F, 0.0F};
+     float body_visibility = 0.0F;
+-    float presentation_arm_visibility = 1.0F;
+     float walk_amount = 0.0F;
+     float stride = 0.0F;
+     float stride_cos = 1.0F;
+@@ -52,6 +55,29 @@ struct PlayerPoseState {
+     float torso_yaw = 0.0F;
+ };
+ 
++struct PlayerViewModelRigState {
++    CameraBasis camera {};
++    glm::vec3 anchor {0.0F};
++    float walk_amount = 0.0F;
++    float stride = 0.0F;
++    float stride_cos = 1.0F;
++    float breathing_offset = 0.0F;
++    float hurt_amount = 0.0F;
++    float swim_amount = 0.0F;
++    float airborne_amount = 0.0F;
++    float landing_amount = 0.0F;
++    float mine_arc = 0.0F;
++    float mine_pull = 0.0F;
++    float place_arc = 0.0F;
++    float place_pull = 0.0F;
++    float look_sway_yaw = 0.0F;
++    float look_sway_pitch = 0.0F;
++    float bob_side = 0.0F;
++    float bob_vertical = 0.0F;
++    float bob_depth = 0.0F;
++    float bob_roll = 0.0F;
++};
++
+ auto make_face_definition(std::array<glm::vec3, 4> corners, const glm::vec3& normal) -> FaceDefinition {
+     return {corners, normal};
+ }
+@@ -107,6 +133,27 @@ auto wrap_degrees(float angle) noexcept -> float {
+     return angle;
+ }
+ 
++auto safe_normalize(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
++    if (glm::dot(value, value) <= 1.0e-6F) {
++        return fallback;
++    }
++    return glm::normalize(value);
++}
++
++auto make_camera_basis(const PlayerController& player) noexcept -> CameraBasis {
++    auto forward = safe_normalize(player.look_direction(), glm::vec3 {0.0F, 0.0F, -1.0F});
++    auto right = glm::cross(forward, glm::vec3 {0.0F, 1.0F, 0.0F});
++    right = safe_normalize(right, glm::vec3 {1.0F, 0.0F, 0.0F});
++    auto up = glm::cross(right, forward);
++    up = safe_normalize(up, glm::vec3 {0.0F, 1.0F, 0.0F});
++    return {forward, right, up};
++}
++
++auto make_body_forward(float yaw_degrees) noexcept -> glm::vec3 {
++    const auto yaw_radians = glm::radians(yaw_degrees);
++    return safe_normalize(glm::vec3 {std::cos(yaw_radians), 0.0F, std::sin(yaw_radians)}, glm::vec3 {0.0F, 0.0F, -1.0F});
++}
++
+ auto hash_to_unit(int x, int y, int seed) noexcept -> float {
+     auto value = static_cast<std::uint32_t>(x) * 374761393U;
+     value ^= static_cast<std::uint32_t>(y) * 668265263U;
+@@ -258,148 +305,103 @@ void append_box(CreatureMeshData& mesh,
+         }
+ 
+         mesh.indices.insert(mesh.indices.end(), {
+-            base_index + 0U, base_index + 1U, base_index + 2U,
+-            base_index + 0U, base_index + 2U, base_index + 3U,
++            base_index + 0,
++            base_index + 1,
++            base_index + 2,
++            base_index + 0,
++            base_index + 2,
++            base_index + 3,
+         });
+     }
+ 
+     ++mesh.part_count;
+ }
+ 
+-[[maybe_unused]] void append_box(CreatureMeshData& mesh,
+-                                 const glm::mat4& root,
+-                                 const glm::vec3& center,
+-                                 const glm::vec3& half_extent,
+-                                 const glm::vec3& rotation_radians,
+-                                 PlayerAtlasTile tile,
+-                                 float material_class,
+-                                 float cavity_mask,
+-                                 float emissive_strength) {
+-    append_box(mesh, root, center, half_extent, rotation_radians, uniform_tiles(tile), material_class, cavity_mask, emissive_strength);
+-}
+-
+-auto sample_player_tile(PlayerAtlasTile tile, int x, int y) noexcept -> std::array<std::uint8_t, 4> {
+-    const auto fx = static_cast<float>(x) + 0.5F;
+-    const auto fy = static_cast<float>(y) + 0.5F;
+-    const auto nx = fx / static_cast<float>(kPlayerAtlasTileSize);
+-    const auto ny = fy / static_cast<float>(kPlayerAtlasTileSize);
+-    const auto grain = tile_noise(x, y, static_cast<int>(tile));
+-    const auto soft_grain = tile_noise(x + 3, y + 9, static_cast<int>(tile) + 31);
+-
+-    switch (tile) {
+-    case PlayerAtlasTile::Skin:
+-        return make_rgba(194.0F + grain * 12.0F, 156.0F + soft_grain * 10.0F, 124.0F + grain * 8.0F, 0.0F);
+-    case PlayerAtlasTile::Hair: {
+-        const auto highlight = saturate(1.0F - ny * 0.84F + grain * 0.18F);
+-        return make_rgba(82.0F + highlight * 24.0F, 56.0F + highlight * 16.0F, 36.0F + highlight * 12.0F, 0.0F);
+-    }
+-    case PlayerAtlasTile::Shirt: {
+-        const auto band = 0.45F + 0.55F * std::sin(nx * 8.0F + grain * 4.0F);
+-        const auto seam = line_mask(nx, 0.5F, 0.07F) * line_mask(ny, 0.48F, 0.30F);
+-        return make_rgba(42.0F + band * 18.0F + seam * 6.0F,
+-                         118.0F + soft_grain * 20.0F + seam * 8.0F,
+-                         188.0F + grain * 24.0F + seam * 10.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Pants: {
+-        const auto stitch = line_mask(nx, 0.5F, 0.05F) * line_mask(ny, 0.56F, 0.44F);
+-        return make_rgba(54.0F + grain * 10.0F + stitch * 8.0F,
+-                         74.0F + soft_grain * 10.0F + stitch * 8.0F,
+-                         158.0F + grain * 18.0F + stitch * 10.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Shoes: {
+-        const auto toe = smooth_range(0.30F, 0.86F, 1.0F - ny);
+-        return make_rgba(42.0F + grain * 6.0F + toe * 12.0F,
+-                         42.0F + soft_grain * 6.0F + toe * 12.0F,
+-                         48.0F + grain * 8.0F + toe * 14.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Eye: {
+-        const auto sclera = radial_falloff(nx, ny, 0.5F, 0.5F, 0.42F);
+-        const auto iris = radial_falloff(nx, ny, 0.5F, 0.5F, 0.18F);
+-        const auto pupil = radial_falloff(nx, ny, 0.52F, 0.52F, 0.09F);
+-        return make_rgba(208.0F + sclera * 24.0F - iris * 44.0F - pupil * 160.0F,
+-                         220.0F + sclera * 20.0F - iris * 72.0F - pupil * 170.0F,
+-                         232.0F + sclera * 12.0F - iris * 118.0F - pupil * 180.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Mouth: {
+-        const auto base = sample_player_tile(PlayerAtlasTile::Skin, x, y);
+-        const auto lip = line_mask(ny, 0.68F + std::sin((nx - 0.5F) * kPi) * 0.05F, 0.05F);
+-        return make_rgba(static_cast<float>(base[0]) - lip * 68.0F,
+-                         static_cast<float>(base[1]) - lip * 102.0F,
+-                         static_cast<float>(base[2]) - lip * 84.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Hurt: {
+-        const auto pulse = radial_falloff(nx, ny, 0.5F, 0.5F, 0.74F);
+-        const auto veins = line_mask(nx, 0.5F + std::sin(ny * 10.0F) * 0.10F, 0.08F) * 0.28F;
+-        return make_rgba(206.0F + pulse * 26.0F,
+-                         72.0F + grain * 14.0F - veins * 20.0F,
+-                         64.0F + soft_grain * 10.0F - veins * 18.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::SkinShadow:
+-        return make_rgba(158.0F + grain * 10.0F, 122.0F + soft_grain * 8.0F, 94.0F + grain * 7.0F, 0.0F);
+-    case PlayerAtlasTile::HairShadow: {
+-        const auto highlight = saturate(1.0F - ny * 0.72F + grain * 0.10F);
+-        return make_rgba(60.0F + highlight * 14.0F, 40.0F + highlight * 10.0F, 24.0F + highlight * 8.0F, 0.0F);
+-    }
+-    case PlayerAtlasTile::ShirtShadow: {
+-        const auto band = 0.45F + 0.55F * std::sin(nx * 7.0F + grain * 4.0F);
+-        return make_rgba(30.0F + band * 12.0F, 92.0F + soft_grain * 16.0F, 154.0F + grain * 16.0F, 0.0F);
+-    }
+-    case PlayerAtlasTile::PantsShadow: {
+-        const auto band = 0.42F + 0.58F * std::sin(nx * 8.0F + grain * 3.0F);
+-        return make_rgba(42.0F + band * 10.0F, 56.0F + soft_grain * 9.0F, 122.0F + grain * 14.0F, 0.0F);
+-    }
+-    case PlayerAtlasTile::Sole: {
+-        const auto edge = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.18F);
+-        return make_rgba(158.0F - edge * 46.0F, 162.0F - edge * 46.0F, 168.0F - edge * 48.0F, 0.0F);
+-    }
+-    case PlayerAtlasTile::Sleeve: {
+-        const auto cuff = line_mask(ny, 0.88F, 0.08F);
+-        return make_rgba(42.0F + grain * 14.0F + cuff * 44.0F,
+-                         118.0F + soft_grain * 18.0F + cuff * 44.0F,
+-                         188.0F + grain * 20.0F + cuff * 32.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Belt: {
+-        const auto buckle = line_mask(nx, 0.5F, 0.09F) * line_mask(ny, 0.50F, 0.22F);
+-        return make_rgba(86.0F + grain * 12.0F + buckle * 94.0F,
+-                         54.0F + soft_grain * 10.0F + buckle * 74.0F,
+-                         32.0F + grain * 8.0F + buckle * 32.0F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Face: {
+-        auto color = sample_player_tile(PlayerAtlasTile::Skin, x, y);
+-        if (y <= 3) {
+-            return sample_player_tile(y <= 2 ? PlayerAtlasTile::Hair : PlayerAtlasTile::HairShadow, x, y);
+-        }
+-        if (((x >= 3 && x <= 5) || (x >= 10 && x <= 12)) && y >= 6 && y <= 7) {
+-            return sample_player_tile(PlayerAtlasTile::Eye, x, y);
+-        }
+-        if (y >= 10 && y <= 12 && x >= 5 && x <= 10) {
+-            const auto mouth = sample_player_tile(PlayerAtlasTile::Mouth, x, y);
+-            color[0] = static_cast<std::uint8_t>(std::max(static_cast<int>(mouth[0]), static_cast<int>(color[0]) - 72));
+-            color[1] = static_cast<std::uint8_t>(std::min(static_cast<int>(color[1]), static_cast<int>(mouth[1])));
+-            color[2] = static_cast<std::uint8_t>(std::min(static_cast<int>(color[2]), static_cast<int>(mouth[2])));
+-        }
+-        const auto cheek = line_mask(nx, 0.5F, 0.42F) * line_mask(ny, 0.58F, 0.36F) * 6.0F;
+-        return make_rgba(static_cast<float>(color[0]) + cheek,
+-                         static_cast<float>(color[1]) + cheek * 0.55F,
+-                         static_cast<float>(color[2]) + cheek * 0.35F,
+-                         0.0F);
+-    }
+-    case PlayerAtlasTile::Count:
+-        break;
+-    }
++auto transform_translation(const glm::mat4& transform) noexcept -> glm::vec3 {
++    return {transform[3].x, transform[3].y, transform[3].z};
++}
++
++auto action_arc(bool active, float progress) noexcept -> float {
++    return active ? std::sin(glm::clamp(progress, 0.0F, 1.0F) * kPi) : 0.0F;
++}
+ 
+-    return make_rgba(255.0F, 0.0F, 255.0F, 0.0F);
++auto action_pull(bool active, float progress) noexcept -> float {
++    return active ? smoothstep01(1.0F - glm::clamp(progress, 0.0F, 1.0F)) : 0.0F;
++}
++
++auto build_world_avatar_pose(const PlayerController& player) -> PlayerWorldAvatarPose {
++    const auto& state = player.state();
++    const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
++    const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
++    const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
++    const auto body_forward = make_body_forward(state.body_yaw_degrees);
++    const auto camera_basis = make_camera_basis(player);
++    auto body_right = glm::cross(body_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
++    body_right = safe_normalize(body_right, camera_basis.right);
++
++    PlayerWorldAvatarPose pose {};
++    pose.body_forward = body_forward;
++    pose.body_right = body_right;
++    pose.body_visibility = 0.0F;
++    pose.walk_amount = walk_amount;
++    pose.stride = std::sin(state.step_phase);
++    pose.stride_cos = std::cos(state.step_phase);
++    pose.breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
++    pose.hurt_amount = hurt_amount;
++    pose.swim_amount = state.swimming ? 1.0F : 0.0F;
++    pose.airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
++    pose.landing_amount = state.landing_impact * state.landing_impact;
++    pose.mine_arc = action_arc(state.primary_action_active, state.primary_action_progress);
++    pose.mine_pull = action_pull(state.primary_action_active, state.primary_action_progress);
++    pose.place_arc = action_arc(state.secondary_action_active, state.secondary_action_progress);
++    pose.place_pull = action_pull(state.secondary_action_active, state.secondary_action_progress);
++    pose.torso_yaw = glm::radians(glm::clamp(wrap_degrees(state.yaw_degrees - state.body_yaw_degrees), -46.0F, 46.0F) * 0.35F);
++    return pose;
++}
++
++auto build_viewmodel_rig_state(const PlayerController& player) -> PlayerViewModelRigState {
++    const auto& state = player.state();
++    const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
++    const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
++    const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
++    const auto stride = std::sin(state.step_phase);
++    const auto stride_cos = std::cos(state.step_phase);
++    const auto breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
++    const auto airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
++    const auto landing_amount = state.landing_impact * state.landing_impact;
++    const auto mine_arc_value = action_arc(state.primary_action_active, state.primary_action_progress);
++    const auto mine_pull_value = action_pull(state.primary_action_active, state.primary_action_progress);
++    const auto place_arc_value = action_arc(state.secondary_action_active, state.secondary_action_progress);
++    const auto place_pull_value = action_pull(state.secondary_action_active, state.secondary_action_progress);
++
++    PlayerViewModelRigState rig {};
++    rig.camera = make_camera_basis(player);
++    rig.walk_amount = walk_amount;
++    rig.stride = stride;
++    rig.stride_cos = stride_cos;
++    rig.breathing_offset = breathing_offset;
++    rig.hurt_amount = hurt_amount;
++    rig.swim_amount = state.swimming ? 1.0F : 0.0F;
++    rig.airborne_amount = airborne_amount;
++    rig.landing_amount = landing_amount;
++    rig.mine_arc = mine_arc_value;
++    rig.mine_pull = mine_pull_value;
++    rig.place_arc = place_arc_value;
++    rig.place_pull = place_pull_value;
++    rig.look_sway_yaw = state.look_sway_yaw;
++    rig.look_sway_pitch = state.look_sway_pitch;
++    rig.bob_side = stride * walk_amount * 0.018F;
++    rig.bob_vertical = stride_cos * walk_amount * 0.012F - landing_amount * 0.050F;
++    rig.bob_depth = std::abs(stride_cos) * walk_amount * 0.014F + airborne_amount * 0.012F;
++    rig.bob_roll = stride * walk_amount * 0.050F;
++    rig.anchor = player.eye_position()
++               + rig.camera.right * (0.32F + rig.bob_side + place_pull_value * 0.024F)
++               + rig.camera.up * (-0.31F + rig.breathing_offset * 0.40F + rig.bob_vertical - hurt_amount * 0.040F)
++               + rig.camera.forward * (0.46F + rig.bob_depth + mine_pull_value * 0.042F - place_arc_value * 0.022F);
++    return rig;
+ }
+ 
+-void append_full_body(CreatureMeshData& mesh, const PlayerController& player, const PlayerPoseState& pose) {
++void append_full_body(CreatureMeshData& mesh, const PlayerController& player, const PlayerWorldAvatarPose& pose) {
+     const auto& state = player.state();
+     const auto shoulder_anchor = player.eye_position()
+                                + pose.body_forward * (0.06F + pose.body_visibility * 0.16F + pose.mine_pull * 0.02F)
+@@ -603,28 +605,17 @@ void append_full_body(CreatureMeshData& mesh, const PlayerController& player, co
+                emissive * 0.12F);
+ }
+ 
+-void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& player, const PlayerPoseState& pose) {
+-    if (pose.presentation_arm_visibility <= 0.05F) {
+-        return;
+-    }
+-
+-    const auto& state = player.state();
+-    const auto visibility = pose.presentation_arm_visibility;
+-    const auto camera_up = glm::normalize(glm::cross(pose.camera_right, pose.camera_forward));
+-    const auto jitter = std::sin(state.animation_time * 12.0F + pose.mine_pull * 3.0F) * pose.walk_amount * 0.006F;
+-    const auto anchor = player.eye_position()
+-                      + pose.camera_forward * (0.18F + pose.mine_pull * 0.04F - pose.place_arc * 0.02F)
+-                      + pose.camera_right * (0.22F + pose.place_pull * 0.02F)
+-                      + camera_up * (-0.30F + pose.stride_cos * pose.walk_amount * 0.014F - pose.hurt_amount * 0.04F + jitter);
++void append_viewmodel_arm(PlayerViewModelMesh& output, const PlayerController& player, const PlayerViewModelRigState& rig) {
++    auto& mesh = output.mesh;
++    const auto camera_up = rig.camera.up;
+ 
+     auto root = glm::mat4(1.0F);
+-    // Je reconstruis la base exacte de ma camera pour que le bras FPS suive vraiment mon regard.
+-    root[0] = glm::vec4(pose.camera_right, 0.0F);
++    root[0] = glm::vec4(rig.camera.right, 0.0F);
+     root[1] = glm::vec4(camera_up, 0.0F);
+-    root[2] = glm::vec4(-pose.camera_forward, 0.0F);
+-    root[3] = glm::vec4(anchor, 1.0F);
++    root[2] = glm::vec4(-rig.camera.forward, 0.0F);
++    root[3] = glm::vec4(rig.anchor, 1.0F);
+ 
+-    const auto emissive = pose.hurt_amount * 0.10F;
++    const auto emissive = rig.hurt_amount * 0.10F;
+     const auto sleeve_tiles = hurt_tiles_if_needed(
+         make_box_tiles(PlayerAtlasTile::Sleeve,
+                        PlayerAtlasTile::ShirtShadow,
+@@ -632,7 +623,7 @@ void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& pla
+                        PlayerAtlasTile::SkinShadow,
+                        PlayerAtlasTile::ShirtShadow,
+                        PlayerAtlasTile::ShirtShadow),
+-        pose.hurt_amount,
++        rig.hurt_amount,
+         0.20F);
+     const auto hand_tiles = hurt_tiles_if_needed(
+         make_box_tiles(PlayerAtlasTile::Skin,
+@@ -641,49 +632,100 @@ void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& pla
+                        PlayerAtlasTile::SkinShadow,
+                        PlayerAtlasTile::SkinShadow,
+                        PlayerAtlasTile::SkinShadow),
+-        pose.hurt_amount,
++        rig.hurt_amount,
+         0.24F);
+ 
+-    const auto shoulder_root = make_frame_transform(
+-        root,
+-        glm::vec3 {0.0F},
+-        glm::vec3 {
+-            0.24F + pose.place_arc * 0.08F + pose.mine_pull * 0.12F,
+-            -0.08F - pose.place_arc * 0.18F + pose.mine_arc * 0.10F,
+-            -1.02F - pose.mine_arc * 0.60F - pose.mine_pull * 0.18F - pose.place_arc * 0.28F - pose.hurt_amount * 0.12F,
+-        });
++    const auto sway_yaw = rig.look_sway_yaw * 0.20F;
++    const auto sway_pitch = rig.look_sway_pitch * 0.16F;
++    const auto sway_roll = -rig.look_sway_yaw * 0.12F + rig.look_sway_pitch * 0.05F;
++    const auto shoulder_pitch_base = 0.20F + sway_pitch + rig.airborne_amount * 0.08F - rig.landing_amount * 0.08F;
++    const auto shoulder_yaw_base = -0.18F + sway_yaw - rig.place_arc * 0.18F + rig.mine_arc * 0.10F;
++    const auto shoulder_roll_base = -1.12F - rig.mine_arc * 0.82F - rig.mine_pull * 0.12F - rig.place_arc * 0.34F -
++                                    rig.hurt_amount * 0.14F - rig.bob_roll - sway_roll;
++
++    auto shoulder_rotation = glm::vec3 {
++        shoulder_pitch_base,
++        shoulder_yaw_base,
++        shoulder_roll_base,
++    };
++    auto elbow_rotation = glm::vec3 {
++        0.10F + rig.mine_arc * 0.56F + rig.place_arc * 0.24F,
++        -0.02F + sway_yaw * 0.60F - rig.place_pull * 0.10F,
++        -0.34F - rig.mine_arc * 1.18F - rig.mine_pull * 0.18F - rig.place_arc * 0.42F - rig.hurt_amount * 0.08F,
++    };
++    auto wrist_rotation = glm::vec3 {
++        -0.02F + rig.mine_arc * 0.18F + rig.place_arc * 0.06F,
++        0.08F + sway_yaw * 0.38F + rig.place_pull * 0.08F,
++        -0.08F - rig.mine_arc * 0.34F - rig.place_arc * 0.14F + rig.bob_roll * 0.28F,
++    };
++
++    if (rig.swim_amount > 0.0F) {
++        const auto swim_cycle = std::sin(player.state().animation_time * 5.0F);
++        shoulder_rotation = glm::mix(shoulder_rotation,
++                                     glm::vec3 {0.58F + swim_cycle * 0.10F, -0.04F, -1.42F - rig.mine_arc * 0.18F},
++                                     rig.swim_amount);
++        elbow_rotation = glm::mix(elbow_rotation,
++                                  glm::vec3 {0.26F + swim_cycle * 0.14F, 0.02F, -0.64F - rig.mine_arc * 0.40F},
++                                  rig.swim_amount);
++        wrist_rotation = glm::mix(wrist_rotation,
++                                  glm::vec3 {0.06F + swim_cycle * 0.08F, 0.08F, -0.16F},
++                                  rig.swim_amount);
++    }
++
++    const auto shoulder_root = make_frame_transform(root, glm::vec3 {0.0F}, shoulder_rotation);
++    const auto elbow_root = make_frame_transform(shoulder_root, glm::vec3 {0.0F, -0.26F, 0.0F}, elbow_rotation);
++    const auto wrist_root = make_frame_transform(elbow_root, glm::vec3 {0.02F, -0.24F, 0.0F}, wrist_rotation);
++    const auto item_socket = make_frame_transform(
++        wrist_root,
++        glm::vec3 {0.17F, -0.15F, 0.0F},
++        glm::vec3 {0.18F + rig.place_pull * 0.08F, -0.08F + rig.mine_pull * 0.04F, -0.26F - rig.mine_arc * 0.12F});
++
+     append_box(mesh,
+                shoulder_root,
+-               glm::vec3 {0.0F, -0.18F, 0.0F},
+-               glm::vec3 {0.085F, 0.18F, 0.085F} * (0.92F + visibility * 0.08F),
++               glm::vec3 {0.0F, -0.12F, 0.0F},
++               glm::vec3 {0.088F, 0.12F, 0.088F},
+                glm::vec3 {0.0F},
+                sleeve_tiles,
+                kMaterialFabric,
+                0.08F,
+-               emissive * 0.52F);
+-
+-    const auto elbow_root = make_frame_transform(
+-        shoulder_root,
+-        glm::vec3 {0.0F, -0.36F, 0.0F},
+-        glm::vec3 {0.04F, -0.02F, -0.34F - pose.mine_arc * 1.05F - pose.mine_pull * 0.18F - pose.place_arc * 0.34F});
++               emissive * 0.46F);
+     append_box(mesh,
+                elbow_root,
+-               glm::vec3 {0.02F, -0.10F, 0.0F},
+-               glm::vec3 {0.10F, 0.10F, 0.085F} * (0.92F + visibility * 0.08F),
++               glm::vec3 {0.0F, -0.12F, 0.0F},
++               glm::vec3 {0.082F, 0.14F, 0.082F},
++               glm::vec3 {0.0F},
++               sleeve_tiles,
++               kMaterialFabric,
++               0.08F,
++               emissive * 0.42F);
++    append_box(mesh,
++               wrist_root,
++               glm::vec3 {0.05F, -0.06F, 0.0F},
++               glm::vec3 {0.11F, 0.08F, 0.09F},
+                glm::vec3 {0.0F},
+                hand_tiles,
+                kMaterialSkin,
+                0.08F,
+-               emissive * 0.48F);
++               emissive * 0.40F);
+     append_box(mesh,
+-               elbow_root,
+-               glm::vec3 {0.10F, -0.20F, 0.0F},
+-               glm::vec3 {0.06F, 0.05F, 0.06F} * (0.92F + visibility * 0.08F),
++               wrist_root,
++               glm::vec3 {0.13F, -0.14F, 0.0F},
++               glm::vec3 {0.055F, 0.045F, 0.06F},
+                glm::vec3 {0.0F},
+                hand_tiles,
+                kMaterialSkin,
+                0.06F,
+-               emissive * 0.44F);
++               emissive * 0.36F);
++
++    output.pose.root_position = rig.anchor;
++    output.pose.shoulder_position = transform_translation(shoulder_root);
++    output.pose.elbow_position = transform_translation(elbow_root);
++    output.pose.wrist_position = transform_translation(wrist_root);
++    output.pose.item_socket_transform = item_socket;
++    output.pose.look_sway_yaw = rig.look_sway_yaw;
++    output.pose.look_sway_pitch = rig.look_sway_pitch;
++    output.pose.walk_bob = rig.bob_vertical;
++    output.pose.action_swing = std::max(rig.mine_arc, rig.place_arc);
+ }
+ 
+ } // namespace
+@@ -705,85 +747,24 @@ auto build_player_atlas_pixels() -> std::vector<std::uint8_t> {
+     return pixels;
+ }
+ 
+-auto build_player_mesh(const PlayerController& player, PlayerMeshView view) -> CreatureMeshData {
++auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData {
+     CreatureMeshData mesh {};
++    append_full_body(mesh, player, build_world_avatar_pose(player));
++    return mesh;
++}
+ 
+-    const auto& state = player.state();
+-    const auto first_person_view = view == PlayerMeshView::FirstPerson;
+-    const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
+-    const auto body_visibility = first_person_view ? smooth_range(34.0F, 78.0F, -state.pitch_degrees) : 0.0F;
+-    const auto presentation_arm_visibility = first_person_view ? 1.0F : 0.0F;
+-    const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
+-    const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
+-
+-    auto camera_forward = player.look_direction();
+-    if (glm::dot(camera_forward, camera_forward) <= 1.0e-6F) {
+-        camera_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
+-    } else {
+-        camera_forward = glm::normalize(camera_forward);
+-    }
+-
+-    auto camera_right = glm::cross(camera_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
+-    if (glm::dot(camera_right, camera_right) <= 1.0e-6F) {
+-        camera_right = glm::vec3 {1.0F, 0.0F, 0.0F};
+-    } else {
+-        camera_right = glm::normalize(camera_right);
+-    }
+-
+-    const auto body_yaw_radians = glm::radians(state.body_yaw_degrees);
+-    auto body_forward = glm::vec3 {std::cos(body_yaw_radians), 0.0F, std::sin(body_yaw_radians)};
+-    if (glm::dot(body_forward, body_forward) <= 1.0e-6F) {
+-        body_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
+-    } else {
+-        body_forward = glm::normalize(body_forward);
+-    }
+-    auto body_right = glm::cross(body_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
+-    if (glm::dot(body_right, body_right) <= 1.0e-6F) {
+-        body_right = camera_right;
+-    } else {
+-        body_right = glm::normalize(body_right);
+-    }
+-
+-    const auto action_arc = [](bool active, float progress) noexcept {
+-        return active ? std::sin(glm::clamp(progress, 0.0F, 1.0F) * kPi) : 0.0F;
+-    };
+-    const auto action_pull = [](bool active, float progress) noexcept {
+-        return active ? smoothstep01(1.0F - glm::clamp(progress, 0.0F, 1.0F)) : 0.0F;
+-    };
+-
+-    PlayerPoseState pose {};
+-    pose.camera_forward = camera_forward;
+-    pose.camera_right = camera_right;
+-    pose.body_forward = body_forward;
+-    pose.body_right = body_right;
+-    pose.body_visibility = body_visibility;
+-    pose.presentation_arm_visibility = presentation_arm_visibility;
+-    pose.walk_amount = walk_amount;
+-    pose.stride = std::sin(state.step_phase);
+-    pose.stride_cos = std::cos(state.step_phase);
+-    pose.breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
+-    pose.hurt_amount = hurt_amount;
+-    pose.swim_amount = state.swimming ? 1.0F : 0.0F;
+-    pose.airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
+-    pose.landing_amount = state.landing_impact * state.landing_impact;
+-    pose.mine_arc = action_arc(state.primary_action_active, state.primary_action_progress);
+-    pose.mine_pull = action_pull(state.primary_action_active, state.primary_action_progress);
+-    pose.place_arc = action_arc(state.secondary_action_active, state.secondary_action_progress);
+-    pose.place_pull = action_pull(state.secondary_action_active, state.secondary_action_progress);
+-    pose.torso_yaw = glm::radians(glm::clamp(wrap_degrees(state.yaw_degrees - state.body_yaw_degrees), -46.0F, 46.0F) * 0.35F);
++auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh {
++    PlayerViewModelMesh output {};
++    append_viewmodel_arm(output, player, build_viewmodel_rig_state(player));
++    return output;
++}
+ 
+-    if (first_person_view) {
+-        // Vue FPS locale facon Minecraft : on garde uniquement le bras de presentation,
+-        // attache a la camera, pour eviter tout decalage avec le view-model et ne jamais
+-        // masquer le sol quand le joueur regarde vers le bas.
+-        if (pose.presentation_arm_visibility > 0.05F) {
+-            append_presentation_arm(mesh, player, pose);
+-        }
+-        return mesh;
++auto build_player_mesh(const PlayerController& player, PlayerMeshView view) -> CreatureMeshData {
++    if (view == PlayerMeshView::WorldAvatar) {
++        return build_player_world_avatar_mesh(player);
+     }
+-
+-    append_full_body(mesh, player, pose);
+-    return mesh;
++    return build_player_viewmodel_mesh(player).mesh;
+ }
+ 
++
+ } // namespace valcraft
+diff --git a/src/player/PlayerGeometry.h b/src/player/PlayerGeometry.h
+index b20cc84..2f51f85 100644
+--- a/src/player/PlayerGeometry.h
++++ b/src/player/PlayerGeometry.h
+@@ -3,6 +3,9 @@
+ #include "creatures/CreatureGeometry.h"
+ #include "gameplay/PlayerController.h"
+ 
++#include <glm/mat4x4.hpp>
++#include <glm/vec3.hpp>
++
+ #include <array>
+ #include <cstdint>
+ #include <vector>
+@@ -38,8 +41,31 @@ enum class PlayerMeshView : std::uint8_t {
+     WorldAvatar = 1,
+ };
+ 
++struct PlayerViewModelPose {
++    glm::vec3 root_position {0.0F};
++    glm::vec3 shoulder_position {0.0F};
++    glm::vec3 elbow_position {0.0F};
++    glm::vec3 wrist_position {0.0F};
++    glm::mat4 item_socket_transform {1.0F};
++    float look_sway_yaw = 0.0F;
++    float look_sway_pitch = 0.0F;
++    float walk_bob = 0.0F;
++    float action_swing = 0.0F;
++};
++
++struct PlayerViewModelMesh {
++    CreatureMeshData mesh;
++    PlayerViewModelPose pose {};
++
++    [[nodiscard]] auto empty() const noexcept -> bool {
++        return mesh.empty();
++    }
++};
++
+ [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;
+ [[nodiscard]] auto build_player_atlas_pixels() -> std::vector<std::uint8_t>;
++[[nodiscard]] auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData;
++[[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh;
+ [[nodiscard]] auto build_player_mesh(const PlayerController& player,
+                                      PlayerMeshView view = PlayerMeshView::FirstPerson) -> CreatureMeshData;
+ 
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index 443129f..c4a6345 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -5,6 +5,7 @@
+ #include "render/HotbarLayout.h"
+ #include "world/BlockVisuals.h"
+ 
++#include <glm/common.hpp>
+ #include <glm/geometric.hpp>
+ #include <glm/gtc/matrix_transform.hpp>
+ #include <glm/gtc/type_ptr.hpp>
+@@ -1461,7 +1462,8 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
+     if (initialized_ &&
+         options_.shadows_enabled == options.shadows_enabled &&
+         options_.shadow_map_size == options.shadow_map_size &&
+-        options_.post_process_enabled == options.post_process_enabled) {
++        options_.post_process_enabled == options.post_process_enabled &&
++        std::abs(options_.viewmodel_fov_degrees - options.viewmodel_fov_degrees) <= 1.0e-4F) {
+         return true;
+     }
+ 
+@@ -1649,6 +1651,11 @@ void Renderer::render_frame(World& world,
+ 
+     const auto aspect = static_cast<float>(width) / static_cast<float>(std::max(height, 1));
+     const auto projection = glm::perspective(glm::radians(75.0F), aspect, 0.1F, 320.0F);
++    const auto viewmodel_projection = glm::perspective(
++        glm::radians(glm::clamp(options_.viewmodel_fov_degrees, 35.0F, 100.0F)),
++        aspect,
++        0.02F,
++        8.0F);
+     const auto view_projection = projection * player.view_matrix();
+     const auto frustum_planes = extract_frustum_planes(view_projection);
+     const auto eye = player.eye_position();
+@@ -1832,7 +1839,6 @@ void Renderer::render_frame(World& world,
+ 
+     draw_item_drops(item_drops);
+     draw_creatures(creatures, view_projection, light_view_projection, eye, environment);
+-    draw_player_avatar(player, view_projection, light_view_projection, eye, environment);
+ 
+     if (has_visible_water) {
+         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
+@@ -1881,6 +1887,8 @@ void Renderer::render_frame(World& world,
+         glCullFace(GL_BACK);
+     }
+ 
++    draw_player_viewmodel(player, viewmodel_projection * player.view_matrix(), light_view_projection, eye, environment);
++
+     if (use_post_process) {
+         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+         run_post_process(environment, width, render_height);
+@@ -3535,6 +3543,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
+     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
+ 
+     glEnable(GL_DEPTH_TEST);
++    glDepthMask(GL_TRUE);
+     glEnable(GL_CULL_FACE);
+     glCullFace(GL_BACK);
+     glUseProgram(creature_program_);
+@@ -3561,7 +3570,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
+     glActiveTexture(GL_TEXTURE0);
+ }
+ 
+-void Renderer::draw_player_avatar(const PlayerController& player,
++void Renderer::draw_player_viewmodel(const PlayerController& player,
+                                   const glm::mat4& view_projection,
+                                   const glm::mat4& light_view_projection,
+                                   const glm::vec3& camera_position,
+@@ -3570,15 +3579,15 @@ void Renderer::draw_player_avatar(const PlayerController& player,
+         return;
+     }
+ 
+-    const auto mesh = build_player_mesh(player, PlayerMeshView::FirstPerson);
+-    if (mesh.empty()) {
++    const auto viewmodel = build_player_viewmodel_mesh(player);
++    if (viewmodel.empty()) {
+         return;
+     }
+ 
+     auto& vertices = creature_vertices_scratch_;
+     auto& indices = creature_indices_scratch_;
+-    vertices.assign(mesh.vertices.begin(), mesh.vertices.end());
+-    indices.assign(mesh.indices.begin(), mesh.indices.end());
++    vertices.assign(viewmodel.mesh.vertices.begin(), viewmodel.mesh.vertices.end());
++    indices.assign(viewmodel.mesh.indices.begin(), viewmodel.mesh.indices.end());
+ 
+     glBindVertexArray(creature_vao_);
+     glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
+@@ -3604,7 +3613,8 @@ void Renderer::draw_player_avatar(const PlayerController& player,
+     glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, vertices.data());
+     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
+ 
+-    glEnable(GL_DEPTH_TEST);
++    glDisable(GL_DEPTH_TEST);
++    glDepthMask(GL_FALSE);
+     glEnable(GL_CULL_FACE);
+     glCullFace(GL_BACK);
+     glUseProgram(creature_program_);
+@@ -3613,21 +3623,25 @@ void Renderer::draw_player_avatar(const PlayerController& player,
+     glUniform3fv(creature_uniforms_.camera_position, 1, glm::value_ptr(camera_position));
+     glUniform3fv(creature_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
+     glUniform3fv(creature_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
+-    glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
+-    glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
+-    glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
++    const auto viewmodel_ambient = glm::max(environment.ambient_color, glm::vec3 {0.22F, 0.22F, 0.24F});
++    const auto viewmodel_fog = glm::mix(environment.fog_color, viewmodel_ambient, 0.80F);
++    glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(viewmodel_ambient));
++    glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(viewmodel_fog));
++    glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(viewmodel_fog));
+     glUniform3fv(creature_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
+-    glUniform1f(creature_uniforms_.daylight_factor, environment.daylight_factor);
++    glUniform1f(creature_uniforms_.daylight_factor, std::max(environment.daylight_factor, 0.20F));
+     glUniform1f(creature_uniforms_.sun_visibility, environment.sun_direction.y > 0.0F ? 1.0F : 0.0F);
+     glUniform1i(creature_uniforms_.atlas, 0);
+     glUniform1i(creature_uniforms_.shadow_map, 1);
+-    glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
++    glUniform1i(creature_uniforms_.shadows_enabled, 0);
+     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
+     glActiveTexture(GL_TEXTURE0);
+     glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
+     glActiveTexture(GL_TEXTURE1);
+     glBindTexture(GL_TEXTURE_2D, shadow_map_);
+     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
++    glDepthMask(GL_TRUE);
++    glEnable(GL_DEPTH_TEST);
+     glEnable(GL_CULL_FACE);
+     glCullFace(GL_BACK);
+     glActiveTexture(GL_TEXTURE0);
+diff --git a/src/render/Renderer.h b/src/render/Renderer.h
+index 5bcaeaa..5ae1723 100644
+--- a/src/render/Renderer.h
++++ b/src/render/Renderer.h
+@@ -26,6 +26,7 @@ struct RendererOptions {
+     bool shadows_enabled = true;
+     int shadow_map_size = 1024;
+     bool post_process_enabled = false;
++    float viewmodel_fov_degrees = 62.0F;
+ };
+ 
+ struct RendererFrameStats {
+@@ -250,7 +251,7 @@ private:
+                         const glm::mat4& light_view_projection,
+                         const glm::vec3& camera_position,
+                         const EnvironmentState& environment);
+-    void draw_player_avatar(const PlayerController& player,
++    void draw_player_viewmodel(const PlayerController& player,
+                             const glm::mat4& view_projection,
+                             const glm::mat4& light_view_projection,
+                             const glm::vec3& camera_position,
+diff --git a/tests/PlayerTests.cpp b/tests/PlayerTests.cpp
+index 844ba2b..2269917 100644
+--- a/tests/PlayerTests.cpp
++++ b/tests/PlayerTests.cpp
+@@ -8,6 +8,7 @@
+ #include "TestUtils.h"
+ 
+ #include <doctest/doctest.h>
++#include <glm/geometric.hpp>
+ 
+ #include <algorithm>
+ #include <array>
+@@ -136,6 +137,41 @@ auto angle_distance_degrees(float lhs, float rhs) -> float {
+     return static_cast<float>(std::abs(std::remainder(lhs - rhs, 360.0F)));
+ }
+ 
++auto item_socket_in_camera_space(const PlayerViewModelMesh& viewmodel, const PlayerController& player) -> glm::vec3 {
++    const auto socket_world = glm::vec3 {
++        viewmodel.pose.item_socket_transform[3].x,
++        viewmodel.pose.item_socket_transform[3].y,
++        viewmodel.pose.item_socket_transform[3].z,
++    };
++    auto camera_forward = player.look_direction();
++    if (glm::dot(camera_forward, camera_forward) <= 1.0e-6F) {
++        camera_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
++    } else {
++        camera_forward = glm::normalize(camera_forward);
++    }
++
++    auto camera_right = glm::cross(camera_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
++    if (glm::dot(camera_right, camera_right) <= 1.0e-6F) {
++        camera_right = glm::vec3 {1.0F, 0.0F, 0.0F};
++    } else {
++        camera_right = glm::normalize(camera_right);
++    }
++    const auto camera_up = glm::normalize(glm::cross(camera_right, camera_forward));
++
++    const auto relative = socket_world - player.eye_position();
++    return {
++        glm::dot(relative, camera_right),
++        glm::dot(relative, camera_up),
++        glm::dot(relative, camera_forward),
++    };
++}
++
++void settle_viewmodel(PlayerController& player, const World& world, int frames = 18) {
++    for (int i = 0; i < frames; ++i) {
++        player.update(PlayerInput {}, 1.0F / 60.0F, world);
++    }
++}
++
+ } // namespace
+ 
+ TEST_CASE("player falls onto the ground and stays grounded") {
+@@ -675,7 +711,7 @@ TEST_CASE("player body yaw follows real movement and eases back toward the camer
+     }
+ }
+ 
+-TEST_CASE("player first person mesh keeps the camera clear while preserving a separate world avatar") {
++TEST_CASE("player first person viewmodel stays camera locked while the world avatar stays separate") {
+     World world(156, 1);
+     test::make_chunk_empty(world, {0, 0});
+     test::make_flat_floor(world, -4, 4, 0, -4, 4);
+@@ -690,35 +726,43 @@ TEST_CASE("player first person mesh keeps the camera clear while preserving a se
+     PlayerInput look_right_input {};
+     look_right_input.look_delta_x = 1125.0F;
+     looking_right.update(look_right_input, 0.0F, world);
++    settle_viewmodel(looking_right, world);
+ 
+     PlayerInput look_up_input {};
+     look_up_input.look_delta_y = -600.0F;
+     looking_up.update(look_up_input, 0.0F, world);
++    settle_viewmodel(looking_up, world);
+ 
+     PlayerInput look_slightly_down_input {};
+     look_slightly_down_input.look_delta_y = 88.0F;
+     looking_slightly_down.update(look_slightly_down_input, 0.0F, world);
++    settle_viewmodel(looking_slightly_down, world);
+ 
+     PlayerInput look_down_input {};
+     look_down_input.look_delta_y = 800.0F;
+     looking_down.update(look_down_input, 0.0F, world);
+     looking_down_clean.update(look_down_input, 0.0F, world);
++    settle_viewmodel(looking_down, world);
++    settle_viewmodel(looking_down_clean, world);
+ 
+     looking_down.set_velocity({1.2F, 0.0F, 0.0F});
+     looking_down_clean.set_velocity({1.2F, 0.0F, 0.0F});
+     looking_down.apply_external_damage(2.0F, PlayerDeathCause::Zombie);
+ 
+     const auto atlas = build_player_atlas_pixels();
+-    const auto forward_mesh = build_player_mesh(looking_forward, PlayerMeshView::FirstPerson);
+-    const auto right_mesh = build_player_mesh(looking_right, PlayerMeshView::FirstPerson);
+-    const auto up_mesh = build_player_mesh(looking_up, PlayerMeshView::FirstPerson);
+-    const auto slightly_down_mesh = build_player_mesh(looking_slightly_down, PlayerMeshView::FirstPerson);
+-    const auto down_mesh = build_player_mesh(looking_down, PlayerMeshView::FirstPerson);
+-    const auto clean_down_mesh = build_player_mesh(looking_down_clean, PlayerMeshView::FirstPerson);
+-    const auto down_mesh_repeat = build_player_mesh(looking_down, PlayerMeshView::FirstPerson);
+-    const auto world_avatar_mesh = build_player_mesh(looking_down, PlayerMeshView::WorldAvatar);
+-    const auto down_bounds = mesh_bounds(down_mesh);
++    const auto forward_viewmodel = build_player_viewmodel_mesh(looking_forward);
++    const auto right_viewmodel = build_player_viewmodel_mesh(looking_right);
++    const auto up_viewmodel = build_player_viewmodel_mesh(looking_up);
++    const auto slightly_down_viewmodel = build_player_viewmodel_mesh(looking_slightly_down);
++    const auto down_viewmodel = build_player_viewmodel_mesh(looking_down);
++    const auto clean_down_viewmodel = build_player_viewmodel_mesh(looking_down_clean);
++    const auto down_viewmodel_repeat = build_player_viewmodel_mesh(looking_down);
++    const auto world_avatar_mesh = build_player_world_avatar_mesh(looking_down);
++    const auto down_bounds = mesh_bounds(down_viewmodel.mesh);
+     const auto world_avatar_bounds = mesh_bounds(world_avatar_mesh);
++    const auto forward_socket = item_socket_in_camera_space(forward_viewmodel, looking_forward);
++    const auto right_socket = item_socket_in_camera_space(right_viewmodel, looking_right);
++    const auto up_socket = item_socket_in_camera_space(up_viewmodel, looking_up);
+ 
+     REQUIRE(atlas.size() == static_cast<std::size_t>(kPlayerAtlasSize * kPlayerAtlasSize * 4));
+     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[2] > player_tile_average_rgba(atlas, PlayerAtlasTile::Pants)[2]);
+@@ -726,25 +770,34 @@ TEST_CASE("player first person mesh keeps the camera clear while preserving a se
+     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hurt)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[0] + 80.0F);
+     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Face)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::HairShadow)[0]);
+ 
+-    CHECK_FALSE(forward_mesh.empty());
+-    CHECK_FALSE(right_mesh.empty());
+-    CHECK_FALSE(up_mesh.empty());
+-    CHECK_FALSE(slightly_down_mesh.empty());
+-    CHECK_FALSE(down_mesh.empty());
+-    CHECK_FALSE(clean_down_mesh.empty());
++    CHECK_FALSE(forward_viewmodel.empty());
++    CHECK_FALSE(right_viewmodel.empty());
++    CHECK_FALSE(up_viewmodel.empty());
++    CHECK_FALSE(slightly_down_viewmodel.empty());
++    CHECK_FALSE(down_viewmodel.empty());
++    CHECK_FALSE(clean_down_viewmodel.empty());
+     CHECK_FALSE(world_avatar_mesh.empty());
+-    CHECK(meshes_match_in_camera_space(forward_mesh, looking_forward, right_mesh, looking_right));
+-    CHECK(meshes_match_in_camera_space(forward_mesh, looking_forward, up_mesh, looking_up));
+-    CHECK(meshes_match_exactly(down_mesh, down_mesh_repeat));
+-    CHECK_FALSE(meshes_match_exactly(down_mesh, clean_down_mesh));
+-    CHECK(forward_mesh.part_count == 3);
+-    CHECK(right_mesh.part_count == forward_mesh.part_count);
+-    CHECK(up_mesh.part_count == forward_mesh.part_count);
+-    CHECK(slightly_down_mesh.part_count == forward_mesh.part_count);
+-    CHECK(down_mesh.part_count == forward_mesh.part_count);
+-    CHECK(world_avatar_mesh.part_count > down_mesh.part_count);
++    CHECK(meshes_match_in_camera_space(forward_viewmodel.mesh, looking_forward, right_viewmodel.mesh, looking_right));
++    CHECK(meshes_match_in_camera_space(forward_viewmodel.mesh, looking_forward, up_viewmodel.mesh, looking_up));
++    CHECK(meshes_match_exactly(down_viewmodel.mesh, down_viewmodel_repeat.mesh));
++    CHECK_FALSE(meshes_match_exactly(down_viewmodel.mesh, clean_down_viewmodel.mesh));
++    CHECK(forward_viewmodel.mesh.part_count >= 4);
++    CHECK(right_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
++    CHECK(up_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
++    CHECK(slightly_down_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
++    CHECK(down_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
++    CHECK(world_avatar_mesh.part_count > down_viewmodel.mesh.part_count);
+     CHECK(down_bounds.min.y > looking_down.position().y + 0.35F);
+     CHECK(world_avatar_bounds.min.y < looking_down.position().y + 0.10F);
++    CHECK(forward_socket.x == doctest::Approx(right_socket.x).epsilon(1.0e-3F));
++    CHECK(forward_socket.y == doctest::Approx(right_socket.y).epsilon(1.0e-3F));
++    CHECK(forward_socket.z == doctest::Approx(right_socket.z).epsilon(1.0e-3F));
++    CHECK(forward_socket.x == doctest::Approx(up_socket.x).epsilon(1.0e-3F));
++    CHECK(forward_socket.y == doctest::Approx(up_socket.y).epsilon(1.0e-3F));
++    CHECK(forward_socket.z == doctest::Approx(up_socket.z).epsilon(1.0e-3F));
++    CHECK(forward_socket.x > 0.10F);
++    CHECK(forward_socket.y < -0.05F);
++    CHECK(forward_socket.z > 0.20F);
+ }
+ 
+ TEST_CASE("player avatar action triggers deterministically change the first person pose") {
+@@ -755,16 +808,18 @@ TEST_CASE("player avatar action triggers deterministically change the first pers
+     mining_player.trigger_primary_action();
+     placing_player.trigger_secondary_action();
+ 
+-    const auto idle_mesh = build_player_mesh(idle_player);
+-    const auto mining_mesh = build_player_mesh(mining_player);
+-    const auto placing_mesh = build_player_mesh(placing_player);
+-
+-    CHECK_FALSE(idle_mesh.empty());
+-    CHECK_FALSE(mining_mesh.empty());
+-    CHECK_FALSE(placing_mesh.empty());
+-    CHECK_FALSE(meshes_match_exactly(idle_mesh, mining_mesh));
+-    CHECK_FALSE(meshes_match_exactly(idle_mesh, placing_mesh));
+-    CHECK_FALSE(meshes_match_exactly(mining_mesh, placing_mesh));
++    const auto idle_viewmodel = build_player_viewmodel_mesh(idle_player);
++    const auto mining_viewmodel = build_player_viewmodel_mesh(mining_player);
++    const auto placing_viewmodel = build_player_viewmodel_mesh(placing_player);
++
++    CHECK_FALSE(idle_viewmodel.empty());
++    CHECK_FALSE(mining_viewmodel.empty());
++    CHECK_FALSE(placing_viewmodel.empty());
++    CHECK_FALSE(meshes_match_exactly(idle_viewmodel.mesh, mining_viewmodel.mesh));
++    CHECK_FALSE(meshes_match_exactly(idle_viewmodel.mesh, placing_viewmodel.mesh));
++    CHECK_FALSE(meshes_match_exactly(mining_viewmodel.mesh, placing_viewmodel.mesh));
++    CHECK(mining_viewmodel.pose.action_swing > idle_viewmodel.pose.action_swing);
++    CHECK(placing_viewmodel.pose.action_swing > idle_viewmodel.pose.action_swing);
+ }
+ 
+ } // namespace valcraft

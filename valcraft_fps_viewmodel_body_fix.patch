@@ -1,0 +1,125 @@
+--- a/src/player/PlayerGeometry.h	2026-03-31 02:14:45.000000000 +0000
++++ b/src/player/PlayerGeometry.h	2026-04-01 23:25:57.171431587 +0000
+@@ -33,8 +33,14 @@
+     Count = 16,
+ };
+ 
++enum class PlayerMeshView : std::uint8_t {
++    FirstPerson = 0,
++    WorldAvatar = 1,
++};
++
+ [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;
+ [[nodiscard]] auto build_player_atlas_pixels() -> std::vector<std::uint8_t>;
+-[[nodiscard]] auto build_player_mesh(const PlayerController& player) -> CreatureMeshData;
++[[nodiscard]] auto build_player_mesh(const PlayerController& player,
++                                     PlayerMeshView view = PlayerMeshView::FirstPerson) -> CreatureMeshData;
+ 
+ } // namespace valcraft
+--- a/src/player/PlayerGeometry.cpp	2026-03-31 02:14:45.000000000 +0000
++++ b/src/player/PlayerGeometry.cpp	2026-04-01 23:25:57.172027341 +0000
+@@ -702,13 +702,14 @@
+     return pixels;
+ }
+ 
+-auto build_player_mesh(const PlayerController& player) -> CreatureMeshData {
++auto build_player_mesh(const PlayerController& player, PlayerMeshView view) -> CreatureMeshData {
+     CreatureMeshData mesh {};
+ 
+     const auto& state = player.state();
++    const auto first_person_view = view == PlayerMeshView::FirstPerson;
+     const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
+-    const auto body_visibility = smooth_range(34.0F, 78.0F, -state.pitch_degrees);
+-    const auto presentation_arm_visibility = 1.0F - smooth_range(0.18F, 0.64F, body_visibility);
++    const auto body_visibility = first_person_view ? smooth_range(34.0F, 78.0F, -state.pitch_degrees) : 0.0F;
++    const auto presentation_arm_visibility = first_person_view ? 1.0F : 0.0F;
+     const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
+     const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
+ 
+@@ -768,14 +769,17 @@
+     pose.place_pull = action_pull(state.secondary_action_active, state.secondary_action_progress);
+     pose.torso_yaw = glm::radians(glm::clamp(wrap_degrees(state.yaw_degrees - state.body_yaw_degrees), -46.0F, 46.0F) * 0.35F);
+ 
+-    if (pose.presentation_arm_visibility > 0.05F) {
+-        append_presentation_arm(mesh, player, pose);
+-    }
+-    if (pose.body_visibility > 0.05F) {
+-        // En vue FPS, on omet la tete pour garder le plan proche propre et eviter tout clipping camera.
+-        append_full_body(mesh, player, pose);
++    if (first_person_view) {
++        // Vue FPS locale facon Minecraft : on garde uniquement le bras de presentation,
++        // attache a la camera, pour eviter tout decalage avec le view-model et ne jamais
++        // masquer le sol quand le joueur regarde vers le bas.
++        if (pose.presentation_arm_visibility > 0.05F) {
++            append_presentation_arm(mesh, player, pose);
++        }
++        return mesh;
+     }
+ 
++    append_full_body(mesh, player, pose);
+     return mesh;
+ }
+ 
+--- a/src/render/Renderer.cpp	2026-03-31 02:14:45.000000000 +0000
++++ b/src/render/Renderer.cpp	2026-04-01 23:25:57.175432357 +0000
+@@ -3570,7 +3570,7 @@
+         return;
+     }
+ 
+-    const auto mesh = build_player_mesh(player);
++    const auto mesh = build_player_mesh(player, PlayerMeshView::FirstPerson);
+     if (mesh.empty()) {
+         return;
+     }
+--- a/tests/PlayerTests.cpp	2026-03-31 02:14:45.000000000 +0000
++++ b/tests/PlayerTests.cpp	2026-04-01 23:25:57.175768832 +0000
+@@ -629,7 +629,7 @@
+     }
+ }
+ 
+-TEST_CASE("player geometry shows a presentation arm forward and a full body when looking down") {
++TEST_CASE("player first person mesh keeps the camera clear while preserving a separate world avatar") {
+     World world(156, 1);
+     test::make_chunk_empty(world, {0, 0});
+     test::make_flat_floor(world, -4, 4, 0, -4, 4);
+@@ -653,12 +653,14 @@
+     looking_down.apply_external_damage(2.0F, PlayerDeathCause::Zombie);
+ 
+     const auto atlas = build_player_atlas_pixels();
+-    const auto forward_mesh = build_player_mesh(looking_forward);
+-    const auto slightly_down_mesh = build_player_mesh(looking_slightly_down);
+-    const auto down_mesh = build_player_mesh(looking_down);
+-    const auto clean_down_mesh = build_player_mesh(looking_down_clean);
+-    const auto down_mesh_repeat = build_player_mesh(looking_down);
++    const auto forward_mesh = build_player_mesh(looking_forward, PlayerMeshView::FirstPerson);
++    const auto slightly_down_mesh = build_player_mesh(looking_slightly_down, PlayerMeshView::FirstPerson);
++    const auto down_mesh = build_player_mesh(looking_down, PlayerMeshView::FirstPerson);
++    const auto clean_down_mesh = build_player_mesh(looking_down_clean, PlayerMeshView::FirstPerson);
++    const auto down_mesh_repeat = build_player_mesh(looking_down, PlayerMeshView::FirstPerson);
++    const auto world_avatar_mesh = build_player_mesh(looking_down, PlayerMeshView::WorldAvatar);
+     const auto down_bounds = mesh_bounds(down_mesh);
++    const auto world_avatar_bounds = mesh_bounds(world_avatar_mesh);
+ 
+     REQUIRE(atlas.size() == static_cast<std::size_t>(kPlayerAtlasSize * kPlayerAtlasSize * 4));
+     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[2] > player_tile_average_rgba(atlas, PlayerAtlasTile::Pants)[2]);
+@@ -670,14 +672,15 @@
+     CHECK_FALSE(slightly_down_mesh.empty());
+     CHECK_FALSE(down_mesh.empty());
+     CHECK_FALSE(clean_down_mesh.empty());
++    CHECK_FALSE(world_avatar_mesh.empty());
+     CHECK(meshes_match_exactly(down_mesh, down_mesh_repeat));
+     CHECK_FALSE(meshes_match_exactly(down_mesh, clean_down_mesh));
+-    CHECK(forward_mesh.part_count >= 3);
++    CHECK(forward_mesh.part_count == 3);
+     CHECK(slightly_down_mesh.part_count == forward_mesh.part_count);
+-    CHECK(down_mesh.part_count >= 10);
+-    CHECK(down_mesh.part_count > forward_mesh.part_count);
+-    CHECK(down_bounds.max.y < looking_down.eye_position().y - 0.10F);
+-    CHECK(down_bounds.min.y > looking_down.position().y - 0.08F);
++    CHECK(down_mesh.part_count == forward_mesh.part_count);
++    CHECK(world_avatar_mesh.part_count > down_mesh.part_count);
++    CHECK(down_bounds.min.y > looking_down.position().y + 0.35F);
++    CHECK(world_avatar_bounds.min.y < looking_down.position().y + 0.10F);
+ }
+ 
+ TEST_CASE("player avatar action triggers deterministically change the first person pose") {

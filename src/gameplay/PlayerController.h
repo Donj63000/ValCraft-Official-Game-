@@ -67,6 +67,8 @@ struct PlayerState {
     float secondary_action_progress = 0.0F;
     float landing_impact = 0.0F;
     float airborne_time = 0.0F;
+    float look_sway_yaw = 0.0F;
+    float look_sway_pitch = 0.0F;
     bool on_ground = false;
     bool fly_mode = false;
     bool head_underwater = false;

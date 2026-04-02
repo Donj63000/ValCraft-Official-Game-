@@ -8,6 +8,7 @@
 #include "TestUtils.h"
 
 #include <doctest/doctest.h>
+#include <glm/geometric.hpp>
 
 #include <algorithm>
 #include <array>
@@ -134,6 +135,41 @@ auto meshes_match_in_camera_space(const CreatureMeshData& lhs,
 
 auto angle_distance_degrees(float lhs, float rhs) -> float {
     return static_cast<float>(std::abs(std::remainder(lhs - rhs, 360.0F)));
+}
+
+auto item_socket_in_camera_space(const PlayerViewModelMesh& viewmodel, const PlayerController& player) -> glm::vec3 {
+    const auto socket_world = glm::vec3 {
+        viewmodel.pose.item_socket_transform[3].x,
+        viewmodel.pose.item_socket_transform[3].y,
+        viewmodel.pose.item_socket_transform[3].z,
+    };
+    auto camera_forward = player.look_direction();
+    if (glm::dot(camera_forward, camera_forward) <= 1.0e-6F) {
+        camera_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
+    } else {
+        camera_forward = glm::normalize(camera_forward);
+    }
+
+    auto camera_right = glm::cross(camera_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
+    if (glm::dot(camera_right, camera_right) <= 1.0e-6F) {
+        camera_right = glm::vec3 {1.0F, 0.0F, 0.0F};
+    } else {
+        camera_right = glm::normalize(camera_right);
+    }
+    const auto camera_up = glm::normalize(glm::cross(camera_right, camera_forward));
+
+    const auto relative = socket_world - player.eye_position();
+    return {
+        glm::dot(relative, camera_right),
+        glm::dot(relative, camera_up),
+        glm::dot(relative, camera_forward),
+    };
+}
+
+void settle_viewmodel(PlayerController& player, const World& world, int frames = 18) {
+    for (int i = 0; i < frames; ++i) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world);
+    }
 }
 
 } // namespace
@@ -675,7 +711,7 @@ TEST_CASE("player body yaw follows real movement and eases back toward the camer
     }
 }
 
-TEST_CASE("player first person mesh keeps the camera clear while preserving a separate world avatar") {
+TEST_CASE("player first person viewmodel stays camera locked while the world avatar stays separate") {
     World world(156, 1);
     test::make_chunk_empty(world, {0, 0});
     test::make_flat_floor(world, -4, 4, 0, -4, 4);
@@ -687,38 +723,48 @@ TEST_CASE("player first person mesh keeps the camera clear while preserving a se
     PlayerController looking_down({0.5F, 1.001F, 0.5F});
     PlayerController looking_down_clean({0.5F, 1.001F, 0.5F});
 
+    settle_viewmodel(looking_forward, world);
+
     PlayerInput look_right_input {};
     look_right_input.look_delta_x = 1125.0F;
     looking_right.update(look_right_input, 0.0F, world);
+    settle_viewmodel(looking_right, world);
 
     PlayerInput look_up_input {};
     look_up_input.look_delta_y = -600.0F;
     looking_up.update(look_up_input, 0.0F, world);
+    settle_viewmodel(looking_up, world);
 
     PlayerInput look_slightly_down_input {};
     look_slightly_down_input.look_delta_y = 88.0F;
     looking_slightly_down.update(look_slightly_down_input, 0.0F, world);
+    settle_viewmodel(looking_slightly_down, world);
 
     PlayerInput look_down_input {};
     look_down_input.look_delta_y = 800.0F;
     looking_down.update(look_down_input, 0.0F, world);
     looking_down_clean.update(look_down_input, 0.0F, world);
+    settle_viewmodel(looking_down, world);
+    settle_viewmodel(looking_down_clean, world);
 
     looking_down.set_velocity({1.2F, 0.0F, 0.0F});
     looking_down_clean.set_velocity({1.2F, 0.0F, 0.0F});
     looking_down.apply_external_damage(2.0F, PlayerDeathCause::Zombie);
 
     const auto atlas = build_player_atlas_pixels();
-    const auto forward_mesh = build_player_mesh(looking_forward, PlayerMeshView::FirstPerson);
-    const auto right_mesh = build_player_mesh(looking_right, PlayerMeshView::FirstPerson);
-    const auto up_mesh = build_player_mesh(looking_up, PlayerMeshView::FirstPerson);
-    const auto slightly_down_mesh = build_player_mesh(looking_slightly_down, PlayerMeshView::FirstPerson);
-    const auto down_mesh = build_player_mesh(looking_down, PlayerMeshView::FirstPerson);
-    const auto clean_down_mesh = build_player_mesh(looking_down_clean, PlayerMeshView::FirstPerson);
-    const auto down_mesh_repeat = build_player_mesh(looking_down, PlayerMeshView::FirstPerson);
-    const auto world_avatar_mesh = build_player_mesh(looking_down, PlayerMeshView::WorldAvatar);
-    const auto down_bounds = mesh_bounds(down_mesh);
+    const auto forward_viewmodel = build_player_viewmodel_mesh(looking_forward);
+    const auto right_viewmodel = build_player_viewmodel_mesh(looking_right);
+    const auto up_viewmodel = build_player_viewmodel_mesh(looking_up);
+    const auto slightly_down_viewmodel = build_player_viewmodel_mesh(looking_slightly_down);
+    const auto down_viewmodel = build_player_viewmodel_mesh(looking_down);
+    const auto clean_down_viewmodel = build_player_viewmodel_mesh(looking_down_clean);
+    const auto down_viewmodel_repeat = build_player_viewmodel_mesh(looking_down);
+    const auto world_avatar_mesh = build_player_world_avatar_mesh(looking_down);
+    const auto down_bounds = mesh_bounds(down_viewmodel.mesh);
     const auto world_avatar_bounds = mesh_bounds(world_avatar_mesh);
+    const auto forward_socket = item_socket_in_camera_space(forward_viewmodel, looking_forward);
+    const auto right_socket = item_socket_in_camera_space(right_viewmodel, looking_right);
+    const auto up_socket = item_socket_in_camera_space(up_viewmodel, looking_up);
 
     REQUIRE(atlas.size() == static_cast<std::size_t>(kPlayerAtlasSize * kPlayerAtlasSize * 4));
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[2] > player_tile_average_rgba(atlas, PlayerAtlasTile::Pants)[2]);
@@ -726,25 +772,34 @@ TEST_CASE("player first person mesh keeps the camera clear while preserving a se
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hurt)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[0] + 80.0F);
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Face)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::HairShadow)[0]);
 
-    CHECK_FALSE(forward_mesh.empty());
-    CHECK_FALSE(right_mesh.empty());
-    CHECK_FALSE(up_mesh.empty());
-    CHECK_FALSE(slightly_down_mesh.empty());
-    CHECK_FALSE(down_mesh.empty());
-    CHECK_FALSE(clean_down_mesh.empty());
+    CHECK_FALSE(forward_viewmodel.empty());
+    CHECK_FALSE(right_viewmodel.empty());
+    CHECK_FALSE(up_viewmodel.empty());
+    CHECK_FALSE(slightly_down_viewmodel.empty());
+    CHECK_FALSE(down_viewmodel.empty());
+    CHECK_FALSE(clean_down_viewmodel.empty());
     CHECK_FALSE(world_avatar_mesh.empty());
-    CHECK(meshes_match_in_camera_space(forward_mesh, looking_forward, right_mesh, looking_right));
-    CHECK(meshes_match_in_camera_space(forward_mesh, looking_forward, up_mesh, looking_up));
-    CHECK(meshes_match_exactly(down_mesh, down_mesh_repeat));
-    CHECK_FALSE(meshes_match_exactly(down_mesh, clean_down_mesh));
-    CHECK(forward_mesh.part_count == 3);
-    CHECK(right_mesh.part_count == forward_mesh.part_count);
-    CHECK(up_mesh.part_count == forward_mesh.part_count);
-    CHECK(slightly_down_mesh.part_count == forward_mesh.part_count);
-    CHECK(down_mesh.part_count == forward_mesh.part_count);
-    CHECK(world_avatar_mesh.part_count > down_mesh.part_count);
+    CHECK(meshes_match_in_camera_space(forward_viewmodel.mesh, looking_forward, right_viewmodel.mesh, looking_right));
+    CHECK(meshes_match_in_camera_space(forward_viewmodel.mesh, looking_forward, up_viewmodel.mesh, looking_up));
+    CHECK(meshes_match_exactly(down_viewmodel.mesh, down_viewmodel_repeat.mesh));
+    CHECK_FALSE(meshes_match_exactly(down_viewmodel.mesh, clean_down_viewmodel.mesh));
+    CHECK(forward_viewmodel.mesh.part_count >= 4);
+    CHECK(right_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
+    CHECK(up_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
+    CHECK(slightly_down_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
+    CHECK(down_viewmodel.mesh.part_count == forward_viewmodel.mesh.part_count);
+    CHECK(world_avatar_mesh.part_count > down_viewmodel.mesh.part_count);
     CHECK(down_bounds.min.y > looking_down.position().y + 0.35F);
     CHECK(world_avatar_bounds.min.y < looking_down.position().y + 0.10F);
+    CHECK(forward_socket.x == doctest::Approx(right_socket.x).epsilon(1.0e-3F));
+    CHECK(forward_socket.y == doctest::Approx(right_socket.y).epsilon(1.0e-3F));
+    CHECK(forward_socket.z == doctest::Approx(right_socket.z).epsilon(1.0e-3F));
+    CHECK(forward_socket.x == doctest::Approx(up_socket.x).epsilon(1.0e-3F));
+    CHECK(forward_socket.y == doctest::Approx(up_socket.y).epsilon(1.0e-3F));
+    CHECK(forward_socket.z == doctest::Approx(up_socket.z).epsilon(1.0e-3F));
+    CHECK(forward_socket.x > 0.10F);
+    CHECK(forward_socket.y < -0.05F);
+    CHECK(forward_socket.z > 0.20F);
 }
 
 TEST_CASE("player avatar action triggers deterministically change the first person pose") {
@@ -755,16 +810,18 @@ TEST_CASE("player avatar action triggers deterministically change the first pers
     mining_player.trigger_primary_action();
     placing_player.trigger_secondary_action();
 
-    const auto idle_mesh = build_player_mesh(idle_player);
-    const auto mining_mesh = build_player_mesh(mining_player);
-    const auto placing_mesh = build_player_mesh(placing_player);
+    const auto idle_viewmodel = build_player_viewmodel_mesh(idle_player);
+    const auto mining_viewmodel = build_player_viewmodel_mesh(mining_player);
+    const auto placing_viewmodel = build_player_viewmodel_mesh(placing_player);
 
-    CHECK_FALSE(idle_mesh.empty());
-    CHECK_FALSE(mining_mesh.empty());
-    CHECK_FALSE(placing_mesh.empty());
-    CHECK_FALSE(meshes_match_exactly(idle_mesh, mining_mesh));
-    CHECK_FALSE(meshes_match_exactly(idle_mesh, placing_mesh));
-    CHECK_FALSE(meshes_match_exactly(mining_mesh, placing_mesh));
+    CHECK_FALSE(idle_viewmodel.empty());
+    CHECK_FALSE(mining_viewmodel.empty());
+    CHECK_FALSE(placing_viewmodel.empty());
+    CHECK_FALSE(meshes_match_exactly(idle_viewmodel.mesh, mining_viewmodel.mesh));
+    CHECK_FALSE(meshes_match_exactly(idle_viewmodel.mesh, placing_viewmodel.mesh));
+    CHECK_FALSE(meshes_match_exactly(mining_viewmodel.mesh, placing_viewmodel.mesh));
+    CHECK(mining_viewmodel.pose.action_swing > idle_viewmodel.pose.action_swing);
+    CHECK(placing_viewmodel.pose.action_swing > idle_viewmodel.pose.action_swing);
 }
 
 } // namespace valcraft

@@ -30,13 +30,16 @@ struct PlayerBoxTiles {
     std::array<PlayerAtlasTile, 6> faces {};
 };
 
-struct PlayerPoseState {
-    glm::vec3 camera_forward {0.0F, 0.0F, -1.0F};
-    glm::vec3 camera_right {1.0F, 0.0F, 0.0F};
+struct CameraBasis {
+    glm::vec3 forward {0.0F, 0.0F, -1.0F};
+    glm::vec3 right {1.0F, 0.0F, 0.0F};
+    glm::vec3 up {0.0F, 1.0F, 0.0F};
+};
+
+struct PlayerWorldAvatarPose {
     glm::vec3 body_forward {0.0F, 0.0F, -1.0F};
     glm::vec3 body_right {1.0F, 0.0F, 0.0F};
     float body_visibility = 0.0F;
-    float presentation_arm_visibility = 1.0F;
     float walk_amount = 0.0F;
     float stride = 0.0F;
     float stride_cos = 1.0F;
@@ -50,6 +53,29 @@ struct PlayerPoseState {
     float place_arc = 0.0F;
     float place_pull = 0.0F;
     float torso_yaw = 0.0F;
+};
+
+struct PlayerViewModelRigState {
+    CameraBasis camera {};
+    glm::vec3 anchor {0.0F};
+    float walk_amount = 0.0F;
+    float stride = 0.0F;
+    float stride_cos = 1.0F;
+    float breathing_offset = 0.0F;
+    float hurt_amount = 0.0F;
+    float swim_amount = 0.0F;
+    float airborne_amount = 0.0F;
+    float landing_amount = 0.0F;
+    float mine_arc = 0.0F;
+    float mine_pull = 0.0F;
+    float place_arc = 0.0F;
+    float place_pull = 0.0F;
+    float look_sway_yaw = 0.0F;
+    float look_sway_pitch = 0.0F;
+    float bob_side = 0.0F;
+    float bob_vertical = 0.0F;
+    float bob_depth = 0.0F;
+    float bob_roll = 0.0F;
 };
 
 auto make_face_definition(std::array<glm::vec3, 4> corners, const glm::vec3& normal) -> FaceDefinition {
@@ -105,6 +131,27 @@ auto wrap_degrees(float angle) noexcept -> float {
         angle -= 360.0F;
     }
     return angle;
+}
+
+auto safe_normalize(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    if (glm::dot(value, value) <= 1.0e-6F) {
+        return fallback;
+    }
+    return glm::normalize(value);
+}
+
+auto make_camera_basis(const PlayerController& player) noexcept -> CameraBasis {
+    auto forward = safe_normalize(player.look_direction(), glm::vec3 {0.0F, 0.0F, -1.0F});
+    auto right = glm::cross(forward, glm::vec3 {0.0F, 1.0F, 0.0F});
+    right = safe_normalize(right, glm::vec3 {1.0F, 0.0F, 0.0F});
+    auto up = glm::cross(right, forward);
+    up = safe_normalize(up, glm::vec3 {0.0F, 1.0F, 0.0F});
+    return {forward, right, up};
+}
+
+auto make_body_forward(float yaw_degrees) noexcept -> glm::vec3 {
+    const auto yaw_radians = glm::radians(yaw_degrees);
+    return safe_normalize(glm::vec3 {std::cos(yaw_radians), 0.0F, std::sin(yaw_radians)}, glm::vec3 {0.0F, 0.0F, -1.0F});
 }
 
 auto hash_to_unit(int x, int y, int seed) noexcept -> float {
@@ -258,24 +305,28 @@ void append_box(CreatureMeshData& mesh,
         }
 
         mesh.indices.insert(mesh.indices.end(), {
-            base_index + 0U, base_index + 1U, base_index + 2U,
-            base_index + 0U, base_index + 2U, base_index + 3U,
+            base_index + 0,
+            base_index + 1,
+            base_index + 2,
+            base_index + 0,
+            base_index + 2,
+            base_index + 3,
         });
     }
 
     ++mesh.part_count;
 }
 
-[[maybe_unused]] void append_box(CreatureMeshData& mesh,
-                                 const glm::mat4& root,
-                                 const glm::vec3& center,
-                                 const glm::vec3& half_extent,
-                                 const glm::vec3& rotation_radians,
-                                 PlayerAtlasTile tile,
-                                 float material_class,
-                                 float cavity_mask,
-                                 float emissive_strength) {
-    append_box(mesh, root, center, half_extent, rotation_radians, uniform_tiles(tile), material_class, cavity_mask, emissive_strength);
+auto transform_translation(const glm::mat4& transform) noexcept -> glm::vec3 {
+    return {transform[3].x, transform[3].y, transform[3].z};
+}
+
+auto action_arc(bool active, float progress) noexcept -> float {
+    return active ? std::sin(glm::clamp(progress, 0.0F, 1.0F) * kPi) : 0.0F;
+}
+
+auto action_pull(bool active, float progress) noexcept -> float {
+    return active ? smoothstep01(1.0F - glm::clamp(progress, 0.0F, 1.0F)) : 0.0F;
 }
 
 auto sample_player_tile(PlayerAtlasTile tile, int x, int y) noexcept -> std::array<std::uint8_t, 4> {
@@ -399,7 +450,79 @@ auto sample_player_tile(PlayerAtlasTile tile, int x, int y) noexcept -> std::arr
     return make_rgba(255.0F, 0.0F, 255.0F, 0.0F);
 }
 
-void append_full_body(CreatureMeshData& mesh, const PlayerController& player, const PlayerPoseState& pose) {
+auto build_world_avatar_pose(const PlayerController& player) -> PlayerWorldAvatarPose {
+    const auto& state = player.state();
+    const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
+    const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
+    const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
+    const auto body_forward = make_body_forward(state.body_yaw_degrees);
+    const auto camera_basis = make_camera_basis(player);
+    auto body_right = glm::cross(body_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
+    body_right = safe_normalize(body_right, camera_basis.right);
+
+    PlayerWorldAvatarPose pose {};
+    pose.body_forward = body_forward;
+    pose.body_right = body_right;
+    pose.body_visibility = 0.0F;
+    pose.walk_amount = walk_amount;
+    pose.stride = std::sin(state.step_phase);
+    pose.stride_cos = std::cos(state.step_phase);
+    pose.breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
+    pose.hurt_amount = hurt_amount;
+    pose.swim_amount = state.swimming ? 1.0F : 0.0F;
+    pose.airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
+    pose.landing_amount = state.landing_impact * state.landing_impact;
+    pose.mine_arc = action_arc(state.primary_action_active, state.primary_action_progress);
+    pose.mine_pull = action_pull(state.primary_action_active, state.primary_action_progress);
+    pose.place_arc = action_arc(state.secondary_action_active, state.secondary_action_progress);
+    pose.place_pull = action_pull(state.secondary_action_active, state.secondary_action_progress);
+    pose.torso_yaw = glm::radians(glm::clamp(wrap_degrees(state.yaw_degrees - state.body_yaw_degrees), -46.0F, 46.0F) * 0.35F);
+    return pose;
+}
+
+auto build_viewmodel_rig_state(const PlayerController& player) -> PlayerViewModelRigState {
+    const auto& state = player.state();
+    const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
+    const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
+    const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
+    const auto stride = std::sin(state.step_phase);
+    const auto stride_cos = std::cos(state.step_phase);
+    const auto breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
+    const auto airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
+    const auto landing_amount = state.landing_impact * state.landing_impact;
+    const auto mine_arc_value = action_arc(state.primary_action_active, state.primary_action_progress);
+    const auto mine_pull_value = action_pull(state.primary_action_active, state.primary_action_progress);
+    const auto place_arc_value = action_arc(state.secondary_action_active, state.secondary_action_progress);
+    const auto place_pull_value = action_pull(state.secondary_action_active, state.secondary_action_progress);
+
+    PlayerViewModelRigState rig {};
+    rig.camera = make_camera_basis(player);
+    rig.walk_amount = walk_amount;
+    rig.stride = stride;
+    rig.stride_cos = stride_cos;
+    rig.breathing_offset = breathing_offset;
+    rig.hurt_amount = hurt_amount;
+    rig.swim_amount = state.swimming ? 1.0F : 0.0F;
+    rig.airborne_amount = airborne_amount;
+    rig.landing_amount = landing_amount;
+    rig.mine_arc = mine_arc_value;
+    rig.mine_pull = mine_pull_value;
+    rig.place_arc = place_arc_value;
+    rig.place_pull = place_pull_value;
+    rig.look_sway_yaw = state.look_sway_yaw;
+    rig.look_sway_pitch = state.look_sway_pitch;
+    rig.bob_side = stride * walk_amount * 0.018F;
+    rig.bob_vertical = stride_cos * walk_amount * 0.012F - landing_amount * 0.050F;
+    rig.bob_depth = std::abs(stride_cos) * walk_amount * 0.014F + airborne_amount * 0.012F;
+    rig.bob_roll = stride * walk_amount * 0.050F;
+    rig.anchor = player.eye_position()
+               + rig.camera.right * (0.66F + rig.bob_side + place_pull_value * 0.024F)
+               + rig.camera.up * (-0.31F + rig.breathing_offset * 0.40F + rig.bob_vertical - hurt_amount * 0.040F)
+               + rig.camera.forward * (0.46F + rig.bob_depth + mine_pull_value * 0.042F - place_arc_value * 0.022F);
+    return rig;
+}
+
+void append_full_body(CreatureMeshData& mesh, const PlayerController& player, const PlayerWorldAvatarPose& pose) {
     const auto& state = player.state();
     const auto shoulder_anchor = player.eye_position()
                                + pose.body_forward * (0.06F + pose.body_visibility * 0.16F + pose.mine_pull * 0.02F)
@@ -603,28 +726,17 @@ void append_full_body(CreatureMeshData& mesh, const PlayerController& player, co
                emissive * 0.12F);
 }
 
-void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& player, const PlayerPoseState& pose) {
-    if (pose.presentation_arm_visibility <= 0.05F) {
-        return;
-    }
-
-    const auto& state = player.state();
-    const auto visibility = pose.presentation_arm_visibility;
-    const auto camera_up = glm::normalize(glm::cross(pose.camera_right, pose.camera_forward));
-    const auto jitter = std::sin(state.animation_time * 12.0F + pose.mine_pull * 3.0F) * pose.walk_amount * 0.006F;
-    const auto anchor = player.eye_position()
-                      + pose.camera_forward * (0.18F + pose.mine_pull * 0.04F - pose.place_arc * 0.02F)
-                      + pose.camera_right * (0.22F + pose.place_pull * 0.02F)
-                      + camera_up * (-0.30F + pose.stride_cos * pose.walk_amount * 0.014F - pose.hurt_amount * 0.04F + jitter);
+void append_viewmodel_arm(PlayerViewModelMesh& output, const PlayerController& player, const PlayerViewModelRigState& rig) {
+    auto& mesh = output.mesh;
+    const auto camera_up = rig.camera.up;
 
     auto root = glm::mat4(1.0F);
-    // Je reconstruis la base exacte de ma camera pour que le bras FPS suive vraiment mon regard.
-    root[0] = glm::vec4(pose.camera_right, 0.0F);
+    root[0] = glm::vec4(rig.camera.right, 0.0F);
     root[1] = glm::vec4(camera_up, 0.0F);
-    root[2] = glm::vec4(-pose.camera_forward, 0.0F);
-    root[3] = glm::vec4(anchor, 1.0F);
+    root[2] = glm::vec4(-rig.camera.forward, 0.0F);
+    root[3] = glm::vec4(rig.anchor, 1.0F);
 
-    const auto emissive = pose.hurt_amount * 0.10F;
+    const auto emissive = rig.hurt_amount * 0.10F;
     const auto sleeve_tiles = hurt_tiles_if_needed(
         make_box_tiles(PlayerAtlasTile::Sleeve,
                        PlayerAtlasTile::ShirtShadow,
@@ -632,7 +744,7 @@ void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& pla
                        PlayerAtlasTile::SkinShadow,
                        PlayerAtlasTile::ShirtShadow,
                        PlayerAtlasTile::ShirtShadow),
-        pose.hurt_amount,
+        rig.hurt_amount,
         0.20F);
     const auto hand_tiles = hurt_tiles_if_needed(
         make_box_tiles(PlayerAtlasTile::Skin,
@@ -641,49 +753,100 @@ void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& pla
                        PlayerAtlasTile::SkinShadow,
                        PlayerAtlasTile::SkinShadow,
                        PlayerAtlasTile::SkinShadow),
-        pose.hurt_amount,
+        rig.hurt_amount,
         0.24F);
 
-    const auto shoulder_root = make_frame_transform(
-        root,
-        glm::vec3 {0.0F},
-        glm::vec3 {
-            0.24F + pose.place_arc * 0.08F + pose.mine_pull * 0.12F,
-            -0.08F - pose.place_arc * 0.18F + pose.mine_arc * 0.10F,
-            -1.02F - pose.mine_arc * 0.60F - pose.mine_pull * 0.18F - pose.place_arc * 0.28F - pose.hurt_amount * 0.12F,
-        });
+    const auto sway_yaw = rig.look_sway_yaw * 0.20F;
+    const auto sway_pitch = rig.look_sway_pitch * 0.16F;
+    const auto sway_roll = -rig.look_sway_yaw * 0.12F + rig.look_sway_pitch * 0.05F;
+    const auto shoulder_pitch_base = 0.20F + sway_pitch + rig.airborne_amount * 0.08F - rig.landing_amount * 0.08F;
+    const auto shoulder_yaw_base = -0.18F + sway_yaw - rig.place_arc * 0.18F + rig.mine_arc * 0.10F;
+    const auto shoulder_roll_base = -1.12F - rig.mine_arc * 0.82F - rig.mine_pull * 0.12F - rig.place_arc * 0.34F -
+                                    rig.hurt_amount * 0.14F - rig.bob_roll - sway_roll;
+
+    auto shoulder_rotation = glm::vec3 {
+        shoulder_pitch_base,
+        shoulder_yaw_base,
+        shoulder_roll_base,
+    };
+    auto elbow_rotation = glm::vec3 {
+        0.10F + rig.mine_arc * 0.56F + rig.place_arc * 0.24F,
+        -0.02F + sway_yaw * 0.60F - rig.place_pull * 0.10F,
+        -0.34F - rig.mine_arc * 1.18F - rig.mine_pull * 0.18F - rig.place_arc * 0.42F - rig.hurt_amount * 0.08F,
+    };
+    auto wrist_rotation = glm::vec3 {
+        -0.02F + rig.mine_arc * 0.18F + rig.place_arc * 0.06F,
+        0.08F + sway_yaw * 0.38F + rig.place_pull * 0.08F,
+        -0.08F - rig.mine_arc * 0.34F - rig.place_arc * 0.14F + rig.bob_roll * 0.28F,
+    };
+
+    if (rig.swim_amount > 0.0F) {
+        const auto swim_cycle = std::sin(player.state().animation_time * 5.0F);
+        shoulder_rotation = glm::mix(shoulder_rotation,
+                                     glm::vec3 {0.58F + swim_cycle * 0.10F, -0.04F, -1.42F - rig.mine_arc * 0.18F},
+                                     rig.swim_amount);
+        elbow_rotation = glm::mix(elbow_rotation,
+                                  glm::vec3 {0.26F + swim_cycle * 0.14F, 0.02F, -0.64F - rig.mine_arc * 0.40F},
+                                  rig.swim_amount);
+        wrist_rotation = glm::mix(wrist_rotation,
+                                  glm::vec3 {0.06F + swim_cycle * 0.08F, 0.08F, -0.16F},
+                                  rig.swim_amount);
+    }
+
+    const auto shoulder_root = make_frame_transform(root, glm::vec3 {0.0F}, shoulder_rotation);
+    const auto elbow_root = make_frame_transform(shoulder_root, glm::vec3 {0.0F, -0.26F, 0.0F}, elbow_rotation);
+    const auto wrist_root = make_frame_transform(elbow_root, glm::vec3 {0.02F, -0.24F, 0.0F}, wrist_rotation);
+    const auto item_socket = make_frame_transform(
+        wrist_root,
+        glm::vec3 {0.17F, -0.15F, 0.0F},
+        glm::vec3 {0.18F + rig.place_pull * 0.08F, -0.08F + rig.mine_pull * 0.04F, -0.26F - rig.mine_arc * 0.12F});
+
     append_box(mesh,
                shoulder_root,
-               glm::vec3 {0.0F, -0.18F, 0.0F},
-               glm::vec3 {0.085F, 0.18F, 0.085F} * (0.92F + visibility * 0.08F),
+               glm::vec3 {0.0F, -0.12F, 0.0F},
+               glm::vec3 {0.088F, 0.12F, 0.088F},
                glm::vec3 {0.0F},
                sleeve_tiles,
                kMaterialFabric,
                0.08F,
-               emissive * 0.52F);
-
-    const auto elbow_root = make_frame_transform(
-        shoulder_root,
-        glm::vec3 {0.0F, -0.36F, 0.0F},
-        glm::vec3 {0.04F, -0.02F, -0.34F - pose.mine_arc * 1.05F - pose.mine_pull * 0.18F - pose.place_arc * 0.34F});
+               emissive * 0.46F);
     append_box(mesh,
                elbow_root,
-               glm::vec3 {0.02F, -0.10F, 0.0F},
-               glm::vec3 {0.10F, 0.10F, 0.085F} * (0.92F + visibility * 0.08F),
+               glm::vec3 {0.0F, -0.12F, 0.0F},
+               glm::vec3 {0.082F, 0.14F, 0.082F},
+               glm::vec3 {0.0F},
+               sleeve_tiles,
+               kMaterialFabric,
+               0.08F,
+               emissive * 0.42F);
+    append_box(mesh,
+               wrist_root,
+               glm::vec3 {0.05F, -0.06F, 0.0F},
+               glm::vec3 {0.11F, 0.08F, 0.09F},
                glm::vec3 {0.0F},
                hand_tiles,
                kMaterialSkin,
                0.08F,
-               emissive * 0.48F);
+               emissive * 0.40F);
     append_box(mesh,
-               elbow_root,
-               glm::vec3 {0.10F, -0.20F, 0.0F},
-               glm::vec3 {0.06F, 0.05F, 0.06F} * (0.92F + visibility * 0.08F),
+               wrist_root,
+               glm::vec3 {0.13F, -0.14F, 0.0F},
+               glm::vec3 {0.055F, 0.045F, 0.06F},
                glm::vec3 {0.0F},
                hand_tiles,
                kMaterialSkin,
                0.06F,
-               emissive * 0.44F);
+               emissive * 0.36F);
+
+    output.pose.root_position = rig.anchor;
+    output.pose.shoulder_position = transform_translation(shoulder_root);
+    output.pose.elbow_position = transform_translation(elbow_root);
+    output.pose.wrist_position = transform_translation(wrist_root);
+    output.pose.item_socket_transform = item_socket;
+    output.pose.look_sway_yaw = rig.look_sway_yaw;
+    output.pose.look_sway_pitch = rig.look_sway_pitch;
+    output.pose.walk_bob = rig.bob_vertical;
+    output.pose.action_swing = std::max(std::max(rig.mine_arc, rig.place_arc), std::max(rig.mine_pull, rig.place_pull));
 }
 
 } // namespace
@@ -705,85 +868,24 @@ auto build_player_atlas_pixels() -> std::vector<std::uint8_t> {
     return pixels;
 }
 
-auto build_player_mesh(const PlayerController& player, PlayerMeshView view) -> CreatureMeshData {
+auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData {
     CreatureMeshData mesh {};
-
-    const auto& state = player.state();
-    const auto first_person_view = view == PlayerMeshView::FirstPerson;
-    const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
-    const auto body_visibility = first_person_view ? smooth_range(34.0F, 78.0F, -state.pitch_degrees) : 0.0F;
-    const auto presentation_arm_visibility = first_person_view ? 1.0F : 0.0F;
-    const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
-    const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
-
-    auto camera_forward = player.look_direction();
-    if (glm::dot(camera_forward, camera_forward) <= 1.0e-6F) {
-        camera_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
-    } else {
-        camera_forward = glm::normalize(camera_forward);
-    }
-
-    auto camera_right = glm::cross(camera_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
-    if (glm::dot(camera_right, camera_right) <= 1.0e-6F) {
-        camera_right = glm::vec3 {1.0F, 0.0F, 0.0F};
-    } else {
-        camera_right = glm::normalize(camera_right);
-    }
-
-    const auto body_yaw_radians = glm::radians(state.body_yaw_degrees);
-    auto body_forward = glm::vec3 {std::cos(body_yaw_radians), 0.0F, std::sin(body_yaw_radians)};
-    if (glm::dot(body_forward, body_forward) <= 1.0e-6F) {
-        body_forward = glm::vec3 {0.0F, 0.0F, -1.0F};
-    } else {
-        body_forward = glm::normalize(body_forward);
-    }
-    auto body_right = glm::cross(body_forward, glm::vec3 {0.0F, 1.0F, 0.0F});
-    if (glm::dot(body_right, body_right) <= 1.0e-6F) {
-        body_right = camera_right;
-    } else {
-        body_right = glm::normalize(body_right);
-    }
-
-    const auto action_arc = [](bool active, float progress) noexcept {
-        return active ? std::sin(glm::clamp(progress, 0.0F, 1.0F) * kPi) : 0.0F;
-    };
-    const auto action_pull = [](bool active, float progress) noexcept {
-        return active ? smoothstep01(1.0F - glm::clamp(progress, 0.0F, 1.0F)) : 0.0F;
-    };
-
-    PlayerPoseState pose {};
-    pose.camera_forward = camera_forward;
-    pose.camera_right = camera_right;
-    pose.body_forward = body_forward;
-    pose.body_right = body_right;
-    pose.body_visibility = body_visibility;
-    pose.presentation_arm_visibility = presentation_arm_visibility;
-    pose.walk_amount = walk_amount;
-    pose.stride = std::sin(state.step_phase);
-    pose.stride_cos = std::cos(state.step_phase);
-    pose.breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
-    pose.hurt_amount = hurt_amount;
-    pose.swim_amount = state.swimming ? 1.0F : 0.0F;
-    pose.airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
-    pose.landing_amount = state.landing_impact * state.landing_impact;
-    pose.mine_arc = action_arc(state.primary_action_active, state.primary_action_progress);
-    pose.mine_pull = action_pull(state.primary_action_active, state.primary_action_progress);
-    pose.place_arc = action_arc(state.secondary_action_active, state.secondary_action_progress);
-    pose.place_pull = action_pull(state.secondary_action_active, state.secondary_action_progress);
-    pose.torso_yaw = glm::radians(glm::clamp(wrap_degrees(state.yaw_degrees - state.body_yaw_degrees), -46.0F, 46.0F) * 0.35F);
-
-    if (first_person_view) {
-        // Vue FPS locale facon Minecraft : on garde uniquement le bras de presentation,
-        // attache a la camera, pour eviter tout decalage avec le view-model et ne jamais
-        // masquer le sol quand le joueur regarde vers le bas.
-        if (pose.presentation_arm_visibility > 0.05F) {
-            append_presentation_arm(mesh, player, pose);
-        }
-        return mesh;
-    }
-
-    append_full_body(mesh, player, pose);
+    append_full_body(mesh, player, build_world_avatar_pose(player));
     return mesh;
 }
+
+auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh {
+    PlayerViewModelMesh output {};
+    append_viewmodel_arm(output, player, build_viewmodel_rig_state(player));
+    return output;
+}
+
+auto build_player_mesh(const PlayerController& player, PlayerMeshView view) -> CreatureMeshData {
+    if (view == PlayerMeshView::WorldAvatar) {
+        return build_player_world_avatar_mesh(player);
+    }
+    return build_player_viewmodel_mesh(player).mesh;
+}
+
 
 } // namespace valcraft

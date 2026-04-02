@@ -3,6 +3,9 @@
 #include "creatures/CreatureGeometry.h"
 #include "gameplay/PlayerController.h"
 
+#include <glm/mat4x4.hpp>
+#include <glm/vec3.hpp>
+
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -38,8 +41,31 @@ enum class PlayerMeshView : std::uint8_t {
     WorldAvatar = 1,
 };
 
+struct PlayerViewModelPose {
+    glm::vec3 root_position {0.0F};
+    glm::vec3 shoulder_position {0.0F};
+    glm::vec3 elbow_position {0.0F};
+    glm::vec3 wrist_position {0.0F};
+    glm::mat4 item_socket_transform {1.0F};
+    float look_sway_yaw = 0.0F;
+    float look_sway_pitch = 0.0F;
+    float walk_bob = 0.0F;
+    float action_swing = 0.0F;
+};
+
+struct PlayerViewModelMesh {
+    CreatureMeshData mesh;
+    PlayerViewModelPose pose {};
+
+    [[nodiscard]] auto empty() const noexcept -> bool {
+        return mesh.empty();
+    }
+};
+
 [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;
 [[nodiscard]] auto build_player_atlas_pixels() -> std::vector<std::uint8_t>;
+[[nodiscard]] auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData;
+[[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh;
 [[nodiscard]] auto build_player_mesh(const PlayerController& player,
                                      PlayerMeshView view = PlayerMeshView::FirstPerson) -> CreatureMeshData;
 

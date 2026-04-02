@@ -5,6 +5,7 @@
 #include "render/HotbarLayout.h"
 #include "world/BlockVisuals.h"
 
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -1461,7 +1462,8 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
     if (initialized_ &&
         options_.shadows_enabled == options.shadows_enabled &&
         options_.shadow_map_size == options.shadow_map_size &&
-        options_.post_process_enabled == options.post_process_enabled) {
+        options_.post_process_enabled == options.post_process_enabled &&
+        std::abs(options_.viewmodel_fov_degrees - options.viewmodel_fov_degrees) <= 1.0e-4F) {
         return true;
     }
 
@@ -1649,6 +1651,11 @@ void Renderer::render_frame(World& world,
 
     const auto aspect = static_cast<float>(width) / static_cast<float>(std::max(height, 1));
     const auto projection = glm::perspective(glm::radians(75.0F), aspect, 0.1F, 320.0F);
+    const auto viewmodel_projection = glm::perspective(
+        glm::radians(glm::clamp(options_.viewmodel_fov_degrees, 35.0F, 100.0F)),
+        aspect,
+        0.02F,
+        8.0F);
     const auto view_projection = projection * player.view_matrix();
     const auto frustum_planes = extract_frustum_planes(view_projection);
     const auto eye = player.eye_position();
@@ -1832,7 +1839,6 @@ void Renderer::render_frame(World& world,
 
     draw_item_drops(item_drops);
     draw_creatures(creatures, view_projection, light_view_projection, eye, environment);
-    draw_player_avatar(player, view_projection, light_view_projection, eye, environment);
 
     if (has_visible_water) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
@@ -1880,6 +1886,8 @@ void Renderer::render_frame(World& world,
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
     }
+
+    draw_player_viewmodel(player, viewmodel_projection * player.view_matrix(), light_view_projection, eye, environment);
 
     if (use_post_process) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3535,6 +3543,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
 
     glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glUseProgram(creature_program_);
@@ -3561,7 +3570,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::draw_player_avatar(const PlayerController& player,
+void Renderer::draw_player_viewmodel(const PlayerController& player,
                                   const glm::mat4& view_projection,
                                   const glm::mat4& light_view_projection,
                                   const glm::vec3& camera_position,
@@ -3570,15 +3579,15 @@ void Renderer::draw_player_avatar(const PlayerController& player,
         return;
     }
 
-    const auto mesh = build_player_mesh(player, PlayerMeshView::FirstPerson);
-    if (mesh.empty()) {
+    const auto viewmodel = build_player_viewmodel_mesh(player);
+    if (viewmodel.empty()) {
         return;
     }
 
     auto& vertices = creature_vertices_scratch_;
     auto& indices = creature_indices_scratch_;
-    vertices.assign(mesh.vertices.begin(), mesh.vertices.end());
-    indices.assign(mesh.indices.begin(), mesh.indices.end());
+    vertices.assign(viewmodel.mesh.vertices.begin(), viewmodel.mesh.vertices.end());
+    indices.assign(viewmodel.mesh.indices.begin(), viewmodel.mesh.indices.end());
 
     glBindVertexArray(creature_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
@@ -3604,7 +3613,8 @@ void Renderer::draw_player_avatar(const PlayerController& player,
     glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, vertices.data());
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
 
-    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glUseProgram(creature_program_);
@@ -3613,21 +3623,25 @@ void Renderer::draw_player_avatar(const PlayerController& player,
     glUniform3fv(creature_uniforms_.camera_position, 1, glm::value_ptr(camera_position));
     glUniform3fv(creature_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
     glUniform3fv(creature_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
-    glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
-    glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
-    glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
+    const auto viewmodel_ambient = glm::max(environment.ambient_color, glm::vec3 {0.22F, 0.22F, 0.24F});
+    const auto viewmodel_fog = glm::mix(environment.fog_color, viewmodel_ambient, 0.80F);
+    glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(viewmodel_ambient));
+    glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(viewmodel_fog));
+    glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(viewmodel_fog));
     glUniform3fv(creature_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
-    glUniform1f(creature_uniforms_.daylight_factor, environment.daylight_factor);
+    glUniform1f(creature_uniforms_.daylight_factor, std::max(environment.daylight_factor, 0.20F));
     glUniform1f(creature_uniforms_.sun_visibility, environment.sun_direction.y > 0.0F ? 1.0F : 0.0F);
     glUniform1i(creature_uniforms_.atlas, 0);
     glUniform1i(creature_uniforms_.shadow_map, 1);
-    glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
+    glUniform1i(creature_uniforms_.shadows_enabled, 0);
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glActiveTexture(GL_TEXTURE0);

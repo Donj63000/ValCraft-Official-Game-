@@ -52,6 +52,9 @@ constexpr float kStepPhaseGroundDistanceScale = 9.8F;
 constexpr float kStepPhaseAirDistanceScale = 4.0F;
 constexpr float kStepPhaseSwimDistanceScale = 7.4F;
 constexpr float kTwoPi = 6.28318530717958647692F;
+constexpr float kLookSwayInputScale = 0.045F;
+constexpr float kLookSwayResponseSharpness = 18.0F;
+constexpr float kLookSwayReturnSharpness = 24.0F;
 
 auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
     const auto horizontal = glm::vec3 {vector.x, 0.0F, vector.z};
@@ -81,6 +84,19 @@ auto yaw_degrees_from_direction(const glm::vec2& direction) noexcept -> float {
     return static_cast<float>(glm::degrees(std::atan2(direction.y, direction.x)));
 }
 
+auto damp_towards(float current, float target, float sharpness, float dt) noexcept -> float {
+    if (dt <= 1.0e-6F) {
+        return target;
+    }
+
+    const auto blend = 1.0F - std::exp(-std::max(sharpness, 0.0F) * dt);
+    return glm::mix(current, target, blend);
+}
+
+auto snap_small_sway(float value) noexcept -> float {
+    return std::abs(value) < 1.0e-3F ? 0.0F : value;
+}
+
 } // namespace
 
 PlayerController::PlayerController(glm::vec3 spawn_position) {
@@ -96,6 +112,10 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.velocity = {};
         state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
         state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
+        state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, 0.0F, kLookSwayReturnSharpness, clamped_dt);
+        state_.look_sway_pitch = damp_towards(state_.look_sway_pitch, 0.0F, kLookSwayReturnSharpness, clamped_dt);
+        state_.look_sway_yaw = snap_small_sway(state_.look_sway_yaw);
+        state_.look_sway_pitch = snap_small_sway(state_.look_sway_pitch);
         return;
     }
 
@@ -132,6 +152,15 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
 
     state_.yaw_degrees += input.look_delta_x * kMouseSensitivity;
     state_.pitch_degrees = std::clamp(state_.pitch_degrees - input.look_delta_y * kMouseSensitivity, -89.0F, 89.0F);
+
+    const auto target_look_sway_yaw = glm::clamp(-input.look_delta_x * kLookSwayInputScale, -1.0F, 1.0F);
+    const auto target_look_sway_pitch = glm::clamp(input.look_delta_y * kLookSwayInputScale, -1.0F, 1.0F);
+    const auto look_input_active = std::abs(input.look_delta_x) > 1.0e-4F || std::abs(input.look_delta_y) > 1.0e-4F;
+    const auto look_sway_sharpness = look_input_active ? kLookSwayResponseSharpness : kLookSwayReturnSharpness;
+    state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, target_look_sway_yaw, look_sway_sharpness, clamped_dt);
+    state_.look_sway_pitch = damp_towards(state_.look_sway_pitch, target_look_sway_pitch, look_sway_sharpness, clamped_dt);
+    state_.look_sway_yaw = snap_small_sway(state_.look_sway_yaw);
+    state_.look_sway_pitch = snap_small_sway(state_.look_sway_pitch);
 
     auto forward = normalized_horizontal(look_direction());
     if (glm::dot(forward, forward) <= 1.0e-6F) {

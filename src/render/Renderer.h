@@ -26,6 +26,7 @@ struct RendererOptions {
     bool shadows_enabled = true;
     int shadow_map_size = 1024;
     bool post_process_enabled = false;
+    float viewmodel_fov_degrees = 62.0F;
 };
 
 struct RendererFrameStats {
@@ -250,7 +251,7 @@ private:
                         const glm::mat4& light_view_projection,
                         const glm::vec3& camera_position,
                         const EnvironmentState& environment);
-    void draw_player_avatar(const PlayerController& player,
+    void draw_player_viewmodel(const PlayerController& player,
                             const glm::mat4& view_projection,
                             const glm::mat4& light_view_projection,
                             const glm::vec3& camera_position,
