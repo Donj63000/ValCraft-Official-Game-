@@ -617,9 +617,12 @@ void append_presentation_arm(CreatureMeshData& mesh, const PlayerController& pla
                       + pose.camera_right * (0.22F + pose.place_pull * 0.02F)
                       + camera_up * (-0.30F + pose.stride_cos * pose.walk_amount * 0.014F - pose.hurt_amount * 0.04F + jitter);
 
-    auto root = glm::translate(glm::mat4(1.0F), anchor);
-    root = glm::rotate(root, glm::radians(state.yaw_degrees), glm::vec3 {0.0F, 1.0F, 0.0F});
-    root = glm::rotate(root, glm::radians(state.pitch_degrees * 0.78F), glm::vec3 {0.0F, 0.0F, 1.0F});
+    auto root = glm::mat4(1.0F);
+    // Je reconstruis la base exacte de ma camera pour que le bras FPS suive vraiment mon regard.
+    root[0] = glm::vec4(pose.camera_right, 0.0F);
+    root[1] = glm::vec4(camera_up, 0.0F);
+    root[2] = glm::vec4(-pose.camera_forward, 0.0F);
+    root[3] = glm::vec4(anchor, 1.0F);
 
     const auto emissive = pose.hurt_amount * 0.10F;
     const auto sleeve_tiles = hurt_tiles_if_needed(
@@ -702,13 +705,14 @@ auto build_player_atlas_pixels() -> std::vector<std::uint8_t> {
     return pixels;
 }
 
-auto build_player_mesh(const PlayerController& player) -> CreatureMeshData {
+auto build_player_mesh(const PlayerController& player, PlayerMeshView view) -> CreatureMeshData {
     CreatureMeshData mesh {};
 
     const auto& state = player.state();
+    const auto first_person_view = view == PlayerMeshView::FirstPerson;
     const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
-    const auto body_visibility = smooth_range(34.0F, 78.0F, -state.pitch_degrees);
-    const auto presentation_arm_visibility = 1.0F - smooth_range(0.18F, 0.64F, body_visibility);
+    const auto body_visibility = first_person_view ? smooth_range(34.0F, 78.0F, -state.pitch_degrees) : 0.0F;
+    const auto presentation_arm_visibility = first_person_view ? 1.0F : 0.0F;
     const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
     const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
 
@@ -768,14 +772,17 @@ auto build_player_mesh(const PlayerController& player) -> CreatureMeshData {
     pose.place_pull = action_pull(state.secondary_action_active, state.secondary_action_progress);
     pose.torso_yaw = glm::radians(glm::clamp(wrap_degrees(state.yaw_degrees - state.body_yaw_degrees), -46.0F, 46.0F) * 0.35F);
 
-    if (pose.presentation_arm_visibility > 0.05F) {
-        append_presentation_arm(mesh, player, pose);
-    }
-    if (pose.body_visibility > 0.05F) {
-        // En vue FPS, on omet la tete pour garder le plan proche propre et eviter tout clipping camera.
-        append_full_body(mesh, player, pose);
+    if (first_person_view) {
+        // Vue FPS locale facon Minecraft : on garde uniquement le bras de presentation,
+        // attache a la camera, pour eviter tout decalage avec le view-model et ne jamais
+        // masquer le sol quand le joueur regarde vers le bas.
+        if (pose.presentation_arm_visibility > 0.05F) {
+            append_presentation_arm(mesh, player, pose);
+        }
+        return mesh;
     }
 
+    append_full_body(mesh, player, pose);
     return mesh;
 }
 

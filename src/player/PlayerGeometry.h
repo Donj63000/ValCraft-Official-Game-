@@ -33,8 +33,14 @@ enum class PlayerAtlasTile : std::uint8_t {
     Count = 16,
 };
 
+enum class PlayerMeshView : std::uint8_t {
+    FirstPerson = 0,
+    WorldAvatar = 1,
+};
+
 [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;
 [[nodiscard]] auto build_player_atlas_pixels() -> std::vector<std::uint8_t>;
-[[nodiscard]] auto build_player_mesh(const PlayerController& player) -> CreatureMeshData;
+[[nodiscard]] auto build_player_mesh(const PlayerController& player,
+                                     PlayerMeshView view = PlayerMeshView::FirstPerson) -> CreatureMeshData;
 
 } // namespace valcraft

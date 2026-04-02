@@ -3570,7 +3570,7 @@ void Renderer::draw_player_avatar(const PlayerController& player,
         return;
     }
 
-    const auto mesh = build_player_mesh(player);
+    const auto mesh = build_player_mesh(player, PlayerMeshView::FirstPerson);
     if (mesh.empty()) {
         return;
     }
