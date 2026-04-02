@@ -1,9 +1,10 @@
 # ValCraft
 
 <p align="center">
-  <strong>Mon defi perso: refaire un jeu dans l'esprit de Minecraft, a ma facon, en C++</strong>
+  <strong>Sandbox voxel solo en C++20 / OpenGL, construit comme un vrai projet moteur-jeu</strong>
   <br>
-  ValCraft est un projet ne d'un challenge personnel: recreer une experience sandbox voxel, avec ma propre direction, mes propres choix de design et une implementation C++ maison.
+  ValCraft est mon remake libre "dans l'esprit de Minecraft" : un monde procedural, une boucle FPS immediate,
+  un terrain modifiable en temps reel et une base technique que je fais evoluer proprement.
 </p>
 
 <p align="center">
@@ -11,50 +12,58 @@
     <img src="https://github.com/Donj63000/ValCraft-Official-Game-/actions/workflows/strict.yml/badge.svg" alt="CI Strict">
   </a>
   <img src="https://img.shields.io/badge/C%2B%2B-20-00599C" alt="C++20">
-  <img src="https://img.shields.io/badge/CMake-3.24%2B-064F8C" alt="CMake">
+  <img src="https://img.shields.io/badge/CMake-3.24%2B-064F8C" alt="CMake 3.24+">
   <img src="https://img.shields.io/badge/OpenGL-3.3%20Core-5586A4" alt="OpenGL 3.3 Core">
-  <img src="https://img.shields.io/badge/Platform-Windows-0078D6" alt="Platform Windows">
-  <img src="https://img.shields.io/badge/Status-Active%20Development-2EA043" alt="Status Active Development">
-  <img src="https://img.shields.io/badge/Development-AI%20Assisted-8A2BE2" alt="AI Assisted Development">
+  <img src="https://img.shields.io/badge/Platform-Windows-0078D6" alt="Windows">
+  <img src="https://img.shields.io/badge/License-Apache%202.0-2EA043" alt="Apache 2.0">
 </p>
 
 <p align="center">
   <a href="#apercu">Apercu</a> |
+  <a href="#points-forts">Points forts</a> |
   <a href="#captures">Captures</a> |
-  <a href="#pour-les-joueurs">Pour les joueurs</a> |
   <a href="#fonctionnalites">Fonctionnalites</a> |
+  <a href="#etat-actuel">Etat actuel</a> |
   <a href="#demarrage-rapide">Demarrage rapide</a> |
   <a href="#controles">Controles</a> |
+  <a href="#architecture">Architecture</a> |
   <a href="#roadmap">Roadmap</a>
 </p>
 
 <p align="center">
   <img src="Images/img.png" alt="Capture principale de ValCraft" width="920">
   <br>
-  <em>ValCraft propose deja une vraie boucle sandbox jouable, mais le projet est encore en progression active et il reste des bugs, des limites et beaucoup d'evolutions a venir.</em>
+  <em>Une V1 jouable, deja lisible visuellement, encore en construction, mais pensee pour grandir proprement.</em>
 </p>
 
 ## Apercu
 
-ValCraft est ne d'un defi personnel: refaire un jeu "comme Minecraft", mais a ma facon, avec ma propre vision du sandbox voxel et avec une implementation orientee C++ plutot qu'un simple assemblage dans un moteur tout fait. L'idee est simple: entrer dans un monde genere proceduralement, se deplacer librement, observer le relief, casser des blocs, en poser d'autres et voir le terrain reagir instantanement.
+ValCraft est un projet personnel de sandbox voxel developpe en `C++20`, `SDL2` et `OpenGL 3.3 Core`.
+L'objectif n'est pas seulement de refaire une boucle de jeu "a la Minecraft", mais de construire une base
+technique propre, testee et evolutive pour un vrai projet de jeu.
 
-Le projet est encore en developpement actif. Il est deja jouable et permet de ressentir la direction du jeu, mais il reste encore des bugs, des parties incompletes et des aspects a polir au fil des versions.
+Aujourd'hui, le depot propose deja une experience jouable : exploration d'un monde procedural, deplacement
+en vue FPS, casse et pose de blocs, eau traversable et nageable, creatures jour/nuit, hotbar, inventaire,
+item drops, HUD, ecran de mort et pipeline de build/validation automatise.
 
-Aujourd'hui, ValCraft met surtout l'accent sur:
+Le projet reste en developpement actif. La base est solide, le coeur sandbox est deja la, mais il reste
+encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
 
-- l'exploration libre d'un monde voxel genere automatiquement
-- les sensations de deplacement en vue FPS avec gravite, collisions et nage
-- l'interaction directe avec le decor via la casse et la pose de blocs
-- une presentation visuelle deja solide avec eau translucide, torches, hotbar et lecture claire du terrain
-- une base de projet propre pour continuer a enrichir le jeu sans casser l'existant
+## Points forts
 
-> ValCraft est aujourd'hui une V1 jouable en cours de progression: le coeur de l'experience sandbox est deja la, mais le projet n'est pas fini et il faut s'attendre a croiser encore des bugs et des elements en evolution.
-
-## Pourquoi essayer ValCraft
-
-| Explorer | Jouer tout de suite | Suivre un projet qui evolue |
+| Jouable maintenant | Techniquement solide | Pense pour evoluer |
 | --- | --- | --- |
-| Parcourez un monde voxel avec relief, eau, vegetation, zones ouvertes et une ambiance sandbox facile a lire tres vite. | Deplacez-vous en vue FPS, sautez, nagez, cassez des blocs, posez-en d'autres et utilisez la hotbar sans attendre un gros setup de gameplay. | Le projet avance comme un vrai jeu en construction: captures regulieres, base jouable, code teste et feuille de route claire. |
+| Monde procedural, boucle FPS immediate, blocs cassables/placables, eau, creatures, inventaire et respawn. | Build `CMake`, `FetchContent`, warnings stricts, tests `doctest`, smoke test, couverture critique et CI Windows. | Architecture separee par modules, workflow reproductible, captures regulieres et roadmap claire. |
+
+## Ce que propose deja ValCraft
+
+- un monde voxel genere proceduralement avec seed deterministe
+- des deplacements FPS avec collisions, saut, nage, plongee et mode fly debug
+- une interaction directe avec le terrain : casser, poser, remplacer certaines decorations
+- une boucle sandbox plus complete que la simple demo terrain : hotbar, inventaire, item drops et respawn
+- des creatures avec cycle jour/nuit : animaux passifs le jour, zombies agressifs la nuit
+- un rendu deja lisible avec eau translucide, torches emissives, vegetation decorative et presentation FPS
+- un projet code comme un vrai depot de production, pas juste un prototype jetable
 
 ## Captures
 
@@ -69,10 +78,10 @@ Aujourd'hui, ValCraft met surtout l'accent sur:
   </tr>
   <tr>
     <td align="center">
-      <strong>Explorer un monde ouvert, lisible et immediatement jouable</strong>
+      <strong>Explorer un monde ouvert procedural deja agreable a parcourir</strong>
     </td>
     <td align="center">
-      <strong>Profiter d'un relief procedural qui donne deja une vraie sensation d'aventure</strong>
+      <strong>Lire rapidement le relief, les volumes et la structure du terrain</strong>
     </td>
   </tr>
   <tr>
@@ -85,26 +94,26 @@ Aujourd'hui, ValCraft met surtout l'accent sur:
   </tr>
   <tr>
     <td align="center">
-      <strong>Retrouver les bases du sandbox voxel: observer, se reperer et agir sur le decor</strong>
+      <strong>Retrouver les bases du sandbox voxel avec une UI deja en place</strong>
     </td>
     <td align="center">
-      <strong>Construire et modifier le terrain avec une boucle simple, claire et immediate</strong>
+      <strong>Modifier le terrain en temps reel avec une boucle simple et directe</strong>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="Images/img_6.png" alt="Capture de gameplay mettant en avant l'eau et l'ambiance de ValCraft">
+      <img src="Images/img_6.png" alt="Capture mettant en avant l'eau et l'ambiance de ValCraft">
     </td>
     <td width="50%">
-      <img src="Images/img_7.png" alt="Capture de gameplay mettant en avant la profondeur visuelle de ValCraft">
+      <img src="Images/img_7.png" alt="Capture mettant en avant la profondeur visuelle de ValCraft">
     </td>
   </tr>
   <tr>
     <td align="center">
-      <strong>Une ambiance visuelle deja posee avec eau translucide, volumes et contrastes lisibles</strong>
+      <strong>Eau, brume, contrastes et silhouettes donnent deja une vraie ambiance</strong>
     </td>
     <td align="center">
-      <strong>Un prototype qui commence deja a ressembler a un vrai jeu a parcourir</strong>
+      <strong>Le prototype commence deja a ressembler a un vrai jeu jouable</strong>
     </td>
   </tr>
   <tr>
@@ -114,62 +123,53 @@ Aujourd'hui, ValCraft met surtout l'accent sur:
   </tr>
   <tr>
     <td colspan="2" align="center">
-      <strong>Un panorama qui montre bien la direction du projet: un sandbox voxel simple, propre et evolutif</strong>
+      <strong>Un panorama qui montre bien la direction du projet : un sandbox voxel simple, propre et evolutif</strong>
     </td>
   </tr>
 </table>
-
-## Pour les joueurs
-
-Si vous regardez ValCraft avant tout comme un jeu, voici ce qu'il propose deja:
-
-- explorer un monde voxel genere proceduralement
-- se deplacer en vue FPS avec collisions, saut et nage
-- casser des blocs et reconstruire le decor en temps reel
-- utiliser une hotbar simple pour rester dans une boucle de jeu immediate
-- profiter d'une V1 jouable qui se concentre sur les sensations de base du sandbox
-
-Ce que ValCraft ne cherche pas encore a faire a ce stade:
-
-- raconter une campagne ou une progression longue
-- proposer du multijoueur ou un gros contenu RPG
-- remplacer un jeu complet fini du genre
-
-Le projet est plutot dans une logique de prototype jouable solide: une bonne base de jeu aujourd'hui, plus de profondeur demain, avec encore des bugs a corriger et des systemes a faire grandir.
 
 ## Fonctionnalites
 
 ### Gameplay
 
-- deplacement `WASD`
-- vue souris en premiere personne
-- saut avec gravite
-- nage, wading et plongee dans l'eau (`Space` / `Ctrl`)
-- collisions joueur contre blocs solides
-- mode fly debug
-- casse de blocs au clic gauche
-- pose de blocs au clic droit
-- hotbar `9` slots avec selection a la roulette
-- prevention de pose dans le volume du joueur
+- exploration libre en vue FPS
+- collisions joueur / terrain, chute, degats de chute, nage et gestion de l'air sous l'eau
+- hotbar `9` slots avec selection clavier et roulette
+- inventaire jouable avec drag/drop, split de stack, echanges hotbar et drop d'objets
+- casse de blocs au clic gauche et pose de blocs au clic droit
+- torches placables avec lumiere
+- objets recoltes transformes en item drops recuperables
+- ecran de mort, respawn et menu pause
+- cycle de creatures avec animaux le jour et zombies offensifs la nuit
 
-### Monde
+### Monde et rendu
 
-- chunks streames autour du joueur
-- seed deterministe
-- generation de relief et de surface par bruit
-- palette V1: `Air`, `Grass`, `Dirt`, `Stone`, `Sand`, `Wood`, `Leaves`, `Water`, `Torch`
-- maillage de chunks avec suppression des faces cachees
-- eau translucide animee avec surface ondulante continue entre blocs
+- generation procedurale deterministe
+- streaming de chunks autour du joueur
+- meshing avec suppression des faces cachees
+- eau translucide avec surface ondulante continue
+- propagation de la lumiere des torches et calcul de lumiere du ciel
+- atlas de blocs et d'accents, vegetation decorative, silhouettes de creatures distinctes
+- culling camera / shadow pass et presentation FPS separee du corps monde
 
 ### Pour les devs
 
-- build `CMake` en `C++20`
-- dependances gerees via `FetchContent`
+- `C++20`, `CMake 3.24+`, `SDL2`, `OpenGL 3.3 Core`, `glad`, `glm`, `FastNoiseLite`, `doctest`
+- dependances recuperees automatiquement via `FetchContent`
 - warnings stricts avec `-Werror`
-- suite de tests automatises
-- smoke test non interactif
+- tests unitaires et de regression
+- smoke test non interactif du jeu
 - verification de couverture critique
-- gate locale et CI executees via le meme script
+- meme logique de verification en local et en CI GitHub Actions
+
+## Etat actuel
+
+| Deja en place | En consolidation | Pas encore prioritaire |
+| --- | --- | --- |
+| Monde sandbox solo jouable | Sauvegarde persistante complete | Multijoueur |
+| Boucle FPS, hotbar, inventaire, drops | Enrichissement du contenu sandbox | Crafting profond |
+| Creatures jour/nuit | Optimisations moteur et rendu | Progression longue type RPG |
+| Pipeline de qualite local + CI | Stabilisation generale et polish | Gros systeme de quetes / narration |
 
 ## Demarrage rapide
 
@@ -179,29 +179,32 @@ Le projet est plutot dans une logique de prototype jouable solide: une bonne bas
 - GCC / MinGW
 - Ninja
 - OpenGL `3.3 Core`
-- CLion ou terminal PowerShell
+- PowerShell ou CLion
+
+> Le script `scripts/check.ps1` sait retrouver automatiquement les outils `cmake`, `ctest`, `gcov`, `ninja`
+> et MinGW depuis une installation CLion recente si besoin.
 
 ### Build
 
 ```powershell
-cmake -S . -B cmake-build-release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build cmake-build-release --target ValCraft --parallel
+cmake -S . -B cmake-build-relwithdebinfo -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build cmake-build-relwithdebinfo --target ValCraft --parallel
 ```
 
 ### Lancer le jeu
 
 ```powershell
-.\cmake-build-release\bin\ValCraft.exe
+.\cmake-build-relwithdebinfo\bin\ValCraft.exe
 ```
 
 ### Lancer les tests
 
 ```powershell
-cmake --build cmake-build-release --target valcraft_tests --parallel
-ctest --test-dir cmake-build-release --output-on-failure
+cmake --build cmake-build-relwithdebinfo --target valcraft_tests --parallel
+ctest --test-dir cmake-build-relwithdebinfo --output-on-failure
 ```
 
-### Lancer un profilage smoke/perf
+### Lancer un smoke/perf run
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\perf.ps1 -Configuration RelWithDebInfo
@@ -213,12 +216,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\perf.ps1 -Configuration RelWi
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ```
 
-Cette verification controle:
+Cette verification controle notamment :
 
 - la compilation stricte
-- la presence d'au moins `20` tests
-- l'execution complete de la suite de tests
-- un smoke test du jeu
+- la decouverte d'un volume minimal de tests
+- l'execution complete de la suite
+- des smoke runs du jeu a plusieurs moments du cycle jour/nuit
 - une couverture critique minimale sur les modules coeur
 
 ## Controles
@@ -228,13 +231,16 @@ Cette verification controle:
 | Avancer / reculer | `W` / `S` |
 | Strafe gauche / droite | `A` / `D` |
 | Saut | `Space` |
-| Nager / plonger dans l'eau | `Space` / `Ctrl` |
-| Monter / descendre en fly | `Space` / `Ctrl` |
-| Basculer le mode fly | `F` |
-| Liberer / reprendre la souris | `Escape` |
+| Nager / monter | `Space` |
+| Plonger / descendre | `Ctrl` |
+| Basculer le fly debug | `F` |
+| Ouvrir / fermer l'inventaire | `E` |
+| Pause / reprendre | `Escape` |
 | Casser un bloc | `Clic gauche` |
 | Poser un bloc | `Clic droit` |
-| Selection du bloc actif | `1` a `9` / `roulette souris` |
+| Selection hotbar | `1` a `9` / roulette souris |
+| Drop d'objet | `Q` |
+| Drop de pile complete | `Ctrl + Q` |
 
 ## Stack technique
 
@@ -253,71 +259,64 @@ Toutes les dependances sont recuperees automatiquement via `FetchContent`.
 
 ```text
 src/
-  app/         Boucle de jeu, initialisation SDL/OpenGL
-  gameplay/    Controle joueur, collisions, interactions monde
-  render/      Shaders, atlas, meshes GPU, rendu OpenGL
-  world/       Blocs, chunks, generation, raycast, meshing
+  app/         Boucle de jeu, UI, branding, options, controles
+  gameplay/    Controle joueur, collisions, interactions et drops
+  player/      Geometrie et presentation du joueur
+  creatures/   Spawn, logique, rendu et silhouettes des creatures
+  render/      Renderer OpenGL, culling, shaders, HUD et viewmodel
+  world/       Blocs, chunks, generation, eclairage, meshing, streaming
 
 tests/
   Tests unitaires et de regression
 
 scripts/
-  Gate stricte locale
+  Checks, smoke/perf et verification locale
 
 .github/workflows/
-  CI Windows qui execute la meme gate que le local
+  CI Windows qui execute la meme logique stricte que le local
 ```
 
-## Developpement assiste par IA
+## Qualite et pipeline
 
-Le developpement de ValCraft s'appuie aussi sur des outils d'IA pour accelerer certaines phases du projet, notamment:
+Le depot est structure pour limiter les regressions et garder une base saine pendant l'evolution du jeu.
 
-- la structuration de plans de travail
-- l'assistance au prototypage et a certaines implementations
-- la relecture technique et l'amelioration de la documentation
-
-Les choix techniques, l'integration dans le projet, les validations et la direction globale restent pilotes par le mainteneur du depot.
-
-## Etat du projet
-
-ValCraft avance avec une priorite simple: d'abord consolider une boucle de jeu sandbox agreable, ensuite enrichir le contenu.
-
-Le jeu est deja jouable, mais il est important de presenter les choses honnetement: le projet est encore en progression, certaines parties sont temporaires, et des bugs peuvent encore apparaitre pendant la partie.
-
-| Dans le perimetre actuel | Pas encore dans le perimetre |
-| --- | --- |
-| Monde procedural jouable | Multijoueur |
-| Exploration FPS | Crafting |
-| Modification du terrain en temps reel | Inventaire complet |
-| Base moteur testee | Sauvegarde persistante complete |
-| Pipeline strict anti-regression | Mobs / IA |
-| CI GitHub reproductible | Eclairage dynamique avance |
+- la CI Windows lance une gate stricte sur chaque `push` et `pull_request`
+- le script `scripts/check.ps1` prepare des builds frais pour les checks stricts et la couverture
+- les tests couvrent le gameplay, le monde, le rendu, l'UI, l'inventaire et les creatures
+- les smoke runs valident que le jeu peut tourner sans interaction utilisateur
+- les checks locaux et la CI reposent sur la meme logique pour eviter les surprises
 
 ## Roadmap
 
-- sauvegarde et chargement des modifications monde
-- inventaire complet et HUD etendu
-- optimisation du meshing
-- frustum culling plus fin
-- generation plus riche
-- systeme d'inventaire
-- sandbox plus profond et interactif
+- sauvegarde et chargement des modifications du monde
+- enrichissement du contenu sandbox et de l'inventaire
+- optimisation du meshing, du streaming et du rendu
+- generation plus riche et plus variee
+- approfondissement des creatures et de l'interactivite du monde
+- consolidation generale de la V1 avant d'ouvrir des features plus ambitieuses
 
 ## Contribution
 
-Les contributions sont bienvenues, surtout sur:
+Les contributions sont bienvenues, surtout sur :
 
-- la stabilite du moteur
+- la stabilite du moteur et du pipeline
 - le gameplay voxel
-- la qualite de rendu
+- le rendu et la lisibilite visuelle
 - la couverture de tests
-- l'ergonomie du pipeline de build
+- l'ergonomie du build et de la CI
 
-Avant toute proposition de changement:
+Avant toute proposition de changement :
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
 ```
+
+## Developpement assiste par IA
+
+Le developpement de ValCraft s'appuie aussi sur des outils d'IA pour accelerer certaines phases :
+documentation, relecture technique, prototypage, structuration de plans de travail et certaines
+implementations. Les choix techniques, l'integration finale, les validations et la direction globale
+restent pilotes par le mainteneur du depot.
 
 ## Licence
 
