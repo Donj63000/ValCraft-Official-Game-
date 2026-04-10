@@ -97,6 +97,18 @@ auto snap_small_sway(float value) noexcept -> float {
     return std::abs(value) < 1.0e-3F ? 0.0F : value;
 }
 
+auto block_break_crack_stage(float progress) noexcept -> std::uint8_t {
+    const auto clamped_progress = std::clamp(progress, 0.0F, 1.0F);
+    const auto scaled_stage = static_cast<int>(clamped_progress * static_cast<float>(kBlockBreakStageCount));
+    return static_cast<std::uint8_t>(std::clamp(scaled_stage, 0, static_cast<int>(kBlockBreakStageCount) - 1));
+}
+
+auto player_physics_block(const World& world, int x, int y, int z) -> BlockId {
+    // Je garde les collisions du joueur coherentes meme si le chunk voisin n'est
+    // pas encore charge, sinon une frame de streaming ouvre un faux passage.
+    return world.peek_block_or_generated(x, y, z);
+}
+
 } // namespace
 
 PlayerController::PlayerController(glm::vec3 spawn_position) {
@@ -308,7 +320,7 @@ auto PlayerController::view_matrix() const -> glm::mat4 {
 }
 
 auto PlayerController::selected_block() const noexcept -> BlockId {
-    return selected_block_;
+    return block_item_id(selected_block_);
 }
 
 auto PlayerController::max_health() const noexcept -> float {
@@ -323,9 +335,21 @@ auto PlayerController::is_dead() const noexcept -> bool {
     return state_.dead;
 }
 
+void PlayerController::load_state(const PlayerState& state) noexcept {
+    state_ = state;
+    block_break_progress_ = {};
+    state_.health = std::clamp(state_.health, 0.0F, kMaxHealth);
+    state_.air_seconds = std::clamp(state_.air_seconds, 0.0F, kMaxAirSeconds);
+    state_.pitch_degrees = std::clamp(state_.pitch_degrees, -89.0F, 89.0F);
+    if (state_.dead) {
+        state_.velocity = {};
+    }
+}
+
 void PlayerController::set_position(const glm::vec3& position) noexcept {
     state_.position = position;
     state_.fall_start_y = position.y;
+    block_break_progress_ = {};
 }
 
 void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
@@ -333,7 +357,7 @@ void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
 }
 
 void PlayerController::set_selected_block(BlockId block_id) noexcept {
-    selected_block_ = block_id;
+    selected_block_ = block_item_id(block_id);
 }
 
 void PlayerController::trigger_primary_action() noexcept {
@@ -356,6 +380,7 @@ void PlayerController::trigger_secondary_action() noexcept {
 
 void PlayerController::respawn(const glm::vec3& position) noexcept {
     state_ = {};
+    block_break_progress_ = {};
     state_.position = position;
     state_.fall_start_y = position.y;
     state_.body_yaw_degrees = state_.yaw_degrees;
@@ -369,9 +394,67 @@ auto PlayerController::current_target(const World& world, float max_distance) co
     return world.raycast(eye_position(), look_direction(), max_distance);
 }
 
+auto PlayerController::update_block_breaking(World& world, float dt, bool breaking_held, float max_distance)
+    -> std::optional<BrokenBlockResult> {
+    if (state_.dead || !breaking_held) {
+        cancel_block_breaking();
+        return std::nullopt;
+    }
+
+    const auto hit = current_target(world, max_distance);
+    if (!hit.hit || !is_block_breakable_at(hit.block, hit.block_id)) {
+        cancel_block_breaking();
+        return std::nullopt;
+    }
+
+    const auto duration_seconds = block_break_duration_seconds(hit.block_id);
+    if (!block_break_progress_.active ||
+        block_break_progress_.block != hit.block ||
+        block_break_progress_.block_id != hit.block_id) {
+        block_break_progress_ = {
+            true,
+            hit.block,
+            hit.block_id,
+            0.0F,
+            duration_seconds,
+            0.0F,
+            0,
+        };
+    }
+
+    if (!state_.primary_action_active) {
+        trigger_primary_action();
+    }
+
+    block_break_progress_.duration_seconds = duration_seconds;
+    block_break_progress_.elapsed_seconds =
+        std::min(block_break_progress_.elapsed_seconds + std::max(dt, 0.0F), duration_seconds);
+    block_break_progress_.progress = duration_seconds <= 1.0e-4F
+                                         ? 1.0F
+                                         : block_break_progress_.elapsed_seconds / duration_seconds;
+    block_break_progress_.crack_stage = block_break_crack_stage(block_break_progress_.progress);
+
+    if (block_break_progress_.progress + 1.0e-4F < 1.0F) {
+        return std::nullopt;
+    }
+
+    world.set_block(hit.block.x, hit.block.y, hit.block.z, to_block_id(BlockType::Air));
+    const auto broken_block = BrokenBlockResult {hit.block, hit.block_id};
+    cancel_block_breaking();
+    return broken_block;
+}
+
+void PlayerController::cancel_block_breaking() noexcept {
+    block_break_progress_ = {};
+}
+
+auto PlayerController::block_break_progress() const noexcept -> const BlockBreakProgress& {
+    return block_break_progress_;
+}
+
 auto PlayerController::try_break_block(World& world, float max_distance) const -> std::optional<BrokenBlockResult> {
     const auto hit = current_target(world, max_distance);
-    if (!hit.hit || !is_block_targetable(hit.block_id)) {
+    if (!hit.hit || !is_block_breakable_at(hit.block, hit.block_id)) {
         return std::nullopt;
     }
 
@@ -379,14 +462,15 @@ auto PlayerController::try_break_block(World& world, float max_distance) const -
     return BrokenBlockResult {hit.block, hit.block_id};
 }
 
-auto PlayerController::try_place_block(World& world, float max_distance) const -> bool {
-    if (selected_block_ == to_block_id(BlockType::Air)) {
-        return false;
+auto PlayerController::try_place_block(World& world, float max_distance) const -> std::optional<PlacedBlockResult> {
+    const auto selected_block = block_item_id(selected_block_);
+    if (selected_block == to_block_id(BlockType::Air)) {
+        return std::nullopt;
     }
 
     const auto hit = current_target(world, max_distance);
     if (!hit.hit) {
-        return false;
+        return std::nullopt;
     }
 
     auto placement_coord = hit.adjacent;
@@ -394,25 +478,42 @@ auto PlayerController::try_place_block(World& world, float max_distance) const -
         placement_coord = hit.block;
     }
 
-    if (selected_block_ == to_block_id(BlockType::Torch)) {
-        if (!world.can_place_torch_at(placement_coord)) {
-            return false;
+    auto block_to_place = selected_block;
+    if (selected_block == to_block_id(BlockType::Torch)) {
+        auto torch_support_coord = hit.block;
+        if (is_block_replaceable(hit.block_id)) {
+            const BlockCoord support_offset {
+                hit.block.x - hit.adjacent.x,
+                hit.block.y - hit.adjacent.y,
+                hit.block.z - hit.adjacent.z,
+            };
+            torch_support_coord = {
+                placement_coord.x + support_offset.x,
+                placement_coord.y + support_offset.y,
+                placement_coord.z + support_offset.z,
+            };
         }
+
+        const auto resolved_torch_block = world.torch_block_to_place(placement_coord, torch_support_coord);
+        if (!resolved_torch_block.has_value()) {
+            return std::nullopt;
+        }
+        block_to_place = *resolved_torch_block;
     } else {
         if (!is_world_y_valid(placement_coord.y)) {
-            return false;
+            return std::nullopt;
         }
         const auto current_block = world.get_block(placement_coord.x, placement_coord.y, placement_coord.z);
         if (current_block != to_block_id(BlockType::Air) && !is_block_replaceable(current_block)) {
-            return false;
+            return std::nullopt;
         }
         if (block_overlaps_player(placement_coord)) {
-            return false;
+            return std::nullopt;
         }
     }
 
-    world.set_block(placement_coord.x, placement_coord.y, placement_coord.z, selected_block_);
-    return true;
+    world.set_block(placement_coord.x, placement_coord.y, placement_coord.z, block_to_place);
+    return PlacedBlockResult {placement_coord, block_to_place};
 }
 
 auto PlayerController::collides_at(const World& world, const glm::vec3& feet_position) const -> bool {
@@ -430,7 +531,7 @@ auto PlayerController::collides_at(const World& world, const glm::vec3& feet_pos
     for (int y = min_y; y <= max_y; ++y) {
         for (int z = min_z; z <= max_z; ++z) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (is_block_collidable(world.get_block(x, y, z))) {
+                if (is_block_collidable(player_physics_block(world, x, y, z))) {
                     return true;
                 }
             }
@@ -520,7 +621,7 @@ void PlayerController::move_axis(float delta, int axis, const World& world) {
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int z = min_z; z <= max_z; ++z) {
-                if (!is_block_collidable(world.get_block(block_x, y, z))) {
+                if (!is_block_collidable(player_physics_block(world, block_x, y, z))) {
                     continue;
                 }
                 next_position.x = delta > 0.0F
@@ -542,7 +643,7 @@ void PlayerController::move_axis(float delta, int axis, const World& world) {
 
         for (int z = min_z; z <= max_z; ++z) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_collidable(world.get_block(x, block_y, z))) {
+                if (!is_block_collidable(player_physics_block(world, x, block_y, z))) {
                     continue;
                 }
                 if (delta > 0.0F) {
@@ -567,7 +668,7 @@ void PlayerController::move_axis(float delta, int axis, const World& world) {
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_collidable(world.get_block(x, y, block_z))) {
+                if (!is_block_collidable(player_physics_block(world, x, y, block_z))) {
                     continue;
                 }
                 next_position.z = delta > 0.0F
@@ -612,6 +713,7 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
         state_.dead = true;
         state_.death_cause = cause;
         state_.velocity = {};
+        block_break_progress_ = {};
         state_.head_underwater = false;
         state_.swimming = false;
         state_.primary_action_active = false;
@@ -630,7 +732,22 @@ void PlayerController::heal(float amount) noexcept {
 }
 
 auto PlayerController::is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool {
-    return is_block_liquid(point_block(world, point));
+    const auto block_x = static_cast<int>(std::floor(point.x));
+    const auto block_y = static_cast<int>(std::floor(point.y));
+    const auto block_z = static_cast<int>(std::floor(point.z));
+    if (!is_world_y_valid(block_y)) {
+        return false;
+    }
+
+    const auto level = world.peek_water_level_or_generated(block_x, block_y, block_z);
+    if (level == 0) {
+        return false;
+    }
+
+    const auto top_height = world.peek_water_level_or_generated(block_x, block_y + 1, block_z) > 0
+                                ? 1.0F
+                                : static_cast<float>(level) / static_cast<float>(kMaxWaterLevel);
+    return point.y < static_cast<float>(block_y) + top_height;
 }
 
 auto PlayerController::sample_water_contact(const World& world, const glm::vec3& feet_position) const noexcept -> WaterContactState {
@@ -669,7 +786,8 @@ auto PlayerController::point_block(const World& world, const glm::vec3& point) c
     if (!is_world_y_valid(block_y)) {
         return to_block_id(BlockType::Air);
     }
-    return world.get_block(
+    return player_physics_block(
+        world,
         static_cast<int>(std::floor(point.x)),
         block_y,
         static_cast<int>(std::floor(point.z)));

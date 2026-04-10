@@ -62,8 +62,19 @@ struct PlayerViewModelMesh {
     }
 };
 
+struct PlayerViewModelParts {
+    std::vector<CreaturePartInstance> parts;
+    PlayerViewModelPose pose {};
+
+    [[nodiscard]] auto empty() const noexcept -> bool {
+        return parts.empty();
+    }
+};
+
 [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;
 [[nodiscard]] auto build_player_atlas_pixels() -> std::vector<std::uint8_t>;
+[[nodiscard]] auto build_player_world_avatar_parts(const PlayerController& player) -> std::vector<CreaturePartInstance>;
+[[nodiscard]] auto build_player_viewmodel_parts(const PlayerController& player) -> PlayerViewModelParts;
 [[nodiscard]] auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData;
 [[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh;
 [[nodiscard]] auto build_player_mesh(const PlayerController& player,

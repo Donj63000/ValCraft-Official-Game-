@@ -30,6 +30,7 @@ public:
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto biome_at(int world_x, int world_z) const noexcept -> BiomeType;
     [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept -> BlockId;
+    [[nodiscard]] auto sample_water_state(int world_x, int y, int world_z) const noexcept -> WaterState;
 
 private:
     struct TerrainColumnSample {

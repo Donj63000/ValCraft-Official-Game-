@@ -1,4 +1,5 @@
 #include "app/PerformanceReport.h"
+#include "gameplay/StartingVillage.h"
 #include "world/World.h"
 #include "world/BlockVisuals.h"
 #include "world/ChunkMesher.h"
@@ -13,11 +14,89 @@
 #include <array>
 #include <cmath>
 #include <doctest/doctest.h>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <utility>
 
 namespace valcraft {
+
+namespace {
+
+struct BiomeVegetationDensity {
+    int sampled_columns = 0;
+    int tree_candidate_columns = 0;
+    int decoration_candidate_columns = 0;
+    int tree_columns = 0;
+    int decoration_columns = 0;
+};
+
+auto is_tree_trunk(BlockId block_id) noexcept -> bool {
+    return block_id == to_block_id(BlockType::Wood) || block_id == to_block_id(BlockType::PineWood);
+}
+
+auto is_green_decoration(BlockId block_id) noexcept -> bool {
+    return block_id == to_block_id(BlockType::TallGrass) ||
+           block_id == to_block_id(BlockType::RedFlower) ||
+           block_id == to_block_id(BlockType::YellowFlower);
+}
+
+auto density_percent(int count, int total) noexcept -> float {
+    if (total <= 0) {
+        return 0.0F;
+    }
+    return static_cast<float>(count) * 100.0F / static_cast<float>(total);
+}
+
+auto terrain_surface_height(const WorldGenerator& generator, int world_x, int world_z) noexcept -> int {
+    for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
+        const auto block = generator.sample_block(world_x, y, world_z);
+        if (block != to_block_id(BlockType::Air) && block != to_block_id(BlockType::Water)) {
+            return y;
+        }
+    }
+    return kWorldMinY - 1;
+}
+
+auto building_wall_height(const StartingVillageBuilding& building) noexcept -> int {
+    switch (building.role) {
+    case VillageBuildingRole::House:
+        return (building.variant_seed % 4U) == 0U ? 4 : 3;
+    case VillageBuildingRole::Workshop:
+    case VillageBuildingRole::Storehouse:
+    case VillageBuildingRole::Lodge:
+        return 4;
+    }
+    return 4;
+}
+
+auto roof_surface_y_at_wall(const StartingVillageBuilding& building, int x, int z) noexcept -> int {
+    const auto roof_base_y = building.base_y + building_wall_height(building) + 1;
+    const auto eave_min_x = building.min_x - 1;
+    const auto eave_max_x = building.max_x + 1;
+    const auto eave_min_z = building.min_z - 1;
+    const auto eave_max_z = building.max_z + 1;
+    if (building.facing == VillageFacing::North || building.facing == VillageFacing::South) {
+        return roof_base_y + std::min(z - eave_min_z, eave_max_z - z);
+    }
+    return roof_base_y + std::min(x - eave_min_x, eave_max_x - x);
+}
+
+auto doorway_world_cell(const StartingVillageBuilding& building) noexcept -> BlockCoord {
+    switch (building.facing) {
+    case VillageFacing::South:
+        return {building.door_x, building.base_y + 1, building.max_z};
+    case VillageFacing::North:
+        return {building.door_x, building.base_y + 1, building.min_z};
+    case VillageFacing::East:
+        return {building.max_x, building.base_y + 1, building.door_z};
+    case VillageFacing::West:
+    default:
+        return {building.min_x, building.base_y + 1, building.door_z};
+    }
+}
+
+} // namespace
 
 TEST_CASE("air uses terrain as the visual fallback material") {
     CHECK(block_visual_material(to_block_id(BlockType::Air)) == BlockVisualMaterial::Terrain);
@@ -151,6 +230,237 @@ TEST_CASE("world set_block outside valid Y is a no-op") {
     CHECK(world.get_block(1, kWorldMaxY, 1) == to_block_id(BlockType::Air));
 }
 
+TEST_CASE("modified chunks survive unload and reload within the same session") {
+    World world(12345, 0);
+    const ChunkCoord origin {0, 0};
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::make_chunk_empty(world, origin);
+    world.set_block(1, 12, 1, to_block_id(BlockType::Stone));
+    test::flush_pending_work(world);
+
+    CHECK(world.get_block(1, 12, 1) == to_block_id(BlockType::Stone));
+
+    world.update_streaming({static_cast<float>(kChunkSizeX * 3) + 0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+
+    CHECK(world.find_chunk(origin) == nullptr);
+    CHECK(world.get_block(1, 12, 1) == to_block_id(BlockType::Stone));
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+
+    REQUIRE(world.find_chunk(origin) != nullptr);
+    CHECK(world.get_block(1, 12, 1) == to_block_id(BlockType::Stone));
+}
+
+TEST_CASE("restoring a block to its generated value clears the chunk override before unload") {
+    std::array<BlockId, kChunkVolume> generator_blocks {};
+    const ChunkCoord origin {0, 0};
+    World generator_world(54321, 0);
+    for (int y = 0; y < kChunkHeight; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                const auto index = static_cast<std::size_t>((y * kChunkSizeZ + z) * kChunkSizeX + x);
+                generator_blocks[index] = generator_world.peek_block_or_generated(x, y, z);
+            }
+        }
+    }
+
+    World world(54321, 0);
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+
+    auto* chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    chunk->copy_blocks_from(generator_blocks.data(), generator_blocks.size());
+    chunk->clear_lighting();
+
+    constexpr int target_y = 1;
+    const auto generated_block = chunk->get_local(1, target_y, 1);
+    const auto replacement_block =
+        generated_block == to_block_id(BlockType::Stone) ? to_block_id(BlockType::Cobblestone) : to_block_id(BlockType::Stone);
+
+    world.set_block(1, target_y, 1, replacement_block);
+    test::flush_pending_work(world);
+
+    CHECK(world.get_block(1, target_y, 1) == replacement_block);
+    CHECK(world.modified_chunk_snapshots().size() == 1);
+
+    world.set_block(1, target_y, 1, generated_block);
+    test::flush_pending_work(world);
+
+    CHECK(world.get_block(1, target_y, 1) == generated_block);
+    CHECK(world.modified_chunk_snapshots().empty());
+
+    world.update_streaming({static_cast<float>(kChunkSizeX * 3) + 0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+
+    CHECK(world.find_chunk(origin) == nullptr);
+    CHECK(world.modified_chunk_snapshots().empty());
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+
+    REQUIRE(world.find_chunk(origin) != nullptr);
+    CHECK(world.get_block(1, target_y, 1) == generated_block);
+    CHECK(world.modified_chunk_snapshots().empty());
+}
+
+TEST_CASE("world chunk snapshots round-trip modified chunks into a fresh world") {
+    World source_world(24680, 1);
+    test::make_chunk_empty(source_world, {0, 0});
+    test::make_chunk_empty(source_world, {1, 0});
+    source_world.set_block(2, 10, 3, to_block_id(BlockType::Stone));
+    source_world.set_block(17, 11, 4, to_block_id(BlockType::Torch));
+    test::flush_pending_work(source_world);
+
+    const auto snapshots = source_world.modified_chunk_snapshots();
+    CHECK(snapshots.size() == 2);
+
+    World restored_world(24680, 1);
+    restored_world.replace_chunk_snapshots(snapshots);
+
+    CHECK(restored_world.get_block(2, 10, 3) == to_block_id(BlockType::Stone));
+    CHECK(restored_world.get_block(17, 11, 4) == to_block_id(BlockType::Torch));
+
+    restored_world.ensure_chunk_loaded({0, 0});
+    restored_world.ensure_chunk_loaded({1, 0});
+    test::flush_pending_work(restored_world);
+
+    CHECK(restored_world.get_block(2, 10, 3) == to_block_id(BlockType::Stone));
+    CHECK(restored_world.get_block(17, 11, 4) == to_block_id(BlockType::Torch));
+    CHECK(restored_world.modified_chunk_snapshots().size() == 2);
+}
+
+TEST_CASE("starting village generator builds a playable procedural spawn hub") {
+    constexpr int kVillageSeed = 424242;
+    StartingVillageGenerator generator(kVillageSeed);
+    WorldGenerator terrain_generator(kVillageSeed);
+    const auto layout = generator.build_layout();
+
+    REQUIRE(layout.buildings.size() >= 10);
+    REQUIRE(layout.residents.size() == layout.buildings.size());
+    CHECK(layout.base_y >= kSeaLevel + 2);
+    CHECK(layout.player_spawn.y > static_cast<float>(layout.base_y));
+    CHECK((layout.max_x - layout.min_x) >= 70);
+    CHECK((layout.max_z - layout.min_z) >= 60);
+    CHECK(std::all_of(layout.residents.begin(), layout.residents.end(), [](const CreatureSpawnAnchor& resident) {
+        return resident.species == CreatureSpecies::Villager;
+    }));
+    CHECK(std::all_of(layout.residents.begin(), layout.residents.end(), [](const CreatureSpawnAnchor& resident) {
+        return resident.patrol_point_count == static_cast<std::uint8_t>(kCreatureResidentPatrolPointCount) &&
+               resident.roam_radius >= 18.0F;
+    }));
+
+    World world(kVillageSeed, 4);
+    generator.apply(world, layout);
+    test::flush_pending_work(world);
+
+    const auto spawn_x = static_cast<int>(std::floor(layout.player_spawn.x));
+    const auto spawn_z = static_cast<int>(std::floor(layout.player_spawn.z));
+    int road_columns = 0;
+    int glass_blocks = 0;
+    for (int z = layout.min_z; z <= layout.max_z; ++z) {
+        for (int x = layout.min_x; x <= layout.max_x; ++x) {
+            const auto ground_block = world.get_block(x, layout.base_y, z);
+            road_columns +=
+                ground_block == to_block_id(BlockType::Cobblestone) ||
+                ground_block == to_block_id(BlockType::Gravel) ||
+                ground_block == to_block_id(BlockType::MossyStone) ? 1 : 0;
+            for (int y = layout.base_y + 1; y <= layout.base_y + 6; ++y) {
+                glass_blocks += world.get_block(x, y, z) == to_block_id(BlockType::Glass) ? 1 : 0;
+            }
+        }
+    }
+
+    CHECK_FALSE(world.modified_chunk_snapshots().empty());
+    CHECK(world.get_block(layout.center_x, layout.base_y, layout.center_z) == to_block_id(BlockType::Water));
+    CHECK(is_block_collidable(world.get_block(spawn_x, layout.base_y, spawn_z)));
+    CHECK(world.get_block(spawn_x, layout.base_y + 1, spawn_z) == to_block_id(BlockType::Air));
+    CHECK(world.get_block(spawn_x, layout.base_y + 2, spawn_z) == to_block_id(BlockType::Air));
+    CHECK(road_columns > 350);
+    CHECK(glass_blocks > 40);
+
+    const auto corner_surface_matches_generated = [&](int world_x, int world_z) {
+        const auto generated_surface_y = terrain_surface_height(terrain_generator, world_x, world_z);
+        const auto world_surface_y = world.surface_height(world_x, world_z);
+        return world_surface_y == generated_surface_y &&
+               world.get_block(world_x, world_surface_y, world_z) ==
+                   terrain_generator.sample_block(world_x, generated_surface_y, world_z);
+    };
+    const std::array<std::pair<int, int>, 4> outer_corners {{
+        {layout.min_x, layout.min_z},
+        {layout.min_x, layout.max_z},
+        {layout.max_x, layout.min_z},
+        {layout.max_x, layout.max_z},
+    }};
+    const auto preserved_corner_columns = static_cast<int>(std::count_if(outer_corners.begin(), outer_corners.end(), [&](const auto& corner) {
+        return corner_surface_matches_generated(corner.first, corner.second);
+    }));
+    CHECK(preserved_corner_columns >= 3);
+
+    for (const auto& building : layout.buildings) {
+        BlockCoord doorway {};
+        switch (building.facing) {
+        case VillageFacing::South:
+            doorway = {building.door_x, building.base_y + 1, building.max_z};
+            break;
+        case VillageFacing::North:
+            doorway = {building.door_x, building.base_y + 1, building.min_z};
+            break;
+        case VillageFacing::East:
+            doorway = {building.max_x, building.base_y + 1, building.door_z};
+            break;
+        case VillageFacing::West:
+            doorway = {building.min_x, building.base_y + 1, building.door_z};
+            break;
+        }
+
+        CHECK(world.get_block(doorway.x, doorway.y, doorway.z) == to_block_id(BlockType::Air));
+        CHECK(world.get_block(doorway.x, doorway.y + 1, doorway.z) == to_block_id(BlockType::Air));
+        CHECK(is_block_collidable(world.get_block(building.interior_x, building.base_y, building.interior_z)));
+        CHECK(world.get_block(building.interior_x, building.base_y + 1, building.interior_z) == to_block_id(BlockType::Air));
+    }
+}
+
+TEST_CASE("starting village buildings seal exterior walls up to the roofline") {
+    constexpr int kVillageSeed = 424242;
+    StartingVillageGenerator generator(kVillageSeed);
+    const auto layout = generator.build_layout();
+
+    World world(kVillageSeed, 4);
+    generator.apply(world, layout);
+    test::flush_pending_work(world);
+
+    for (const auto& building : layout.buildings) {
+        const auto doorway = doorway_world_cell(building);
+        for (int z = building.min_z; z <= building.max_z; ++z) {
+            for (int x = building.min_x; x <= building.max_x; ++x) {
+                const auto edge = x == building.min_x || x == building.max_x || z == building.min_z || z == building.max_z;
+                if (!edge) {
+                    continue;
+                }
+
+                const auto wall_roof_y = roof_surface_y_at_wall(building, x, z);
+                for (int y = building.base_y + 1; y < wall_roof_y; ++y) {
+                    CAPTURE(static_cast<int>(building.role));
+                    CAPTURE(static_cast<int>(building.facing));
+                    CAPTURE(x);
+                    CAPTURE(y);
+                    CAPTURE(z);
+                    if (x == doorway.x && z == doorway.z && y <= building.base_y + 2) {
+                        CHECK(world.get_block(x, y, z) == to_block_id(BlockType::Air));
+                    } else {
+                        CHECK(world.get_block(x, y, z) != to_block_id(BlockType::Air));
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("torch block properties are non opaque non collidable and emissive") {
     const auto properties = block_properties(to_block_id(BlockType::Torch));
 
@@ -180,6 +490,20 @@ TEST_CASE("water block properties are translucent replaceable and non collidable
     CHECK(properties.mesh_type == BlockMeshType::Water);
 }
 
+TEST_CASE("block break durations stay coherent across fragile terrain and hard rock") {
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Air)) == doctest::Approx(0.0F));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Dirt)) == doctest::Approx(0.80F));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Stone)) == doctest::Approx(1.30F));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Cobblestone)) >
+          block_break_duration_seconds(to_block_id(BlockType::Stone)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::TallGrass)) <
+          block_break_duration_seconds(to_block_id(BlockType::Dirt)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Torch)) <
+          block_break_duration_seconds(to_block_id(BlockType::TallGrass)));
+    CHECK(is_block_breakable(to_block_id(BlockType::Stone)));
+    CHECK_FALSE(is_block_breakable(to_block_id(BlockType::Air)));
+}
+
 TEST_CASE("block atlas expands to 128 square pixels and preserves transparent decorative tiles") {
     const auto pixels = build_block_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
@@ -194,6 +518,31 @@ TEST_CASE("block atlas expands to 128 square pixels and preserves transparent de
 
     CHECK(pixels[transparent_alpha_index] == 0);
     CHECK(pixels[opaque_alpha_index] == 255);
+}
+
+TEST_CASE("block atlas includes progressively denser crack tiles for block breaking") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto opaque_texel_count = [&](std::uint8_t stage) {
+        const auto tile = block_break_crack_tile(stage);
+        const auto origin_x = tile.x * kBlockAtlasTileSize;
+        const auto origin_y = tile.y * kBlockAtlasTileSize;
+        auto count = 0;
+        for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto alpha_index =
+                    static_cast<std::size_t>(((origin_y + y) * kBlockAtlasSize + (origin_x + x)) * 4 + 3);
+                count += pixels[alpha_index] > 0 ? 1 : 0;
+            }
+        }
+        return count;
+    };
+
+    CHECK(kBlockBreakStageCount == 8);
+    CHECK(opaque_texel_count(0) > 0);
+    CHECK(opaque_texel_count(kBlockBreakStageCount - 1) > opaque_texel_count(0));
+    CHECK(opaque_texel_count(3) >= opaque_texel_count(0));
 }
 
 TEST_CASE("block atlas includes a translucent water tile") {
@@ -482,18 +831,26 @@ TEST_CASE("accent atlas keeps authored celestial sprites within expected dimensi
     const auto pixels = build_accent_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kAccentAtlasSize * kAccentAtlasSize * 4));
 
+    const auto sun_tile = accent_atlas_tile(AccentAtlasSprite::Sun);
+    const auto moon_tile = accent_atlas_tile(AccentAtlasSprite::Moon);
     const auto star_tile = accent_atlas_tile(AccentAtlasSprite::Star);
     const auto cloud_tile = accent_atlas_tile(AccentAtlasSprite::Cloud);
+    const auto ring_tile = accent_atlas_tile(AccentAtlasSprite::Ring);
     const auto sample_alpha = [&](const AccentAtlasTile& tile, int local_x, int local_y) {
         const auto x = tile.x * kAccentAtlasTileSize + local_x;
         const auto y = tile.y * kAccentAtlasTileSize + local_y;
         return pixels[static_cast<std::size_t>((y * kAccentAtlasSize + x) * 4 + 3)];
     };
 
+    CHECK(sample_alpha(sun_tile, 8, 8) > 0);
+    CHECK(sample_alpha(sun_tile, 0, 0) == 0);
+    CHECK(sample_alpha(moon_tile, 8, 8) > 0);
+    CHECK(sample_alpha(moon_tile, 0, 0) == 0);
     CHECK(sample_alpha(star_tile, 8, 8) > 0);
     CHECK(sample_alpha(star_tile, 0, 0) == 0);
     CHECK(sample_alpha(cloud_tile, 8, 8) > 0);
     CHECK(sample_alpha(cloud_tile, 15, 0) == 0);
+    CHECK(sample_alpha(ring_tile, 8, 8) < sample_alpha(ring_tile, 8, 2));
 }
 
 TEST_CASE("generation is deterministic for identical seeds") {
@@ -571,9 +928,13 @@ TEST_CASE("world generator fills every submerged column up to the global sea lev
                 CAPTURE(x);
                 CAPTURE(z);
                 CAPTURE(surface_y);
-                CHECK(world.get_block(x, kSeaLevel, z) == to_block_id(BlockType::Water));
+                const auto has_sea_water = world.has_water(x, kSeaLevel, z);
+                const auto sea_water_level = world.water_level(x, kSeaLevel, z);
+                CHECK(has_sea_water);
+                CHECK(sea_water_level == kMaxWaterLevel);
                 if (kSeaLevel < kWorldMaxY) {
-                    CHECK(world.get_block(x, kSeaLevel + 1, z) != to_block_id(BlockType::Water));
+                    const auto has_water_above_sea = world.has_water(x, kSeaLevel + 1, z);
+                    CHECK_FALSE(has_water_above_sea);
                 }
             }
         }
@@ -823,6 +1184,61 @@ TEST_CASE("chunk mesher handles isolated high blocks without losing geometry") {
     CHECK(max_z == doctest::Approx(2.625F));
 }
 
+TEST_CASE("wall torch meshes shift toward their support and sit lower than floor torches") {
+    struct TorchBounds {
+        glm::vec3 min {0.0F};
+        glm::vec3 max {0.0F};
+    };
+
+    const auto capture_torch_bounds = [](const ChunkMeshData& mesh) {
+        const auto wood_material = block_visual_material_value(BlockVisualMaterial::Wood);
+        const auto emissive_material = block_visual_material_value(BlockVisualMaterial::Emissive);
+        TorchBounds bounds {
+            glm::vec3 {std::numeric_limits<float>::max()},
+            glm::vec3 {std::numeric_limits<float>::lowest()},
+        };
+
+        for (const auto& vertex : mesh.vertices) {
+            if (std::abs(vertex.material_class - wood_material) > 1.0e-4F &&
+                std::abs(vertex.material_class - emissive_material) > 1.0e-4F) {
+                continue;
+            }
+
+            bounds.min.x = std::min(bounds.min.x, vertex.x);
+            bounds.min.y = std::min(bounds.min.y, vertex.y);
+            bounds.min.z = std::min(bounds.min.z, vertex.z);
+            bounds.max.x = std::max(bounds.max.x, vertex.x);
+            bounds.max.y = std::max(bounds.max.y, vertex.y);
+            bounds.max.z = std::max(bounds.max.z, vertex.z);
+        }
+
+        return bounds;
+    };
+
+    World floor_world(1841, 1);
+    test::make_chunk_empty(floor_world, {0, 0});
+    floor_world.set_block(2, 9, 2, to_block_id(BlockType::Stone));
+    floor_world.set_block(2, 10, 2, to_block_id(BlockType::Torch));
+    floor_world.rebuild_dirty_meshes();
+
+    const auto* floor_mesh = floor_world.mesh_for({0, 0});
+    REQUIRE(floor_mesh != nullptr);
+    const auto floor_bounds = capture_torch_bounds(*floor_mesh);
+
+    World wall_world(1842, 1);
+    test::make_chunk_empty(wall_world, {0, 0});
+    wall_world.set_block(1, 10, 2, to_block_id(BlockType::Stone));
+    wall_world.set_block(2, 10, 2, to_block_id(BlockType::TorchWallNegativeX));
+    wall_world.rebuild_dirty_meshes();
+
+    const auto* wall_mesh = wall_world.mesh_for({0, 0});
+    REQUIRE(wall_mesh != nullptr);
+    const auto wall_bounds = capture_torch_bounds(*wall_mesh);
+
+    CHECK(wall_bounds.min.x < floor_bounds.min.x);
+    CHECK(wall_bounds.max.y < floor_bounds.max.y);
+}
+
 TEST_CASE("sky light stays at 15 until the first opaque block and 0 below it") {
     World world(19, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -881,6 +1297,22 @@ TEST_CASE("removing the support block removes the torch above it") {
 
     CHECK(world.get_block(3, 1, 3) == to_block_id(BlockType::Air));
     CHECK(world.get_block_light(3, 1, 3) == 0);
+}
+
+TEST_CASE("removing the wall support removes the wall torch") {
+    World world(221, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 5, 3, to_block_id(BlockType::Stone));
+    world.set_block(2, 5, 3, to_block_id(BlockType::TorchWallNegativeX));
+    world.rebuild_lighting();
+    REQUIRE(world.get_block(2, 5, 3) == to_block_id(BlockType::TorchWallNegativeX));
+    REQUIRE(world.get_block_light(2, 5, 3) == 14);
+
+    world.set_block(1, 5, 3, to_block_id(BlockType::Air));
+    world.rebuild_lighting();
+
+    CHECK(world.get_block(2, 5, 3) == to_block_id(BlockType::Air));
+    CHECK(world.get_block_light(2, 5, 3) == 0);
 }
 
 TEST_CASE("update_streaming plans the full radius around the player without immediate loads") {
@@ -1109,6 +1541,147 @@ TEST_CASE("generator exposes all major biome families across a wide sample") {
     CHECK(biomes.contains(BiomeType::Taiga));
 }
 
+TEST_CASE("generator keeps meadow and forest vegetation density in the intended range") {
+    WorldGenerator generator(1337);
+    BiomeVegetationDensity meadow {};
+    BiomeVegetationDensity forest {};
+    constexpr int kChunkRadius = 8;
+
+    for (int chunk_z = -kChunkRadius; chunk_z <= kChunkRadius; ++chunk_z) {
+        for (int chunk_x = -kChunkRadius; chunk_x <= kChunkRadius; ++chunk_x) {
+            Chunk chunk({chunk_x, chunk_z});
+            generator.generate_chunk(chunk);
+
+            const auto base_world_x = chunk_x * kChunkSizeX;
+            const auto base_world_z = chunk_z * kChunkSizeZ;
+            for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
+                for (int local_x = 0; local_x < kChunkSizeX; ++local_x) {
+                    const auto world_x = base_world_x + local_x;
+                    const auto world_z = base_world_z + local_z;
+
+                    auto* density = static_cast<BiomeVegetationDensity*>(nullptr);
+                    switch (generator.biome_at(world_x, world_z)) {
+                    case BiomeType::Meadow:
+                        density = &meadow;
+                        break;
+                    case BiomeType::Forest:
+                        density = &forest;
+                        break;
+                    default:
+                        break;
+                    }
+
+                    if (density == nullptr) {
+                        continue;
+                    }
+
+                    ++density->sampled_columns;
+                    const auto surface_y = terrain_surface_height(generator, world_x, world_z);
+                    if (!chunk.in_bounds_local(local_x, surface_y + 1, local_z)) {
+                        continue;
+                    }
+
+                    const auto above_surface = chunk.get_local(local_x, surface_y + 1, local_z);
+                    if (above_surface != to_block_id(BlockType::Water)) {
+                        ++density->decoration_candidate_columns;
+                        if (surface_y >= 48 && surface_y <= kWorldMaxY - 10) {
+                            ++density->tree_candidate_columns;
+                        }
+                    }
+
+                    if (is_tree_trunk(above_surface)) {
+                        ++density->tree_columns;
+                    } else if (is_green_decoration(above_surface)) {
+                        ++density->decoration_columns;
+                    }
+                }
+            }
+        }
+    }
+
+    REQUIRE(meadow.sampled_columns > 4000);
+    REQUIRE(forest.sampled_columns > 4000);
+    REQUIRE(meadow.tree_candidate_columns > 4000);
+    REQUIRE(meadow.decoration_candidate_columns > 4000);
+    REQUIRE(forest.tree_candidate_columns > 4000);
+    REQUIRE(forest.decoration_candidate_columns > 4000);
+
+    const auto meadow_tree_percent = density_percent(meadow.tree_columns, meadow.tree_candidate_columns);
+    const auto meadow_decoration_percent = density_percent(meadow.decoration_columns, meadow.decoration_candidate_columns);
+    const auto forest_tree_percent = density_percent(forest.tree_columns, forest.tree_candidate_columns);
+    const auto forest_decoration_percent = density_percent(forest.decoration_columns, forest.decoration_candidate_columns);
+
+    CAPTURE(meadow.sampled_columns);
+    CAPTURE(meadow.tree_candidate_columns);
+    CAPTURE(meadow.decoration_candidate_columns);
+    CAPTURE(meadow.tree_columns);
+    CAPTURE(meadow.decoration_columns);
+    CAPTURE(meadow_tree_percent);
+    CAPTURE(meadow_decoration_percent);
+    CHECK(meadow_tree_percent >= 0.8F);
+    CHECK(meadow_tree_percent <= 2.0F);
+    CHECK(meadow_decoration_percent >= 9.0F);
+    CHECK(meadow_decoration_percent <= 15.0F);
+
+    CAPTURE(forest.sampled_columns);
+    CAPTURE(forest.tree_candidate_columns);
+    CAPTURE(forest.decoration_candidate_columns);
+    CAPTURE(forest.tree_columns);
+    CAPTURE(forest.decoration_columns);
+    CAPTURE(forest_tree_percent);
+    CAPTURE(forest_decoration_percent);
+    CHECK(forest_tree_percent >= 2.8F);
+    CHECK(forest_tree_percent <= 4.3F);
+    CHECK(forest_decoration_percent >= 11.0F);
+    CHECK(forest_decoration_percent <= 16.5F);
+}
+
+TEST_CASE("coastal sand in meadow and forest biomes stays free of green decorations") {
+    WorldGenerator generator(1337);
+    int sampled_sandy_columns = 0;
+    int green_decorations_on_sand = 0;
+    constexpr int kChunkRadius = 10;
+
+    for (int chunk_z = -kChunkRadius; chunk_z <= kChunkRadius; ++chunk_z) {
+        for (int chunk_x = -kChunkRadius; chunk_x <= kChunkRadius; ++chunk_x) {
+            Chunk chunk({chunk_x, chunk_z});
+            generator.generate_chunk(chunk);
+
+            const auto base_world_x = chunk_x * kChunkSizeX;
+            const auto base_world_z = chunk_z * kChunkSizeZ;
+            for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
+                for (int local_x = 0; local_x < kChunkSizeX; ++local_x) {
+                    const auto world_x = base_world_x + local_x;
+                    const auto world_z = base_world_z + local_z;
+                    const auto biome = generator.biome_at(world_x, world_z);
+                    if (biome != BiomeType::Meadow && biome != BiomeType::Forest) {
+                        continue;
+                    }
+
+                    const auto surface_y = terrain_surface_height(generator, world_x, world_z);
+                    if (!chunk.in_bounds_local(local_x, surface_y + 1, local_z)) {
+                        continue;
+                    }
+
+                    const auto surface_block = chunk.get_local(local_x, surface_y, local_z);
+                    if (surface_block != to_block_id(BlockType::Sand)) {
+                        continue;
+                    }
+
+                    ++sampled_sandy_columns;
+                    const auto above_surface = chunk.get_local(local_x, surface_y + 1, local_z);
+                    if (is_green_decoration(above_surface)) {
+                        ++green_decorations_on_sand;
+                    }
+                }
+            }
+        }
+    }
+
+    REQUIRE(sampled_sandy_columns > 1000);
+    CHECK(green_decorations_on_sand == 0);
+}
+
 TEST_CASE("boundary block edits remesh both chunks touching the border") {
     World world(16, 1);
     const ChunkCoord left {0, 0};
@@ -1188,9 +1761,9 @@ TEST_CASE("water border meshing matches the eventual generated neighbor even bef
                 for (int local_z = 0; local_z < kChunkSizeZ && !border_extends_into_generated_neighbor; ++local_z) {
                     const auto world_x = origin.x * kChunkSizeX + (kChunkSizeX - 1);
                     const auto world_z = origin.z * kChunkSizeZ + local_z;
-                    border_extends_into_generated_neighbor =
-                        world.get_block(world_x, kSeaLevel, world_z) == to_block_id(BlockType::Water) &&
-                        world.peek_block_or_generated(world_x + 1, kSeaLevel, world_z) == to_block_id(BlockType::Water);
+                    const auto origin_has_water = world.has_water(world_x, kSeaLevel, world_z);
+                    const auto neighbor_water_level = world.peek_water_level_or_generated(world_x + 1, kSeaLevel, world_z);
+                    border_extends_into_generated_neighbor = origin_has_water && neighbor_water_level != 0U;
                 }
 
                 if (!border_extends_into_generated_neighbor) {
@@ -1344,6 +1917,64 @@ TEST_CASE("local block lighting only dirties affected mesh sections") {
     CHECK(chunk->is_section_dirty(0));
     CHECK_FALSE(chunk->is_section_dirty(6));
     CHECK(chunk->dirty_section_count() < kChunkSectionCount);
+}
+
+TEST_CASE("sky light changes only remesh the impacted vertical band") {
+    World world(195, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    world.set_block(1, 15, 1, to_block_id(BlockType::Stone));
+    world.set_block(1, 31, 1, to_block_id(BlockType::Stone));
+    test::flush_pending_work(world);
+
+    auto* chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->dirty_section_count() == 0);
+
+    world.set_block(1, 31, 1, to_block_id(BlockType::Air));
+    REQUIRE(world.pending_lighting_count() == 1);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0;
+    budget.mesh_rebuild_budget = 0;
+    budget.light_node_budget = 65536;
+    budget.max_generation_ms = 10.0;
+    budget.max_lighting_ms = 10.0;
+    budget.max_meshing_ms = 0.0;
+
+    const auto stats = world.process_pending_work(budget);
+    CHECK(stats.lighting_jobs_completed == 1);
+    CHECK(world.get_sky_light(1, 30, 1) == 15);
+    CHECK(world.get_sky_light(1, 14, 1) == 0);
+
+    chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    CHECK(chunk->is_section_dirty(0));
+    CHECK(chunk->is_section_dirty(1));
+    CHECK(chunk->is_section_dirty(2));
+    CHECK_FALSE(chunk->is_section_dirty(6));
+    CHECK(chunk->dirty_section_count() < kChunkSectionCount);
+}
+
+TEST_CASE("interior sky light changes do not remesh neighboring chunks") {
+    World world(197, 1);
+    const ChunkCoord origin {0, 0};
+    const ChunkCoord east {1, 0};
+
+    test::make_chunk_empty(world, origin);
+    test::make_chunk_empty(world, east);
+    world.rebuild_dirty_meshes();
+
+    const auto origin_revision_before = world.mesh_revision(origin);
+    const auto east_revision_before = world.mesh_revision(east);
+    REQUIRE(origin_revision_before > 0);
+    REQUIRE(east_revision_before > 0);
+
+    world.set_block(8, 15, 8, to_block_id(BlockType::Stone));
+    test::flush_pending_work(world);
+
+    CHECK(world.mesh_revision(origin) > origin_revision_before);
+    CHECK(world.mesh_revision(east) == east_revision_before);
 }
 
 TEST_CASE("rebuilding a dirty chunk enqueues a GPU upload event") {
@@ -1567,22 +2198,31 @@ TEST_CASE("environment curve is brightest at noon and remains readable at midnig
 
     CHECK(noon.daylight_factor > dusk.daylight_factor);
     CHECK(dusk.daylight_factor > midnight.daylight_factor);
-    CHECK(midnight.daylight_factor >= 0.15F);
+    CHECK(midnight.daylight_factor >= 0.18F);
 }
 
-TEST_CASE("environment state exposes stylized sky and post-process controls across the day cycle") {
+TEST_CASE("environment state keeps day crisp dusk warm and night cool with softer night sky contrast") {
     const auto noon = EnvironmentClock::compute_state(12.0F);
     const auto dusk = EnvironmentClock::compute_state(18.5F);
     const auto midnight = EnvironmentClock::compute_state(0.0F);
+    const auto noon_sky_span = glm::length(noon.sky_zenith_color - noon.sky_horizon_color);
+    const auto midnight_sky_span = glm::length(midnight.sky_zenith_color - midnight.sky_horizon_color);
 
     CHECK(noon.star_intensity < 0.05F);
-    CHECK(midnight.star_intensity > 0.50F);
-    CHECK(dusk.horizon_glow_color.r > midnight.horizon_glow_color.r);
+    CHECK(midnight.star_intensity > 0.70F);
+    CHECK(dusk.horizon_glow_color.r > noon.horizon_glow_color.r);
     CHECK(noon.exposure > midnight.exposure);
     CHECK(midnight.vignette_strength > noon.vignette_strength);
     CHECK(dusk.glow_strength >= noon.glow_strength);
-    CHECK(glm::length(noon.sky_zenith_color - noon.sky_horizon_color) > 0.10F);
-    CHECK(glm::length(midnight.distant_fog_color - midnight.night_tint_color) > 0.02F);
+    CHECK(noon.cloud_intensity > midnight.cloud_intensity);
+    CHECK(dusk.cloud_intensity > 0.20F);
+    CHECK(dusk.sky_horizon_color.r > dusk.sky_zenith_color.r);
+    CHECK(noon.sky_horizon_color.b > noon.sky_horizon_color.r);
+    CHECK(midnight.sky_zenith_color.b > midnight.sky_zenith_color.r);
+    CHECK(midnight.fog_color.b > midnight.fog_color.r);
+    CHECK(noon_sky_span > 0.16F);
+    CHECK(midnight_sky_span < noon_sky_span * 0.35F);
+    CHECK(midnight.distant_fog_color.b > midnight.night_tint_color.b);
 }
 
 TEST_CASE("environment clock respects freeze mode") {

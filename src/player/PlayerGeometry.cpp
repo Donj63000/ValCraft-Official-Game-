@@ -82,7 +82,7 @@ auto make_face_definition(std::array<glm::vec3, 4> corners, const glm::vec3& nor
     return {corners, normal};
 }
 
-auto box_faces() -> const std::array<FaceDefinition, 6>& {
+[[maybe_unused]] auto box_faces() -> const std::array<FaceDefinition, 6>& {
     static const std::array<FaceDefinition, 6> kFaces {{
         make_face_definition(
             {glm::vec3 {0.5F, -0.5F, -0.5F}, glm::vec3 {0.5F, 0.5F, -0.5F}, glm::vec3 {0.5F, 0.5F, 0.5F}, glm::vec3 {0.5F, -0.5F, 0.5F}},
@@ -249,7 +249,7 @@ auto hurt_tiles_if_needed(const PlayerBoxTiles& tiles, float hurt_amount, float 
     return tiles;
 }
 
-auto player_tile_uvs(PlayerAtlasTile tile) noexcept -> std::array<std::array<float, 2>, 4> {
+[[maybe_unused]] auto player_tile_uvs(PlayerAtlasTile tile) noexcept -> std::array<std::array<float, 2>, 4> {
     const auto tile_coordinates = player_atlas_tile_coordinates(tile);
     const auto uv_step = 1.0F / kPlayerAtlasTilesPerAxis;
     const auto u0 = static_cast<float>(tile_coordinates[0]) * uv_step;
@@ -264,7 +264,23 @@ auto player_tile_uvs(PlayerAtlasTile tile) noexcept -> std::array<std::array<flo
     }};
 }
 
-void append_box(CreatureMeshData& mesh,
+auto player_tile_uv_rect(PlayerAtlasTile tile) noexcept -> BoxUvRect {
+    const auto tile_coordinates = player_atlas_tile_coordinates(tile);
+    const auto uv_step = 1.0F / kPlayerAtlasTilesPerAxis;
+    const auto u0 = static_cast<float>(tile_coordinates[0]) * uv_step;
+    const auto v0 = static_cast<float>(tile_coordinates[1]) * uv_step;
+    return {u0, v0, u0 + uv_step, v0 + uv_step};
+}
+
+auto make_box_uvs(const PlayerBoxTiles& tiles) noexcept -> std::array<BoxUvRect, 6> {
+    std::array<BoxUvRect, 6> face_uvs {};
+    for (std::size_t face_index = 0; face_index < face_uvs.size(); ++face_index) {
+        face_uvs[face_index] = player_tile_uv_rect(tiles.faces[face_index]);
+    }
+    return face_uvs;
+}
+
+void append_box(std::vector<CreaturePartInstance>& mesh,
                 const glm::mat4& root,
                 const glm::vec3& center,
                 const glm::vec3& half_extent,
@@ -277,44 +293,15 @@ void append_box(CreatureMeshData& mesh,
         return;
     }
 
-    const auto transform = make_transform(root, center, rotation_radians, half_extent);
-    const auto normal_matrix = glm::transpose(glm::inverse(glm::mat3(transform)));
-
-    for (std::size_t face_index = 0; face_index < box_faces().size(); ++face_index) {
-        const auto& face = box_faces()[face_index];
-        const auto face_normal = glm::normalize(normal_matrix * face.normal);
-        const auto uvs = player_tile_uvs(tiles.faces[face_index]);
-        const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
-        for (std::size_t vertex_index = 0; vertex_index < face.corners.size(); ++vertex_index) {
-            const auto world_position = transform * glm::vec4(face.corners[vertex_index], 1.0F);
-            mesh.vertices.push_back({
-                world_position.x,
-                world_position.y,
-                world_position.z,
-                uvs[vertex_index][0],
-                uvs[vertex_index][1],
-                face_normal.x,
-                face_normal.y,
-                face_normal.z,
-                0.0F,
-                0.0F,
-                material_class,
-                cavity_mask,
-                emissive_strength,
-            });
-        }
-
-        mesh.indices.insert(mesh.indices.end(), {
-            base_index + 0,
-            base_index + 1,
-            base_index + 2,
-            base_index + 0,
-            base_index + 2,
-            base_index + 3,
-        });
-    }
-
-    ++mesh.part_count;
+    mesh.push_back({
+        make_transform(root, center, rotation_radians, half_extent),
+        make_box_uvs(tiles),
+        0.0F,
+        0.0F,
+        material_class,
+        cavity_mask,
+        emissive_strength,
+    });
 }
 
 auto transform_translation(const glm::mat4& transform) noexcept -> glm::vec3 {
@@ -522,7 +509,7 @@ auto build_viewmodel_rig_state(const PlayerController& player) -> PlayerViewMode
     return rig;
 }
 
-void append_full_body(CreatureMeshData& mesh, const PlayerController& player, const PlayerWorldAvatarPose& pose) {
+void append_full_body(std::vector<CreaturePartInstance>& mesh, const PlayerController& player, const PlayerWorldAvatarPose& pose) {
     const auto& state = player.state();
     const auto shoulder_anchor = player.eye_position()
                                + pose.body_forward * (0.06F + pose.body_visibility * 0.16F + pose.mine_pull * 0.02F)
@@ -726,8 +713,8 @@ void append_full_body(CreatureMeshData& mesh, const PlayerController& player, co
                emissive * 0.12F);
 }
 
-void append_viewmodel_arm(PlayerViewModelMesh& output, const PlayerController& player, const PlayerViewModelRigState& rig) {
-    auto& mesh = output.mesh;
+void append_viewmodel_arm(PlayerViewModelParts& output, const PlayerController& player, const PlayerViewModelRigState& rig) {
+    auto& mesh = output.parts;
     const auto camera_up = rig.camera.up;
 
     auto root = glm::mat4(1.0F);
@@ -868,15 +855,30 @@ auto build_player_atlas_pixels() -> std::vector<std::uint8_t> {
     return pixels;
 }
 
-auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData {
-    CreatureMeshData mesh {};
+auto build_player_world_avatar_parts(const PlayerController& player) -> std::vector<CreaturePartInstance> {
+    std::vector<CreaturePartInstance> mesh {};
+    mesh.reserve(16U);
     append_full_body(mesh, player, build_world_avatar_pose(player));
     return mesh;
 }
 
-auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh {
-    PlayerViewModelMesh output {};
+auto build_player_viewmodel_parts(const PlayerController& player) -> PlayerViewModelParts {
+    PlayerViewModelParts output {};
+    output.parts.reserve(4U);
     append_viewmodel_arm(output, player, build_viewmodel_rig_state(player));
+    return output;
+}
+
+auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData {
+    const auto parts = build_player_world_avatar_parts(player);
+    return build_creature_mesh(std::span<const CreaturePartInstance>(parts.data(), parts.size()));
+}
+
+auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh {
+    const auto parts = build_player_viewmodel_parts(player);
+    PlayerViewModelMesh output {};
+    output.mesh = build_creature_mesh(std::span<const CreaturePartInstance>(parts.parts.data(), parts.parts.size()));
+    output.pose = parts.pose;
     return output;
 }
 

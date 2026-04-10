@@ -24,6 +24,11 @@ enum class PerformanceStage : std::size_t {
     Unattributed,
 };
 
+enum class PerformanceEventKind {
+    BlockBreak = 0,
+    BlockPlace,
+};
+
 constexpr auto kPerformanceLagThreshold16Ms = 16.7;
 constexpr auto kPerformanceLagThreshold33Ms = 33.3;
 constexpr auto kPerformanceLagThreshold50Ms = 50.0;
@@ -67,9 +72,24 @@ struct FramePerformanceSample {
     PerformanceStage dominant_stage = PerformanceStage::Unattributed;
 };
 
+struct PerformanceEvent {
+    std::size_t frame_index = 0;
+    PerformanceEventKind kind = PerformanceEventKind::BlockBreak;
+    std::string label {};
+    int world_x = 0;
+    int world_y = 0;
+    int world_z = 0;
+    int chunk_x = 0;
+    int chunk_z = 0;
+    std::size_t pending_generation = 0;
+    std::size_t pending_mesh = 0;
+    std::size_t pending_lighting = 0;
+};
+
 struct PerformanceReportMetadata {
     std::string platform = "unknown";
     std::string build_type = "unknown";
+    std::string capture_mode = "interactive";
     std::size_t smoke_frames = 0;
     int stream_radius = 0;
     bool shadows_enabled = true;
@@ -132,6 +152,12 @@ struct PerformanceHotspotSummary {
     PerformanceStage worst_frame_stage = PerformanceStage::Unattributed;
 };
 
+struct PerformanceEventSummary {
+    std::size_t total_events = 0;
+    std::size_t block_breaks = 0;
+    std::size_t block_places = 0;
+};
+
 struct SpikeWindow {
     std::size_t start_frame = 0;
     std::size_t end_frame = 0;
@@ -147,9 +173,11 @@ struct PerformanceRunReport {
     PerformanceReportMetadata metadata {};
     PerformanceReportSummary summary {};
     PerformanceHotspotSummary hotspots {};
+    PerformanceEventSummary event_summary {};
     std::vector<FramePerformanceSample> worst_frames {};
     std::vector<SpikeWindow> spike_windows {};
     std::vector<FramePerformanceSample> frames {};
+    std::vector<PerformanceEvent> events {};
 };
 
 inline auto performance_stage_name(PerformanceStage stage) -> std::string_view {
@@ -171,6 +199,17 @@ inline auto performance_stage_name(PerformanceStage stage) -> std::string_view {
     case PerformanceStage::Unattributed:
     default:
         return "unattributed";
+    }
+}
+
+inline auto performance_event_kind_name(PerformanceEventKind kind) -> std::string_view {
+    switch (kind) {
+    case PerformanceEventKind::BlockBreak:
+        return "block_break";
+    case PerformanceEventKind::BlockPlace:
+        return "block_place";
+    default:
+        return "unknown";
     }
 }
 
@@ -280,10 +319,25 @@ inline auto build_spike_windows(const std::vector<FramePerformanceSample>& sampl
 inline auto build_performance_report(const PerformanceReportMetadata& metadata,
                                      const std::vector<FramePerformanceSample>& raw_samples,
                                      bool include_full_trace,
-                                     std::size_t worst_frame_count = 10) -> PerformanceRunReport {
+                                     std::size_t worst_frame_count = 10,
+                                     const std::vector<PerformanceEvent>& raw_events = {}) -> PerformanceRunReport {
     PerformanceRunReport report {};
     report.metadata = metadata;
     report.metadata.trace_included = include_full_trace;
+    report.events = raw_events;
+    report.event_summary.total_events = raw_events.size();
+    for (const auto& event : raw_events) {
+        switch (event.kind) {
+        case PerformanceEventKind::BlockBreak:
+            ++report.event_summary.block_breaks;
+            break;
+        case PerformanceEventKind::BlockPlace:
+            ++report.event_summary.block_places;
+            break;
+        default:
+            break;
+        }
+    }
 
     std::vector<FramePerformanceSample> samples = raw_samples;
     for (auto& sample : samples) {
@@ -485,6 +539,22 @@ inline void append_sample_json(std::ostringstream& stream, const FramePerformanc
            << ", \"dominant_stage\": \"" << performance_stage_name(sample.dominant_stage) << "\"}";
 }
 
+inline void append_event_json(std::ostringstream& stream, const PerformanceEvent& event, std::string_view indent) {
+    stream << indent << "{"
+           << "\"frame_index\": " << event.frame_index
+           << ", \"kind\": \"" << performance_event_kind_name(event.kind) << "\""
+           << ", \"label\": \"" << json_escape(event.label) << "\""
+           << ", \"world_x\": " << event.world_x
+           << ", \"world_y\": " << event.world_y
+           << ", \"world_z\": " << event.world_z
+           << ", \"chunk_x\": " << event.chunk_x
+           << ", \"chunk_z\": " << event.chunk_z
+           << ", \"pending_generation\": " << event.pending_generation
+           << ", \"pending_mesh\": " << event.pending_mesh
+           << ", \"pending_lighting\": " << event.pending_lighting
+           << "}";
+}
+
 inline auto format_performance_json(const PerformanceRunReport& report) -> std::string {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(6);
@@ -493,6 +563,7 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
     stream << "  \"metadata\": {\n";
     stream << "    \"platform\": \"" << json_escape(report.metadata.platform) << "\",\n";
     stream << "    \"build_type\": \"" << json_escape(report.metadata.build_type) << "\",\n";
+    stream << "    \"capture_mode\": \"" << json_escape(report.metadata.capture_mode) << "\",\n";
     stream << "    \"smoke_frames\": " << report.metadata.smoke_frames << ",\n";
     stream << "    \"stream_radius\": " << report.metadata.stream_radius << ",\n";
     stream << "    \"shadows_enabled\": " << (report.metadata.shadows_enabled ? "true" : "false") << ",\n";
@@ -549,6 +620,11 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
     }
     stream << "    }\n";
     stream << "  },\n";
+    stream << "  \"event_summary\": {"
+           << "\"total\": " << report.event_summary.total_events
+           << ", \"block_breaks\": " << report.event_summary.block_breaks
+           << ", \"block_places\": " << report.event_summary.block_places
+           << "},\n";
     stream << "  \"worst_frames\": [\n";
     for (std::size_t index = 0; index < report.worst_frames.size(); ++index) {
         append_sample_json(stream, report.worst_frames[index], "    ");
@@ -568,6 +644,15 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
                << ", \"peak_ms\": " << window.peak_ms
                << ", \"dominant_stage\": \"" << performance_stage_name(window.dominant_stage) << "\"}";
         if (index + 1 != report.spike_windows.size()) {
+            stream << ',';
+        }
+        stream << '\n';
+    }
+    stream << "  ],\n";
+    stream << "  \"events\": [\n";
+    for (std::size_t index = 0; index < report.events.size(); ++index) {
+        append_event_json(stream, report.events[index], "    ");
+        if (index + 1 != report.events.size()) {
             stream << ',';
         }
         stream << '\n';
@@ -598,11 +683,12 @@ inline auto format_performance_report(const PerformanceRunReport& report) -> std
 
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(3);
-    stream << "ValCraft smoke performance summary";
+    stream << "ValCraft performance summary";
     if (!report.metadata.scenario.empty()) {
         stream << " [" << report.metadata.scenario << "]";
     }
     stream << '\n';
+    stream << "  capture_mode=" << report.metadata.capture_mode << '\n';
     stream << "  render_flags shadows=" << (report.metadata.shadows_enabled ? "on" : "off")
            << " post_process=" << (report.metadata.post_process_enabled ? "on" : "off")
            << " shadow_map_size=" << report.metadata.shadow_map_size << '\n';
@@ -651,6 +737,9 @@ inline auto format_performance_report(const PerformanceRunReport& report) -> std
            << " lag_frames_50_0=" << report.summary.lag_buckets.over_50_0_ms << '\n';
     stream << "  hotspot_worst_frame=" << performance_stage_name(report.hotspots.worst_frame_stage)
            << " spike_windows=" << report.spike_windows.size() << '\n';
+    stream << "  events_total=" << report.event_summary.total_events
+           << " block_breaks=" << report.event_summary.block_breaks
+           << " block_places=" << report.event_summary.block_places << '\n';
     stream << "  scheduler_stream_changes=" << report.summary.total_stream_chunk_changes
            << " generation_enqueued=" << report.summary.total_generation_enqueued
            << " generation_pruned=" << report.summary.total_generation_pruned

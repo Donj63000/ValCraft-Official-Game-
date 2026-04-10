@@ -10,6 +10,10 @@ coverage-report/
 compile_commands.json
 CMakeUserPresets.json
 perf-artifacts/
+performancesaudit/runs/
+performancesaudit/legacy-live/
+tmp-perf-probe/
+tmp-perf-review/
 
 *compile*.txt
 build-errors*.txt

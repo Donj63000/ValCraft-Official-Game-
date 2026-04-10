@@ -10,6 +10,7 @@ namespace valcraft {
 constexpr int kBlockAtlasSize = 128;
 constexpr int kBlockAtlasTileSize = 16;
 constexpr float kBlockAtlasTilesPerAxis = 8.0F;
+constexpr int kBlockBreakCrackAtlasRow = 5;
 constexpr int kAccentAtlasSize = 64;
 constexpr int kAccentAtlasTileSize = 16;
 constexpr float kAccentAtlasTilesPerAxis = 4.0F;
@@ -57,6 +58,7 @@ enum class BlockVisualMaterial : std::uint8_t {
     Water = 6,
     Emissive = 7,
     Snow = 8,
+    Glass = 10,
 };
 
 [[nodiscard]] constexpr auto accent_atlas_tile(AccentAtlasSprite sprite) noexcept -> AccentAtlasTile {
@@ -78,6 +80,7 @@ enum class BlockVisualMaterial : std::uint8_t {
 }
 
 [[nodiscard]] constexpr auto block_atlas_tile(BlockId block_id, BlockVisualFace face) noexcept -> BlockAtlasTile {
+    block_id = block_item_id(block_id);
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Grass:
         if (face == BlockVisualFace::PositiveY) {
@@ -149,6 +152,8 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {3, 3};
     case BlockType::DeadShrub:
         return {4, 3};
+    case BlockType::Glass:
+        return {1, 4};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -156,6 +161,7 @@ enum class BlockVisualMaterial : std::uint8_t {
 }
 
 [[nodiscard]] constexpr auto block_hotbar_tile(BlockId block_id) noexcept -> BlockAtlasTile {
+    block_id = block_item_id(block_id);
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Grass:
         return {1, 0};
@@ -167,12 +173,21 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {7, 2};
     case BlockType::Torch:
         return {0, 3};
+    case BlockType::Glass:
+        return {1, 4};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }
 }
 
+[[nodiscard]] constexpr auto block_break_crack_tile(std::uint8_t stage) noexcept -> BlockAtlasTile {
+    const auto clamped_stage =
+        stage >= kBlockBreakStageCount ? static_cast<int>(kBlockBreakStageCount - 1) : static_cast<int>(stage);
+    return {clamped_stage, kBlockBreakCrackAtlasRow};
+}
+
 [[nodiscard]] constexpr auto block_visual_material(BlockId block_id) noexcept -> BlockVisualMaterial {
+    block_id = block_item_id(block_id);
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Grass:
     case BlockType::Dirt:
@@ -203,6 +218,8 @@ enum class BlockVisualMaterial : std::uint8_t {
         return BlockVisualMaterial::Emissive;
     case BlockType::Snow:
         return BlockVisualMaterial::Snow;
+    case BlockType::Glass:
+        return BlockVisualMaterial::Glass;
     case BlockType::Air:
     default:
         return BlockVisualMaterial::Terrain;

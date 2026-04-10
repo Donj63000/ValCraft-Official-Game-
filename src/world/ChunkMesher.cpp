@@ -38,7 +38,6 @@ struct FaceDefinition {
 constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
-constexpr float kWaterSurfaceHeight = 15.0F / 16.0F;
 constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
 constexpr int kWaterSurfaceSubdivisions = 4;
 constexpr int kWaterSideVerticalSubdivisions = 2;
@@ -54,6 +53,7 @@ auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::
 struct Neighborhood {
     std::array<const Chunk*, 9> chunks {};
     std::array<BlockId, kCachedNeighborhoodVolume> blocks {};
+    std::array<std::uint8_t, kCachedNeighborhoodVolume> water_levels {};
     std::array<std::uint8_t, kCachedNeighborhoodVolume> sky_light {};
     std::array<std::uint8_t, kCachedNeighborhoodVolume> block_light {};
     int min_cached_y = kWorldMinY;
@@ -90,6 +90,7 @@ struct Neighborhood {
                     const auto index = cache_index(x, y, z);
                     if (chunk == nullptr) {
                         blocks[index] = to_block_id(BlockType::Air);
+                        water_levels[index] = 0;
                         sky_light[index] = 15;
                         block_light[index] = 0;
                         continue;
@@ -97,9 +98,11 @@ struct Neighborhood {
 
                     const auto local_index = chunk_linear_index(local_x, y, local_z);
                     const auto& chunk_blocks = chunk->blocks();
+                    const auto& chunk_water = chunk->water_state();
                     const auto& chunk_sky_light = chunk->sky_light();
                     const auto& chunk_block_light = chunk->block_light();
                     blocks[index] = chunk_blocks[local_index];
+                    water_levels[index] = water_level_from_state(chunk_water[local_index]);
                     sky_light[index] = chunk_sky_light[local_index];
                     block_light[index] = chunk_block_light[local_index];
                 }
@@ -112,6 +115,13 @@ struct Neighborhood {
             return to_block_id(BlockType::Air);
         }
         return blocks[cache_index(x, y, z)];
+    }
+
+    [[nodiscard]] auto water_level_at(int x, int y, int z) const -> std::uint8_t {
+        if (!is_world_y_valid(y) || y < min_cached_y || y > max_cached_y) {
+            return 0;
+        }
+        return water_levels[cache_index(x, y, z)];
     }
 
     [[nodiscard]] auto sky_light_at(int x, int y, int z) const -> std::uint8_t {
@@ -526,7 +536,13 @@ void append_torch_mesh(ChunkMeshData& mesh,
     constexpr float head_max_y = 14.0F / 16.0F;
     constexpr float head_side_v_max = 5.0F / 16.0F;
     constexpr float torch_ao = 1.0F;
+    constexpr float wall_mount_offset = 4.5F / 16.0F;
+    constexpr float wall_pivot_y = 3.5F / 16.0F;
+    constexpr float wall_tilt_radians = 22.5F * 3.14159265358979323846F / 180.0F;
 
+    const auto torch_block = neighborhood.block_at(local_coord.x, local_coord.y, local_coord.z);
+    const auto support_offset = torch_support_offset(torch_block);
+    const auto wall_torch = is_wall_torch_block(torch_block);
     const auto torch_light = std::max(
         neighborhood.block_light_at(local_coord.x, local_coord.y, local_coord.z),
         static_cast<std::uint8_t>(14));
@@ -542,16 +558,53 @@ void append_torch_mesh(ChunkMeshData& mesh,
     const auto top_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::PositiveY);
     const auto bottom_tile = block_atlas_tile(to_block_id(BlockType::Torch), BlockVisualFace::NegativeY);
 
+    const auto transform_local_position = [&](const std::array<float, 3>& local_position) {
+        if (!wall_torch) {
+            return local_position;
+        }
+
+        auto x = local_position[0] + static_cast<float>(support_offset.x) * wall_mount_offset;
+        auto y = local_position[1];
+        auto z = local_position[2] + static_cast<float>(support_offset.z) * wall_mount_offset;
+        const auto pivot_x = 0.5F + static_cast<float>(support_offset.x) * wall_mount_offset;
+        const auto pivot_z = 0.5F + static_cast<float>(support_offset.z) * wall_mount_offset;
+
+        x -= pivot_x;
+        y -= wall_pivot_y;
+        z -= pivot_z;
+
+        if (support_offset.x != 0) {
+            const auto tilt = static_cast<float>(support_offset.x) * wall_tilt_radians;
+            const auto cos_tilt = std::cos(tilt);
+            const auto sin_tilt = std::sin(tilt);
+            const auto rotated_x = x * cos_tilt - y * sin_tilt;
+            const auto rotated_y = x * sin_tilt + y * cos_tilt;
+            x = rotated_x;
+            y = rotated_y;
+        } else if (support_offset.z != 0) {
+            const auto tilt = -static_cast<float>(support_offset.z) * wall_tilt_radians;
+            const auto cos_tilt = std::cos(tilt);
+            const auto sin_tilt = std::sin(tilt);
+            const auto rotated_y = y * cos_tilt - z * sin_tilt;
+            const auto rotated_z = y * sin_tilt + z * cos_tilt;
+            y = rotated_y;
+            z = rotated_z;
+        }
+
+        return std::array<float, 3> {x + pivot_x, y + wall_pivot_y, z + pivot_z};
+    };
+
     auto append_prism_face = [&](Face face,
                                  const std::array<std::array<float, 3>, 4>& local_positions,
                                  const std::array<std::array<float, 2>, 4>& uvs,
                                  float material_class) {
         std::array<std::array<float, 3>, 4> positions {};
         for (std::size_t i = 0; i < local_positions.size(); ++i) {
+            const auto transformed_local = transform_local_position(local_positions[i]);
             positions[i] = {
-                static_cast<float>(chunk_world_x + local_coord.x) + local_positions[i][0],
-                static_cast<float>(local_coord.y) + local_positions[i][1],
-                static_cast<float>(chunk_world_z + local_coord.z) + local_positions[i][2],
+                static_cast<float>(chunk_world_x + local_coord.x) + transformed_local[0],
+                static_cast<float>(local_coord.y) + transformed_local[1],
+                static_cast<float>(chunk_world_z + local_coord.z) + transformed_local[2],
             };
         }
 
@@ -737,7 +790,8 @@ void append_water_face(ChunkMeshData& mesh,
                        const BlockCoord& local_coord,
                        int chunk_world_x,
                        int chunk_world_z,
-                       float top_height,
+                       const std::array<float, 4>& top_corner_heights,
+                       float bottom_height,
                        bool surface_block) {
     const auto tile = block_atlas_tile(to_block_id(BlockType::Water), to_visual_face(face));
     const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
@@ -755,10 +809,17 @@ void append_water_face(ChunkMeshData& mesh,
     std::array<float, 4> corner_block_values {};
     const std::array<Float2, 4> corner_uvs {{{u1, v0}, {u1, v1}, {u0, v1}, {u0, v0}}};
 
+    const auto corner_index_for_vertex = [](const VertexPattern& vertex) noexcept -> std::size_t {
+        if (vertex.position[0] > 0.5F) {
+            return vertex.position[2] > 0.5F ? 1U : 2U;
+        }
+        return vertex.position[2] > 0.5F ? 0U : 3U;
+    };
+
     for (std::size_t i = 0; i < definition.vertices.size(); ++i) {
         const auto& vertex = definition.vertices[i];
         const auto top_vertex = vertex.position[1] > 0.5F;
-        const auto y_position = top_vertex ? top_height : 0.0F;
+        const auto y_position = top_vertex ? top_corner_heights[corner_index_for_vertex(vertex)] : bottom_height;
         corner_positions[i] = {
             static_cast<float>(chunk_world_x + local_coord.x) + vertex.position[0],
             static_cast<float>(local_coord.y) + y_position,
@@ -796,7 +857,7 @@ void append_water_face(ChunkMeshData& mesh,
                     wave_weight = 1.0F;
                 } else if (face != Face::NegativeY) {
                     const auto local_y = position[1] - static_cast<float>(local_coord.y);
-                    if (local_y > top_height - 0.0001F) {
+                    if (local_y > bottom_height + 0.0001F) {
                         wave_weight = 1.0F;
                     }
                 }
@@ -838,15 +899,50 @@ void append_water_face(ChunkMeshData& mesh,
     ++mesh.water_face_count;
 }
 
+auto cell_water_top_height(const Neighborhood& neighborhood, const BlockCoord& local_coord) noexcept -> float {
+    const auto level = neighborhood.water_level_at(local_coord.x, local_coord.y, local_coord.z);
+    if (level == 0) {
+        return 0.0F;
+    }
+    if (neighborhood.water_level_at(local_coord.x, local_coord.y + 1, local_coord.z) > 0) {
+        return 1.0F;
+    }
+    return static_cast<float>(level) / static_cast<float>(kMaxWaterLevel);
+}
+
+auto sample_water_corner_heights(const Neighborhood& neighborhood, const BlockCoord& local_coord) -> std::array<float, 4> {
+    const std::array<std::array<BlockCoord, 4>, 4> corner_samples {{
+        {{{0, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {-1, 0, 1}}},
+        {{{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {1, 0, 1}}},
+        {{{0, 0, 0}, {1, 0, 0}, {0, 0, -1}, {1, 0, -1}}},
+        {{{0, 0, 0}, {-1, 0, 0}, {0, 0, -1}, {-1, 0, -1}}},
+    }};
+
+    std::array<float, 4> corner_heights {};
+    for (std::size_t corner_index = 0; corner_index < corner_samples.size(); ++corner_index) {
+        auto height = 0.0F;
+        for (const auto& sample_offset : corner_samples[corner_index]) {
+            const BlockCoord sample_coord {
+                local_coord.x + sample_offset.x,
+                local_coord.y + sample_offset.y,
+                local_coord.z + sample_offset.z,
+            };
+            height = std::max(height, cell_water_top_height(neighborhood, sample_coord));
+        }
+        corner_heights[corner_index] = height;
+    }
+    return corner_heights;
+}
+
 void append_water_mesh(ChunkMeshData& mesh,
                        const World& world,
                        const Neighborhood& neighborhood,
                        const BlockCoord& local_coord,
                        int chunk_world_x,
                        int chunk_world_z) {
-    const auto block_above = neighborhood.block_at(local_coord.x, local_coord.y + 1, local_coord.z);
-    const auto surface_block = !is_block_liquid(block_above);
-    const auto top_height = surface_block ? kWaterSurfaceHeight : 1.0F;
+    const auto surface_block = neighborhood.water_level_at(local_coord.x, local_coord.y + 1, local_coord.z) == 0;
+    const auto top_corner_heights = sample_water_corner_heights(neighborhood, local_coord);
+    const auto current_top_height = cell_water_top_height(neighborhood, local_coord);
 
     for (int face_index = 0; face_index < static_cast<int>(kFaceDefinitions.size()); ++face_index) {
         const auto face = static_cast<Face>(face_index);
@@ -858,6 +954,7 @@ void append_water_mesh(ChunkMeshData& mesh,
         };
 
         auto neighbor_block = neighborhood.block_at(neighbor.x, neighbor.y, neighbor.z);
+        auto neighbor_water_level = neighborhood.water_level_at(neighbor.x, neighbor.y, neighbor.z);
         auto neighbor_local_x = neighbor.x;
         auto neighbor_local_z = neighbor.z;
         const auto* neighbor_chunk = neighborhood.sample_chunk(neighbor.x, neighbor.z, neighbor_local_x, neighbor_local_z);
@@ -867,12 +964,73 @@ void append_water_mesh(ChunkMeshData& mesh,
             // verticales temporaires qui disparaissent seulement apres le chargement
             // du voisin reel.
             neighbor_block = world.peek_block_or_generated(chunk_world_x + neighbor.x, neighbor.y, chunk_world_z + neighbor.z);
+            neighbor_water_level =
+                world.peek_water_level_or_generated(chunk_world_x + neighbor.x, neighbor.y, chunk_world_z + neighbor.z);
         }
-        if (is_block_liquid(neighbor_block) || is_block_opaque(neighbor_block)) {
+
+        if (face == Face::PositiveY) {
+            if (neighbor_water_level > 0) {
+                continue;
+            }
+            append_water_face(
+                mesh,
+                neighborhood,
+                definition,
+                face,
+                local_coord,
+                chunk_world_x,
+                chunk_world_z,
+                top_corner_heights,
+                0.0F,
+                surface_block);
             continue;
         }
 
-        append_water_face(mesh, neighborhood, definition, face, local_coord, chunk_world_x, chunk_world_z, top_height, surface_block);
+        if (face == Face::NegativeY) {
+            if (neighbor_water_level > 0 || is_block_opaque(neighbor_block)) {
+                continue;
+            }
+            append_water_face(
+                mesh,
+                neighborhood,
+                definition,
+                face,
+                local_coord,
+                chunk_world_x,
+                chunk_world_z,
+                top_corner_heights,
+                0.0F,
+                surface_block);
+            continue;
+        }
+
+        const auto neighbor_bottom_height = neighbor_water_level > 0
+                                                ? (world.peek_water_level_or_generated(
+                                                       chunk_world_x + neighbor.x,
+                                                       neighbor.y,
+                                                       chunk_world_z + neighbor.z) > 0 &&
+                                                   world.peek_water_level_or_generated(
+                                                       chunk_world_x + neighbor.x,
+                                                       neighbor.y + 1,
+                                                       chunk_world_z + neighbor.z) > 0
+                                                       ? 1.0F
+                                                       : static_cast<float>(neighbor_water_level) / static_cast<float>(kMaxWaterLevel))
+                                                : 0.0F;
+        if (is_block_opaque(neighbor_block) || neighbor_bottom_height >= current_top_height - 0.0001F) {
+            continue;
+        }
+
+        append_water_face(
+            mesh,
+            neighborhood,
+            definition,
+            face,
+            local_coord,
+            chunk_world_x,
+            chunk_world_z,
+            top_corner_heights,
+            neighbor_bottom_height,
+            surface_block);
     }
 }
 
@@ -883,15 +1041,15 @@ auto ChunkMesher::build_mesh(const World& world,
                              std::size_t vertex_reserve_hint,
                              std::size_t index_reserve_hint) const -> ChunkMeshData {
     const auto* chunk = world.find_chunk(coord);
-    if (chunk == nullptr || !chunk->has_meshable_blocks()) {
+    if (chunk == nullptr) {
         return {};
     }
 
     return build_mesh_range(
         world,
         coord,
-        chunk->min_mesh_y(),
-        chunk->max_mesh_y(),
+        kWorldMinY,
+        kWorldMaxY,
         vertex_reserve_hint,
         index_reserve_hint);
 }
@@ -907,12 +1065,9 @@ auto ChunkMesher::build_mesh_range(const World& world,
     if (chunk == nullptr) {
         return mesh;
     }
-    if (!chunk->has_meshable_blocks()) {
-        return mesh;
-    }
 
-    const auto clamped_min_y = std::max(chunk->min_mesh_y(), min_y);
-    const auto clamped_max_y = std::min(chunk->max_mesh_y(), max_y);
+    const auto clamped_min_y = std::max(kWorldMinY, min_y);
+    const auto clamped_max_y = std::min(kWorldMaxY, max_y);
     if (clamped_max_y < clamped_min_y) {
         return mesh;
     }
@@ -933,11 +1088,14 @@ auto ChunkMesher::build_mesh_range(const World& world,
         for (int z = 0; z < kChunkSizeZ; ++z) {
             for (int x = 0; x < kChunkSizeX; ++x) {
                 const auto block_id = chunk_blocks[chunk_linear_index(x, y, z)];
+                const BlockCoord local_coord {x, y, z};
+                if (neighborhood.water_level_at(x, y, z) > 0) {
+                    append_water_mesh(mesh, world, neighborhood, local_coord, chunk_world_x, chunk_world_z);
+                }
                 if (!has_block_mesh(block_id)) {
                     continue;
                 }
 
-                const BlockCoord local_coord {x, y, z};
                 if (block_mesh_type(block_id) == BlockMeshType::Torch) {
                     append_torch_mesh(mesh, neighborhood, local_coord, chunk_world_x, chunk_world_z);
                     continue;
@@ -947,7 +1105,6 @@ auto ChunkMesher::build_mesh_range(const World& world,
                     continue;
                 }
                 if (block_mesh_type(block_id) == BlockMeshType::Water) {
-                    append_water_mesh(mesh, world, neighborhood, local_coord, chunk_world_x, chunk_world_z);
                     continue;
                 }
 

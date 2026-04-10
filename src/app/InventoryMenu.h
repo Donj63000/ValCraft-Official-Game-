@@ -143,17 +143,18 @@ inline constexpr auto inventory_slot_has_item(const HotbarSlot& slot) noexcept -
 
 inline constexpr auto inventory_can_merge(const HotbarSlot& slot, BlockId block_id) noexcept -> bool {
     return inventory_slot_has_item(slot) &&
-           slot.block_id == block_id &&
+           block_item_id(slot.block_id) == block_item_id(block_id) &&
            slot.count < kMaxItemStackCount;
 }
 
 inline constexpr auto inventory_same_item(const HotbarSlot& lhs, const HotbarSlot& rhs) noexcept -> bool {
     return inventory_slot_has_item(lhs) &&
            inventory_slot_has_item(rhs) &&
-           lhs.block_id == rhs.block_id;
+           block_item_id(lhs.block_id) == block_item_id(rhs.block_id);
 }
 
 inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::string_view {
+    block_id = block_item_id(block_id);
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Grass:
         return "HERBE";
@@ -202,7 +203,7 @@ inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::st
 }
 
 inline constexpr auto inventory_slot_icon_tile(BlockId block_id) noexcept -> BlockAtlasTile {
-    return block_hotbar_tile(block_id);
+    return block_hotbar_tile(block_item_id(block_id));
 }
 
 inline constexpr void normalize_inventory_storage_slot(HotbarSlot& slot) noexcept {

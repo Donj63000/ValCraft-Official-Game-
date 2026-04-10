@@ -20,16 +20,24 @@ public:
     [[nodiscard]] auto coord() const noexcept -> ChunkCoord;
     [[nodiscard]] auto in_bounds_local(int x, int y, int z) const noexcept -> bool;
     [[nodiscard]] auto get_local(int x, int y, int z) const -> BlockId;
+    [[nodiscard]] auto get_water_state_local(int x, int y, int z) const -> WaterState;
+    [[nodiscard]] auto water_level_local(int x, int y, int z) const -> std::uint8_t;
+    [[nodiscard]] auto has_water_local(int x, int y, int z) const -> bool;
     [[nodiscard]] auto get_sky_light_local(int x, int y, int z) const -> std::uint8_t;
     [[nodiscard]] auto get_block_light_local(int x, int y, int z) const -> std::uint8_t;
     void set_local(int x, int y, int z, BlockId block_id);
+    void set_water_state_local(int x, int y, int z, WaterState water_state);
     void set_sky_light_local(int x, int y, int z, std::uint8_t light_level);
     void set_block_light_local(int x, int y, int z, std::uint8_t light_level);
     void fill(BlockId block_id);
+    void fill_water(WaterState water_state = 0) noexcept;
     void clear_lighting() noexcept;
-    [[nodiscard]] auto rebuild_sky_light_column(int x, int z) -> bool;
+    [[nodiscard]] auto rebuild_sky_light_column(int x, int z) -> std::bitset<kChunkSectionCount>;
+    void copy_blocks_from(const BlockId* data, std::size_t count);
+    void copy_water_from(const WaterState* data, std::size_t count);
     void copy_block_light_from(const std::uint8_t* data, std::size_t count);
     [[nodiscard]] auto blocks() const noexcept -> const std::array<BlockId, kChunkVolume>&;
+    [[nodiscard]] auto water_state() const noexcept -> const std::array<WaterState, kChunkVolume>&;
     [[nodiscard]] auto sky_light() const noexcept -> const std::array<std::uint8_t, kChunkVolume>&;
     [[nodiscard]] auto block_light() const noexcept -> const std::array<std::uint8_t, kChunkVolume>&;
     [[nodiscard]] auto has_meshable_blocks() const noexcept -> bool;
@@ -58,6 +66,7 @@ private:
 
     ChunkCoord coord_ {};
     std::array<BlockId, kChunkVolume> blocks_ {};
+    std::array<WaterState, kChunkVolume> water_ {};
     std::array<std::uint8_t, kChunkVolume> sky_light_ {};
     std::array<std::uint8_t, kChunkVolume> block_light_ {};
     std::array<std::uint16_t, kChunkHeight> meshable_count_per_y_ {};

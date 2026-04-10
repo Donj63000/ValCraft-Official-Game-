@@ -38,6 +38,21 @@ auto Chunk::get_local(int x, int y, int z) const -> BlockId {
     return blocks_[index_of(x, y, z)];
 }
 
+auto Chunk::get_water_state_local(int x, int y, int z) const -> WaterState {
+    if (!in_bounds_local(x, y, z)) {
+        throw std::out_of_range("Chunk::get_water_state_local coordinates out of bounds");
+    }
+    return water_[index_of(x, y, z)];
+}
+
+auto Chunk::water_level_local(int x, int y, int z) const -> std::uint8_t {
+    return water_level_from_state(get_water_state_local(x, y, z));
+}
+
+auto Chunk::has_water_local(int x, int y, int z) const -> bool {
+    return water_level_local(x, y, z) > 0;
+}
+
 auto Chunk::get_sky_light_local(int x, int y, int z) const -> std::uint8_t {
     if (!in_bounds_local(x, y, z)) {
         throw std::out_of_range("Chunk::get_sky_light_local coordinates out of bounds");
@@ -95,6 +110,20 @@ void Chunk::set_local(int x, int y, int z, BlockId block_id) {
     lighting_dirty_ = true;
 }
 
+void Chunk::set_water_state_local(int x, int y, int z, WaterState water_state) {
+    if (!in_bounds_local(x, y, z)) {
+        throw std::out_of_range("Chunk::set_water_state_local coordinates out of bounds");
+    }
+
+    auto& current_state = water_[index_of(x, y, z)];
+    if (current_state == water_state) {
+        return;
+    }
+
+    current_state = water_state;
+    mark_section_dirty_for_y(y);
+}
+
 void Chunk::set_sky_light_local(int x, int y, int z, std::uint8_t light_level) {
     if (!in_bounds_local(x, y, z)) {
         throw std::out_of_range("Chunk::set_sky_light_local coordinates out of bounds");
@@ -111,6 +140,7 @@ void Chunk::set_block_light_local(int x, int y, int z, std::uint8_t light_level)
 
 void Chunk::fill(BlockId block_id) {
     std::fill(blocks_.begin(), blocks_.end(), block_id);
+    fill_water();
     const auto meshable = contributes_to_mesh_bounds(block_id);
     if (meshable) {
         min_mesh_y_ = kWorldMinY;
@@ -125,17 +155,21 @@ void Chunk::fill(BlockId block_id) {
     lighting_dirty_ = true;
 }
 
+void Chunk::fill_water(WaterState water_state) noexcept {
+    std::fill(water_.begin(), water_.end(), water_state);
+}
+
 void Chunk::clear_lighting() noexcept {
     std::fill(sky_light_.begin(), sky_light_.end(), 0);
     std::fill(block_light_.begin(), block_light_.end(), 0);
 }
 
-auto Chunk::rebuild_sky_light_column(int x, int z) -> bool {
+auto Chunk::rebuild_sky_light_column(int x, int z) -> std::bitset<kChunkSectionCount> {
     if (x < 0 || x >= kChunkSizeX || z < 0 || z >= kChunkSizeZ) {
         throw std::out_of_range("Chunk::rebuild_sky_light_column coordinates out of bounds");
     }
 
-    auto changed = false;
+    std::bitset<kChunkSectionCount> changed_sections;
     bool sky_visible = true;
     for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
         const auto block_id = blocks_[index_of(x, y, z)];
@@ -143,7 +177,7 @@ auto Chunk::rebuild_sky_light_column(int x, int z) -> bool {
         auto& current_light = sky_light_[index_of(x, y, z)];
         if (current_light != next_light) {
             current_light = next_light;
-            changed = true;
+            changed_sections.set(section_index_of_y(y));
         }
 
         if (is_block_opaque(block_id)) {
@@ -151,7 +185,45 @@ auto Chunk::rebuild_sky_light_column(int x, int z) -> bool {
         }
     }
 
-    return changed;
+    return changed_sections;
+}
+
+void Chunk::copy_blocks_from(const BlockId* data, std::size_t count) {
+    if (count != blocks_.size()) {
+        throw std::out_of_range("Chunk::copy_blocks_from size mismatch");
+    }
+
+    std::memcpy(blocks_.data(), data, count * sizeof(BlockId));
+    meshable_count_per_y_.fill(0);
+    surface_heightmap_.fill(0);
+
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                const auto block_id = blocks_[index_of(x, y, z)];
+                if (contributes_to_mesh_bounds(block_id)) {
+                    ++meshable_count_per_y_[static_cast<std::size_t>(y)];
+                }
+                if (is_block_surface_support(block_id)) {
+                    auto& surface_height = surface_heightmap_[surface_index_of(x, z)];
+                    surface_height = std::max(surface_height, y);
+                }
+            }
+        }
+    }
+
+    rebuild_meshable_bounds();
+    dirty_sections_.set();
+    lighting_dirty_ = true;
+}
+
+void Chunk::copy_water_from(const WaterState* data, std::size_t count) {
+    if (count != water_.size()) {
+        throw std::out_of_range("Chunk::copy_water_from size mismatch");
+    }
+
+    std::memcpy(water_.data(), data, count * sizeof(WaterState));
+    dirty_sections_.set();
 }
 
 void Chunk::copy_block_light_from(const std::uint8_t* data, std::size_t count) {
@@ -163,6 +235,10 @@ void Chunk::copy_block_light_from(const std::uint8_t* data, std::size_t count) {
 
 auto Chunk::blocks() const noexcept -> const std::array<BlockId, kChunkVolume>& {
     return blocks_;
+}
+
+auto Chunk::water_state() const noexcept -> const std::array<WaterState, kChunkVolume>& {
+    return water_;
 }
 
 auto Chunk::sky_light() const noexcept -> const std::array<std::uint8_t, kChunkVolume>& {

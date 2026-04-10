@@ -46,6 +46,12 @@ constexpr auto kUnlimitedBudget = std::numeric_limits<std::size_t>::max() / 4U;
 constexpr auto kSkyColumnCount = static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
 constexpr auto kMeshInvalidationPriorityRadius = 2;
 constexpr std::size_t kLightingTimeCheckInterval = 128;
+constexpr std::uint8_t kLightingBoundaryNegX = 1U << 0U;
+constexpr std::uint8_t kLightingBoundaryPosX = 1U << 1U;
+constexpr std::uint8_t kLightingBoundaryNegZ = 1U << 2U;
+constexpr std::uint8_t kLightingBoundaryPosZ = 1U << 3U;
+constexpr std::uint8_t kLightingBoundaryAll =
+    kLightingBoundaryNegX | kLightingBoundaryPosX | kLightingBoundaryNegZ | kLightingBoundaryPosZ;
 
 enum class LightingRegionSlot : std::uint8_t {
     Center = 0,
@@ -119,12 +125,82 @@ auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
 }
 
+auto lighting_boundary_mask_for_column(int local_x, int local_z) noexcept -> std::uint8_t {
+    std::uint8_t mask = 0;
+    if (local_x == 0) {
+        mask |= kLightingBoundaryNegX;
+    }
+    if (local_x == kChunkSizeX - 1) {
+        mask |= kLightingBoundaryPosX;
+    }
+    if (local_z == 0) {
+        mask |= kLightingBoundaryNegZ;
+    }
+    if (local_z == kChunkSizeZ - 1) {
+        mask |= kLightingBoundaryPosZ;
+    }
+    return mask;
+}
+
+auto lighting_boundary_mask_touches_neighbor(std::uint8_t boundary_mask, const ChunkCoord& neighbor_offset) noexcept -> bool {
+    if (boundary_mask == 0) {
+        return false;
+    }
+
+    const auto touches_neg_x = (boundary_mask & kLightingBoundaryNegX) != 0;
+    const auto touches_pos_x = (boundary_mask & kLightingBoundaryPosX) != 0;
+    const auto touches_neg_z = (boundary_mask & kLightingBoundaryNegZ) != 0;
+    const auto touches_pos_z = (boundary_mask & kLightingBoundaryPosZ) != 0;
+
+    if (neighbor_offset.x < 0 && neighbor_offset.z == 0) {
+        return touches_neg_x;
+    }
+    if (neighbor_offset.x > 0 && neighbor_offset.z == 0) {
+        return touches_pos_x;
+    }
+    if (neighbor_offset.x == 0 && neighbor_offset.z < 0) {
+        return touches_neg_z;
+    }
+    if (neighbor_offset.x == 0 && neighbor_offset.z > 0) {
+        return touches_pos_z;
+    }
+    if (neighbor_offset.x < 0 && neighbor_offset.z < 0) {
+        return touches_neg_x && touches_neg_z;
+    }
+    if (neighbor_offset.x < 0 && neighbor_offset.z > 0) {
+        return touches_neg_x && touches_pos_z;
+    }
+    if (neighbor_offset.x > 0 && neighbor_offset.z < 0) {
+        return touches_pos_x && touches_neg_z;
+    }
+    if (neighbor_offset.x > 0 && neighbor_offset.z > 0) {
+        return touches_pos_x && touches_pos_z;
+    }
+    return false;
+}
+
 auto section_min_y(std::size_t section_index) noexcept -> int {
     return static_cast<int>(section_index * static_cast<std::size_t>(kChunkSectionHeight));
 }
 
 auto section_max_y(std::size_t section_index) noexcept -> int {
     return std::min(kWorldMaxY, section_min_y(section_index) + kChunkSectionHeight - 1);
+}
+
+auto expand_section_mask(const std::bitset<kChunkSectionCount>& sections) noexcept -> std::bitset<kChunkSectionCount> {
+    auto expanded = sections;
+    for (std::size_t section_index = 0; section_index < kChunkSectionCount; ++section_index) {
+        if (!sections.test(section_index)) {
+            continue;
+        }
+        if (section_index > 0) {
+            expanded.set(section_index - 1);
+        }
+        if (section_index + 1 < kChunkSectionCount) {
+            expanded.set(section_index + 1);
+        }
+    }
+    return expanded;
 }
 
 void append_chunk_mesh_section(ChunkMeshData& destination, const ChunkMeshData& section_mesh) {
@@ -158,7 +234,9 @@ World::World(int seed, int stream_radius)
     const auto loaded_side = static_cast<std::size_t>(std::max(stream_radius_, 0) * 2 + 3);
     const auto max_loaded_chunks = loaded_side * loaded_side;
     chunks_.reserve(max_loaded_chunks);
+    chunk_overrides_.reserve(max_loaded_chunks);
     pending_generation_set_.reserve(max_loaded_chunks);
+    pending_fluid_set_.reserve(max_loaded_chunks * static_cast<std::size_t>(kChunkHeight / 4));
     pending_mesh_set_.reserve(max_loaded_chunks);
     pending_priority_mesh_set_.reserve(max_loaded_chunks);
     deferred_mesh_invalidation_set_.reserve(max_loaded_chunks);
@@ -178,9 +256,49 @@ auto World::get_block(int x, int y, int z) const -> BlockId {
     const auto local = world_to_local(x, y, z);
     const auto* chunk = find_chunk(chunk_coord);
     if (chunk == nullptr) {
-        return to_block_id(BlockType::Air);
+        const auto override_iterator = chunk_overrides_.find(chunk_coord);
+        if (override_iterator == chunk_overrides_.end()) {
+            return to_block_id(BlockType::Air);
+        }
+        return override_iterator->second.blocks[chunk_linear_index(local.x, local.y, local.z)];
     }
     return chunk->get_local(local.x, local.y, local.z);
+}
+
+auto World::raw_water_state(int x, int y, int z) const -> WaterState {
+    if (!is_world_y_valid(y)) {
+        return 0;
+    }
+
+    const auto chunk_coord = world_to_chunk(x, z);
+    const auto local = world_to_local(x, y, z);
+    const auto* chunk = find_chunk(chunk_coord);
+    if (chunk == nullptr) {
+        const auto override_iterator = chunk_overrides_.find(chunk_coord);
+        if (override_iterator == chunk_overrides_.end()) {
+            return 0;
+        }
+        return override_iterator->second.water_state[chunk_linear_index(local.x, local.y, local.z)];
+    }
+    return chunk->get_water_state_local(local.x, local.y, local.z);
+}
+
+auto World::water_level(int x, int y, int z) const -> std::uint8_t {
+    return water_level_from_state(raw_water_state(x, y, z));
+}
+
+auto World::has_water(int x, int y, int z) const -> bool {
+    return water_level(x, y, z) > 0;
+}
+
+auto World::water_surface_y(int x, int y, int z) const -> std::optional<float> {
+    const auto level = water_level(x, y, z);
+    if (level == 0) {
+        return std::nullopt;
+    }
+
+    const auto top_height = has_water(x, y + 1, z) ? 1.0F : static_cast<float>(level) / static_cast<float>(kMaxWaterLevel);
+    return static_cast<float>(y) + top_height;
 }
 
 auto World::peek_block_or_generated(int x, int y, int z) const -> BlockId {
@@ -195,7 +313,32 @@ auto World::peek_block_or_generated(int x, int y, int z) const -> BlockId {
         return chunk->get_local(local.x, local.y, local.z);
     }
 
+    const auto override_iterator = chunk_overrides_.find(chunk_coord);
+    if (override_iterator != chunk_overrides_.end()) {
+        return override_iterator->second.blocks[chunk_linear_index(local.x, local.y, local.z)];
+    }
+
     return generator_.sample_block(x, y, z);
+}
+
+auto World::peek_water_level_or_generated(int x, int y, int z) const -> std::uint8_t {
+    if (!is_world_y_valid(y)) {
+        return 0;
+    }
+
+    const auto chunk_coord = world_to_chunk(x, z);
+    const auto local = world_to_local(x, y, z);
+    const auto* chunk = find_chunk(chunk_coord);
+    if (chunk != nullptr) {
+        return chunk->water_level_local(local.x, local.y, local.z);
+    }
+
+    const auto override_iterator = chunk_overrides_.find(chunk_coord);
+    if (override_iterator != chunk_overrides_.end()) {
+        return water_level_from_state(override_iterator->second.water_state[chunk_linear_index(local.x, local.y, local.z)]);
+    }
+
+    return water_level_from_state(generator_.sample_water_state(x, y, z));
 }
 
 auto World::get_sky_light(int x, int y, int z) const -> std::uint8_t {
@@ -243,16 +386,52 @@ void World::set_block(int x, int y, int z, BlockId block_id) {
     auto& chunk = record.chunk;
 
     const auto current_block = chunk.get_local(local.x, local.y, local.z);
-    if (current_block == block_id) {
+    const auto current_water_state = chunk.get_water_state_local(local.x, local.y, local.z);
+
+    auto next_block = current_block;
+    auto next_water_state = current_water_state;
+    if (block_id == to_block_id(BlockType::Water)) {
+        if (current_block != to_block_id(BlockType::Air) &&
+            !is_block_replaceable(current_block) &&
+            !is_torch_block(current_block)) {
+            return;
+        }
+        next_block = to_block_id(BlockType::Air);
+        next_water_state = make_water_state(kMaxWaterLevel, true);
+    } else {
+        next_block = block_id;
+        next_water_state = 0;
+    }
+
+    if (current_block == next_block && current_water_state == next_water_state) {
         return;
     }
 
-    chunk.set_local(local.x, local.y, local.z, block_id);
-    update_chunk_emissive_cache(record, local, current_block, block_id);
-    mark_sky_column_dirty(chunk_coord, local.x, local.z);
+    if (current_block != next_block) {
+        chunk.set_local(local.x, local.y, local.z, next_block);
+    }
+    if (current_water_state != next_water_state) {
+        chunk.set_water_state_local(local.x, local.y, local.z, next_water_state);
+    }
+
+    update_chunk_override_after_cell_change(
+        chunk_coord,
+        local,
+        current_block,
+        next_block,
+        current_water_state,
+        next_water_state);
+
+    if (current_block != next_block) {
+        update_chunk_emissive_cache(record, local, current_block, next_block);
+        mark_sky_column_dirty(chunk_coord, local.x, local.z);
+        mark_chunk_and_neighbors_lighting_dirty(chunk_coord);
+        remove_unsupported_torches_around(x, y, z);
+    }
+
     mark_chunk_and_neighbors_dirty(chunk_coord, local);
-    mark_chunk_and_neighbors_lighting_dirty(chunk_coord);
-    remove_unsupported_torch_above(x, y, z);
+    enqueue_fluid_cell({x, y, z});
+    enqueue_adjacent_fluid_cells({x, y, z});
 }
 
 auto World::world_to_chunk(int x, int z) const noexcept -> ChunkCoord {
@@ -362,23 +541,115 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
                 block_id,
             };
         }
+
+        if (has_water(current.x, current.y, current.z)) {
+            return {
+                true,
+                current,
+                previous,
+                to_block_id(BlockType::Water),
+            };
+        }
     }
 
     return {};
 }
 
 auto World::can_place_torch_at(const BlockCoord& world_coord) const -> bool {
-    if (!is_world_y_valid(world_coord.y) || world_coord.y == kWorldMinY) {
+    if (!is_world_y_valid(world_coord.y)) {
         return false;
     }
+
     const auto current_block = get_block(world_coord.x, world_coord.y, world_coord.z);
-    if (current_block != to_block_id(BlockType::Air) &&
+    if (is_torch_block(current_block)) {
+        const auto support_offset = torch_support_offset(current_block);
+        const BlockCoord support_coord {
+            world_coord.x + support_offset.x,
+            world_coord.y + support_offset.y,
+            world_coord.z + support_offset.z,
+        };
+        return can_place_torch_at(world_coord, support_coord);
+    }
+
+    constexpr std::array<BlockCoord, 5> support_offsets {{
+        {0, -1, 0},
+        {1, 0, 0},
+        {-1, 0, 0},
+        {0, 0, 1},
+        {0, 0, -1},
+    }};
+
+    for (const auto& support_offset : support_offsets) {
+        const BlockCoord support_coord {
+            world_coord.x + support_offset.x,
+            world_coord.y + support_offset.y,
+            world_coord.z + support_offset.z,
+        };
+        if (can_place_torch_at(world_coord, support_coord)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+auto World::can_place_torch_at(const BlockCoord& world_coord, const BlockCoord& support_coord) const -> bool {
+    if (!is_world_y_valid(world_coord.y)) {
+        return false;
+    }
+
+    const auto current_block = get_block(world_coord.x, world_coord.y, world_coord.z);
+    if (has_water(world_coord.x, world_coord.y, world_coord.z)) {
+        return false;
+    }
+    if (!is_torch_block(current_block) &&
+        current_block != to_block_id(BlockType::Air) &&
         (!is_block_replaceable(current_block) || is_block_liquid(current_block))) {
         return false;
     }
 
-    const auto support_block = get_block(world_coord.x, world_coord.y - 1, world_coord.z);
+    const BlockCoord support_offset {
+        support_coord.x - world_coord.x,
+        support_coord.y - world_coord.y,
+        support_coord.z - world_coord.z,
+    };
+    const auto expected_torch_block = torch_block_from_support_offset(support_offset);
+    if (!is_torch_block(expected_torch_block)) {
+        return false;
+    }
+    if (is_torch_block(current_block) && current_block != expected_torch_block) {
+        return false;
+    }
+
+    const auto support_block = get_block(support_coord.x, support_coord.y, support_coord.z);
     return is_block_opaque(support_block);
+}
+
+auto World::torch_block_to_place(const BlockCoord& world_coord, const BlockCoord& support_coord) const
+    -> std::optional<BlockId> {
+    if (!is_world_y_valid(world_coord.y)) {
+        return std::nullopt;
+    }
+
+    const auto current_block = get_block(world_coord.x, world_coord.y, world_coord.z);
+    if (has_water(world_coord.x, world_coord.y, world_coord.z)) {
+        return std::nullopt;
+    }
+    if (current_block != to_block_id(BlockType::Air) &&
+        (!is_block_replaceable(current_block) || is_block_liquid(current_block))) {
+        return std::nullopt;
+    }
+
+    if (!can_place_torch_at(world_coord, support_coord)) {
+        return std::nullopt;
+    }
+
+    const BlockCoord support_offset {
+        support_coord.x - world_coord.x,
+        support_coord.y - world_coord.y,
+        support_coord.z - world_coord.z,
+    };
+    return torch_block_from_support_offset(support_offset);
 }
 
 void World::ensure_chunk_loaded(const ChunkCoord& coord) {
@@ -421,6 +692,11 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
     stats.generation_ms =
         std::chrono::duration<double, std::milli>(clock::now() - generation_start).count();
 
+    const auto fluid_start = clock::now();
+    process_fluid_queue(budget.fluid_cell_budget, budget.max_fluid_ms, stats);
+    stats.fluid_ms =
+        std::chrono::duration<double, std::milli>(clock::now() - fluid_start).count();
+
     const auto lighting_start = clock::now();
     process_lighting_queue(budget.light_node_budget, budget.max_lighting_ms, stats);
     stats.lighting_ms =
@@ -433,6 +709,7 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
         std::chrono::duration<double, std::milli>(clock::now() - meshing_start).count();
 
     stats.pending_generation = pending_generation_count();
+    stats.pending_fluid = pending_fluid_count();
     stats.pending_mesh = pending_mesh_count();
     stats.pending_lighting = pending_lighting_count();
     return stats;
@@ -440,6 +717,9 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
 
 void World::rebuild_lighting() {
     WorldWorkStats stats {};
+    while (!pending_fluid_queue_.empty()) {
+        process_fluid_queue(kUnlimitedBudget, std::numeric_limits<double>::infinity(), stats);
+    }
     while (true) {
         enqueue_dirty_chunks();
         if (!active_lighting_job_.has_value() && pending_lighting_queue_.empty()) {
@@ -451,6 +731,10 @@ void World::rebuild_lighting() {
 }
 
 void World::rebuild_dirty_meshes() {
+    WorldWorkStats fluid_stats {};
+    while (!pending_fluid_queue_.empty()) {
+        process_fluid_queue(kUnlimitedBudget, std::numeric_limits<double>::infinity(), fluid_stats);
+    }
     rebuild_lighting();
 
     WorldWorkStats stats {};
@@ -553,6 +837,10 @@ auto World::pending_generation_count() const noexcept -> std::size_t {
     return pending_generation_queue_.size();
 }
 
+auto World::pending_fluid_count() const noexcept -> std::size_t {
+    return pending_fluid_queue_.size();
+}
+
 auto World::pending_mesh_count() const noexcept -> std::size_t {
     return pending_priority_mesh_queue_.size() + pending_mesh_queue_.size();
 }
@@ -563,6 +851,7 @@ auto World::pending_lighting_count() const noexcept -> std::size_t {
 
 auto World::has_pending_work() const noexcept -> bool {
     return !pending_generation_queue_.empty() ||
+           !pending_fluid_queue_.empty() ||
            !pending_priority_mesh_queue_.empty() ||
            !pending_mesh_queue_.empty() ||
            !pending_lighting_queue_.empty() ||
@@ -594,6 +883,48 @@ auto World::are_chunks_ready(const glm::vec3& player_position, int radius) const
     }
 
     return true;
+}
+
+auto World::modified_chunk_snapshots() const -> std::vector<WorldChunkSnapshot> {
+    std::vector<WorldChunkSnapshot> snapshots;
+    snapshots.reserve(chunk_overrides_.size());
+
+    for (const auto& [coord, override_entry] : chunk_overrides_) {
+        if (override_entry.generator_mismatch_count == 0) {
+            continue;
+        }
+
+        if (const auto loaded_iterator = chunks_.find(coord); loaded_iterator != chunks_.end()) {
+            snapshots.push_back({coord, loaded_iterator->second.chunk.blocks(), loaded_iterator->second.chunk.water_state()});
+            continue;
+        }
+
+        snapshots.push_back({coord, override_entry.blocks, override_entry.water_state});
+    }
+
+    return snapshots;
+}
+
+void World::replace_chunk_snapshots(const std::vector<WorldChunkSnapshot>& snapshots) {
+    chunk_overrides_.clear();
+    for (const auto& snapshot : snapshots) {
+        const auto mismatch_count = count_generator_mismatches(snapshot.coord, snapshot.blocks, snapshot.water_state);
+        if (mismatch_count == 0) {
+            continue;
+        }
+        chunk_overrides_[snapshot.coord] = {snapshot.blocks, snapshot.water_state, mismatch_count};
+    }
+
+    for (auto& [coord, record] : chunks_) {
+        const auto iterator = chunk_overrides_.find(coord);
+        if (iterator == chunk_overrides_.end()) {
+            continue;
+        }
+        apply_chunk_snapshot_to_record(record, iterator->second.blocks, iterator->second.water_state);
+        enqueue_lighting_update(coord);
+        invalidate_loaded_mesh_neighbors_for_chunk_load(coord);
+        apply_chunk_load_fluid_revalidation(coord);
+    }
 }
 
 auto World::floor_div(int value, int divisor) noexcept -> int {
@@ -702,12 +1033,18 @@ void World::load_chunk_immediate(const ChunkCoord& coord) {
     }
 
     generator_.generate_chunk(iterator->second.chunk);
-    iterator->second.emissive_blocks.clear();
+    iterator->second.chunk.clear_lighting();
+    if (const auto override_iterator = chunk_overrides_.find(coord); override_iterator != chunk_overrides_.end()) {
+        apply_chunk_snapshot_to_record(iterator->second, override_iterator->second.blocks, override_iterator->second.water_state);
+    } else {
+        refresh_chunk_emissive_cache(iterator->second);
+    }
     iterator->second.sky_columns_dirty.set();
     iterator->second.chunk.mark_dirty();
     iterator->second.chunk.mark_lighting_dirty();
     enqueue_lighting_update(coord);
     invalidate_loaded_mesh_neighbors_for_chunk_load(coord);
+    apply_chunk_load_fluid_revalidation(coord);
 }
 
 void World::enqueue_generation_candidate(const ChunkCoord& coord, WorldStreamingStats* stats) {
@@ -807,8 +1144,17 @@ void World::invalidate_loaded_mesh_neighbors(const ChunkCoord& coord, bool defer
 
 void World::invalidate_loaded_mesh_neighbors_for_sections(
     const ChunkCoord& coord,
-    const std::array<bool, kChunkSectionCount>& dirty_sections) {
+    const std::bitset<kChunkSectionCount>& dirty_sections,
+    std::uint8_t boundary_mask) {
+    if (dirty_sections.none() || boundary_mask == 0) {
+        return;
+    }
+
     for (const auto& offset : kMeshNeighborOffsets) {
+        if (!lighting_boundary_mask_touches_neighbor(boundary_mask, offset)) {
+            continue;
+        }
+
         const ChunkCoord neighbor_coord {coord.x + offset.x, coord.z + offset.z};
         auto* neighbor = find_chunk(neighbor_coord);
         if (neighbor == nullptr) {
@@ -884,6 +1230,73 @@ void World::enqueue_lighting_update(const ChunkCoord& coord) {
     pending_lighting_set_.insert(coord);
     for (const auto& covered_coord : coverage) {
         pending_lighting_coverage_.insert(covered_coord);
+    }
+}
+
+void World::enqueue_fluid_cell(const BlockCoord& world_coord) {
+    if (!is_world_y_valid(world_coord.y) || !is_chunk_loaded_for_world(world_coord.x, world_coord.z)) {
+        return;
+    }
+    if (!pending_fluid_set_.insert(world_coord).second) {
+        return;
+    }
+    pending_fluid_queue_.push_back(world_coord);
+}
+
+void World::enqueue_adjacent_fluid_cells(const BlockCoord& world_coord) {
+    constexpr std::array<BlockCoord, 7> neighbor_offsets {{
+        {0, 0, 0},
+        {1, 0, 0},
+        {-1, 0, 0},
+        {0, 0, 1},
+        {0, 0, -1},
+        {0, 1, 0},
+        {0, -1, 0},
+    }};
+
+    for (const auto& offset : neighbor_offsets) {
+        enqueue_fluid_cell({
+            world_coord.x + offset.x,
+            world_coord.y + offset.y,
+            world_coord.z + offset.z,
+        });
+    }
+}
+
+void World::enqueue_chunk_fluid_updates(const ChunkCoord& coord) {
+    const auto* chunk = find_chunk(coord);
+    if (chunk == nullptr) {
+        return;
+    }
+
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                if (!chunk->has_water_local(x, y, z)) {
+                    continue;
+                }
+
+                const BlockCoord world_coord {
+                    coord.x * kChunkSizeX + x,
+                    y,
+                    coord.z * kChunkSizeZ + z,
+                };
+                if (can_water_flow_into_loaded(world_coord.x, world_coord.y - 1, world_coord.z) ||
+                    can_water_flow_into_loaded(world_coord.x + 1, world_coord.y, world_coord.z) ||
+                    can_water_flow_into_loaded(world_coord.x - 1, world_coord.y, world_coord.z) ||
+                    can_water_flow_into_loaded(world_coord.x, world_coord.y, world_coord.z + 1) ||
+                    can_water_flow_into_loaded(world_coord.x, world_coord.y, world_coord.z - 1)) {
+                    enqueue_fluid_cell(world_coord);
+                }
+            }
+        }
+    }
+}
+
+void World::apply_chunk_load_fluid_revalidation(const ChunkCoord& coord) {
+    enqueue_chunk_fluid_updates(coord);
+    for (const auto& offset : kNeighborOffsets) {
+        enqueue_chunk_fluid_updates({coord.x + offset.x, coord.z + offset.z});
     }
 }
 
@@ -964,6 +1377,151 @@ void World::process_generation_queue(std::size_t budget, double max_ms, WorldWor
         load_chunk_immediate(coord);
         ++stats.generated_chunks;
         --remaining;
+    }
+}
+
+void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStats& stats) {
+    using clock = std::chrono::steady_clock;
+
+    if (budget == 0) {
+        return;
+    }
+
+    const auto time_limited = has_time_budget(max_ms);
+    if (time_limited && max_ms <= 0.0) {
+        return;
+    }
+
+    const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
+    auto remaining = budget;
+    while (remaining > 0 && !pending_fluid_queue_.empty()) {
+        if (time_limited && clock::now() >= deadline) {
+            break;
+        }
+
+        const auto world_coord = pending_fluid_queue_.front();
+        pending_fluid_queue_.pop_front();
+        pending_fluid_set_.erase(world_coord);
+        --remaining;
+        ++stats.processed_fluid_cells;
+
+        if (!is_world_y_valid(world_coord.y) || !is_chunk_loaded_for_world(world_coord.x, world_coord.z)) {
+            continue;
+        }
+
+        auto current_state = raw_water_state(world_coord.x, world_coord.y, world_coord.z);
+        auto current_level = water_level_from_state(current_state);
+        if (current_level == 0) {
+            continue;
+        }
+
+        const auto current_is_source = water_state_is_source(current_state);
+        if (current_is_source && current_level != kMaxWaterLevel) {
+            current_state = make_water_state(kMaxWaterLevel, true);
+            (void)set_water_state(world_coord.x, world_coord.y, world_coord.z, current_state);
+            current_level = kMaxWaterLevel;
+        }
+
+        const BlockCoord below {
+            world_coord.x,
+            world_coord.y - 1,
+            world_coord.z,
+        };
+
+        auto vertical_transfer_happened = false;
+        if (can_water_flow_into_loaded(below.x, below.y, below.z) && try_prepare_cell_for_water(below.x, below.y, below.z)) {
+            const auto below_state = raw_water_state(below.x, below.y, below.z);
+            const auto below_level = water_level_from_state(below_state);
+            if (below_level < kMaxWaterLevel) {
+                const auto available_level = current_is_source ? kMaxWaterLevel : current_level;
+                const auto transfer = std::min<std::uint8_t>(available_level, static_cast<std::uint8_t>(kMaxWaterLevel - below_level));
+                if (transfer > 0) {
+                    const auto next_below_level = static_cast<std::uint8_t>(below_level + transfer);
+                    (void)set_water_state(below.x, below.y, below.z, make_water_state(next_below_level));
+
+                    if (current_is_source) {
+                        (void)set_water_state(world_coord.x, world_coord.y, world_coord.z, make_water_state(kMaxWaterLevel, true));
+                    } else {
+                        current_level = static_cast<std::uint8_t>(current_level - transfer);
+                        (void)set_water_state(
+                            world_coord.x,
+                            world_coord.y,
+                            world_coord.z,
+                            current_level > 0 ? make_water_state(current_level) : 0);
+                    }
+
+                    enqueue_adjacent_fluid_cells(world_coord);
+                    enqueue_adjacent_fluid_cells(below);
+                    vertical_transfer_happened = true;
+                }
+            }
+        }
+
+        if (vertical_transfer_happened) {
+            continue;
+        }
+
+        auto mutable_current_level = current_is_source ? kMaxWaterLevel : current_level;
+        std::vector<BlockCoord> changed_neighbors;
+        while (mutable_current_level > 0) {
+            auto best_neighbor = std::optional<BlockCoord> {};
+            auto best_level = std::numeric_limits<int>::max();
+
+            for (const auto& offset : kNeighborOffsets) {
+                const BlockCoord neighbor {
+                    world_coord.x + offset.x,
+                    world_coord.y,
+                    world_coord.z + offset.z,
+                };
+                if (!can_water_flow_into_loaded(neighbor.x, neighbor.y, neighbor.z)) {
+                    continue;
+                }
+                if (!try_prepare_cell_for_water(neighbor.x, neighbor.y, neighbor.z)) {
+                    continue;
+                }
+
+                const auto neighbor_level = static_cast<int>(water_level(neighbor.x, neighbor.y, neighbor.z));
+                if (neighbor_level < best_level) {
+                    best_level = neighbor_level;
+                    best_neighbor = neighbor;
+                }
+            }
+
+            if (!best_neighbor.has_value()) {
+                break;
+            }
+            if (static_cast<int>(mutable_current_level) - best_level <= 1) {
+                break;
+            }
+
+            const auto next_neighbor_level =
+                static_cast<std::uint8_t>(water_level(best_neighbor->x, best_neighbor->y, best_neighbor->z) + 1);
+            (void)set_water_state(best_neighbor->x, best_neighbor->y, best_neighbor->z, make_water_state(next_neighbor_level));
+            changed_neighbors.push_back(*best_neighbor);
+
+            if (!current_is_source) {
+                --mutable_current_level;
+                (void)set_water_state(
+                    world_coord.x,
+                    world_coord.y,
+                    world_coord.z,
+                    mutable_current_level > 0 ? make_water_state(mutable_current_level) : 0);
+                if (mutable_current_level == 0) {
+                    break;
+                }
+            }
+        }
+
+        if (current_is_source) {
+            (void)set_water_state(world_coord.x, world_coord.y, world_coord.z, make_water_state(kMaxWaterLevel, true));
+        }
+
+        if (!changed_neighbors.empty()) {
+            enqueue_adjacent_fluid_cells(world_coord);
+            for (const auto& changed_neighbor : changed_neighbors) {
+                enqueue_adjacent_fluid_cells(changed_neighbor);
+            }
+        }
     }
 }
 
@@ -1140,8 +1698,11 @@ auto World::collect_lighting_region(const ChunkCoord& anchor) const -> std::vect
 auto World::initialize_lighting_job(LightingJob& job) -> bool {
     job.queue.clear();
     job.region_present.fill(false);
-    job.changed_chunks.fill(false);
     job.block_light_difference_counts.fill(0U);
+    job.changed_sky_boundary_masks.fill(0U);
+    for (auto& changed_sections : job.changed_sky_sections) {
+        changed_sections.reset();
+    }
     for (auto& column_bits : job.processed_sky_columns) {
         column_bits.reset();
     }
@@ -1200,8 +1761,10 @@ void World::rebuild_local_sky_light(LightingJob& job) {
 
             const auto local_x = static_cast<int>(bit_index % static_cast<std::size_t>(kChunkSizeX));
             const auto local_z = static_cast<int>(bit_index / static_cast<std::size_t>(kChunkSizeX));
-            if (chunk.rebuild_sky_light_column(local_x, local_z)) {
-                mark_lighting_chunk_changed(job, coord);
+            const auto changed_sections = chunk.rebuild_sky_light_column(local_x, local_z);
+            if (changed_sections.any()) {
+                job.changed_sky_sections[slot_index] |= changed_sections;
+                job.changed_sky_boundary_masks[slot_index] |= lighting_boundary_mask_for_column(local_x, local_z);
             }
         }
     }
@@ -1305,7 +1868,8 @@ void World::finalize_lighting_job(const LightingJob& job) {
 
         auto& record = iterator->second;
         const auto block_light_changed = job.block_light_difference_counts[slot_index] > 0;
-        std::array<bool, kChunkSectionCount> changed_sections {};
+        auto changed_sections = job.changed_sky_sections[slot_index];
+        const auto sky_boundary_mask = job.changed_sky_boundary_masks[slot_index];
         if (block_light_changed) {
             const auto& current_block_light = record.chunk.block_light();
             for (std::size_t section_index = 0; section_index < kChunkSectionCount; ++section_index) {
@@ -1323,24 +1887,26 @@ void World::finalize_lighting_job(const LightingJob& job) {
                         }
                     }
                 }
-                changed_sections[section_index] = section_changed;
+                if (section_changed) {
+                    changed_sections.set(section_index);
+                }
             }
             record.chunk.copy_block_light_from(job.block_light_buffers[slot_index].data(), job.block_light_buffers[slot_index].size());
         }
 
-        const auto lighting_changed = block_light_changed || job.changed_chunks[slot_index];
+        const auto lighting_changed = changed_sections.any();
         if (lighting_changed) {
-            if (job.changed_chunks[slot_index]) {
-                record.chunk.mark_dirty();
-                invalidate_loaded_mesh_neighbors(coord, false);
-            } else {
-                for (std::size_t section_index = 0; section_index < changed_sections.size(); ++section_index) {
-                    if (changed_sections[section_index]) {
-                        record.chunk.mark_section_dirty(section_index);
-                    }
+            const auto expanded_sections = expand_section_mask(changed_sections);
+            for (std::size_t section_index = 0; section_index < kChunkSectionCount; ++section_index) {
+                if (expanded_sections.test(section_index)) {
+                    record.chunk.mark_section_dirty(section_index);
                 }
-                invalidate_loaded_mesh_neighbors_for_sections(coord, changed_sections);
             }
+            // Je ne remeshe les voisins que si la lumiere a vraiment touche
+            // une bordure de chunk, sauf pour la block light ou je garde la
+            // voie conservative pour eviter toute regression d'eclairage.
+            const auto neighbor_boundary_mask = block_light_changed ? kLightingBoundaryAll : sky_boundary_mask;
+            invalidate_loaded_mesh_neighbors_for_sections(coord, changed_sections, neighbor_boundary_mask);
         }
 
         record.chunk.clear_lighting_dirty();
@@ -1390,6 +1956,10 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
     }
 
     for (const auto& coord : to_remove) {
+        const auto record_iterator = chunks_.find(coord);
+        if (record_iterator != chunks_.end()) {
+            sync_chunk_override_snapshot(coord, record_iterator->second.chunk);
+        }
         for (const auto& offset : kNeighborOffsets) {
             const ChunkCoord neighbor_coord {coord.x + offset.x, coord.z + offset.z};
             if (auto* neighbor = find_chunk(neighbor_coord); neighbor != nullptr) {
@@ -1461,6 +2031,21 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
     pending_lighting_queue_ = std::move(kept_lighting_updates);
     rebuild_pending_lighting_metadata();
 
+    std::deque<BlockCoord> kept_fluid_updates;
+    while (!pending_fluid_queue_.empty()) {
+        const auto world_coord = pending_fluid_queue_.front();
+        pending_fluid_queue_.pop_front();
+        if (!is_chunk_loaded_for_world(world_coord.x, world_coord.z)) {
+            continue;
+        }
+        kept_fluid_updates.push_back(world_coord);
+    }
+    pending_fluid_queue_ = std::move(kept_fluid_updates);
+    pending_fluid_set_.clear();
+    for (const auto& world_coord : pending_fluid_queue_) {
+        pending_fluid_set_.insert(world_coord);
+    }
+
     return to_remove.size();
 }
 
@@ -1520,21 +2105,29 @@ void World::enqueue_gpu_unload(const ChunkCoord& coord) {
     }
 }
 
-void World::remove_unsupported_torch_above(int x, int y, int z) {
-    const auto torch_y = y + 1;
-    if (!is_world_y_valid(torch_y)) {
-        return;
-    }
+void World::remove_unsupported_torches_around(int x, int y, int z) {
+    constexpr std::array<BlockCoord, 6> neighbor_offsets {{
+        {0, 1, 0},
+        {1, 0, 0},
+        {-1, 0, 0},
+        {0, 0, 1},
+        {0, 0, -1},
+        {0, -1, 0},
+    }};
 
-    const BlockCoord torch_coord {x, torch_y, z};
-    if (get_block(torch_coord.x, torch_coord.y, torch_coord.z) != to_block_id(BlockType::Torch)) {
-        return;
-    }
-    if (can_place_torch_at(torch_coord)) {
-        return;
-    }
+    for (const auto& offset : neighbor_offsets) {
+        const BlockCoord torch_coord {x + offset.x, y + offset.y, z + offset.z};
+        if (!is_world_y_valid(torch_coord.y)) {
+            continue;
+        }
 
-    set_block(torch_coord.x, torch_coord.y, torch_coord.z, to_block_id(BlockType::Air));
+        const auto torch_block = get_block(torch_coord.x, torch_coord.y, torch_coord.z);
+        if (!is_torch_block(torch_block) || can_place_torch_at(torch_coord)) {
+            continue;
+        }
+
+        set_block(torch_coord.x, torch_coord.y, torch_coord.z, to_block_id(BlockType::Air));
+    }
 }
 
 void World::refresh_chunk_emissive_cache(ChunkRecord& record) {
@@ -1572,25 +2165,169 @@ void World::update_chunk_emissive_cache(ChunkRecord& record,
     }
 }
 
+void World::sync_chunk_override_snapshot(const ChunkCoord& coord, const Chunk& chunk) {
+    auto iterator = chunk_overrides_.find(coord);
+    if (iterator == chunk_overrides_.end()) {
+        return;
+    }
+
+    iterator->second.blocks = chunk.blocks();
+    iterator->second.water_state = chunk.water_state();
+    iterator->second.generator_mismatch_count =
+        count_generator_mismatches(coord, iterator->second.blocks, iterator->second.water_state);
+    if (iterator->second.generator_mismatch_count == 0) {
+        chunk_overrides_.erase(iterator);
+    }
+}
+
+void World::apply_chunk_snapshot_to_record(ChunkRecord& record,
+                                           const std::array<BlockId, kChunkVolume>& blocks,
+                                           const std::array<WaterState, kChunkVolume>& water_state) {
+    record.chunk.copy_blocks_from(blocks.data(), blocks.size());
+    record.chunk.copy_water_from(water_state.data(), water_state.size());
+    record.chunk.clear_lighting();
+    record.sky_columns_dirty.set();
+    refresh_chunk_emissive_cache(record);
+}
+
+auto World::count_generator_mismatches(const ChunkCoord& coord,
+                                       const std::array<BlockId, kChunkVolume>& blocks,
+                                       const std::array<WaterState, kChunkVolume>& water_state) const -> std::size_t {
+    std::size_t mismatch_count = 0;
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                const auto block_index = chunk_linear_index(x, y, z);
+                const auto world_x = coord.x * kChunkSizeX + x;
+                const auto world_z = coord.z * kChunkSizeZ + z;
+                if (blocks[block_index] != generator_.sample_block(world_x, y, world_z)) {
+                    ++mismatch_count;
+                }
+                if (water_state[block_index] != generator_.sample_water_state(world_x, y, world_z)) {
+                    ++mismatch_count;
+                }
+            }
+        }
+    }
+    return mismatch_count;
+}
+
+auto World::is_chunk_loaded_for_world(int x, int z) const noexcept -> bool {
+    return find_chunk(world_to_chunk(x, z)) != nullptr;
+}
+
+auto World::can_water_flow_into_loaded(int x, int y, int z) const -> bool {
+    if (!is_world_y_valid(y) || !is_chunk_loaded_for_world(x, z)) {
+        return false;
+    }
+
+    const auto block = get_block(x, y, z);
+    return block == to_block_id(BlockType::Air) ||
+           is_torch_block(block) ||
+           is_block_replaceable(block) ||
+           has_water(x, y, z);
+}
+
+auto World::try_prepare_cell_for_water(int x, int y, int z) -> bool {
+    if (!is_world_y_valid(y) || !is_chunk_loaded_for_world(x, z)) {
+        return false;
+    }
+
+    const auto block = get_block(x, y, z);
+    if (block == to_block_id(BlockType::Air) || has_water(x, y, z)) {
+        return true;
+    }
+    if (!is_torch_block(block) && !is_block_replaceable(block)) {
+        return false;
+    }
+
+    set_block(x, y, z, to_block_id(BlockType::Air));
+    return get_block(x, y, z) == to_block_id(BlockType::Air);
+}
+
+auto World::set_water_state(int x, int y, int z, WaterState water_state) -> bool {
+    if (!is_world_y_valid(y)) {
+        return false;
+    }
+
+    const auto chunk_coord = world_to_chunk(x, z);
+    if (!chunks_.contains(chunk_coord)) {
+        return false;
+    }
+
+    const auto local = world_to_local(x, y, z);
+    auto iterator = chunks_.find(chunk_coord);
+    if (iterator == chunks_.end()) {
+        return false;
+    }
+
+    auto& chunk = iterator->second.chunk;
+    const auto previous_water_state = chunk.get_water_state_local(local.x, local.y, local.z);
+    if (previous_water_state == water_state) {
+        return false;
+    }
+
+    const auto current_block = chunk.get_local(local.x, local.y, local.z);
+    chunk.set_water_state_local(local.x, local.y, local.z, water_state);
+    update_chunk_override_after_cell_change(chunk_coord, local, current_block, current_block, previous_water_state, water_state);
+    mark_chunk_and_neighbors_dirty(chunk_coord, local);
+    return true;
+}
+
+void World::update_chunk_override_after_cell_change(const ChunkCoord& coord,
+                                                    const BlockCoord& local_coord,
+                                                    BlockId previous_block,
+                                                    BlockId next_block,
+                                                    WaterState previous_water_state,
+                                                    WaterState next_water_state) {
+    const auto block_index = chunk_linear_index(local_coord.x, local_coord.y, local_coord.z);
+    const auto world_coord = local_to_world(coord, local_coord);
+    const auto generated_block = generator_.sample_block(world_coord.x, world_coord.y, world_coord.z);
+    const auto generated_water_state = generator_.sample_water_state(world_coord.x, world_coord.y, world_coord.z);
+
+    if (auto override_iterator = chunk_overrides_.find(coord); override_iterator == chunk_overrides_.end()) {
+        const auto next_mismatch = next_block != generated_block || next_water_state != generated_water_state;
+        if (!next_mismatch) {
+            return;
+        }
+
+        auto* chunk = find_chunk(coord);
+        if (chunk == nullptr) {
+            return;
+        }
+
+        ChunkOverrideEntry entry {};
+        entry.blocks = chunk->blocks();
+        entry.water_state = chunk->water_state();
+        entry.generator_mismatch_count = count_generator_mismatches(coord, entry.blocks, entry.water_state);
+        if (entry.generator_mismatch_count > 0) {
+            chunk_overrides_.emplace(coord, std::move(entry));
+        }
+    } else {
+        auto& entry = override_iterator->second;
+        const auto previous_mismatch =
+            previous_block != generated_block || previous_water_state != generated_water_state;
+        const auto next_mismatch =
+            next_block != generated_block || next_water_state != generated_water_state;
+        entry.blocks[block_index] = next_block;
+        entry.water_state[block_index] = next_water_state;
+        if (previous_mismatch && !next_mismatch) {
+            --entry.generator_mismatch_count;
+        } else if (!previous_mismatch && next_mismatch) {
+            ++entry.generator_mismatch_count;
+        }
+        if (entry.generator_mismatch_count == 0) {
+            chunk_overrides_.erase(override_iterator);
+        }
+    }
+}
+
 auto World::lighting_region_contains(const LightingJob& job, const ChunkCoord& coord) const noexcept -> bool {
     const auto slot = lighting_region_slot_for(job.anchor, coord);
     if (slot == LightingRegionSlot::Invalid) {
         return false;
     }
     return job.region_present[lighting_region_slot_index(slot)];
-}
-
-void World::mark_lighting_chunk_changed(LightingJob& job, const ChunkCoord& coord) {
-    const auto slot = lighting_region_slot_for(job.anchor, coord);
-    if (slot == LightingRegionSlot::Invalid) {
-        return;
-    }
-
-    const auto slot_index = lighting_region_slot_index(slot);
-    if (!job.region_present[slot_index]) {
-        return;
-    }
-    job.changed_chunks[slot_index] = true;
 }
 
 auto World::lighting_buffer_index(const BlockCoord& local_coord) const noexcept -> std::size_t {

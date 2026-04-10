@@ -168,7 +168,11 @@ endif()
 glad_add_library(valcraft_glad REPRODUCIBLE API gl:core=3.3)
 
 add_library(valcraft_core
+    src/app/Audit.cpp
+    src/app/GameBranding.cpp
     src/app/GameOptions.cpp
+    src/app/SaveGame.cpp
+    src/audio/ProceduralMusic.cpp
     src/creatures/CreatureGeometry.cpp
     src/creatures/CreatureSystem.cpp
     src/world/Chunk.cpp
@@ -178,8 +182,10 @@ add_library(valcraft_core
     src/world/ChunkMesher.cpp
     src/world/Environment.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/StartingVillage.cpp
     src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp
+    src/render/ItemDropGeometry.cpp
 )
 
 target_include_directories(valcraft_core
@@ -205,6 +211,7 @@ valcraft_enable_ipo_for(valcraft_core)
 add_executable(ValCraft
     src/main.cpp
     src/app/Game.cpp
+    src/app/GameMusic.cpp
     src/render/Renderer.cpp
 )
 
@@ -225,10 +232,21 @@ valcraft_enable_ipo_for(ValCraft)
 
 valcraft_copy_runtime_dlls(ValCraft)
 valcraft_copy_mingw_runtime_dlls(ValCraft)
+add_custom_command(TARGET ValCraft POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:ValCraft>/Images
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/Images/valcraft_icon.bmp
+        $<TARGET_FILE_DIR:ValCraft>/Images/valcraft_icon.bmp
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/Images/valcraft_icon.png
+        $<TARGET_FILE_DIR:ValCraft>/Images/valcraft_icon.png
+)
 
 add_executable(valcraft_tests
     tests/main.cpp
     tests/AppTests.cpp
+    tests/AudioTests.cpp
     tests/CreatureTests.cpp
     tests/RenderTests.cpp
     tests/WorldTests.cpp
@@ -256,6 +274,13 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_block_texture_tiles.py
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "Regenerating baked block texture tiles from Textures/*.png"
+        VERBATIM
+    )
+
+    add_custom_target(valcraft_regenerate_window_icon
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_window_icon.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Regenerating ValCraft window icon assets"
         VERBATIM
     )
 endif()
@@ -286,6 +311,19 @@ add_custom_target(valcraft_check_perf_smoke
         -NoBuild
         -SmokeFrames 180
         -Scenarios baseline
+    DEPENDS ValCraft
+    USES_TERMINAL
+)
+
+add_custom_target(valcraft_check_audit_smoke
+    COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit.ps1
+        -BuildDir ${CMAKE_BINARY_DIR}
+        -NoConfigure
+        -NoBuild
+        -Mode measure
+        -Label smoke
+        -SmokeFrames 180
     DEPENDS ValCraft
     USES_TERMINAL
 )

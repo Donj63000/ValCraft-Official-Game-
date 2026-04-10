@@ -1,14 +1,20 @@
 #pragma once
 
+#include "app/ConfirmDialog.h"
 #include "app/DeathScreen.h"
 #include "app/Hotbar.h"
 #include "app/InventoryMenu.h"
+#include "app/MainMenu.h"
+#include "app/OptionsMenu.h"
 #include "app/PauseMenu.h"
+#include "app/SaveSlotMenu.h"
 #include "creatures/CreatureGeometry.h"
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
 #include "player/PlayerGeometry.h"
+#include "render/ItemDropGeometry.h"
+#include "render/ShadowCulling.h"
 #include "world/Environment.h"
 #include "world/World.h"
 
@@ -17,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -67,11 +74,20 @@ public:
                       const InventoryMenuState& inventory_menu,
                       const DeathScreenState& death_screen,
                       const PauseMenuState& pause_menu,
+                      const MainMenuState& main_menu,
+                      const SaveSlotMenuState& save_slot_menu,
+                      const OptionsMenuState& options_menu,
+                      const ConfirmDialogState& confirm_dialog,
                       std::span<const CreatureRenderInstance> creatures,
                       std::span<const ItemDropRenderInstance> item_drops,
                       const EnvironmentState& environment,
                       int width,
                       int height);
+    void render_loading_screen(std::string_view title,
+                               std::string_view detail,
+                               float progress,
+                               int width,
+                               int height);
     [[nodiscard]] auto last_frame_stats() const noexcept -> const RendererFrameStats&;
 
 private:
@@ -85,6 +101,7 @@ private:
         std::uint64_t revision = 0;
         GLsizeiptr vertex_buffer_bytes = 0;
         GLsizeiptr index_buffer_bytes = 0;
+        ChunkBounds bounds {};
     };
 
     struct WorldUniformLocations {
@@ -153,6 +170,14 @@ private:
         GLint texel_direction = -1;
     };
 
+    struct MenuBackgroundUniformLocations {
+        GLint scene_texture = -1;
+        GLint blur_texture = -1;
+        GLint blur_mix = -1;
+        GLint tint_color = -1;
+        GLint vignette_strength = -1;
+    };
+
     struct CreatureUniformLocations {
         GLint view_projection = -1;
         GLint light_view_projection = -1;
@@ -169,6 +194,7 @@ private:
         GLint shadow_map = -1;
         GLint shadows_enabled = -1;
         GLint time_of_day = -1;
+        GLint player_light_strength = -1;
     };
 
     struct VisibleChunk {
@@ -176,6 +202,10 @@ private:
         const GpuMesh* mesh = nullptr;
         glm::vec3 center {0.0F};
         float distance_squared = 0.0F;
+    };
+
+    struct ShadowChunk {
+        const GpuMesh* mesh = nullptr;
     };
 
     struct HotbarHudCacheKey {
@@ -216,6 +246,38 @@ private:
         auto operator==(const PauseHudCacheKey&) const -> bool = default;
     };
 
+    struct MainMenuHudCacheKey {
+        MainMenuState main_menu {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const MainMenuHudCacheKey&) const -> bool = default;
+    };
+
+    struct SaveSlotHudCacheKey {
+        SaveSlotMenuState save_slot_menu {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const SaveSlotHudCacheKey&) const -> bool = default;
+    };
+
+    struct OptionsHudCacheKey {
+        OptionsMenuState options_menu {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const OptionsHudCacheKey&) const -> bool = default;
+    };
+
+    struct ConfirmHudCacheKey {
+        ConfirmDialogState confirm_dialog {};
+        int width = 0;
+        int height = 0;
+
+        auto operator==(const ConfirmHudCacheKey&) const -> bool = default;
+    };
+
     template <typename Key>
     struct HudGeometryCache {
         bool valid = false;
@@ -238,6 +300,7 @@ private:
     void create_item_drop_geometry();
     void create_screen_quad_geometry();
     void create_crosshair_geometry();
+    void upload_block_break_overlay_mesh(const BlockBreakProgress& break_progress);
     void create_hud_geometry();
     void ensure_post_process_targets(int width, int height);
     void destroy_post_process_targets();
@@ -245,27 +308,41 @@ private:
     void destroy_water_scene_targets();
     void draw_sky(const PlayerController& player, const EnvironmentState& environment);
     void run_post_process(const EnvironmentState& environment, int width, int height);
-    void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops);
+    void run_menu_background_pass(int width, int height);
+    void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
+                         const glm::mat4& view_projection,
+                         const glm::mat4& light_view_projection,
+                         const glm::mat4& inverse_view_projection,
+                         const glm::vec3& camera_position,
+                         const EnvironmentState& environment,
+                         bool sun_visible);
     void draw_creatures(std::span<const CreatureRenderInstance> creatures,
                         const glm::mat4& view_projection,
                         const glm::mat4& light_view_projection,
                         const glm::vec3& camera_position,
-                        const EnvironmentState& environment);
+                        const EnvironmentState& environment,
+                        bool player_light_active);
     void draw_player_viewmodel(const PlayerController& player,
                             const glm::mat4& view_projection,
                             const glm::mat4& light_view_projection,
                             const glm::vec3& camera_position,
                             const EnvironmentState& environment);
+    void draw_block_break_overlay(const PlayerController& player);
     void draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& environment, int width, int height);
     void draw_inventory_menu(const InventoryMenuState& inventory_menu, const HotbarState& hotbar, int width, int height);
     void draw_death_screen(const DeathScreenState& death_screen, int width, int height);
     void draw_pause_menu(const PauseMenuState& pause_menu, int width, int height);
+    void draw_main_menu(const MainMenuState& main_menu, int width, int height);
+    void draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int width, int height);
+    void draw_options_menu(const OptionsMenuState& options_menu, int width, int height);
+    void draw_confirm_dialog(const ConfirmDialogState& confirm_dialog, int width, int height);
     void draw_crosshair();
     void ensure_hud_buffer_capacity(std::size_t vertex_count);
     void upload_hud_vertices(std::span<const HudVertex> vertices);
 
     GLuint world_program_ = 0;
     GLuint creature_program_ = 0;
+    GLuint item_drop_program_ = 0;
     GLuint shadow_program_ = 0;
     GLuint hud_program_ = 0;
     GLuint crosshair_program_ = 0;
@@ -273,6 +350,7 @@ private:
     GLuint post_process_program_ = 0;
     GLuint glow_extract_program_ = 0;
     GLuint glow_blur_program_ = 0;
+    GLuint menu_background_program_ = 0;
     GLuint atlas_texture_ = 0;
     GLuint accent_texture_ = 0;
     GLuint creature_atlas_texture_ = 0;
@@ -293,8 +371,14 @@ private:
     GLuint creature_vao_ = 0;
     GLuint creature_vbo_ = 0;
     GLuint creature_ebo_ = 0;
+    GLuint creature_instance_vbo_ = 0;
+    GLuint viewmodel_vao_ = 0;
+    GLuint viewmodel_instance_vbo_ = 0;
+    GpuMesh block_break_overlay_mesh_ {};
     GLuint item_drop_vao_ = 0;
     GLuint item_drop_vbo_ = 0;
+    GLuint item_drop_ebo_ = 0;
+    GLuint item_drop_instance_vbo_ = 0;
     GLuint hud_vao_ = 0;
     GLuint hud_vbo_ = 0;
     GLuint crosshair_vao_ = 0;
@@ -302,26 +386,33 @@ private:
     RendererOptions options_ {};
     WorldUniformLocations world_uniforms_ {};
     CreatureUniformLocations creature_uniforms_ {};
+    WorldUniformLocations item_drop_uniforms_ {};
     ShadowUniformLocations shadow_uniforms_ {};
     HudUniformLocations hud_uniforms_ {};
     SkyUniformLocations sky_uniforms_ {};
     PostProcessUniformLocations post_process_uniforms_ {};
     GlowExtractUniformLocations glow_extract_uniforms_ {};
     GlowBlurUniformLocations glow_blur_uniforms_ {};
+    MenuBackgroundUniformLocations menu_background_uniforms_ {};
     std::unordered_map<ChunkCoord, GpuMesh, ChunkCoordHash> gpu_meshes_ {};
     std::vector<VisibleChunk> visible_chunks_cache_ {};
-    GLsizeiptr creature_vertex_buffer_bytes_ = 0;
-    GLsizeiptr creature_index_buffer_bytes_ = 0;
-    GLsizeiptr item_drop_vertex_buffer_bytes_ = 0;
+    std::vector<ShadowChunk> shadow_chunks_cache_ {};
+    GLsizeiptr creature_instance_buffer_bytes_ = 0;
+    GLsizeiptr viewmodel_instance_buffer_bytes_ = 0;
+    GLsizeiptr item_drop_instance_buffer_bytes_ = 0;
     GLsizeiptr hud_vertex_buffer_bytes_ = 0;
     RendererFrameStats last_frame_stats_ {};
-    std::vector<ChunkVertex> item_drop_vertices_scratch_ {};
-    std::vector<CreatureVertex> creature_vertices_scratch_ {};
-    std::vector<std::uint32_t> creature_indices_scratch_ {};
+    std::vector<ItemDropGpuInstance> item_drop_instances_scratch_ {};
+    std::vector<CreaturePartInstance> creature_parts_scratch_ {};
+    std::vector<std::uint32_t> translated_water_indices_scratch_ {};
     HudGeometryCache<HotbarHudCacheKey> hotbar_cache_ {};
     HudGeometryCache<InventoryHudCacheKey> inventory_cache_ {};
     HudGeometryCache<DeathHudCacheKey> death_cache_ {};
     HudGeometryCache<PauseHudCacheKey> pause_cache_ {};
+    HudGeometryCache<MainMenuHudCacheKey> main_menu_cache_ {};
+    HudGeometryCache<SaveSlotHudCacheKey> save_slot_cache_ {};
+    HudGeometryCache<OptionsHudCacheKey> options_cache_ {};
+    HudGeometryCache<ConfirmHudCacheKey> confirm_cache_ {};
     int water_scene_target_width_ = 0;
     int water_scene_target_height_ = 0;
     int scene_target_width_ = 0;

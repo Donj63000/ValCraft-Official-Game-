@@ -12,6 +12,14 @@ namespace valcraft {
 namespace {
 
 constexpr auto kBaseStoneHeight = 42;
+constexpr std::uint32_t kForestTreePlacementModulo = 16U;
+constexpr std::uint32_t kMeadowTreePlacementModulo = 45U;
+constexpr std::uint32_t kTaigaTreePlacementModulo = 18U;
+constexpr std::uint32_t kMeadowDecorationPlacementModulo = 8U;
+constexpr std::uint32_t kForestDecorationPlacementModulo = 7U;
+constexpr std::uint32_t kDesertDecorationPlacementModulo = 9U;
+constexpr std::uint32_t kTaigaDecorationPlacementModulo = 11U;
+constexpr std::uint32_t kRockyPeaksDecorationPlacementModulo = 19U;
 
 auto hash_column(int x, int z, int seed) noexcept -> std::uint32_t {
     auto value = static_cast<std::uint32_t>(x) * 374761393U;
@@ -91,6 +99,10 @@ void WorldGenerator::generate_chunk(Chunk& chunk) {
             for (int y = kWorldMinY; y <= column_max_y; ++y) {
                 const auto block = choose_terrain_block(column, world_x, y, world_z);
                 if (block == to_block_id(BlockType::Air)) {
+                    const auto water_state = sample_water_state(world_x, y, world_z);
+                    if (water_state != 0) {
+                        chunk.set_water_state_local(local_x, y, local_z, water_state);
+                    }
                     continue;
                 }
                 chunk.set_local(local_x, y, local_z, block);
@@ -128,6 +140,18 @@ auto WorldGenerator::sample_block(int world_x, int y, int world_z) const noexcep
 
     const auto column = sample_column(world_x, world_z);
     return choose_terrain_block(column, world_x, y, world_z);
+}
+
+auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const noexcept -> WaterState {
+    if (!is_world_y_valid(y)) {
+        return 0;
+    }
+
+    const auto column = sample_column(world_x, world_z);
+    if (column.water_level > column.surface_height && y > column.surface_height && y <= column.water_level) {
+        return make_water_state(kMaxWaterLevel, true);
+    }
+    return 0;
 }
 
 auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> TerrainColumnSample {
@@ -278,10 +302,6 @@ auto WorldGenerator::choose_terrain_block(const TerrainColumnSample& column, int
         return block;
     }
 
-    if (column.water_level > column.surface_height && y <= column.water_level) {
-        return to_block_id(BlockType::Water);
-    }
-
     return to_block_id(BlockType::Air);
 }
 
@@ -291,11 +311,11 @@ auto WorldGenerator::should_place_tree(BiomeType biome, int surface_y, std::uint
     }
     switch (biome) {
     case BiomeType::Forest:
-        return (column_hash % 14U) == 0U;
+        return (column_hash % kForestTreePlacementModulo) == 0U;
     case BiomeType::Meadow:
-        return (column_hash % 31U) == 0U;
+        return (column_hash % kMeadowTreePlacementModulo) == 0U;
     case BiomeType::Taiga:
-        return (column_hash % 18U) == 0U;
+        return (column_hash % kTaigaTreePlacementModulo) == 0U;
     case BiomeType::Desert:
     case BiomeType::RockyPeaks:
     default:
@@ -306,15 +326,15 @@ auto WorldGenerator::should_place_tree(BiomeType biome, int surface_y, std::uint
 auto WorldGenerator::should_place_decoration(BiomeType biome, std::uint32_t column_hash) const noexcept -> bool {
     switch (biome) {
     case BiomeType::Meadow:
-        return (column_hash % 3U) == 0U;
+        return (column_hash % kMeadowDecorationPlacementModulo) == 0U;
     case BiomeType::Forest:
-        return (column_hash % 5U) == 0U;
+        return (column_hash % kForestDecorationPlacementModulo) == 0U;
     case BiomeType::Desert:
-        return (column_hash % 9U) == 0U;
+        return (column_hash % kDesertDecorationPlacementModulo) == 0U;
     case BiomeType::Taiga:
-        return (column_hash % 11U) == 0U;
+        return (column_hash % kTaigaDecorationPlacementModulo) == 0U;
     case BiomeType::RockyPeaks:
-        return (column_hash % 19U) == 0U;
+        return (column_hash % kRockyPeaksDecorationPlacementModulo) == 0U;
     default:
         return false;
     }
@@ -349,9 +369,13 @@ void WorldGenerator::place_decoration(Chunk& chunk,
         return;
     }
 
+    const auto surface_block = chunk.get_local(local_x, surface_y, local_z);
     BlockId decoration = to_block_id(BlockType::Air);
     switch (biome) {
     case BiomeType::Meadow:
+        if (surface_block == to_block_id(BlockType::Sand)) {
+            return;
+        }
         if ((column_hash % 23U) == 0U) {
             decoration = to_block_id(BlockType::RedFlower);
         } else if ((column_hash % 29U) == 0U) {
@@ -361,6 +385,9 @@ void WorldGenerator::place_decoration(Chunk& chunk,
         }
         break;
     case BiomeType::Forest:
+        if (surface_block == to_block_id(BlockType::Sand)) {
+            return;
+        }
         if ((column_hash % 37U) == 0U) {
             decoration = to_block_id(BlockType::YellowFlower);
         } else {

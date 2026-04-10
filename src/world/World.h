@@ -20,23 +20,28 @@ namespace valcraft {
 
 struct WorldWorkBudget {
     std::size_t chunk_generation_budget = 2;
+    std::size_t fluid_cell_budget = 256;
     std::size_t mesh_rebuild_budget = 4;
     std::size_t light_node_budget = 16384;
     double max_generation_ms = 1.0;
+    double max_fluid_ms = 1.0;
     double max_lighting_ms = 1.5;
     double max_meshing_ms = 2.0;
 };
 
 struct WorldWorkStats {
     std::size_t generated_chunks = 0;
+    std::size_t processed_fluid_cells = 0;
     std::size_t meshed_chunks = 0;
     std::size_t prioritized_meshed_chunks = 0;
     std::size_t light_nodes_processed = 0;
     std::size_t lighting_jobs_completed = 0;
     std::size_t pending_generation = 0;
+    std::size_t pending_fluid = 0;
     std::size_t pending_mesh = 0;
     std::size_t pending_lighting = 0;
     double generation_ms = 0.0;
+    double fluid_ms = 0.0;
     double lighting_ms = 0.0;
     double meshing_ms = 0.0;
 };
@@ -46,6 +51,12 @@ struct WorldStreamingStats {
     std::size_t generation_enqueued = 0;
     std::size_t generation_pruned = 0;
     std::size_t unloaded_chunks = 0;
+};
+
+struct WorldChunkSnapshot {
+    ChunkCoord coord {};
+    std::array<BlockId, kChunkVolume> blocks {};
+    std::array<WaterState, kChunkVolume> water_state {};
 };
 
 class World {
@@ -71,10 +82,14 @@ public:
     explicit World(int seed = 1337, int stream_radius = kDefaultStreamRadius);
 
     [[nodiscard]] auto get_block(int x, int y, int z) const -> BlockId;
+    [[nodiscard]] auto water_level(int x, int y, int z) const -> std::uint8_t;
+    [[nodiscard]] auto has_water(int x, int y, int z) const -> bool;
+    [[nodiscard]] auto water_surface_y(int x, int y, int z) const -> std::optional<float>;
     // Helper de maillage: si le chunk n'est pas encore charge, on previsualise
     // le terrain/eau deterministe issu du generateur pour eviter les murs d'eau
     // temporaires sur les frontieres de streaming.
     [[nodiscard]] auto peek_block_or_generated(int x, int y, int z) const -> BlockId;
+    [[nodiscard]] auto peek_water_level_or_generated(int x, int y, int z) const -> std::uint8_t;
     [[nodiscard]] auto get_sky_light(int x, int y, int z) const -> std::uint8_t;
     [[nodiscard]] auto get_block_light(int x, int y, int z) const -> std::uint8_t;
     void set_block(int x, int y, int z, BlockId block_id);
@@ -84,6 +99,9 @@ public:
     [[nodiscard]] auto local_to_world(const ChunkCoord& chunk_coord, const BlockCoord& local) const noexcept -> BlockCoord;
     [[nodiscard]] auto raycast(const glm::vec3& origin, const glm::vec3& direction, float max_distance) const -> RaycastHit;
     [[nodiscard]] auto can_place_torch_at(const BlockCoord& world_coord) const -> bool;
+    [[nodiscard]] auto can_place_torch_at(const BlockCoord& world_coord, const BlockCoord& support_coord) const -> bool;
+    [[nodiscard]] auto torch_block_to_place(const BlockCoord& world_coord, const BlockCoord& support_coord) const
+        -> std::optional<BlockId>;
 
     void ensure_chunk_loaded(const ChunkCoord& coord);
     auto update_streaming(const glm::vec3& player_position) -> WorldStreamingStats;
@@ -104,16 +122,25 @@ public:
     [[nodiscard]] auto surface_height(int world_x, int world_z) -> int;
     [[nodiscard]] auto loaded_surface_height(int world_x, int world_z) const -> std::optional<int>;
     [[nodiscard]] auto pending_generation_count() const noexcept -> std::size_t;
+    [[nodiscard]] auto pending_fluid_count() const noexcept -> std::size_t;
     [[nodiscard]] auto pending_mesh_count() const noexcept -> std::size_t;
     [[nodiscard]] auto pending_lighting_count() const noexcept -> std::size_t;
     [[nodiscard]] auto has_pending_work() const noexcept -> bool;
     [[nodiscard]] auto are_chunks_ready(const glm::vec3& player_position, int radius) const -> bool;
+    [[nodiscard]] auto modified_chunk_snapshots() const -> std::vector<WorldChunkSnapshot>;
+    void replace_chunk_snapshots(const std::vector<WorldChunkSnapshot>& snapshots);
 
     [[nodiscard]] static auto floor_div(int value, int divisor) noexcept -> int;
     [[nodiscard]] static auto positive_mod(int value, int divisor) noexcept -> int;
 
 private:
     static constexpr std::size_t kLightingRegionSlots = 5;
+
+    struct ChunkOverrideEntry {
+        std::array<BlockId, kChunkVolume> blocks {};
+        std::array<WaterState, kChunkVolume> water_state {};
+        std::size_t generator_mismatch_count = 0;
+    };
 
     struct PendingLightingUpdate {
         ChunkCoord anchor {};
@@ -131,7 +158,8 @@ private:
         std::array<bool, kLightingRegionSlots> region_present {};
         std::array<std::vector<std::uint8_t>, kLightingRegionSlots> block_light_buffers {};
         std::array<std::bitset<kChunkSizeX * kChunkSizeZ>, kLightingRegionSlots> processed_sky_columns {};
-        std::array<bool, kLightingRegionSlots> changed_chunks {};
+        std::array<std::bitset<kChunkSectionCount>, kLightingRegionSlots> changed_sky_sections {};
+        std::array<std::uint8_t, kLightingRegionSlots> changed_sky_boundary_masks {};
         std::array<std::size_t, kLightingRegionSlots> block_light_difference_counts {};
         std::deque<LightNode> queue;
     };
@@ -146,16 +174,21 @@ private:
     void enqueue_generation_ring_transition(const ChunkCoord& previous_center, const ChunkCoord& next_center, WorldStreamingStats& stats);
     void prune_generation_queue(WorldStreamingStats& stats);
     void enqueue_lighting_update(const ChunkCoord& coord);
+    void enqueue_fluid_cell(const BlockCoord& world_coord);
+    void enqueue_adjacent_fluid_cells(const BlockCoord& world_coord);
+    void enqueue_chunk_fluid_updates(const ChunkCoord& coord);
     void invalidate_loaded_mesh_neighbors(const ChunkCoord& coord, bool defer_if_lighting_pending);
     void invalidate_loaded_mesh_neighbors_for_sections(
         const ChunkCoord& coord,
-        const std::array<bool, kChunkSectionCount>& dirty_sections);
+        const std::bitset<kChunkSectionCount>& dirty_sections,
+        std::uint8_t boundary_mask);
     void invalidate_loaded_mesh_neighbors_for_chunk_load(const ChunkCoord& coord);
     void rebuild_pending_lighting_metadata();
     void flush_deferred_mesh_invalidations();
     void enqueue_mesh_rebuild(const ChunkCoord& coord, bool prioritize = false);
     void enqueue_dirty_chunks();
     void process_generation_queue(std::size_t budget, double max_ms, WorldWorkStats& stats);
+    void process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStats& stats);
     void process_lighting_queue(std::size_t budget, double max_ms, WorldWorkStats& stats);
     void process_mesh_queue(std::size_t budget, double max_ms, WorldWorkStats& stats);
     [[nodiscard]] auto collect_lighting_region(const ChunkCoord& anchor) const -> std::vector<ChunkCoord>;
@@ -167,11 +200,29 @@ private:
     void rebuild_chunk_mesh(ChunkRecord& record);
     void enqueue_gpu_upload(const ChunkCoord& coord);
     void enqueue_gpu_unload(const ChunkCoord& coord);
-    void remove_unsupported_torch_above(int x, int y, int z);
+    void remove_unsupported_torches_around(int x, int y, int z);
     void refresh_chunk_emissive_cache(ChunkRecord& record);
     void update_chunk_emissive_cache(ChunkRecord& record, const BlockCoord& local_coord, BlockId previous_block, BlockId next_block);
+    void sync_chunk_override_snapshot(const ChunkCoord& coord, const Chunk& chunk);
+    void apply_chunk_snapshot_to_record(ChunkRecord& record,
+                                        const std::array<BlockId, kChunkVolume>& blocks,
+                                        const std::array<WaterState, kChunkVolume>& water_state);
+    [[nodiscard]] auto count_generator_mismatches(const ChunkCoord& coord,
+                                                  const std::array<BlockId, kChunkVolume>& blocks,
+                                                  const std::array<WaterState, kChunkVolume>& water_state) const -> std::size_t;
+    [[nodiscard]] auto raw_water_state(int x, int y, int z) const -> WaterState;
+    [[nodiscard]] auto can_water_flow_into_loaded(int x, int y, int z) const -> bool;
+    [[nodiscard]] auto is_chunk_loaded_for_world(int x, int z) const noexcept -> bool;
+    [[nodiscard]] auto set_water_state(int x, int y, int z, WaterState water_state) -> bool;
+    [[nodiscard]] auto try_prepare_cell_for_water(int x, int y, int z) -> bool;
+    void update_chunk_override_after_cell_change(const ChunkCoord& coord,
+                                                 const BlockCoord& local_coord,
+                                                 BlockId previous_block,
+                                                 BlockId next_block,
+                                                 WaterState previous_water_state,
+                                                 WaterState next_water_state);
+    void apply_chunk_load_fluid_revalidation(const ChunkCoord& coord);
     [[nodiscard]] auto lighting_region_contains(const LightingJob& job, const ChunkCoord& coord) const noexcept -> bool;
-    void mark_lighting_chunk_changed(LightingJob& job, const ChunkCoord& coord);
     [[nodiscard]] auto lighting_buffer_index(const BlockCoord& local_coord) const noexcept -> std::size_t;
     [[nodiscard]] auto get_job_block_light(const LightingJob& job, const BlockCoord& world_coord) const -> std::uint8_t;
     [[nodiscard]] auto set_job_block_light(LightingJob& job, const BlockCoord& world_coord, std::uint8_t light_level) -> bool;
@@ -184,8 +235,11 @@ private:
     WorldGenerator generator_;
     ChunkMesher mesher_;
     std::unordered_map<ChunkCoord, ChunkRecord, ChunkCoordHash> chunks_ {};
+    std::unordered_map<ChunkCoord, ChunkOverrideEntry, ChunkCoordHash> chunk_overrides_ {};
     std::deque<ChunkCoord> pending_generation_queue_ {};
+    std::deque<BlockCoord> pending_fluid_queue_ {};
     std::unordered_set<ChunkCoord, ChunkCoordHash> pending_generation_set_ {};
+    std::unordered_set<BlockCoord, BlockCoordHash> pending_fluid_set_ {};
     std::deque<ChunkCoord> pending_priority_mesh_queue_ {};
     std::deque<ChunkCoord> pending_mesh_queue_ {};
     std::deque<PendingLightingUpdate> pending_lighting_queue_ {};

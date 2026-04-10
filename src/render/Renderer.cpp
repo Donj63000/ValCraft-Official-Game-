@@ -1,6 +1,8 @@
 #include "app/GameBranding.h"
 #include "render/Renderer.h"
+#include "render/ItemDropGeometry.h"
 #include "render/ShadowCulling.h"
+#include "render/SkyShaderSource.h"
 #include "creatures/CreatureGeometry.h"
 #include "render/HotbarLayout.h"
 #include "world/BlockVisuals.h"
@@ -17,6 +19,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -34,14 +39,72 @@ constexpr std::size_t kCreatureDayBoxBudget = 30U;
 constexpr std::size_t kCreatureNightBoxBudget = 40U;
 constexpr std::size_t kCreatureMaxBoxBudget = kCreatureDayBoxBudget > kCreatureNightBoxBudget ? kCreatureDayBoxBudget : kCreatureNightBoxBudget;
 constexpr std::size_t kCreatureMaxRenderedCount = 12U;
-constexpr auto kInitialCreatureVertexBufferBytes =
-    static_cast<GLsizeiptr>(sizeof(CreatureVertex) * kCreatureVerticesPerBox * kCreatureMaxBoxBudget * kCreatureMaxRenderedCount);
-constexpr auto kInitialCreatureIndexBufferBytes =
-    static_cast<GLsizeiptr>(sizeof(std::uint32_t) * kCreatureIndicesPerBox * kCreatureMaxBoxBudget * kCreatureMaxRenderedCount);
-constexpr auto kInitialItemDropVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(ChunkVertex) * 768U);
+constexpr auto kInitialCreatureInstanceBufferBytes =
+    static_cast<GLsizeiptr>(sizeof(CreaturePartInstance) * kCreatureMaxBoxBudget * kCreatureMaxRenderedCount);
+constexpr auto kInitialItemDropInstanceBufferBytes =
+    static_cast<GLsizeiptr>(sizeof(ItemDropGpuInstance) * 512U);
 constexpr auto kInitialHudBufferBytes = static_cast<GLsizeiptr>(sizeof(float) * 9U * 6U * 32U);
 constexpr std::size_t kMaxGpuMeshEventsPerFrame = 8;
 constexpr double kMaxGpuMeshSyncMsPerFrame = 1.0;
+
+struct BoxTemplateVertex {
+    float x = 0.0F;
+    float y = 0.0F;
+    float z = 0.0F;
+    float nx = 0.0F;
+    float ny = 1.0F;
+    float nz = 0.0F;
+    float u = 0.0F;
+    float v = 0.0F;
+    float face_index = 0.0F;
+};
+
+auto box_template_vertices() -> const std::array<BoxTemplateVertex, kCreatureVerticesPerBox>& {
+    static const std::array<BoxTemplateVertex, kCreatureVerticesPerBox> kVertices {{
+        {0.5F, -0.5F, -0.5F, 1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F},
+        {0.5F, 0.5F, -0.5F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F},
+        {0.5F, 0.5F, 0.5F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F},
+        {0.5F, -0.5F, 0.5F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F},
+
+        {-0.5F, -0.5F, 0.5F, -1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F},
+        {-0.5F, 0.5F, 0.5F, -1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F},
+        {-0.5F, 0.5F, -0.5F, -1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 1.0F},
+        {-0.5F, -0.5F, -0.5F, -1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F},
+
+        {-0.5F, 0.5F, 0.5F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F, 2.0F},
+        {0.5F, 0.5F, 0.5F, 0.0F, 1.0F, 0.0F, 1.0F, 1.0F, 2.0F},
+        {0.5F, 0.5F, -0.5F, 0.0F, 1.0F, 0.0F, 0.0F, 1.0F, 2.0F},
+        {-0.5F, 0.5F, -0.5F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 2.0F},
+
+        {-0.5F, -0.5F, -0.5F, 0.0F, -1.0F, 0.0F, 1.0F, 0.0F, 3.0F},
+        {0.5F, -0.5F, -0.5F, 0.0F, -1.0F, 0.0F, 1.0F, 1.0F, 3.0F},
+        {0.5F, -0.5F, 0.5F, 0.0F, -1.0F, 0.0F, 0.0F, 1.0F, 3.0F},
+        {-0.5F, -0.5F, 0.5F, 0.0F, -1.0F, 0.0F, 0.0F, 0.0F, 3.0F},
+
+        {0.5F, -0.5F, 0.5F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 4.0F},
+        {0.5F, 0.5F, 0.5F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F, 4.0F},
+        {-0.5F, 0.5F, 0.5F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 4.0F},
+        {-0.5F, -0.5F, 0.5F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 4.0F},
+
+        {-0.5F, -0.5F, -0.5F, 0.0F, 0.0F, -1.0F, 1.0F, 0.0F, 5.0F},
+        {-0.5F, 0.5F, -0.5F, 0.0F, 0.0F, -1.0F, 1.0F, 1.0F, 5.0F},
+        {0.5F, 0.5F, -0.5F, 0.0F, 0.0F, -1.0F, 0.0F, 1.0F, 5.0F},
+        {0.5F, -0.5F, -0.5F, 0.0F, 0.0F, -1.0F, 0.0F, 0.0F, 5.0F},
+    }};
+    return kVertices;
+}
+
+auto box_template_indices() -> const std::array<std::uint32_t, kCreatureIndicesPerBox>& {
+    static const std::array<std::uint32_t, kCreatureIndicesPerBox> kIndices {{
+        0U, 1U, 2U, 0U, 2U, 3U,
+        4U, 5U, 6U, 4U, 6U, 7U,
+        8U, 9U, 10U, 8U, 10U, 11U,
+        12U, 13U, 14U, 12U, 14U, 15U,
+        16U, 17U, 18U, 16U, 18U, 19U,
+        20U, 21U, 22U, 20U, 22U, 23U,
+    }};
+    return kIndices;
+}
 
 auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, GLsizeiptr minimum_bytes) -> GLsizeiptr {
     auto capacity = std::max(current_bytes, minimum_bytes);
@@ -51,8 +114,134 @@ auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, G
     return capacity;
 }
 
+void configure_box_template_attributes(GLuint vao, GLuint vbo, GLuint ebo) {
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(BoxTemplateVertex), reinterpret_cast<void*>(offsetof(BoxTemplateVertex, x)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BoxTemplateVertex), reinterpret_cast<void*>(offsetof(BoxTemplateVertex, nx)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(BoxTemplateVertex), reinterpret_cast<void*>(offsetof(BoxTemplateVertex, u)));
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(BoxTemplateVertex), reinterpret_cast<void*>(offsetof(BoxTemplateVertex, face_index)));
+}
+
+void configure_creature_instance_attributes(GLuint vao, GLuint instance_vbo) {
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, instance_vbo);
+
+    constexpr GLuint kTransformLocation = 4;
+    for (GLuint column = 0; column < 4; ++column) {
+        const auto location = kTransformLocation + column;
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(
+            location,
+            4,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(CreaturePartInstance),
+            reinterpret_cast<void*>(offsetof(CreaturePartInstance, transform) + sizeof(glm::vec4) * column));
+        glVertexAttribDivisor(location, 1);
+    }
+
+    constexpr GLuint kUvLocation = 8;
+    for (GLuint face_index = 0; face_index < 6; ++face_index) {
+        const auto location = kUvLocation + face_index;
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(
+            location,
+            4,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(CreaturePartInstance),
+            reinterpret_cast<void*>(offsetof(CreaturePartInstance, face_uvs) + sizeof(BoxUvRect) * face_index));
+        glVertexAttribDivisor(location, 1);
+    }
+
+    glEnableVertexAttribArray(14);
+    glVertexAttribPointer(14, 4, GL_FLOAT, GL_FALSE, sizeof(CreaturePartInstance), reinterpret_cast<void*>(offsetof(CreaturePartInstance, nightmare_factor)));
+    glVertexAttribDivisor(14, 1);
+
+    glEnableVertexAttribArray(15);
+    glVertexAttribPointer(15, 1, GL_FLOAT, GL_FALSE, sizeof(CreaturePartInstance), reinterpret_cast<void*>(offsetof(CreaturePartInstance, emissive_strength)));
+    glVertexAttribDivisor(15, 1);
+}
+
+void configure_item_drop_instance_attributes(GLuint vao, GLuint instance_vbo) {
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, instance_vbo);
+
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, center)));
+    glVertexAttribDivisor(4, 1);
+
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, size)));
+    glVertexAttribDivisor(5, 1);
+
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, rotation)));
+    glVertexAttribDivisor(6, 1);
+
+    glEnableVertexAttribArray(7);
+    glVertexAttribIPointer(7, 1, GL_UNSIGNED_BYTE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, block_id)));
+    glVertexAttribDivisor(7, 1);
+
+    glEnableVertexAttribArray(8);
+    glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, sky_light)));
+    glVertexAttribDivisor(8, 1);
+
+    glEnableVertexAttribArray(9);
+    glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, block_light)));
+    glVertexAttribDivisor(9, 1);
+
+    glEnableVertexAttribArray(10);
+    glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, material_class)));
+    glVertexAttribDivisor(10, 1);
+}
+
 auto quantize_hud_value(float value, float steps_per_unit) -> int {
     return static_cast<int>(std::lround(value * steps_per_unit));
+}
+
+auto format_save_slot_timestamp(std::uint64_t unix_seconds) -> std::string {
+    if (unix_seconds == 0) {
+        return "AUCUNE SAUVEGARDE";
+    }
+
+    const auto time_value = static_cast<std::time_t>(unix_seconds);
+    std::tm local_time {};
+#ifdef _WIN32
+    localtime_s(&local_time, &time_value);
+#else
+    localtime_r(&time_value, &local_time);
+#endif
+
+    std::ostringstream stream;
+    stream << std::setfill('0')
+           << std::setw(2) << local_time.tm_mday << "/"
+           << std::setw(2) << (local_time.tm_mon + 1) << "  "
+           << std::setw(2) << local_time.tm_hour << ":"
+           << std::setw(2) << local_time.tm_min;
+    return stream.str();
+}
+
+auto format_save_slot_seed(int seed) -> std::string {
+    return std::string("SEED ") + std::to_string(seed);
+}
+
+auto format_save_slot_time(float time_of_day) -> std::string {
+    const auto hours = static_cast<int>(std::floor(time_of_day));
+    const auto minutes = static_cast<int>(std::round((time_of_day - static_cast<float>(hours)) * 60.0F));
+    std::ostringstream stream;
+    stream << "HEURE "
+           << std::setfill('0') << std::setw(2) << hours
+           << ":"
+           << std::setfill('0') << std::setw(2) << (minutes % 60);
+    return stream.str();
 }
 
 auto pixel_to_ndc_x(float x, float viewport_width) -> float {
@@ -75,40 +264,6 @@ auto atlas_uv_rect(const HotbarAtlasTile& tile) -> std::array<float, 4> {
     const auto u0 = static_cast<float>(tile.x) * uv_step;
     const auto v0 = static_cast<float>(tile.y) * uv_step;
     return {u0, v0, u0 + uv_step, v0 + uv_step};
-}
-
-void append_item_drop_quad(std::vector<ChunkVertex>& vertices,
-                           const glm::vec3& bottom_center,
-                           const glm::vec3& right,
-                           const glm::vec3& up,
-                           const std::array<float, 4>& uv_rect,
-                           float sky_light,
-                           float block_light,
-                           float material_class) {
-    const auto bottom_left = bottom_center - right;
-    const auto bottom_right = bottom_center + right;
-    const auto top_right = bottom_right + up;
-    const auto top_left = bottom_left + up;
-    auto normal = glm::cross(bottom_right - bottom_left, top_left - bottom_left);
-    if (glm::dot(normal, normal) <= 1.0e-6F) {
-        normal = glm::vec3 {0.0F, 0.0F, 1.0F};
-    } else {
-        normal = glm::normalize(normal);
-    }
-
-    const auto u0 = uv_rect[0];
-    const auto v0 = uv_rect[1];
-    const auto u1 = uv_rect[2];
-    const auto v1 = uv_rect[3];
-
-    vertices.insert(vertices.end(), {
-        {bottom_left.x, bottom_left.y, bottom_left.z, u0, v1, normal.x, normal.y, normal.z, 1.0F, 1.0F, sky_light, block_light, material_class},
-        {bottom_right.x, bottom_right.y, bottom_right.z, u1, v1, normal.x, normal.y, normal.z, 1.0F, 1.0F, sky_light, block_light, material_class},
-        {top_right.x, top_right.y, top_right.z, u1, v0, normal.x, normal.y, normal.z, 1.0F, 1.0F, sky_light, block_light, material_class},
-        {bottom_left.x, bottom_left.y, bottom_left.z, u0, v1, normal.x, normal.y, normal.z, 1.0F, 1.0F, sky_light, block_light, material_class},
-        {top_right.x, top_right.y, top_right.z, u1, v0, normal.x, normal.y, normal.z, 1.0F, 1.0F, sky_light, block_light, material_class},
-        {top_left.x, top_left.y, top_left.z, u0, v0, normal.x, normal.y, normal.z, 1.0F, 1.0F, sky_light, block_light, material_class},
-    });
 }
 
 void append_hud_quad(std::vector<HudVertex>& vertices,
@@ -550,6 +705,8 @@ auto ui_material_accent(BlockId block_id) -> HudColor {
         return {0.98F, 0.78F, 0.30F, 1.0F};
     case BlockVisualMaterial::Snow:
         return {0.90F, 0.93F, 0.98F, 1.0F};
+    case BlockVisualMaterial::Glass:
+        return {0.62F, 0.84F, 0.98F, 1.0F};
     default:
         return {0.56F, 0.60F, 0.66F, 1.0F};
     }
@@ -579,6 +736,8 @@ auto item_material_label(BlockId block_id) -> std::string_view {
         return "LUMIERE";
     case BlockVisualMaterial::Snow:
         return "NEIGE";
+    case BlockVisualMaterial::Glass:
+        return "VERRE";
     default:
         return "VIDE";
     }
@@ -1452,6 +1611,405 @@ auto item_stack_display_label(const HotbarSlot& slot) -> std::string {
     return label;
 }
 
+constexpr float kBlockBreakOverlayMaterialClass = 9.0F;
+constexpr float kBlockBreakOverlaySkyLight = 1.0F;
+constexpr float kBlockBreakOverlayBlockLight = 0.22F;
+constexpr float kBlockBreakOverlayAo = 1.0F;
+constexpr float kBlockBreakOverlayBaseInflate = 0.0035F;
+constexpr float kBlockBreakOverlayProgressInflate = 0.0105F;
+
+using OverlayQuad = std::array<std::array<float, 3>, 4>;
+using OverlayUvs = std::array<std::array<float, 2>, 4>;
+
+auto overlay_tile_uvs(const BlockAtlasTile& tile, float min_u = 0.0F, float min_v = 0.0F, float max_u = 1.0F, float max_v = 1.0F)
+    -> OverlayUvs {
+    const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
+    const auto tile_u0 = static_cast<float>(tile.x) * uv_step;
+    const auto tile_v0 = static_cast<float>(tile.y) * uv_step;
+    const auto u0 = tile_u0 + min_u * uv_step;
+    const auto v0 = tile_v0 + min_v * uv_step;
+    const auto u1 = tile_u0 + max_u * uv_step;
+    const auto v1 = tile_v0 + max_v * uv_step;
+    return {{
+        {u1, v0},
+        {u1, v1},
+        {u0, v1},
+        {u0, v0},
+    }};
+}
+
+void append_block_break_quad(std::vector<ChunkVertex>& vertices,
+                             std::vector<std::uint32_t>& indices,
+                             const OverlayQuad& positions,
+                             const OverlayUvs& uvs,
+                             const std::array<float, 3>& normal,
+                             float face_shade) {
+    const auto base_index = static_cast<std::uint32_t>(vertices.size());
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+        vertices.push_back({
+            positions[index][0],
+            positions[index][1],
+            positions[index][2],
+            uvs[index][0],
+            uvs[index][1],
+            normal[0],
+            normal[1],
+            normal[2],
+            face_shade,
+            kBlockBreakOverlayAo,
+            kBlockBreakOverlaySkyLight,
+            kBlockBreakOverlayBlockLight,
+            kBlockBreakOverlayMaterialClass,
+            0.0F,
+        });
+    }
+
+    indices.insert(indices.end(), {
+        base_index + 0U, base_index + 1U, base_index + 2U,
+        base_index + 0U, base_index + 2U, base_index + 3U,
+    });
+}
+
+void append_block_break_double_sided_quad(std::vector<ChunkVertex>& vertices,
+                                          std::vector<std::uint32_t>& indices,
+                                          const OverlayQuad& positions,
+                                          const OverlayUvs& uvs,
+                                          const std::array<float, 3>& normal,
+                                          float face_shade) {
+    append_block_break_quad(vertices, indices, positions, uvs, normal, face_shade);
+
+    const OverlayQuad reversed_positions {{
+        positions[3],
+        positions[2],
+        positions[1],
+        positions[0],
+    }};
+    const std::array<float, 3> reversed_normal {{
+        -normal[0],
+        -normal[1],
+        -normal[2],
+    }};
+    append_block_break_quad(vertices, indices, reversed_positions, uvs, reversed_normal, face_shade * 0.96F);
+}
+
+void append_block_break_cube_mesh(std::vector<ChunkVertex>& vertices,
+                                  std::vector<std::uint32_t>& indices,
+                                  const BlockCoord& block,
+                                  const BlockAtlasTile& tile,
+                                  float inflate,
+                                  float top_height = 1.0F) {
+    const auto min_x = static_cast<float>(block.x) - inflate;
+    const auto max_x = static_cast<float>(block.x + 1) + inflate;
+    const auto min_y = static_cast<float>(block.y) - inflate;
+    const auto max_y = static_cast<float>(block.y) + top_height + inflate;
+    const auto min_z = static_cast<float>(block.z) - inflate;
+    const auto max_z = static_cast<float>(block.z + 1) + inflate;
+    const auto uvs = overlay_tile_uvs(tile);
+
+    append_block_break_quad(
+        vertices,
+        indices,
+        {{{max_x, min_y, min_z}, {max_x, max_y, min_z}, {max_x, max_y, max_z}, {max_x, min_y, max_z}}},
+        uvs,
+        {1.0F, 0.0F, 0.0F},
+        0.85F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        {{{min_x, min_y, max_z}, {min_x, max_y, max_z}, {min_x, max_y, min_z}, {min_x, min_y, min_z}}},
+        uvs,
+        {-1.0F, 0.0F, 0.0F},
+        0.85F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        {{{min_x, max_y, max_z}, {max_x, max_y, max_z}, {max_x, max_y, min_z}, {min_x, max_y, min_z}}},
+        uvs,
+        {0.0F, 1.0F, 0.0F},
+        1.0F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        {{{min_x, min_y, min_z}, {max_x, min_y, min_z}, {max_x, min_y, max_z}, {min_x, min_y, max_z}}},
+        uvs,
+        {0.0F, -1.0F, 0.0F},
+        0.65F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        {{{max_x, min_y, max_z}, {max_x, max_y, max_z}, {min_x, max_y, max_z}, {min_x, min_y, max_z}}},
+        uvs,
+        {0.0F, 0.0F, 1.0F},
+        0.75F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        {{{min_x, min_y, min_z}, {min_x, max_y, min_z}, {max_x, max_y, min_z}, {max_x, min_y, min_z}}},
+        uvs,
+        {0.0F, 0.0F, -1.0F},
+        0.75F);
+}
+
+void append_block_break_cross_mesh(std::vector<ChunkVertex>& vertices,
+                                   std::vector<std::uint32_t>& indices,
+                                   const BlockCoord& block,
+                                   const BlockAtlasTile& tile,
+                                   float inflate) {
+    const auto min_edge = 0.18F - inflate;
+    const auto max_edge = 0.82F + inflate;
+    const auto min_y = static_cast<float>(block.y) - inflate;
+    const auto max_y = static_cast<float>(block.y) + 0.95F + inflate;
+    const auto world_x = static_cast<float>(block.x);
+    const auto world_z = static_cast<float>(block.z);
+    const auto uvs = overlay_tile_uvs(tile);
+
+    append_block_break_double_sided_quad(
+        vertices,
+        indices,
+        {{
+            {world_x + min_edge, min_y, world_z + min_edge},
+            {world_x + min_edge, max_y, world_z + min_edge},
+            {world_x + max_edge, max_y, world_z + max_edge},
+            {world_x + max_edge, min_y, world_z + max_edge},
+        }},
+        uvs,
+        {0.70710677F, 0.0F, -0.70710677F},
+        0.95F);
+    append_block_break_double_sided_quad(
+        vertices,
+        indices,
+        {{
+            {world_x + max_edge, min_y, world_z + min_edge},
+            {world_x + max_edge, max_y, world_z + min_edge},
+            {world_x + min_edge, max_y, world_z + max_edge},
+            {world_x + min_edge, min_y, world_z + max_edge},
+        }},
+        uvs,
+        {0.70710677F, 0.0F, 0.70710677F},
+        0.95F);
+}
+
+void append_block_break_torch_mesh(std::vector<ChunkVertex>& vertices,
+                                   std::vector<std::uint32_t>& indices,
+                                   const BlockCoord& block,
+                                   BlockId block_id,
+                                   const BlockAtlasTile& tile,
+                                   float inflate) {
+    constexpr float base_min_x = 6.0F / 16.0F;
+    constexpr float base_max_x = 10.0F / 16.0F;
+    constexpr float base_min_z = 6.0F / 16.0F;
+    constexpr float base_max_z = 10.0F / 16.0F;
+    constexpr float base_min_y = 0.0F;
+    constexpr float base_shaft_max_y = 10.0F / 16.0F;
+    constexpr float base_head_max_y = 14.0F / 16.0F;
+    constexpr float wall_mount_offset = 4.5F / 16.0F;
+    constexpr float wall_pivot_y = 3.5F / 16.0F;
+    constexpr float wall_tilt_radians = 22.5F * 3.14159265358979323846F / 180.0F;
+
+    const auto support_offset = torch_support_offset(block_id);
+    const auto wall_torch = is_wall_torch_block(block_id);
+    const auto uvs = overlay_tile_uvs(tile);
+
+    const auto transform_local_position = [&](const std::array<float, 3>& local_position) {
+        if (!wall_torch) {
+            return std::array<float, 3> {
+                static_cast<float>(block.x) + local_position[0],
+                static_cast<float>(block.y) + local_position[1],
+                static_cast<float>(block.z) + local_position[2],
+            };
+        }
+
+        auto x = local_position[0] + static_cast<float>(support_offset.x) * wall_mount_offset;
+        auto y = local_position[1];
+        auto z = local_position[2] + static_cast<float>(support_offset.z) * wall_mount_offset;
+        const auto pivot_x = 0.5F + static_cast<float>(support_offset.x) * wall_mount_offset;
+        const auto pivot_z = 0.5F + static_cast<float>(support_offset.z) * wall_mount_offset;
+
+        x -= pivot_x;
+        y -= wall_pivot_y;
+        z -= pivot_z;
+
+        if (support_offset.x != 0) {
+            const auto tilt = static_cast<float>(support_offset.x) * wall_tilt_radians;
+            const auto cos_tilt = std::cos(tilt);
+            const auto sin_tilt = std::sin(tilt);
+            const auto rotated_x = x * cos_tilt - y * sin_tilt;
+            const auto rotated_y = x * sin_tilt + y * cos_tilt;
+            x = rotated_x;
+            y = rotated_y;
+        } else if (support_offset.z != 0) {
+            const auto tilt = -static_cast<float>(support_offset.z) * wall_tilt_radians;
+            const auto cos_tilt = std::cos(tilt);
+            const auto sin_tilt = std::sin(tilt);
+            const auto rotated_y = y * cos_tilt - z * sin_tilt;
+            const auto rotated_z = y * sin_tilt + z * cos_tilt;
+            y = rotated_y;
+            z = rotated_z;
+        }
+
+        return std::array<float, 3> {
+            static_cast<float>(block.x) + x + pivot_x,
+            static_cast<float>(block.y) + y + wall_pivot_y,
+            static_cast<float>(block.z) + z + pivot_z,
+        };
+    };
+
+    const auto inflate_local_x = inflate;
+    const auto inflate_local_z = inflate;
+    const auto inflate_min_y = inflate;
+    const auto inflate_shaft_y = inflate * 0.45F;
+    const auto inflate_head_y = inflate;
+
+    const auto make_face = [&](const std::array<std::array<float, 3>, 4>& local_positions) {
+        std::array<std::array<float, 3>, 4> positions {};
+        for (std::size_t i = 0; i < local_positions.size(); ++i) {
+            positions[i] = transform_local_position(local_positions[i]);
+        }
+        return positions;
+    };
+
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_max_x + inflate_local_x, base_min_y - inflate_min_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z},
+                    {base_max_x + inflate_local_x, base_min_y - inflate_min_y, base_max_z + inflate_local_z}}}),
+        uvs,
+        {1.0F, 0.0F, 0.0F},
+        0.85F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_min_x - inflate_local_x, base_min_y - inflate_min_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z},
+                    {base_min_x - inflate_local_x, base_min_y - inflate_min_y, base_min_z - inflate_local_z}}}),
+        uvs,
+        {-1.0F, 0.0F, 0.0F},
+        0.85F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_max_x + inflate_local_x, base_min_y - inflate_min_y, base_max_z + inflate_local_z},
+                    {base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_min_y - inflate_min_y, base_max_z + inflate_local_z}}}),
+        uvs,
+        {0.0F, 0.0F, 1.0F},
+        0.75F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_min_x - inflate_local_x, base_min_y - inflate_min_y, base_min_z - inflate_local_z},
+                    {base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_min_y - inflate_min_y, base_min_z - inflate_local_z}}}),
+        uvs,
+        {0.0F, 0.0F, -1.0F},
+        0.75F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_min_x - inflate_local_x, base_min_y - inflate_min_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_min_y - inflate_min_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_min_y - inflate_min_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_min_y - inflate_min_y, base_max_z + inflate_local_z}}}),
+        uvs,
+        {0.0F, -1.0F, 0.0F},
+        0.65F);
+
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_head_max_y + inflate_head_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_head_max_y + inflate_head_y, base_max_z + inflate_local_z},
+                    {base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z}}}),
+        uvs,
+        {1.0F, 0.0F, 0.0F},
+        0.85F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_head_max_y + inflate_head_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_head_max_y + inflate_head_y, base_min_z - inflate_local_z},
+                    {base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z}}}),
+        uvs,
+        {-1.0F, 0.0F, 0.0F},
+        0.85F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z},
+                    {base_max_x + inflate_local_x, base_head_max_y + inflate_head_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_head_max_y + inflate_head_y, base_max_z + inflate_local_z},
+                    {base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_max_z + inflate_local_z}}}),
+        uvs,
+        {0.0F, 0.0F, 1.0F},
+        0.75F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_min_x - inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z},
+                    {base_min_x - inflate_local_x, base_head_max_y + inflate_head_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_head_max_y + inflate_head_y, base_min_z - inflate_local_z},
+                    {base_max_x + inflate_local_x, base_shaft_max_y + inflate_shaft_y, base_min_z - inflate_local_z}}}),
+        uvs,
+        {0.0F, 0.0F, -1.0F},
+        0.75F);
+    append_block_break_quad(
+        vertices,
+        indices,
+        make_face({{{base_min_x - inflate_local_x, base_head_max_y + inflate_head_y, base_max_z + inflate_local_z},
+                    {base_max_x + inflate_local_x, base_head_max_y + inflate_head_y, base_max_z + inflate_local_z},
+                    {base_max_x + inflate_local_x, base_head_max_y + inflate_head_y, base_min_z - inflate_local_z},
+                    {base_min_x - inflate_local_x, base_head_max_y + inflate_head_y, base_min_z - inflate_local_z}}}),
+        uvs,
+        {0.0F, 1.0F, 0.0F},
+        1.0F);
+}
+
+auto build_block_break_overlay_mesh_data(const BlockBreakProgress& break_progress) -> ChunkMeshData {
+    ChunkMeshData mesh {};
+    if (!break_progress.active || !is_block_breakable_at(break_progress.block, break_progress.block_id)) {
+        return mesh;
+    }
+
+    const auto tile = block_break_crack_tile(break_progress.crack_stage);
+    const auto inflate =
+        kBlockBreakOverlayBaseInflate + break_progress.progress * kBlockBreakOverlayProgressInflate;
+
+    mesh.vertices.reserve(64U);
+    mesh.indices.reserve(96U);
+
+    switch (block_mesh_type(break_progress.block_id)) {
+    case BlockMeshType::Cross:
+        append_block_break_cross_mesh(mesh.vertices, mesh.indices, break_progress.block, tile, inflate);
+        break;
+    case BlockMeshType::Torch:
+        append_block_break_torch_mesh(mesh.vertices, mesh.indices, break_progress.block, break_progress.block_id, tile, inflate);
+        break;
+    case BlockMeshType::Water:
+        append_block_break_cube_mesh(
+            mesh.vertices,
+            mesh.indices,
+            break_progress.block,
+            tile,
+            inflate,
+            15.0F / 16.0F);
+        break;
+    case BlockMeshType::FullCube:
+    default:
+        append_block_break_cube_mesh(mesh.vertices, mesh.indices, break_progress.block, tile, inflate);
+        break;
+    }
+
+    mesh.face_count = mesh.indices.size() / 6U;
+    return mesh;
+}
+
 } // namespace
 
 Renderer::~Renderer() {
@@ -1493,6 +2051,7 @@ void Renderer::shutdown() {
         for (auto& entry : gpu_meshes_) {
             destroy_gpu_mesh(entry.second);
         }
+        destroy_gpu_mesh(block_break_overlay_mesh_);
 
         destroy_water_scene_targets();
         destroy_post_process_targets();
@@ -1531,6 +2090,15 @@ void Renderer::shutdown() {
         if (shadow_framebuffer_ != 0) {
             glDeleteFramebuffers(1, &shadow_framebuffer_);
         }
+        if (viewmodel_instance_vbo_ != 0) {
+            glDeleteBuffers(1, &viewmodel_instance_vbo_);
+        }
+        if (viewmodel_vao_ != 0) {
+            glDeleteVertexArrays(1, &viewmodel_vao_);
+        }
+        if (creature_instance_vbo_ != 0) {
+            glDeleteBuffers(1, &creature_instance_vbo_);
+        }
         if (creature_ebo_ != 0) {
             glDeleteBuffers(1, &creature_ebo_);
         }
@@ -1540,6 +2108,12 @@ void Renderer::shutdown() {
         if (creature_vao_ != 0) {
             glDeleteVertexArrays(1, &creature_vao_);
         }
+        if (item_drop_instance_vbo_ != 0) {
+            glDeleteBuffers(1, &item_drop_instance_vbo_);
+        }
+        if (item_drop_ebo_ != 0) {
+            glDeleteBuffers(1, &item_drop_ebo_);
+        }
         if (item_drop_vbo_ != 0) {
             glDeleteBuffers(1, &item_drop_vbo_);
         }
@@ -1548,6 +2122,9 @@ void Renderer::shutdown() {
         }
         if (world_program_ != 0) {
             glDeleteProgram(world_program_);
+        }
+        if (item_drop_program_ != 0) {
+            glDeleteProgram(item_drop_program_);
         }
         if (creature_program_ != 0) {
             glDeleteProgram(creature_program_);
@@ -1573,10 +2150,15 @@ void Renderer::shutdown() {
         if (glow_blur_program_ != 0) {
             glDeleteProgram(glow_blur_program_);
         }
+        if (menu_background_program_ != 0) {
+            glDeleteProgram(menu_background_program_);
+        }
     }
 
     gpu_meshes_.clear();
+    block_break_overlay_mesh_ = {};
     visible_chunks_cache_.clear();
+    shadow_chunks_cache_.clear();
     screen_quad_vao_ = 0;
     crosshair_vbo_ = 0;
     crosshair_vao_ = 0;
@@ -1594,9 +2176,15 @@ void Renderer::shutdown() {
     creature_vao_ = 0;
     creature_vbo_ = 0;
     creature_ebo_ = 0;
+    creature_instance_vbo_ = 0;
+    viewmodel_vao_ = 0;
+    viewmodel_instance_vbo_ = 0;
     item_drop_vao_ = 0;
     item_drop_vbo_ = 0;
+    item_drop_ebo_ = 0;
+    item_drop_instance_vbo_ = 0;
     world_program_ = 0;
+    item_drop_program_ = 0;
     creature_program_ = 0;
     shadow_program_ = 0;
     hud_program_ = 0;
@@ -1605,17 +2193,20 @@ void Renderer::shutdown() {
     post_process_program_ = 0;
     glow_extract_program_ = 0;
     glow_blur_program_ = 0;
+    menu_background_program_ = 0;
     world_uniforms_ = {};
     creature_uniforms_ = {};
+    item_drop_uniforms_ = {};
     shadow_uniforms_ = {};
     hud_uniforms_ = {};
     sky_uniforms_ = {};
     post_process_uniforms_ = {};
     glow_extract_uniforms_ = {};
     glow_blur_uniforms_ = {};
-    creature_vertex_buffer_bytes_ = 0;
-    creature_index_buffer_bytes_ = 0;
-    item_drop_vertex_buffer_bytes_ = 0;
+    menu_background_uniforms_ = {};
+    creature_instance_buffer_bytes_ = 0;
+    viewmodel_instance_buffer_bytes_ = 0;
+    item_drop_instance_buffer_bytes_ = 0;
     last_frame_stats_ = {};
     water_scene_target_width_ = 0;
     water_scene_target_height_ = 0;
@@ -1633,6 +2224,10 @@ void Renderer::render_frame(World& world,
                             const InventoryMenuState& inventory_menu,
                             const DeathScreenState& death_screen,
                             const PauseMenuState& pause_menu,
+                            const MainMenuState& main_menu,
+                            const SaveSlotMenuState& save_slot_menu,
+                            const OptionsMenuState& options_menu,
+                            const ConfirmDialogState& confirm_dialog,
                             std::span<const CreatureRenderInstance> creatures,
                             std::span<const ItemDropRenderInstance> item_drops,
                             const EnvironmentState& environment,
@@ -1671,46 +2266,13 @@ void Renderer::render_frame(World& world,
     const auto draw_distance_sq = draw_distance * draw_distance;
     constexpr float kBackCullStartDistance = 20.0F;
     constexpr float kBackCullStartDistanceSq = kBackCullStartDistance * kBackCullStartDistance;
-    auto& visible_chunks = visible_chunks_cache_;
-    visible_chunks.clear();
-    if (visible_chunks.capacity() < gpu_meshes_.size()) {
-        visible_chunks.reserve(gpu_meshes_.size());
-    }
-
-    for (const auto& [coord, gpu_mesh] : gpu_meshes_) {
-        if (gpu_mesh.opaque_index_count == 0 && gpu_mesh.water_index_count == 0) {
-            continue;
-        }
-
-        const auto bounds = make_chunk_bounds(coord);
-        if (!should_render_chunk_in_camera_pass(
-                bounds,
-                frustum_planes,
-                eye,
-                forward,
-                draw_distance_sq,
-                kBackCullStartDistanceSq)) {
-            continue;
-        }
-
-        visible_chunks.push_back({
-            coord,
-            &gpu_mesh,
-            bounds.center,
-            chunk_horizontal_distance_sq(bounds.center, eye),
-        });
-    }
-    std::sort(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& lhs, const VisibleChunk& rhs) {
-        return lhs.distance_squared < rhs.distance_squared;
-    });
-    frame_stats.visible_chunks = visible_chunks.size();
-
     const auto sun_visible = environment.sun_direction.y > 0.0F;
     glm::mat4 light_view_projection(1.0F);
+    ShadowPassContext shadow_context {};
+    auto shadow_map_size = 0;
 
     if (options_.shadows_enabled && sun_visible) {
-        const auto shadow_start = clock::now();
-        const auto shadow_map_size = std::max(options_.shadow_map_size, 1);
+        shadow_map_size = std::max(options_.shadow_map_size, 1);
         const auto snap = (kShadowDistance * 2.0F) / static_cast<float>(shadow_map_size);
         const auto focus = player.position() + glm::vec3 {0.0F, 18.0F, 0.0F};
         const auto snapped_focus = glm::vec3 {
@@ -1729,8 +2291,57 @@ void Renderer::render_frame(World& world,
             1.0F,
             kShadowDistance * 3.0F);
         light_view_projection = light_projection * light_view;
-        const auto light_frustum_planes = extract_frustum_planes(light_view_projection);
+        shadow_context.frustum = extract_frustum_planes(light_view_projection);
+        shadow_context.focus = focus;
+        const auto max_shadow_distance = kShadowDistance + static_cast<float>(kChunkSizeX);
+        shadow_context.max_distance_sq = max_shadow_distance * max_shadow_distance;
+        shadow_context.enabled = true;
+    }
 
+    auto& visible_chunks = visible_chunks_cache_;
+    auto& shadow_chunks = shadow_chunks_cache_;
+    visible_chunks.clear();
+    shadow_chunks.clear();
+    if (visible_chunks.capacity() < gpu_meshes_.size()) {
+        visible_chunks.reserve(gpu_meshes_.size());
+    }
+    if (shadow_chunks.capacity() < gpu_meshes_.size()) {
+        shadow_chunks.reserve(gpu_meshes_.size());
+    }
+
+    for (const auto& [coord, gpu_mesh] : gpu_meshes_) {
+        if (gpu_mesh.opaque_index_count == 0 && gpu_mesh.water_index_count == 0) {
+            continue;
+        }
+
+        const auto visibility = classify_chunk_visibility(
+            gpu_mesh.bounds,
+            frustum_planes,
+            eye,
+            forward,
+            draw_distance_sq,
+            kBackCullStartDistanceSq,
+            shadow_context,
+            gpu_mesh.opaque_index_count > 0);
+        if (visibility.camera) {
+            visible_chunks.push_back({
+                coord,
+                &gpu_mesh,
+                gpu_mesh.bounds.center,
+                visibility.distance_squared,
+            });
+        }
+        if (visibility.shadow) {
+            shadow_chunks.push_back({&gpu_mesh});
+        }
+    }
+    std::sort(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& lhs, const VisibleChunk& rhs) {
+        return lhs.distance_squared < rhs.distance_squared;
+    });
+    frame_stats.visible_chunks = visible_chunks.size();
+
+    if (shadow_context.enabled) {
+        const auto shadow_start = clock::now();
         glViewport(0, 0, shadow_map_size, shadow_map_size);
         glBindFramebuffer(GL_FRAMEBUFFER, shadow_framebuffer_);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -1746,20 +2357,9 @@ void Renderer::render_frame(World& world,
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, atlas_texture_);
 
-        const auto max_shadow_distance = kShadowDistance + static_cast<float>(kChunkSizeX);
-        const auto max_shadow_distance_sq = max_shadow_distance * max_shadow_distance;
-        for (const auto& [coord, gpu_mesh] : gpu_meshes_) {
-            if (gpu_mesh.opaque_index_count == 0) {
-                continue;
-            }
-
-            const auto bounds = make_chunk_bounds(coord);
-            if (!should_render_chunk_in_shadow_pass(bounds, light_frustum_planes, focus, max_shadow_distance_sq)) {
-                continue;
-            }
-
-            glBindVertexArray(gpu_mesh.vao);
-            glDrawElements(GL_TRIANGLES, gpu_mesh.opaque_index_count, GL_UNSIGNED_INT, nullptr);
+        for (const auto& shadow_chunk : shadow_chunks) {
+            glBindVertexArray(shadow_chunk.mesh->vao);
+            glDrawElements(GL_TRIANGLES, shadow_chunk.mesh->opaque_index_count, GL_UNSIGNED_INT, nullptr);
             ++frame_stats.shadow_chunks;
         }
 
@@ -1774,6 +2374,10 @@ void Renderer::render_frame(World& world,
     const auto render_width = std::max(width, 1);
     const auto render_height = std::max(height, 1);
     const auto use_post_process = options_.post_process_enabled && width > 0 && height > 0;
+    const auto menu_preview_visible =
+        main_menu.visible ||
+        (save_slot_menu.visible && save_slot_menu.parent == SaveSlotMenuParent::MainMenu) ||
+        (options_menu.visible && options_menu.parent == OptionsMenuParent::MainMenu);
     const auto has_visible_water = std::any_of(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& visible_chunk) {
         return visible_chunk.mesh->water_index_count > 0;
     });
@@ -1781,11 +2385,11 @@ void Renderer::render_frame(World& world,
     if (has_visible_water) {
         ensure_water_scene_targets(render_width, render_height);
     }
-    if (use_post_process || has_visible_water) {
+    if (use_post_process || has_visible_water || menu_preview_visible) {
         ensure_post_process_targets(render_width, render_height);
     }
 
-    const auto final_target_framebuffer = (use_post_process || has_visible_water) ? scene_framebuffer_ : 0U;
+    const auto final_target_framebuffer = (use_post_process || has_visible_water || menu_preview_visible) ? scene_framebuffer_ : 0U;
     const auto opaque_target_framebuffer = has_visible_water ? water_scene_framebuffer_ : final_target_framebuffer;
     const auto inverse_view_projection = glm::inverse(view_projection);
 
@@ -1837,8 +2441,21 @@ void Renderer::render_frame(World& world,
         ++frame_stats.world_chunks;
     }
 
-    draw_item_drops(item_drops);
-    draw_creatures(creatures, view_projection, light_view_projection, eye, environment);
+    draw_item_drops(
+        item_drops,
+        view_projection,
+        light_view_projection,
+        inverse_view_projection,
+        eye,
+        environment,
+        sun_visible);
+    draw_creatures(
+        creatures,
+        view_projection,
+        light_view_projection,
+        eye,
+        environment,
+        selected_hotbar_emits_local_light(hotbar));
 
     if (has_visible_water) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
@@ -1887,9 +2504,16 @@ void Renderer::render_frame(World& world,
         glCullFace(GL_BACK);
     }
 
-    draw_player_viewmodel(player, viewmodel_projection * player.view_matrix(), light_view_projection, eye, environment);
+    draw_block_break_overlay(player);
 
-    if (use_post_process) {
+    if (!menu_preview_visible) {
+        draw_player_viewmodel(player, viewmodel_projection * player.view_matrix(), light_view_projection, eye, environment);
+    }
+
+    if (menu_preview_visible) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        run_menu_background_pass(render_width, render_height);
+    } else if (use_post_process) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         run_post_process(environment, width, render_height);
     } else if (has_visible_water) {
@@ -1911,7 +2535,13 @@ void Renderer::render_frame(World& world,
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    if (death_screen.visible) {
+    if (main_menu.visible) {
+        draw_main_menu(main_menu, width, height);
+    } else if (save_slot_menu.visible) {
+        draw_save_slot_menu(save_slot_menu, width, height);
+    } else if (options_menu.visible) {
+        draw_options_menu(options_menu, width, height);
+    } else if (death_screen.visible) {
         draw_death_screen(death_screen, width, height);
     } else if (pause_menu.visible) {
         draw_pause_menu(pause_menu, width, height);
@@ -1921,8 +2551,220 @@ void Renderer::render_frame(World& world,
         draw_hotbar(player, hotbar, environment, width, height);
         draw_crosshair();
     }
+    if (confirm_dialog.visible) {
+        draw_confirm_dialog(confirm_dialog, width, height);
+    }
     frame_stats.world_ms = std::chrono::duration<double, std::milli>(clock::now() - world_start).count();
     last_frame_stats_ = frame_stats;
+}
+
+void Renderer::render_loading_screen(std::string_view title,
+                                     std::string_view detail,
+                                     float progress,
+                                     int width,
+                                     int height) {
+    if (!initialized_ || width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    const auto clamped_progress = std::clamp(progress, 0.0F, 1.0F);
+    const auto panel_width = std::clamp(viewport_width * 0.44F, 420.0F, 760.0F);
+    const auto panel_height = std::clamp(viewport_height * 0.27F, 190.0F, 280.0F);
+    const auto panel_x = (viewport_width - panel_width) * 0.5F;
+    const auto panel_y = (viewport_height - panel_height) * 0.5F;
+    const auto padding = std::clamp(panel_width * 0.06F, 24.0F, 42.0F);
+    const auto title_pixel_size = std::floor(std::clamp(viewport_width * 0.0050F, 5.0F, 8.0F));
+    const auto detail_pixel_size = std::floor(std::clamp(viewport_width * 0.0020F, 2.0F, 4.0F));
+    const auto percent_pixel_size = std::max(3.0F, detail_pixel_size);
+
+    std::vector<HudVertex> vertices {};
+    vertices.reserve(8192U);
+
+    const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x + pixel_size,
+            y + pixel_size,
+            pixel_size,
+            text,
+            {0.0F, 0.0F, 0.0F, 0.45F},
+            centered);
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x,
+            y,
+            pixel_size,
+            text,
+            color,
+            centered);
+    };
+
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.04F, 0.05F, 0.06F, 1.0F});
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height * 0.36F, {0.07F, 0.08F, 0.09F, 0.72F});
+    append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, viewport_height * 0.64F, viewport_width, viewport_height * 0.36F, {0.02F, 0.03F, 0.04F, 0.84F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        viewport_width * 0.16F,
+        panel_y - 36.0F,
+        viewport_width * 0.68F,
+        panel_height + 72.0F,
+        {0.88F, 0.70F, 0.32F, 0.05F});
+
+    append_hud_shadow_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        28.0F,
+        {0.0F, 0.0F, 0.0F, 0.28F});
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        5.0F,
+        make_stone_panel_palette(),
+        false);
+
+    const auto header_height = std::clamp(panel_height * 0.34F, 58.0F, 84.0F);
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x + 12.0F,
+        panel_y + 12.0F,
+        panel_width - 24.0F,
+        header_height,
+        4.0F,
+        make_header_panel_palette(),
+        false);
+
+    const auto title_text = title.empty() ? std::string_view("VALCRAFT") : title;
+    draw_text(
+        panel_x + panel_width * 0.5F,
+        panel_y + 24.0F,
+        title_pixel_size,
+        title_text,
+        {0.98F, 0.95F, 0.88F, 1.0F},
+        true);
+    draw_text(
+        panel_x + panel_width * 0.5F,
+        panel_y + 24.0F + title_pixel_size * 7.0F + 6.0F,
+        detail_pixel_size,
+        detail.empty() ? std::string_view("CHARGEMENT DU MONDE") : detail,
+        {0.84F, 0.86F, 0.90F, 0.96F},
+        true);
+
+    const auto track_x = panel_x + padding;
+    const auto track_y = panel_y + header_height + 34.0F;
+    const auto track_width = panel_width - padding * 2.0F;
+    const auto track_height = std::clamp(panel_height * 0.19F, 24.0F, 36.0F);
+    const auto track_inner_x = track_x + 10.0F;
+    const auto track_inner_y = track_y + 10.0F;
+    const auto track_inner_width = std::max(0.0F, track_width - 20.0F);
+    const auto track_inner_height = std::max(0.0F, track_height - 20.0F);
+    const auto fill_width = track_inner_width * clamped_progress;
+    const auto accent = HudColor {0.94F, 0.76F, 0.32F, 1.0F};
+
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        track_x,
+        track_y,
+        track_width,
+        track_height,
+        3.0F,
+        make_slate_panel_palette(),
+        true);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        track_inner_x,
+        track_inner_y,
+        track_inner_width,
+        track_inner_height,
+        {0.08F, 0.10F, 0.12F, 0.88F});
+    if (fill_width > 0.0F) {
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            track_inner_x,
+            track_inner_y,
+            fill_width,
+            track_inner_height,
+            hud_with_alpha(hud_scale_rgb(accent, 0.88F), 0.96F));
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            track_inner_x,
+            track_inner_y,
+            fill_width,
+            std::max(2.0F, track_inner_height * 0.36F),
+            hud_with_alpha(hud_scale_rgb(accent, 1.18F), 0.42F));
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            track_inner_x + std::max(0.0F, fill_width - 6.0F),
+            track_inner_y,
+            6.0F,
+            track_inner_height,
+            hud_with_alpha(hud_scale_rgb(accent, 1.24F), 0.76F));
+    }
+
+    std::string percent_text = std::to_string(static_cast<int>(std::lround(clamped_progress * 100.0F)));
+    percent_text += " %";
+    draw_text(
+        panel_x + panel_width * 0.5F,
+        track_y + track_height + 18.0F,
+        percent_pixel_size,
+        percent_text,
+        {0.96F, 0.97F, 0.99F, 0.98F},
+        true);
+    draw_text(
+        panel_x + panel_width * 0.5F,
+        track_y + track_height + 18.0F + percent_pixel_size * 7.0F + 6.0F,
+        detail_pixel_size,
+        "PREPARATION EN COURS",
+        {0.76F, 0.79F, 0.84F, 0.90F},
+        true);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, std::max(width, 1), std::max(height, 1));
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glClearColor(0.04F, 0.05F, 0.06F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
 }
 
 auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
@@ -1967,25 +2809,13 @@ void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats) {
 void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision) {
     auto& gpu_mesh = gpu_meshes_[coord];
     gpu_mesh.revision = revision;
+    gpu_mesh.bounds = make_chunk_bounds(coord);
     gpu_mesh.opaque_index_count = 0;
     gpu_mesh.water_index_count = 0;
     gpu_mesh.water_index_offset_bytes = 0;
 
     if (mesh.total_index_count() == 0 || mesh.total_vertex_count() == 0) {
         return;
-    }
-
-    std::vector<ChunkVertex> combined_vertices;
-    combined_vertices.reserve(mesh.total_vertex_count());
-    combined_vertices.insert(combined_vertices.end(), mesh.vertices.begin(), mesh.vertices.end());
-    combined_vertices.insert(combined_vertices.end(), mesh.water_vertices.begin(), mesh.water_vertices.end());
-
-    std::vector<std::uint32_t> combined_indices;
-    combined_indices.reserve(mesh.total_index_count());
-    combined_indices.insert(combined_indices.end(), mesh.indices.begin(), mesh.indices.end());
-    const auto water_vertex_offset = static_cast<std::uint32_t>(mesh.vertices.size());
-    for (const auto index : mesh.water_indices) {
-        combined_indices.push_back(index + water_vertex_offset);
     }
 
     if (gpu_mesh.vao == 0) {
@@ -2021,8 +2851,12 @@ void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, s
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
     }
 
-    const auto vertex_bytes = static_cast<GLsizeiptr>(combined_vertices.size() * sizeof(ChunkVertex));
-    const auto index_bytes = static_cast<GLsizeiptr>(combined_indices.size() * sizeof(std::uint32_t));
+    const auto opaque_vertex_bytes = static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(ChunkVertex));
+    const auto water_vertex_bytes = static_cast<GLsizeiptr>(mesh.water_vertices.size() * sizeof(ChunkVertex));
+    const auto vertex_bytes = opaque_vertex_bytes + water_vertex_bytes;
+    const auto opaque_index_bytes = static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t));
+    const auto water_index_bytes = static_cast<GLsizeiptr>(mesh.water_indices.size() * sizeof(std::uint32_t));
+    const auto index_bytes = opaque_index_bytes + water_index_bytes;
 
     if (gpu_mesh.vertex_buffer_bytes < vertex_bytes) {
         gpu_mesh.vertex_buffer_bytes = grow_buffer_capacity(
@@ -2039,12 +2873,96 @@ void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, s
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
     }
 
-    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, combined_vertices.data());
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, combined_indices.data());
+    if (opaque_vertex_bytes > 0) {
+        glBufferSubData(GL_ARRAY_BUFFER, 0, opaque_vertex_bytes, mesh.vertices.data());
+    }
+    if (water_vertex_bytes > 0) {
+        glBufferSubData(GL_ARRAY_BUFFER, opaque_vertex_bytes, water_vertex_bytes, mesh.water_vertices.data());
+    }
+
+    if (opaque_index_bytes > 0) {
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, opaque_index_bytes, mesh.indices.data());
+    }
+    if (water_index_bytes > 0) {
+        auto& translated_water_indices = translated_water_indices_scratch_;
+        translated_water_indices.resize(mesh.water_indices.size());
+        const auto water_vertex_offset = static_cast<std::uint32_t>(mesh.vertices.size());
+        for (std::size_t index = 0; index < mesh.water_indices.size(); ++index) {
+            translated_water_indices[index] = mesh.water_indices[index] + water_vertex_offset;
+        }
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, opaque_index_bytes, water_index_bytes, translated_water_indices.data());
+    }
 
     gpu_mesh.opaque_index_count = static_cast<GLsizei>(mesh.indices.size());
     gpu_mesh.water_index_count = static_cast<GLsizei>(mesh.water_indices.size());
-    gpu_mesh.water_index_offset_bytes = static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t));
+    gpu_mesh.water_index_offset_bytes = opaque_index_bytes;
+}
+
+void Renderer::upload_block_break_overlay_mesh(const BlockBreakProgress& break_progress) {
+    const auto mesh = build_block_break_overlay_mesh_data(break_progress);
+    auto& gpu_mesh = block_break_overlay_mesh_;
+    gpu_mesh.opaque_index_count = 0;
+    gpu_mesh.water_index_count = 0;
+    gpu_mesh.water_index_offset_bytes = 0;
+
+    if (mesh.indices.empty() || mesh.vertices.empty()) {
+        return;
+    }
+
+    if (gpu_mesh.vao == 0) {
+        glGenVertexArrays(1, &gpu_mesh.vao);
+        glGenBuffers(1, &gpu_mesh.vbo);
+        glGenBuffers(1, &gpu_mesh.ebo);
+
+        glBindVertexArray(gpu_mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, x)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, u)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, nx)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, face_shade)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, ao)));
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, sky_light)));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
+        glEnableVertexAttribArray(7);
+        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, material_class)));
+        glEnableVertexAttribArray(8);
+        glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, wave_weight)));
+    } else {
+        glBindVertexArray(gpu_mesh.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
+    }
+
+    const auto vertex_bytes = static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(ChunkVertex));
+    const auto index_bytes = static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t));
+
+    if (gpu_mesh.vertex_buffer_bytes < vertex_bytes) {
+        gpu_mesh.vertex_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.vertex_buffer_bytes,
+            vertex_bytes,
+            kInitialVertexBufferBytes);
+        glBufferData(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
+    }
+    if (gpu_mesh.index_buffer_bytes < index_bytes) {
+        gpu_mesh.index_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.index_buffer_bytes,
+            index_bytes,
+            kInitialIndexBufferBytes);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
+    }
+
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, mesh.vertices.data());
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, mesh.indices.data());
+    gpu_mesh.opaque_index_count = static_cast<GLsizei>(mesh.indices.size());
 }
 
 void Renderer::destroy_gpu_mesh(GpuMesh& mesh) {
@@ -2173,6 +3091,167 @@ void main() {
     v_wave_weight = wave_weight;
     v_distance = distance(world_position.xyz, u_camera_position);
     v_world_position = world_position.xyz;
+    v_light_position = u_light_view_projection * world_position;
+}
+)";
+
+    static constexpr auto* item_drop_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_face_uv;
+layout(location = 3) in float a_face_index;
+layout(location = 4) in vec3 i_center;
+layout(location = 5) in float i_size;
+layout(location = 6) in float i_rotation;
+layout(location = 7) in uint i_block_id;
+layout(location = 8) in float i_sky_light;
+layout(location = 9) in float i_block_light;
+layout(location = 10) in float i_material_class;
+
+uniform mat4 u_view_projection;
+uniform mat4 u_light_view_projection;
+uniform vec3 u_camera_position;
+
+out vec2 v_uv;
+out vec3 v_normal;
+out float v_face_shade;
+out float v_ao;
+out float v_sky_light;
+out float v_block_light;
+out float v_material_class;
+out float v_wave_weight;
+out float v_distance;
+out vec3 v_world_position;
+out vec4 v_light_position;
+
+vec4 atlas_uv_rect(int tile_x, int tile_y) {
+    float uv_step = 1.0 / 8.0;
+    float u0 = float(tile_x) * uv_step;
+    float v0 = float(tile_y) * uv_step;
+    return vec4(u0, v0, u0 + uv_step, v0 + uv_step);
+}
+
+vec4 block_uv_rect(uint block_id, uint face_index) {
+    bool top_face = face_index == 2u;
+    bool bottom_face = face_index == 3u;
+
+    switch (block_id) {
+    case 1u:
+        if (top_face) {
+            return atlas_uv_rect(0, 0);
+        }
+        if (bottom_face) {
+            return atlas_uv_rect(2, 0);
+        }
+        return atlas_uv_rect(1, 0);
+    case 2u:
+        return atlas_uv_rect(2, 0);
+    case 3u:
+        return atlas_uv_rect(3, 0);
+    case 4u:
+        return atlas_uv_rect(4, 0);
+    case 5u:
+        return atlas_uv_rect(5, 0);
+    case 6u:
+        return atlas_uv_rect(6, 0);
+    case 7u:
+        return atlas_uv_rect(7, 0);
+    case 8u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(1, 1);
+        }
+        return atlas_uv_rect(0, 1);
+    case 9u:
+        return atlas_uv_rect(2, 1);
+    case 10u:
+        return atlas_uv_rect(3, 1);
+    case 11u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(5, 1);
+        }
+        return atlas_uv_rect(4, 1);
+    case 12u:
+        return atlas_uv_rect(6, 1);
+    case 13u:
+        if (top_face) {
+            return atlas_uv_rect(0, 2);
+        }
+        if (bottom_face) {
+            return atlas_uv_rect(2, 0);
+        }
+        return atlas_uv_rect(1, 2);
+    case 14u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(6, 2);
+        }
+        return atlas_uv_rect(5, 2);
+    case 15u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(5, 3);
+        }
+        return atlas_uv_rect(7, 2);
+    case 16u:
+        if (top_face) {
+            return atlas_uv_rect(7, 3);
+        }
+        if (bottom_face) {
+            return atlas_uv_rect(0, 4);
+        }
+        return atlas_uv_rect(6, 3);
+    case 17u:
+        return atlas_uv_rect(1, 3);
+    case 18u:
+        return atlas_uv_rect(2, 3);
+    case 19u:
+        return atlas_uv_rect(3, 3);
+    case 20u:
+        return atlas_uv_rect(4, 3);
+    default:
+        return atlas_uv_rect(0, 0);
+    }
+}
+
+float face_shade(float face_index) {
+    if (face_index < 1.5) {
+        return 0.85;
+    }
+    if (face_index < 2.5) {
+        return 1.0;
+    }
+    if (face_index < 3.5) {
+        return 0.65;
+    }
+    return 0.75;
+}
+
+vec3 rotate_y(vec3 value, float cos_rotation, float sin_rotation) {
+    return vec3(
+        value.x * cos_rotation - value.z * sin_rotation,
+        value.y,
+        value.x * sin_rotation + value.z * cos_rotation
+    );
+}
+
+void main() {
+    float cos_rotation = cos(i_rotation);
+    float sin_rotation = sin(i_rotation);
+    vec3 world_position3 = i_center + rotate_y(a_position * i_size, cos_rotation, sin_rotation);
+    vec3 world_normal = normalize(rotate_y(a_normal, cos_rotation, sin_rotation));
+    vec4 uv_rect = block_uv_rect(i_block_id, uint(a_face_index + 0.5));
+    vec2 uv = mix(uv_rect.xy, uv_rect.zw, a_face_uv);
+    vec4 world_position = vec4(world_position3, 1.0);
+
+    gl_Position = u_view_projection * world_position;
+    v_uv = uv;
+    v_normal = world_normal;
+    v_face_shade = face_shade(a_face_index);
+    v_ao = 1.0;
+    v_sky_light = i_sky_light;
+    v_block_light = i_block_light;
+    v_material_class = i_material_class;
+    v_wave_weight = 0.0;
+    v_distance = distance(world_position3, u_camera_position);
+    v_world_position = world_position3;
     v_light_position = u_light_view_projection * world_position;
 }
 )";
@@ -2312,6 +3391,7 @@ void main() {
     float flora_mask = material_mask(v_material_class, 5.0);
     float emissive_mask = material_mask(v_material_class, 7.0);
     float snow_mask = material_mask(v_material_class, 8.0);
+    float glass_mask = material_mask(v_material_class, 10.0);
 
     float view_alignment = mix(max(dot(view_direction, normal), 0.0), abs(dot(view_direction, normal)), water_mask);
     float sun_alignment = mix(max(dot(normal, sun_direction), 0.0), abs(dot(normal, sun_direction)), water_mask);
@@ -2327,18 +3407,22 @@ void main() {
     vec3 bounce_light = mix(u_fog_color, u_distant_fog_color, 0.42) * bounce_factor * (0.12 + 0.12 * daylight);
     vec3 torch_light = vec3(1.14, 0.70, 0.32) * block_light * (1.18 + emissive_mask * 0.55);
 
-    float rim = pow(1.0 - view_alignment, mix(3.0, 1.7, water_mask + foliage_mask * 0.35 + flora_mask * 0.45));
-    vec3 rim_color = mix(u_fog_color, u_sun_color, 0.55) * rim * (0.02 + 0.08 * daylight + 0.04 * foliage_mask + 0.05 * flora_mask);
+    float rim = pow(1.0 - view_alignment, mix(3.0, 1.7, water_mask + foliage_mask * 0.35 + flora_mask * 0.45 + glass_mask * 0.55));
+    vec3 rim_color =
+        mix(u_fog_color, u_sun_color, 0.55) * rim * (0.02 + 0.08 * daylight + 0.04 * foliage_mask + 0.05 * flora_mask + 0.10 * glass_mask);
 
     vec3 reflected = reflect(-sun_direction, normal);
-    float specular_power = mix(11.0, 34.0, rock_mask + snow_mask * 0.3 + sand_mask * 0.1);
+    float specular_power = mix(11.0, 34.0, rock_mask + snow_mask * 0.3 + sand_mask * 0.1 + glass_mask * 0.55);
     specular_power = mix(specular_power, 18.0, wood_mask);
+    specular_power = mix(specular_power, 42.0, glass_mask);
     float specular = pow(max(dot(reflected, view_direction), 0.0), specular_power);
-    vec3 specular_color = u_sun_color * specular * shadow * (0.12 * rock_mask + 0.08 * wood_mask + 0.05 * snow_mask);
+    vec3 specular_color =
+        u_sun_color * specular * shadow * (0.12 * rock_mask + 0.08 * wood_mask + 0.05 * snow_mask + 0.22 * glass_mask);
 
     vec3 material_tint = vec3(1.0);
     material_tint = mix(material_tint, vec3(1.03, 0.99, 0.92), sand_mask);
     material_tint = mix(material_tint, vec3(0.94, 0.98, 1.06), snow_mask);
+    material_tint = mix(material_tint, vec3(0.84, 0.94, 1.08), glass_mask);
     material_tint = mix(material_tint, vec3(0.96, 1.03, 0.97), foliage_mask * 0.65 + flora_mask * 0.45);
     material_tint = mix(material_tint, vec3(1.02, 0.98, 0.94), wood_mask * 0.45);
 
@@ -2420,13 +3504,18 @@ void main() {
 
     static constexpr auto* creature_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
-layout(location = 1) in vec2 a_uv;
-layout(location = 2) in vec3 a_normal;
-layout(location = 3) in float a_nightmare_factor;
-layout(location = 4) in float a_tension;
-layout(location = 5) in float a_material_class;
-layout(location = 6) in float a_cavity_mask;
-layout(location = 7) in float a_emissive_strength;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in vec2 a_face_uv;
+layout(location = 3) in float a_face_index;
+layout(location = 4) in mat4 i_transform;
+layout(location = 8) in vec4 i_uv_pos_x;
+layout(location = 9) in vec4 i_uv_neg_x;
+layout(location = 10) in vec4 i_uv_pos_y;
+layout(location = 11) in vec4 i_uv_neg_y;
+layout(location = 12) in vec4 i_uv_pos_z;
+layout(location = 13) in vec4 i_uv_neg_z;
+layout(location = 14) in vec4 i_surface;
+layout(location = 15) in float i_emissive_strength;
 
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
@@ -2443,18 +3532,41 @@ out float v_cavity_mask;
 out float v_emissive_strength;
 out vec4 v_light_position;
 
+vec4 face_uv_rect(float face_index) {
+    if (face_index < 0.5) {
+        return i_uv_pos_x;
+    }
+    if (face_index < 1.5) {
+        return i_uv_neg_x;
+    }
+    if (face_index < 2.5) {
+        return i_uv_pos_y;
+    }
+    if (face_index < 3.5) {
+        return i_uv_neg_y;
+    }
+    if (face_index < 4.5) {
+        return i_uv_pos_z;
+    }
+    return i_uv_neg_z;
+}
+
 void main() {
-    vec4 world_position = vec4(a_position, 1.0);
+    vec4 world_position = i_transform * vec4(a_position, 1.0);
+    mat3 normal_matrix = transpose(inverse(mat3(i_transform)));
+    vec3 world_normal = normalize(normal_matrix * a_normal);
+    vec4 uv_rect = face_uv_rect(a_face_index);
+
     gl_Position = u_view_projection * world_position;
-    v_uv = a_uv;
-    v_normal = a_normal;
+    v_uv = mix(uv_rect.xy, uv_rect.zw, a_face_uv);
+    v_normal = world_normal;
     v_world_position = world_position.xyz;
     v_distance = distance(world_position.xyz, u_camera_position);
-    v_nightmare_factor = a_nightmare_factor;
-    v_tension = a_tension;
-    v_material_class = a_material_class;
-    v_cavity_mask = a_cavity_mask;
-    v_emissive_strength = a_emissive_strength;
+    v_nightmare_factor = i_surface.x;
+    v_tension = i_surface.y;
+    v_material_class = i_surface.z;
+    v_cavity_mask = i_surface.w;
+    v_emissive_strength = i_emissive_strength;
     v_light_position = u_light_view_projection * world_position;
 }
 )";
@@ -2484,6 +3596,7 @@ uniform float u_daylight_factor;
 uniform float u_sun_visibility;
 uniform float u_time_of_day;
 uniform int u_shadows_enabled;
+uniform float u_player_light_strength;
 
 out vec4 frag_color;
 
@@ -2527,7 +3640,7 @@ void main() {
     float thin_surface = 1.0 - smoothstep(0.22, 0.50, v_material_class);
 
     float cavity_occlusion = mix(1.0, 0.54, cavity * (0.62 + 0.14 * v_nightmare_factor));
-    float ambient_strength = mix(0.36, 1.02, sky_mix) * mix(1.08, 0.84, hard_material) * cavity_occlusion;
+    float ambient_strength = mix(0.42, 1.02, sky_mix) * mix(1.08, 0.84, hard_material) * cavity_occlusion;
     vec3 ambient = u_ambient_color * ambient_strength;
 
     float wrap = mix(0.34, 0.10, hard_material);
@@ -2537,9 +3650,16 @@ void main() {
     float backlight = pow(max(dot(normal, -sun_direction), 0.0), 1.8);
     vec3 translucency = u_sun_color * backlight * thin_surface * sky_mix * u_sun_visibility * (0.04 + 0.10 * soft_fiber);
 
+    float player_light_distance = length((u_camera_position + vec3(0.0, -0.18, 0.0)) - v_world_position);
+    float player_light_falloff = 1.0 - smoothstep(1.2, 8.8, player_light_distance);
+    float player_light_facing = 0.55 + 0.45 * max(dot(normal, view_direction), 0.0);
+    float player_light_night_boost = mix(0.18, 1.0, 1.0 - sky_mix);
+    vec3 player_light =
+        vec3(1.18, 0.78, 0.36) * u_player_light_strength * player_light_falloff * player_light_facing * player_light_night_boost;
+
     float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), 2.45);
     vec3 rim_light = mix(vec3(0.12, 0.10, 0.08), vec3(0.34, 0.50, 0.60), 1.0 - sky_mix);
-    rim_light *= rim * mix(0.05, 0.11, 1.0 - hard_material) * mix(0.75, 1.0, v_nightmare_factor);
+    rim_light *= rim * mix(0.08, 0.16, 1.0 - hard_material) * mix(0.78, 1.04, v_nightmare_factor);
 
     vec3 reflected = reflect(-sun_direction, normal);
     float specular = pow(max(dot(reflected, view_direction), 0.0), mix(42.0, 16.0, hard_material));
@@ -2550,10 +3670,10 @@ void main() {
     vec3 nightmare_glow =
         vec3(1.00, 0.18, 0.12) * emissive_mask * v_emissive_strength * v_nightmare_factor * (0.24 + v_tension * 0.30) * pulse;
 
-    vec3 lit_color = albedo * (ambient + sunlight + translucency);
+    vec3 lit_color = albedo * (ambient + sunlight + translucency + player_light);
     lit_color *= cavity_occlusion;
     lit_color += rim_light + specular_color;
-    lit_color += u_night_tint_color * (0.07 + 0.07 * v_nightmare_factor) * (1.0 - sky_mix);
+    lit_color += u_night_tint_color * (0.09 + 0.08 * v_nightmare_factor) * (1.0 - sky_mix);
     float fog = clamp(v_distance / 160.0, 0.0, 1.0);
     fog = fog * fog;
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
@@ -2649,85 +3769,7 @@ void main() {
 }
 )";
 
-    static constexpr auto* sky_fragment_shader = R"(#version 330 core
-in vec2 v_uv;
-
-uniform mat4 u_inverse_view_projection;
-uniform vec3 u_sun_direction;
-uniform float u_daylight_factor;
-uniform float u_time_of_day;
-uniform vec3 u_sky_zenith_color;
-uniform vec3 u_sky_horizon_color;
-uniform vec3 u_horizon_glow_color;
-uniform vec3 u_sun_disk_color;
-uniform vec3 u_moon_disk_color;
-uniform float u_star_intensity;
-uniform float u_cloud_intensity;
-uniform sampler2D u_accent_atlas;
-
-out vec4 frag_color;
-
-const float kPi = 3.14159265358979323846;
-
-vec2 project_to_billboard(vec3 direction, vec3 center_direction, float angular_scale) {
-    vec3 center = normalize(center_direction);
-    vec3 helper = abs(center.y) > 0.95 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(helper, center));
-    vec3 up = normalize(cross(center, right));
-    float depth = max(dot(direction, center), 0.0001);
-    vec2 plane = vec2(dot(direction, right), dot(direction, up)) / depth;
-    return plane / angular_scale * 0.5 + 0.5;
-}
-
-vec2 tile_uv(vec2 tile, vec2 local_uv) {
-    float step_uv = 0.25;
-    vec2 padding = vec2(0.012);
-    return (tile + mix(padding, vec2(1.0) - padding, clamp(local_uv, 0.0, 1.0))) * step_uv;
-}
-
-float hash12(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-}
-
-void main() {
-    vec4 far_point = u_inverse_view_projection * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
-    vec3 direction = normalize(far_point.xyz / max(far_point.w, 0.0001));
-    float up = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
-    float horizon_band = exp(-abs(direction.y) * 8.0);
-    vec3 color = mix(u_sky_horizon_color, u_sky_zenith_color, pow(up, 0.62));
-    color += u_horizon_glow_color * horizon_band * (0.12 + 0.32 * (1.0 - clamp(u_daylight_factor, 0.0, 1.0)));
-
-    vec2 sun_uv = project_to_billboard(direction, normalize(u_sun_direction), 0.08);
-    vec4 sun_sprite = texture(u_accent_atlas, tile_uv(vec2(0.0, 0.0), sun_uv));
-    vec4 ring_sprite = texture(u_accent_atlas, tile_uv(vec2(0.0, 1.0), project_to_billboard(direction, normalize(u_sun_direction), 0.15)));
-    color += u_sun_disk_color * sun_sprite.a * (0.85 + 0.25 * clamp(u_daylight_factor, 0.0, 1.0));
-    color += u_horizon_glow_color * ring_sprite.a * (0.08 + 0.12 * clamp(u_daylight_factor, 0.0, 1.0));
-
-    vec2 moon_uv = project_to_billboard(direction, -normalize(u_sun_direction), 0.072);
-    vec4 moon_sprite = texture(u_accent_atlas, tile_uv(vec2(1.0, 0.0), moon_uv));
-    color += u_moon_disk_color * moon_sprite.a * (0.20 + 0.80 * u_star_intensity);
-
-    vec2 cloud_flow = vec2(u_time_of_day * 0.0035, u_time_of_day * 0.0018);
-    vec2 cloud_a = fract(direction.xz * 1.55 + cloud_flow);
-    vec2 cloud_b = fract(direction.zx * 1.10 - cloud_flow * 0.7);
-    float cloud_mask =
-        texture(u_accent_atlas, tile_uv(vec2(3.0, 0.0), cloud_a)).a * 0.65 +
-        texture(u_accent_atlas, tile_uv(vec2(3.0, 0.0), cloud_b)).a * 0.45;
-    cloud_mask *= smoothstep(-0.22, 0.32, direction.y) * (1.0 - smoothstep(0.34, 0.82, direction.y));
-    color = mix(color, color + vec3(0.18, 0.16, 0.14), cloud_mask * u_cloud_intensity * 0.22);
-
-    vec2 star_grid = vec2(atan(direction.z, direction.x) / (2.0 * kPi) + 0.5, asin(clamp(direction.y, -1.0, 1.0)) / kPi + 0.5);
-    vec2 star_cell = floor(star_grid * vec2(38.0, 18.0));
-    vec2 star_local = fract(star_grid * vec2(38.0, 18.0));
-    float star_seed = hash12(star_cell);
-    float star_gate = step(0.92, star_seed);
-    vec4 star_sprite = texture(u_accent_atlas, tile_uv(vec2(2.0, 0.0), star_local));
-    float twinkle = 0.65 + 0.35 * sin(u_time_of_day * 6.0 + star_seed * 20.0);
-    color += vec3(0.78, 0.90, 1.00) * star_sprite.a * star_gate * twinkle * u_star_intensity;
-
-    frag_color = vec4(color, 1.0);
-}
-)";
+    static constexpr auto* sky_fragment_shader = kSkyFragmentShaderSource;
 
     static constexpr auto* glow_extract_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
@@ -2797,8 +3839,34 @@ void main() {
 }
 )";
 
+    static constexpr auto* menu_background_fragment_shader = R"(#version 330 core
+in vec2 v_uv;
+
+uniform sampler2D u_scene_texture;
+uniform sampler2D u_blur_texture;
+uniform float u_blur_mix;
+uniform vec3 u_tint_color;
+uniform float u_vignette_strength;
+
+out vec4 frag_color;
+
+void main() {
+    vec3 scene = texture(u_scene_texture, v_uv).rgb;
+    vec3 blurred = texture(u_blur_texture, v_uv).rgb;
+    vec3 color = mix(scene, blurred, clamp(u_blur_mix, 0.0, 1.0));
+    color = mix(color, color * u_tint_color, 0.22);
+    float vignette = smoothstep(0.94, 0.18, distance(v_uv, vec2(0.5)));
+    color *= mix(1.0 - u_vignette_strength, 1.0, vignette);
+    color = pow(clamp(color, 0.0, 16.0), vec3(1.0 / 2.2));
+    frag_color = vec4(clamp(color, 0.0, 1.0), 1.0);
+}
+)";
+
     world_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, world_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
+    item_drop_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, item_drop_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
     creature_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, creature_vertex_shader),
@@ -2824,6 +3892,9 @@ void main() {
     post_process_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, screen_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, post_process_fragment_shader));
+    menu_background_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, screen_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, menu_background_fragment_shader));
 
     world_uniforms_.view_projection = glGetUniformLocation(world_program_, "u_view_projection");
     world_uniforms_.light_view_projection = glGetUniformLocation(world_program_, "u_light_view_projection");
@@ -2844,6 +3915,25 @@ void main() {
     world_uniforms_.inverse_view_projection = glGetUniformLocation(world_program_, "u_inverse_view_projection");
     world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
 
+    item_drop_uniforms_.view_projection = glGetUniformLocation(item_drop_program_, "u_view_projection");
+    item_drop_uniforms_.light_view_projection = glGetUniformLocation(item_drop_program_, "u_light_view_projection");
+    item_drop_uniforms_.camera_position = glGetUniformLocation(item_drop_program_, "u_camera_position");
+    item_drop_uniforms_.sun_direction = glGetUniformLocation(item_drop_program_, "u_sun_direction");
+    item_drop_uniforms_.sun_color = glGetUniformLocation(item_drop_program_, "u_sun_color");
+    item_drop_uniforms_.ambient_color = glGetUniformLocation(item_drop_program_, "u_ambient_color");
+    item_drop_uniforms_.fog_color = glGetUniformLocation(item_drop_program_, "u_fog_color");
+    item_drop_uniforms_.distant_fog_color = glGetUniformLocation(item_drop_program_, "u_distant_fog_color");
+    item_drop_uniforms_.night_tint_color = glGetUniformLocation(item_drop_program_, "u_night_tint_color");
+    item_drop_uniforms_.daylight_factor = glGetUniformLocation(item_drop_program_, "u_daylight_factor");
+    item_drop_uniforms_.sun_visibility = glGetUniformLocation(item_drop_program_, "u_sun_visibility");
+    item_drop_uniforms_.time_of_day = glGetUniformLocation(item_drop_program_, "u_time_of_day");
+    item_drop_uniforms_.atlas = glGetUniformLocation(item_drop_program_, "u_atlas");
+    item_drop_uniforms_.shadow_map = glGetUniformLocation(item_drop_program_, "u_shadow_map");
+    item_drop_uniforms_.scene_color = glGetUniformLocation(item_drop_program_, "u_scene_color");
+    item_drop_uniforms_.scene_depth = glGetUniformLocation(item_drop_program_, "u_scene_depth");
+    item_drop_uniforms_.inverse_view_projection = glGetUniformLocation(item_drop_program_, "u_inverse_view_projection");
+    item_drop_uniforms_.shadows_enabled = glGetUniformLocation(item_drop_program_, "u_shadows_enabled");
+
     creature_uniforms_.view_projection = glGetUniformLocation(creature_program_, "u_view_projection");
     creature_uniforms_.light_view_projection = glGetUniformLocation(creature_program_, "u_light_view_projection");
     creature_uniforms_.camera_position = glGetUniformLocation(creature_program_, "u_camera_position");
@@ -2859,6 +3949,7 @@ void main() {
     creature_uniforms_.shadow_map = glGetUniformLocation(creature_program_, "u_shadow_map");
     creature_uniforms_.shadows_enabled = glGetUniformLocation(creature_program_, "u_shadows_enabled");
     creature_uniforms_.time_of_day = glGetUniformLocation(creature_program_, "u_time_of_day");
+    creature_uniforms_.player_light_strength = glGetUniformLocation(creature_program_, "u_player_light_strength");
 
     shadow_uniforms_.light_view_projection = glGetUniformLocation(shadow_program_, "u_light_view_projection");
     shadow_uniforms_.atlas = glGetUniformLocation(shadow_program_, "u_atlas");
@@ -2887,6 +3978,11 @@ void main() {
     post_process_uniforms_.vignette_strength = glGetUniformLocation(post_process_program_, "u_vignette_strength");
     post_process_uniforms_.night_tint_color = glGetUniformLocation(post_process_program_, "u_night_tint_color");
     post_process_uniforms_.glow_strength = glGetUniformLocation(post_process_program_, "u_glow_strength");
+    menu_background_uniforms_.scene_texture = glGetUniformLocation(menu_background_program_, "u_scene_texture");
+    menu_background_uniforms_.blur_texture = glGetUniformLocation(menu_background_program_, "u_blur_texture");
+    menu_background_uniforms_.blur_mix = glGetUniformLocation(menu_background_program_, "u_blur_mix");
+    menu_background_uniforms_.tint_color = glGetUniformLocation(menu_background_program_, "u_tint_color");
+    menu_background_uniforms_.vignette_strength = glGetUniformLocation(menu_background_program_, "u_vignette_strength");
 }
 
 void Renderer::create_atlas_texture() {
@@ -3003,63 +4099,67 @@ void Renderer::create_shadow_map() {
 }
 
 void Renderer::create_creature_geometry() {
-    glGenVertexArrays(1, &creature_vao_);
     glGenBuffers(1, &creature_vbo_);
     glGenBuffers(1, &creature_ebo_);
-    glBindVertexArray(creature_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, creature_ebo_);
-    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureVertexBufferBytes, nullptr, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, kInitialCreatureIndexBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    const auto& template_vertices = box_template_vertices();
+    const auto& template_indices = box_template_indices();
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(template_vertices.size() * sizeof(BoxTemplateVertex)),
+        template_vertices.data(),
+        GL_STATIC_DRAW);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(template_indices.size() * sizeof(std::uint32_t)),
+        template_indices.data(),
+        GL_STATIC_DRAW);
 
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, x)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, u)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, nx)));
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, nightmare_factor)));
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, tension)));
-    glEnableVertexAttribArray(5);
-    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, material_class)));
-    glEnableVertexAttribArray(6);
-    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, cavity_mask)));
-    glEnableVertexAttribArray(7);
-    glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(CreatureVertex), reinterpret_cast<void*>(offsetof(CreatureVertex, emissive_strength)));
+    glGenVertexArrays(1, &creature_vao_);
+    glGenBuffers(1, &creature_instance_vbo_);
+    configure_box_template_attributes(creature_vao_, creature_vbo_, creature_ebo_);
+    glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureInstanceBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    configure_creature_instance_attributes(creature_vao_, creature_instance_vbo_);
 
-    creature_vertex_buffer_bytes_ = kInitialCreatureVertexBufferBytes;
-    creature_index_buffer_bytes_ = kInitialCreatureIndexBufferBytes;
+    glGenVertexArrays(1, &viewmodel_vao_);
+    glGenBuffers(1, &viewmodel_instance_vbo_);
+    configure_box_template_attributes(viewmodel_vao_, creature_vbo_, creature_ebo_);
+    glBindBuffer(GL_ARRAY_BUFFER, viewmodel_instance_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureInstanceBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    configure_creature_instance_attributes(viewmodel_vao_, viewmodel_instance_vbo_);
+
+    creature_instance_buffer_bytes_ = kInitialCreatureInstanceBufferBytes;
+    viewmodel_instance_buffer_bytes_ = kInitialCreatureInstanceBufferBytes;
 }
 
 void Renderer::create_item_drop_geometry() {
-    glGenVertexArrays(1, &item_drop_vao_);
     glGenBuffers(1, &item_drop_vbo_);
-    glBindVertexArray(item_drop_vao_);
+    glGenBuffers(1, &item_drop_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, item_drop_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, kInitialItemDropVertexBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, item_drop_ebo_);
+    const auto& template_vertices = box_template_vertices();
+    const auto& template_indices = box_template_indices();
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(template_vertices.size() * sizeof(BoxTemplateVertex)),
+        template_vertices.data(),
+        GL_STATIC_DRAW);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(template_indices.size() * sizeof(std::uint32_t)),
+        template_indices.data(),
+        GL_STATIC_DRAW);
 
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, x)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, u)));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, nx)));
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, face_shade)));
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, ao)));
-    glEnableVertexAttribArray(5);
-    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, sky_light)));
-    glEnableVertexAttribArray(6);
-    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
-    glEnableVertexAttribArray(7);
-    glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, material_class)));
-    glEnableVertexAttribArray(8);
-    glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, wave_weight)));
+    glGenVertexArrays(1, &item_drop_vao_);
+    glGenBuffers(1, &item_drop_instance_vbo_);
+    configure_box_template_attributes(item_drop_vao_, item_drop_vbo_, item_drop_ebo_);
+    glBindBuffer(GL_ARRAY_BUFFER, item_drop_instance_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, kInitialItemDropInstanceBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    configure_item_drop_instance_attributes(item_drop_vao_, item_drop_instance_vbo_);
 
-    item_drop_vertex_buffer_bytes_ = kInitialItemDropVertexBufferBytes;
+    item_drop_instance_buffer_bytes_ = kInitialItemDropInstanceBufferBytes;
 }
 
 void Renderer::create_screen_quad_geometry() {
@@ -3385,77 +4485,133 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drops) {
-    if (item_drops.empty() || world_program_ == 0 || item_drop_vao_ == 0 || item_drop_vbo_ == 0) {
+void Renderer::run_menu_background_pass(int width, int height) {
+    if (menu_background_program_ == 0 || glow_blur_program_ == 0 || screen_quad_vao_ == 0 ||
+        scene_color_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
         return;
     }
 
-    auto& vertices = item_drop_vertices_scratch_;
-    vertices.clear();
-    vertices.reserve(item_drops.size() * 36U);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glBindVertexArray(screen_quad_vao_);
 
-    for (const auto& drop : item_drops) {
-        if (drop.block_id == to_block_id(BlockType::Air) || drop.count == 0) {
-            continue;
-        }
+    glViewport(0, 0, glow_target_width_, glow_target_height_);
+    glBindFramebuffer(GL_FRAMEBUFFER, glow_ping_framebuffer_);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(glow_blur_program_);
+    glUniform1i(glow_blur_uniforms_.source_texture, 0);
+    glUniform2f(glow_blur_uniforms_.texel_direction, 1.0F / static_cast<float>(glow_target_width_), 0.0F);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        const auto uv_rect = atlas_uv_rect(block_hotbar_tile(drop.block_id));
-        const auto material_class = block_visual_material_value(drop.block_id);
-        const auto bob_offset = std::sin(drop.age_seconds * 3.2F) * 0.06F + 0.12F;
-        const auto size = drop.count >= 32 ? 0.42F : (drop.count >= 2 ? 0.39F : 0.35F);
-        const auto half_width = glm::vec3 {size * 0.5F, 0.0F, 0.0F};
-        const auto up = glm::vec3 {0.0F, size, 0.0F};
-        const auto rotation = drop.spin_radians;
-        const auto cos_rotation = std::cos(rotation);
-        const auto sin_rotation = std::sin(rotation);
-        const auto basis_a = glm::vec3 {cos_rotation * half_width.x, 0.0F, sin_rotation * half_width.x};
-        const auto basis_b = glm::vec3 {-sin_rotation * half_width.x, 0.0F, cos_rotation * half_width.x};
-        const auto layer_count = drop.count >= 32 ? 3 : (drop.count >= 2 ? 2 : 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUniform2f(glow_blur_uniforms_.texel_direction, 0.0F, 1.0F / static_cast<float>(glow_target_height_));
+    glBindTexture(GL_TEXTURE_2D, glow_ping_texture_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        for (int layer = 0; layer < layer_count; ++layer) {
-            const auto layer_offset = static_cast<float>(layer) * 0.035F;
-            const auto bottom_center = drop.position + glm::vec3 {0.0F, bob_offset + layer_offset, 0.0F};
-            append_item_drop_quad(vertices, bottom_center, basis_a, up, uv_rect, drop.sky_light, drop.block_light, material_class);
-            append_item_drop_quad(vertices, bottom_center, basis_b, up, uv_rect, drop.sky_light, drop.block_light, material_class);
-        }
-    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width, std::max(height, 1));
+    glUseProgram(menu_background_program_);
+    glUniform1i(menu_background_uniforms_.scene_texture, 0);
+    glUniform1i(menu_background_uniforms_.blur_texture, 1);
+    glUniform1f(menu_background_uniforms_.blur_mix, 0.80F);
+    const glm::vec3 tint_color {0.66F, 0.72F, 0.78F};
+    glUniform3fv(menu_background_uniforms_.tint_color, 1, glm::value_ptr(tint_color));
+    glUniform1f(menu_background_uniforms_.vignette_strength, 0.30F);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glActiveTexture(GL_TEXTURE0);
+}
 
-    if (vertices.empty()) {
+void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
+                               const glm::mat4& view_projection,
+                               const glm::mat4& light_view_projection,
+                               const glm::mat4& inverse_view_projection,
+                               const glm::vec3& camera_position,
+                               const EnvironmentState& environment,
+                               bool sun_visible) {
+    if (item_drops.empty() || item_drop_program_ == 0 || item_drop_vao_ == 0 || item_drop_instance_vbo_ == 0 || item_drop_ebo_ == 0) {
         return;
     }
 
-    const auto vertex_bytes = static_cast<GLsizeiptr>(vertices.size() * sizeof(ChunkVertex));
+    auto& instances = item_drop_instances_scratch_;
+    build_item_drop_gpu_instances_into(item_drops, instances);
+    if (instances.empty()) {
+        return;
+    }
+
+    const auto instance_bytes = static_cast<GLsizeiptr>(instances.size() * sizeof(ItemDropGpuInstance));
     glBindVertexArray(item_drop_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, item_drop_vbo_);
-    if (item_drop_vertex_buffer_bytes_ < vertex_bytes) {
-        item_drop_vertex_buffer_bytes_ = grow_buffer_capacity(
-            item_drop_vertex_buffer_bytes_,
-            vertex_bytes,
-            kInitialItemDropVertexBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, item_drop_vertex_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, item_drop_instance_vbo_);
+    if (item_drop_instance_buffer_bytes_ < instance_bytes) {
+        item_drop_instance_buffer_bytes_ = grow_buffer_capacity(
+            item_drop_instance_buffer_bytes_,
+            instance_bytes,
+            kInitialItemDropInstanceBufferBytes);
+        glBufferData(GL_ARRAY_BUFFER, item_drop_instance_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
     }
-    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, vertices.data());
+    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, instances.data());
 
-    glUseProgram(world_program_);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(item_drop_program_);
+    glUniformMatrix4fv(item_drop_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
+    glUniformMatrix4fv(item_drop_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniformMatrix4fv(item_drop_uniforms_.inverse_view_projection, 1, GL_FALSE, glm::value_ptr(inverse_view_projection));
+    glUniform3fv(item_drop_uniforms_.camera_position, 1, glm::value_ptr(camera_position));
+    glUniform3fv(item_drop_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
+    glUniform3fv(item_drop_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
+    glUniform3fv(item_drop_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
+    glUniform3fv(item_drop_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
+    glUniform3fv(item_drop_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
+    glUniform3fv(item_drop_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
+    glUniform1f(item_drop_uniforms_.daylight_factor, environment.daylight_factor);
+    glUniform1f(item_drop_uniforms_.sun_visibility, sun_visible ? 1.0F : 0.0F);
+    glUniform1f(item_drop_uniforms_.time_of_day, environment.time_of_day);
+    glUniform1i(item_drop_uniforms_.atlas, 0);
+    glUniform1i(item_drop_uniforms_.shadow_map, 1);
+    glUniform1i(item_drop_uniforms_.scene_color, 2);
+    glUniform1i(item_drop_uniforms_.scene_depth, 3);
+    glUniform1i(item_drop_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_);
 
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+    glDrawElementsInstanced(
+        GL_TRIANGLES,
+        static_cast<GLsizei>(box_template_indices().size()),
+        GL_UNSIGNED_INT,
+        nullptr,
+        static_cast<GLsizei>(instances.size()));
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glActiveTexture(GL_TEXTURE0);
 }
 
 void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
                               const glm::mat4& view_projection,
                               const glm::mat4& light_view_projection,
                               const glm::vec3& camera_position,
-                              const EnvironmentState& environment) {
-    if (creatures.empty() || creature_program_ == 0 || creature_vao_ == 0 || creature_vbo_ == 0 || creature_ebo_ == 0) {
+                              const EnvironmentState& environment,
+                              bool player_light_active) {
+    if (creatures.empty() || creature_program_ == 0 || creature_vao_ == 0 || creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
         return;
     }
 
@@ -3493,57 +4649,39 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
         visible_creatures.resize(kMaxRenderedCreatures);
     }
 
-    auto& vertices = creature_vertices_scratch_;
-    auto& indices = creature_indices_scratch_;
-    vertices.clear();
-    indices.clear();
-    vertices.reserve(visible_creatures.size() * kCreatureVerticesPerBox * kCreatureMaxBoxBudget);
-    indices.reserve(visible_creatures.size() * kCreatureIndicesPerBox * kCreatureMaxBoxBudget);
+    auto& parts = creature_parts_scratch_;
+    parts.clear();
+    parts.reserve(visible_creatures.size() * kCreatureMaxBoxBudget);
 
     for (const auto& visible_creature : visible_creatures) {
-        const auto mesh = build_creature_mesh(*visible_creature.creature);
-        if (mesh.empty()) {
+        const auto creature_parts = build_creature_parts(*visible_creature.creature);
+        if (creature_parts.empty()) {
             continue;
         }
 
-        const auto base_index = static_cast<std::uint32_t>(vertices.size());
-        vertices.insert(vertices.end(), mesh.vertices.begin(), mesh.vertices.end());
-        indices.reserve(indices.size() + mesh.indices.size());
-        for (const auto index : mesh.indices) {
-            indices.push_back(base_index + index);
-        }
+        parts.insert(parts.end(), creature_parts.begin(), creature_parts.end());
     }
 
-    if (indices.empty()) {
+    if (parts.empty()) {
         return;
     }
 
     glBindVertexArray(creature_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, creature_ebo_);
+    glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
 
-    const auto vertex_bytes = static_cast<GLsizeiptr>(vertices.size() * sizeof(CreatureVertex));
-    const auto index_bytes = static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t));
-    if (creature_vertex_buffer_bytes_ < vertex_bytes) {
-        creature_vertex_buffer_bytes_ = grow_buffer_capacity(
-            creature_vertex_buffer_bytes_,
-            vertex_bytes,
-            kInitialCreatureVertexBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, creature_vertex_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
+    const auto instance_bytes = static_cast<GLsizeiptr>(parts.size() * sizeof(CreaturePartInstance));
+    if (creature_instance_buffer_bytes_ < instance_bytes) {
+        creature_instance_buffer_bytes_ = grow_buffer_capacity(
+            creature_instance_buffer_bytes_,
+            instance_bytes,
+            kInitialCreatureInstanceBufferBytes);
+        glBufferData(GL_ARRAY_BUFFER, creature_instance_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
     }
-    if (creature_index_buffer_bytes_ < index_bytes) {
-        creature_index_buffer_bytes_ = grow_buffer_capacity(
-            creature_index_buffer_bytes_,
-            index_bytes,
-            kInitialCreatureIndexBufferBytes);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, creature_index_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
-    }
-
-    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, vertices.data());
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
+    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, parts.data());
 
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glUseProgram(creature_program_);
@@ -3562,11 +4700,17 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUniform1i(creature_uniforms_.shadow_map, 1);
     glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
+    glUniform1f(creature_uniforms_.player_light_strength, player_light_active ? 1.0F : 0.0F);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, creature_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
+    glDrawElementsInstanced(
+        GL_TRIANGLES,
+        static_cast<GLsizei>(box_template_indices().size()),
+        GL_UNSIGNED_INT,
+        nullptr,
+        static_cast<GLsizei>(parts.size()));
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -3575,46 +4719,31 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
                                   const glm::mat4& light_view_projection,
                                   const glm::vec3& camera_position,
                                   const EnvironmentState& environment) {
-    if (player.is_dead() || creature_program_ == 0 || creature_vao_ == 0 || creature_vbo_ == 0 || creature_ebo_ == 0 || player_atlas_texture_ == 0) {
+    if (player.is_dead() || creature_program_ == 0 || viewmodel_vao_ == 0 || viewmodel_instance_vbo_ == 0 || creature_ebo_ == 0 || player_atlas_texture_ == 0) {
         return;
     }
 
-    const auto viewmodel = build_player_viewmodel_mesh(player);
+    const auto viewmodel = build_player_viewmodel_parts(player);
     if (viewmodel.empty()) {
         return;
     }
 
-    auto& vertices = creature_vertices_scratch_;
-    auto& indices = creature_indices_scratch_;
-    vertices.assign(viewmodel.mesh.vertices.begin(), viewmodel.mesh.vertices.end());
-    indices.assign(viewmodel.mesh.indices.begin(), viewmodel.mesh.indices.end());
+    glBindVertexArray(viewmodel_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, viewmodel_instance_vbo_);
 
-    glBindVertexArray(creature_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, creature_ebo_);
-
-    const auto vertex_bytes = static_cast<GLsizeiptr>(vertices.size() * sizeof(CreatureVertex));
-    const auto index_bytes = static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t));
-    if (creature_vertex_buffer_bytes_ < vertex_bytes) {
-        creature_vertex_buffer_bytes_ = grow_buffer_capacity(
-            creature_vertex_buffer_bytes_,
-            vertex_bytes,
-            kInitialCreatureVertexBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, creature_vertex_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
+    const auto instance_bytes = static_cast<GLsizeiptr>(viewmodel.parts.size() * sizeof(CreaturePartInstance));
+    if (viewmodel_instance_buffer_bytes_ < instance_bytes) {
+        viewmodel_instance_buffer_bytes_ = grow_buffer_capacity(
+            viewmodel_instance_buffer_bytes_,
+            instance_bytes,
+            kInitialCreatureInstanceBufferBytes);
+        glBufferData(GL_ARRAY_BUFFER, viewmodel_instance_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
     }
-    if (creature_index_buffer_bytes_ < index_bytes) {
-        creature_index_buffer_bytes_ = grow_buffer_capacity(
-            creature_index_buffer_bytes_,
-            index_bytes,
-            kInitialCreatureIndexBufferBytes);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, creature_index_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
-    }
-
-    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, vertices.data());
-    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, indices.data());
+    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, viewmodel.parts.data());
 
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
+    glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glUseProgram(creature_program_);
@@ -3635,16 +4764,45 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glUniform1i(creature_uniforms_.shadow_map, 1);
     glUniform1i(creature_uniforms_.shadows_enabled, 0);
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
+    glUniform1f(creature_uniforms_.player_light_strength, 0.0F);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
+    glDrawElementsInstanced(
+        GL_TRIANGLES,
+        static_cast<GLsizei>(box_template_indices().size()),
+        GL_UNSIGNED_INT,
+        nullptr,
+        static_cast<GLsizei>(viewmodel.parts.size()));
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glActiveTexture(GL_TEXTURE0);
+}
+
+void Renderer::draw_block_break_overlay(const PlayerController& player) {
+    const auto& break_progress = player.block_break_progress();
+    if (!break_progress.active || break_progress.progress <= 0.0F) {
+        block_break_overlay_mesh_.opaque_index_count = 0;
+        return;
+    }
+
+    upload_block_break_overlay_mesh(break_progress);
+    if (block_break_overlay_mesh_.vao == 0 || block_break_overlay_mesh_.opaque_index_count == 0) {
+        return;
+    }
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glUseProgram(world_program_);
+    glBindVertexArray(block_break_overlay_mesh_.vao);
+    glDrawElements(GL_TRIANGLES, block_break_overlay_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
+    glDepthMask(GL_TRUE);
 }
 
 void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& /*environment*/, int width, int height) {
@@ -4855,6 +6013,454 @@ void Renderer::draw_pause_menu(const PauseMenuState& pause_menu, int width, int 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
 
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_main_menu(const MainMenuState& main_menu, int width, int height) {
+    if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto layout = build_main_menu_layout(width, height, main_menu);
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    MainMenuHudCacheKey cache_key {};
+    cache_key.main_menu = main_menu;
+    cache_key.width = width;
+    cache_key.height = height;
+
+    auto& cache = main_menu_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(16384U);
+
+        const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+            append_pixel_text(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x + pixel_size,
+                y + pixel_size,
+                pixel_size,
+                text,
+                {0.0F, 0.0F, 0.0F, 0.45F},
+                centered);
+            append_pixel_text(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x,
+                y,
+                pixel_size,
+                text,
+                color,
+                centered);
+        };
+
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.03F, 0.04F, 0.05F, 0.42F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height * 0.32F, {0.04F, 0.05F, 0.06F, 0.18F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, viewport_height * 0.68F, viewport_width, viewport_height * 0.32F, {0.01F, 0.02F, 0.03F, 0.28F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, viewport_width * 0.18F, 0.0F, viewport_width * 0.64F, viewport_height, {0.32F, 0.28F, 0.18F, 0.06F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, viewport_width * 0.22F, layout.hero_y + 92.0F, viewport_width * 0.56F, 2.0F, {1.0F, 0.84F, 0.48F, 0.10F});
+
+        const auto title_pixel_size = std::floor(std::clamp(viewport_width * 0.0064F, 6.0F, 11.0F));
+        const auto logo_glow = HudColor {0.96F, 0.82F, 0.46F, 0.16F};
+        append_hud_shadow_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.hero_center_x - measure_pixel_text("VALCRAFT", title_pixel_size) * 0.5F - 20.0F,
+            layout.hero_y - 16.0F,
+            measure_pixel_text("VALCRAFT", title_pixel_size) + 40.0F,
+            title_pixel_size * 8.0F + 24.0F,
+            26.0F,
+            logo_glow);
+        draw_text(layout.hero_center_x, layout.hero_y, title_pixel_size, "VALCRAFT", {0.16F, 0.12F, 0.05F, 0.88F}, true);
+        draw_text(layout.hero_center_x - 2.0F, layout.hero_y - 2.0F, title_pixel_size, "VALCRAFT", {1.00F, 0.86F, 0.54F, 0.96F}, true);
+        draw_text(layout.hero_center_x, layout.hero_y - 4.0F, title_pixel_size, "VALCRAFT", {0.98F, 0.95F, 0.88F, 1.0F}, true);
+        draw_text(
+            layout.tagline_center_x,
+            layout.tagline_y,
+            std::floor(std::clamp(viewport_width * 0.0019F, 2.0F, 4.0F)),
+            "CONSTRUIRE  EXPLORER  SURVIVRE",
+            {0.92F, 0.93F, 0.96F, 0.92F},
+            true);
+
+        for (const auto& button : layout.buttons) {
+            const auto palette = button.selected
+                                     ? make_warm_panel_palette({0.96F, 0.78F, 0.34F, 1.0F})
+                                     : make_slate_panel_palette();
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                button.x,
+                button.y,
+                button.width,
+                button.height,
+                4.0F,
+                palette,
+                true);
+
+            const auto button_pixel_size = std::floor(std::clamp(button.height / 11.0F, 3.0F, 4.0F));
+            draw_text(
+                button.x + button.width * 0.5F,
+                button.y + std::floor((button.height - button_pixel_size * 7.0F) * 0.5F),
+                button_pixel_size,
+                button.label,
+                button.selected ? HudColor {1.0F, 0.98F, 0.92F, 1.0F} : HudColor {0.92F, 0.94F, 0.98F, 0.96F},
+                true);
+        }
+
+        draw_text(
+            viewport_width * 0.5F,
+            layout.button_stack_y + layout.button_stack_height + 26.0F,
+            2.0F,
+            "ENTREE POUR VALIDER",
+            {0.80F, 0.82F, 0.86F, 0.84F},
+            true);
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int width, int height) {
+    if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto layout = build_save_slot_menu_layout(width, height, save_slot_menu);
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    SaveSlotHudCacheKey cache_key {};
+    cache_key.save_slot_menu = save_slot_menu;
+    cache_key.width = width;
+    cache_key.height = height;
+
+    auto& cache = save_slot_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(32768U);
+
+        const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+            append_pixel_text(vertices, viewport_width, viewport_height, x + pixel_size, y + pixel_size, pixel_size, text, {0.0F, 0.0F, 0.0F, 0.44F}, centered);
+            append_pixel_text(vertices, viewport_width, viewport_height, x, y, pixel_size, text, color, centered);
+        };
+
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.02F, 0.03F, 0.04F, 0.52F});
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_width,
+            layout.panel_height,
+            5.0F,
+            make_stone_panel_palette(),
+            false);
+
+        const auto title_pixel_size = std::floor(std::clamp(viewport_width * 0.0038F, 4.0F, 6.0F));
+        const auto subtitle_pixel_size = std::floor(std::clamp(viewport_width * 0.0018F, 2.0F, 3.0F));
+        draw_text(layout.title_center_x, layout.title_y, title_pixel_size, save_slot_menu_mode_title(save_slot_menu.mode), {0.98F, 0.97F, 0.94F, 1.0F}, true);
+        draw_text(layout.subtitle_center_x, layout.subtitle_y, subtitle_pixel_size, save_slot_menu_mode_subtitle(save_slot_menu.mode), {0.82F, 0.84F, 0.88F, 0.94F}, true);
+
+        for (const auto& card : layout.cards) {
+            auto palette = card.selected
+                               ? make_warm_panel_palette(card.occupied ? HudColor {0.92F, 0.74F, 0.34F, 1.0F} : HudColor {0.70F, 0.86F, 0.98F, 1.0F})
+                               : make_slate_panel_palette();
+            if (!card.enabled) {
+                palette.fill = {0.13F, 0.14F, 0.16F, 0.84F};
+                palette.highlight = {0.20F, 0.20F, 0.22F, 0.12F};
+            }
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                card.x,
+                card.y,
+                card.width,
+                card.height,
+                3.0F,
+                palette,
+                true);
+
+            const auto heading_size = 3.0F;
+            const auto body_size = 2.0F;
+            const auto padding = 12.0F;
+            const auto slot_label = std::string("SLOT ") + std::to_string(static_cast<int>(card.slot_index + 1U));
+            draw_text(card.x + padding, card.y + 10.0F, heading_size, slot_label, {0.98F, 0.99F, 1.0F, 0.98F});
+
+            if (card.delete_visible) {
+                const auto delete_palette = card.delete_hovered
+                                                ? make_warm_panel_palette({0.88F, 0.33F, 0.27F, 1.0F})
+                                                : make_slate_panel_palette();
+                append_stylized_panel_top_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    card.delete_x,
+                    card.delete_y,
+                    card.delete_size,
+                    card.delete_size,
+                    2.0F,
+                    delete_palette,
+                    true);
+                draw_text(
+                    card.delete_x + card.delete_size * 0.5F,
+                    card.delete_y + std::floor((card.delete_size - 21.0F) * 0.5F),
+                    3.0F,
+                    "X",
+                    {0.98F, 0.97F, 0.95F, 0.98F},
+                    true);
+            }
+
+            if (!card.occupied) {
+                draw_text(card.x + padding, card.y + 34.0F, body_size, "VIDE", {0.74F, 0.78F, 0.84F, 0.90F});
+                if (card.active_slot) {
+                    draw_text(card.x + card.width - 50.0F, card.y + 10.0F, body_size, "ACTIF", {1.0F, 0.88F, 0.56F, 0.94F});
+                }
+                continue;
+            }
+
+            const auto timestamp = format_save_slot_timestamp(card.metadata.saved_at_unix_seconds);
+            const auto seed_text = format_save_slot_seed(card.metadata.seed);
+            const auto time_text = format_save_slot_time(card.metadata.time_of_day);
+            draw_text(card.x + padding, card.y + 34.0F, body_size, timestamp, {0.86F, 0.88F, 0.92F, 0.96F});
+            draw_text(card.x + padding, card.y + 52.0F, body_size, seed_text, {0.80F, 0.83F, 0.88F, 0.94F});
+            draw_text(card.x + padding, card.y + 70.0F, body_size, time_text, {0.80F, 0.83F, 0.88F, 0.94F});
+            if (card.active_slot) {
+                const auto active_x = card.delete_visible ? card.delete_x - 52.0F : card.x + card.width - 50.0F;
+                draw_text(active_x, card.y + 10.0F, body_size, "ACTIF", {1.0F, 0.88F, 0.56F, 0.94F});
+            }
+        }
+
+        const auto back_palette = layout.back_button.selected
+                                      ? make_warm_panel_palette({0.88F, 0.72F, 0.34F, 1.0F})
+                                      : make_slate_panel_palette();
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.back_button.x,
+            layout.back_button.y,
+            layout.back_button.width,
+            layout.back_button.height,
+            3.0F,
+            back_palette,
+            true);
+        draw_text(
+            layout.back_button.x + layout.back_button.width * 0.5F,
+            layout.back_button.y + std::floor((layout.back_button.height - 21.0F) * 0.5F),
+            3.0F,
+            "RETOUR",
+            {0.96F, 0.97F, 0.99F, 0.98F},
+            true);
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_options_menu(const OptionsMenuState& options_menu, int width, int height) {
+    if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto layout = build_options_menu_layout(width, height, options_menu);
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    OptionsHudCacheKey cache_key {};
+    cache_key.options_menu = options_menu;
+    cache_key.width = width;
+    cache_key.height = height;
+
+    auto& cache = options_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(12288U);
+
+        const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+            append_pixel_text(vertices, viewport_width, viewport_height, x + pixel_size, y + pixel_size, pixel_size, text, {0.0F, 0.0F, 0.0F, 0.44F}, centered);
+            append_pixel_text(vertices, viewport_width, viewport_height, x, y, pixel_size, text, color, centered);
+        };
+
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.03F, 0.04F, 0.05F, 0.56F});
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_width,
+            layout.panel_height,
+            5.0F,
+            make_stone_panel_palette(),
+            false);
+
+        const auto title_pixel_size = std::floor(std::clamp(viewport_width * 0.0038F, 4.0F, 6.0F));
+        const auto subtitle_pixel_size = std::floor(std::clamp(viewport_width * 0.0018F, 2.0F, 3.0F));
+        draw_text(layout.title_center_x, layout.title_y, title_pixel_size, "OPTIONS", {0.98F, 0.97F, 0.94F, 1.0F}, true);
+        draw_text(layout.subtitle_center_x, layout.subtitle_y, subtitle_pixel_size, options_menu_subtitle(options_menu.parent), {0.82F, 0.84F, 0.88F, 0.94F}, true);
+
+        for (const auto& button : layout.buttons) {
+            const auto palette = button.selected
+                                     ? make_warm_panel_palette({0.90F, 0.74F, 0.34F, 1.0F})
+                                     : make_slate_panel_palette();
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                button.x,
+                button.y,
+                button.width,
+                button.height,
+                4.0F,
+                palette,
+                true);
+            const auto button_pixel_size = std::floor(std::clamp(button.height / 11.0F, 3.0F, 4.0F));
+            draw_text(
+                button.x + button.width * 0.5F,
+                button.y + std::floor((button.height - button_pixel_size * 7.0F) * 0.5F),
+                button_pixel_size,
+                button.label,
+                {0.96F, 0.97F, 0.99F, 0.98F},
+                true);
+        }
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_confirm_dialog(const ConfirmDialogState& confirm_dialog, int width, int height) {
+    if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto layout = build_confirm_dialog_layout(width, height, confirm_dialog);
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    ConfirmHudCacheKey cache_key {};
+    cache_key.confirm_dialog = confirm_dialog;
+    cache_key.width = width;
+    cache_key.height = height;
+
+    auto& cache = confirm_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(8192U);
+
+        const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+            append_pixel_text(vertices, viewport_width, viewport_height, x + pixel_size, y + pixel_size, pixel_size, text, {0.0F, 0.0F, 0.0F, 0.44F}, centered);
+            append_pixel_text(vertices, viewport_width, viewport_height, x, y, pixel_size, text, color, centered);
+        };
+
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.02F, 0.03F, 0.04F, 0.62F});
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_width,
+            layout.panel_height,
+            4.0F,
+            make_stone_panel_palette(),
+            false);
+
+        draw_text(layout.title_center_x, layout.title_y, 4.0F, confirm_dialog_title(confirm_dialog.intent), {0.98F, 0.97F, 0.94F, 1.0F}, true);
+        draw_text(layout.subtitle_center_x, layout.subtitle_y, 2.0F, confirm_dialog_subtitle(confirm_dialog.intent), {0.84F, 0.86F, 0.90F, 0.94F}, true);
+
+        for (const auto& button : layout.buttons) {
+            const auto palette = button.selected
+                                     ? make_warm_panel_palette(button.choice == ConfirmDialogChoice::Confirm
+                                                                   ? HudColor {0.90F, 0.74F, 0.34F, 1.0F}
+                                                                   : HudColor {0.72F, 0.78F, 0.88F, 1.0F})
+                                     : make_slate_panel_palette();
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                button.x,
+                button.y,
+                button.width,
+                button.height,
+                3.0F,
+                palette,
+                true);
+            draw_text(
+                button.x + button.width * 0.5F,
+                button.y + std::floor((button.height - 21.0F) * 0.5F),
+                3.0F,
+                button.label,
+                {0.96F, 0.97F, 0.99F, 0.98F},
+                true);
+        }
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST);

@@ -3,16 +3,28 @@
 #include "world/Block.h"
 #include "world/Environment.h"
 
+#include <array>
 #include <glm/vec3.hpp>
 
+#include <cstddef>
 #include <cstdint>
 
 namespace valcraft {
+
+inline constexpr std::size_t kCreatureResidentPatrolPointCount = 4;
 
 enum class CreatureSpecies : std::uint8_t {
     Pig = 0,
     Cow = 1,
     Sheep = 2,
+    Villager = 3,
+};
+
+enum class CreatureResidentRole : std::uint8_t {
+    Gardener = 0,
+    Merchant = 1,
+    Artisan = 2,
+    Elder = 3,
 };
 
 enum class CreatureBehaviorState : std::uint8_t {
@@ -32,15 +44,32 @@ struct CreatureSpawnAnchor {
     BlockCoord ground_block {};
     glm::vec3 spawn_position {0.0F};
     CreatureSpecies species = CreatureSpecies::Pig;
+    float roam_radius = 0.0F;
+    std::array<glm::vec3, kCreatureResidentPatrolPointCount> patrol_points {};
+    std::uint8_t patrol_point_count = 0;
 };
 
 inline auto operator==(const CreatureSpawnAnchor& lhs, const CreatureSpawnAnchor& rhs) noexcept -> bool {
-    return lhs.chunk == rhs.chunk &&
-           lhs.ground_block == rhs.ground_block &&
-           lhs.spawn_position.x == rhs.spawn_position.x &&
-           lhs.spawn_position.y == rhs.spawn_position.y &&
-           lhs.spawn_position.z == rhs.spawn_position.z &&
-           lhs.species == rhs.species;
+    if (lhs.chunk != rhs.chunk ||
+        lhs.ground_block != rhs.ground_block ||
+        lhs.spawn_position.x != rhs.spawn_position.x ||
+        lhs.spawn_position.y != rhs.spawn_position.y ||
+        lhs.spawn_position.z != rhs.spawn_position.z ||
+        lhs.species != rhs.species ||
+        lhs.roam_radius != rhs.roam_radius ||
+        lhs.patrol_point_count != rhs.patrol_point_count) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < lhs.patrol_points.size(); ++index) {
+        if (lhs.patrol_points[index].x != rhs.patrol_points[index].x ||
+            lhs.patrol_points[index].y != rhs.patrol_points[index].y ||
+            lhs.patrol_points[index].z != rhs.patrol_points[index].z) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 struct CreatureInstance {
@@ -60,6 +89,7 @@ struct CreatureInstance {
     float gaze_weight = 0.0F;
     float attack_cooldown = 0.0F;
     float attack_amount = 0.0F;
+    std::uint8_t resident_target_index = 0;
 };
 
 struct CreatureRenderInstance {

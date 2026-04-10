@@ -23,6 +23,19 @@ struct ChunkBounds {
     glm::vec3 center {0.0F};
 };
 
+struct ShadowPassContext {
+    std::array<FrustumPlane, 6> frustum {};
+    glm::vec3 focus {0.0F};
+    float max_distance_sq = 0.0F;
+    bool enabled = false;
+};
+
+struct ChunkPassVisibility {
+    bool camera = false;
+    bool shadow = false;
+    float distance_squared = 0.0F;
+};
+
 inline auto make_frustum_plane(const glm::vec4& equation) -> FrustumPlane {
     const auto normal = glm::vec3 {equation.x, equation.y, equation.z};
     const auto length = glm::length(normal);
@@ -131,6 +144,37 @@ inline auto should_render_chunk_in_shadow_pass(const ChunkBounds& bounds,
     }
 
     return chunk_horizontal_distance_sq(bounds.center, focus) <= max_shadow_distance_sq;
+}
+
+inline auto classify_chunk_visibility(const ChunkBounds& bounds,
+                                      const std::array<FrustumPlane, 6>& camera_frustum,
+                                      const glm::vec3& eye,
+                                      const glm::vec3& forward,
+                                      float draw_distance_sq,
+                                      float back_cull_start_distance_sq,
+                                      const ShadowPassContext& shadow_context,
+                                      bool shadow_candidate,
+                                      float back_cull_dot_threshold = -0.45F) -> ChunkPassVisibility {
+    ChunkPassVisibility visibility {};
+    visibility.distance_squared = chunk_horizontal_distance_sq(bounds.center, eye);
+    visibility.camera = should_render_chunk_in_camera_pass(
+        bounds,
+        camera_frustum,
+        eye,
+        forward,
+        draw_distance_sq,
+        back_cull_start_distance_sq,
+        back_cull_dot_threshold);
+
+    visibility.shadow =
+        shadow_context.enabled &&
+        shadow_candidate &&
+        should_render_chunk_in_shadow_pass(
+            bounds,
+            shadow_context.frustum,
+            shadow_context.focus,
+            shadow_context.max_distance_sq);
+    return visibility;
 }
 
 } // namespace valcraft

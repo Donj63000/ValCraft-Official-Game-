@@ -108,6 +108,9 @@ function Get-ScenarioDefinition {
         [Parameter(Mandatory)]
         [string]$OutputPath,
 
+        [Parameter(Mandatory)]
+        [string]$AuditRoot,
+
         [switch]$Trace
     )
 
@@ -118,7 +121,9 @@ function Get-ScenarioDefinition {
         "--freeze-time",
         "--perf-report",
         "--perf-json=$OutputPath",
-        "--perf-scenario=$Name"
+        "--perf-scenario=$Name",
+        "--audit-dir=$AuditRoot",
+        "--audit-mode=measure"
     )
 
     switch ($Name) {
@@ -149,6 +154,52 @@ function Get-ScenarioDefinition {
         Name = $Name
         Arguments = $arguments
     }
+}
+
+function Get-SanitizedAuditLabel {
+    param([string]$RawLabel)
+
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($character in $RawLabel.ToCharArray()) {
+        if (($character -ge 'a' -and $character -le 'z') -or
+            ($character -ge 'A' -and $character -le 'Z') -or
+            ($character -ge '0' -and $character -le '9') -or
+            $character -eq '-' -or
+            $character -eq '_') {
+            [void]$builder.Append($character)
+            continue
+        }
+
+        if ($character -eq ' ' -or $character -eq '/' -or $character -eq '\' -or $character -eq '.') {
+            [void]$builder.Append('-')
+        }
+    }
+
+    $sanitized = $builder.ToString().Trim('-')
+    if ([string]::IsNullOrWhiteSpace($sanitized)) {
+        return "interactive"
+    }
+    return $sanitized
+}
+
+function Find-LatestScenarioRun {
+    param(
+        [Parameter(Mandatory)]
+        [string]$AuditRoot,
+
+        [Parameter(Mandatory)]
+        [string]$ScenarioName
+    )
+
+    $runsRoot = Join-Path $AuditRoot "runs"
+    if (-not (Test-Path $runsRoot)) {
+        return $null
+    }
+
+    $sanitizedLabel = Get-SanitizedAuditLabel -RawLabel $ScenarioName
+    return Get-ChildItem -Path $runsRoot -Directory -Filter "*-measure-$sanitizedLabel" |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
 }
 
 function Assert-ScenarioReport {
@@ -185,6 +236,38 @@ function Assert-ScenarioReport {
     }
 }
 
+function Assert-AuditRun {
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.DirectoryInfo]$RunDirectory,
+
+        [Parameter(Mandatory)]
+        [string]$ScenarioName
+    )
+
+    $requiredFiles = @(
+        "manifest.json",
+        "summary.json",
+        "summary.txt",
+        "events.jsonl",
+        "seconds.jsonl",
+        "frames.jsonl",
+        "spikes.json"
+    )
+
+    foreach ($fileName in $requiredFiles) {
+        $path = Join-Path $RunDirectory.FullName $fileName
+        if (-not (Test-Path $path)) {
+            throw "Perf scenario '$ScenarioName' is missing audit artifact '$path'."
+        }
+    }
+
+    $manifest = Get-Content -Path (Join-Path $RunDirectory.FullName "manifest.json") -Raw | ConvertFrom-Json
+    if ([string]$manifest.status -ne "completed") {
+        throw "Perf scenario '$ScenarioName' produced audit status '$($manifest.status)'."
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = Join-Path $repoRoot "cmake-build-perf"
@@ -193,7 +276,7 @@ $BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
 
 if ([string]::IsNullOrWhiteSpace($ArtifactDir)) {
     $runId = Get-Date -Format "yyyyMMdd-HHmmss"
-    $ArtifactDir = Join-Path $BuildDir ("perf-artifacts\" + $runId)
+    $ArtifactDir = Join-Path $repoRoot ("performancesaudit\perf-suite\" + $runId)
 }
 $ArtifactDir = [System.IO.Path]::GetFullPath($ArtifactDir)
 
@@ -233,7 +316,7 @@ New-Item -ItemType Directory -Path $ArtifactDir | Out-Null
 $scenarioSummaries = @()
 foreach ($scenarioName in $Scenarios) {
     $outputPath = Join-Path $ArtifactDir ($scenarioName + ".json")
-    $definition = Get-ScenarioDefinition -Name $scenarioName -SmokeFrames $SmokeFrames -OutputPath $outputPath -Trace:$Trace
+    $definition = Get-ScenarioDefinition -Name $scenarioName -SmokeFrames $SmokeFrames -OutputPath $outputPath -AuditRoot $ArtifactDir -Trace:$Trace
     Write-Host ("==> Running perf scenario '{0}'" -f $scenarioName)
     Invoke-External -FilePath $gameExe -Arguments $definition.Arguments -WorkingDirectory $BuildDir
 
@@ -243,6 +326,11 @@ foreach ($scenarioName in $Scenarios) {
 
     $report = Get-Content -Path $outputPath -Raw | ConvertFrom-Json
     Assert-ScenarioReport -Report $report -ScenarioName $scenarioName -SmokeFrames $SmokeFrames -Trace:$Trace
+    $runDirectory = Find-LatestScenarioRun -AuditRoot $ArtifactDir -ScenarioName $scenarioName
+    if ($null -eq $runDirectory) {
+        throw "Perf scenario '$scenarioName' did not create an audit run directory."
+    }
+    Assert-AuditRun -RunDirectory $runDirectory -ScenarioName $scenarioName
 
     $summary = [PSCustomObject]@{
         scenario = $scenarioName
@@ -254,6 +342,7 @@ foreach ($scenarioName in $Scenarios) {
         lag_frames_50_0 = [int]$report.summary.lag_buckets.over_50_0_ms
         worst_frame_stage = [string]$report.hotspots.worst_frame_stage
         spike_windows = @($report.spike_windows).Count
+        run_directory = $runDirectory.FullName
         output = $outputPath
     }
     $scenarioSummaries += $summary

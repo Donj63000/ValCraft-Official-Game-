@@ -30,6 +30,15 @@ struct ItemDropRenderInstance {
     float block_light = 0.0F;
 };
 
+struct ItemDropAuditStats {
+    std::size_t spawned = 0;
+    std::size_t merged = 0;
+    std::size_t picked_up = 0;
+    std::size_t expired = 0;
+    std::size_t active_drops = 0;
+    std::size_t rejected_spawns = 0;
+};
+
 class ItemDropSystem {
 public:
     void spawn_drop(const HotbarSlot& stack, const glm::vec3& position, const glm::vec3& initial_velocity);
@@ -42,9 +51,13 @@ public:
 
     [[nodiscard]] auto active_drop_count() const noexcept -> std::size_t;
     [[nodiscard]] auto drops() const noexcept -> const std::vector<ItemDrop>&;
+    [[nodiscard]] auto consume_audit_stats() noexcept -> ItemDropAuditStats;
+    void load_drops(const std::vector<ItemDrop>& drops);
+    void clear() noexcept;
 
 private:
     std::vector<ItemDrop> drops_ {};
+    ItemDropAuditStats audit_stats_ {};
 };
 
 } // namespace valcraft

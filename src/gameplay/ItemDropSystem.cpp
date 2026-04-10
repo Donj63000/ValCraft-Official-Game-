@@ -167,6 +167,7 @@ void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& positi
 
         inventory_merge_into_slot(drop.stack, remaining);
         if (!inventory_slot_has_item(remaining)) {
+            ++audit_stats_.merged;
             return;
         }
     }
@@ -178,15 +179,19 @@ void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& positi
             }
             inventory_merge_into_slot(drop.stack, remaining);
             if (!inventory_slot_has_item(remaining)) {
+                ++audit_stats_.merged;
                 return;
             }
         }
         if (drops_.size() >= kMaxActiveDrops) {
+            ++audit_stats_.rejected_spawns;
             return;
         }
     }
 
     drops_.push_back({position, initial_velocity, remaining, 0.0F, kPickupDelaySeconds, false});
+    ++audit_stats_.spawned;
+    audit_stats_.active_drops = drops_.size();
 }
 
 void ItemDropSystem::update(float dt,
@@ -202,6 +207,7 @@ void ItemDropSystem::update(float dt,
         auto& drop = *iterator;
         normalize_item_stack(drop.stack);
         if (!inventory_slot_has_item(drop.stack) || drop.position.y < -8.0F) {
+            ++audit_stats_.expired;
             iterator = drops_.erase(iterator);
             continue;
         }
@@ -215,6 +221,7 @@ void ItemDropSystem::update(float dt,
         if (drop.pickup_cooldown <= 0.0F && distance_sq <= pickup_radius_sq) {
             drop.stack = inventory_try_store_stack(inventory, hotbar, drop.stack);
             if (!inventory_slot_has_item(drop.stack)) {
+                ++audit_stats_.picked_up;
                 iterator = drops_.erase(iterator);
                 continue;
             }
@@ -244,6 +251,7 @@ void ItemDropSystem::update(float dt,
         if (drop.pickup_cooldown <= 0.0F && glm::dot(pickup_offset, pickup_offset) <= pickup_radius_sq) {
             drop.stack = inventory_try_store_stack(inventory, hotbar, drop.stack);
             if (!inventory_slot_has_item(drop.stack)) {
+                ++audit_stats_.picked_up;
                 iterator = drops_.erase(iterator);
                 continue;
             }
@@ -251,6 +259,8 @@ void ItemDropSystem::update(float dt,
 
         ++iterator;
     }
+
+    audit_stats_.active_drops = drops_.size();
 }
 
 void ItemDropSystem::build_render_instances(const World& world, std::vector<ItemDropRenderInstance>& out) const {
@@ -280,6 +290,24 @@ auto ItemDropSystem::active_drop_count() const noexcept -> std::size_t {
 
 auto ItemDropSystem::drops() const noexcept -> const std::vector<ItemDrop>& {
     return drops_;
+}
+
+auto ItemDropSystem::consume_audit_stats() noexcept -> ItemDropAuditStats {
+    const auto stats = audit_stats_;
+    audit_stats_ = {};
+    audit_stats_.active_drops = drops_.size();
+    return stats;
+}
+
+void ItemDropSystem::load_drops(const std::vector<ItemDrop>& drops) {
+    drops_ = drops;
+    audit_stats_ = {};
+    audit_stats_.active_drops = drops_.size();
+}
+
+void ItemDropSystem::clear() noexcept {
+    drops_.clear();
+    audit_stats_ = {};
 }
 
 } // namespace valcraft

@@ -171,7 +171,18 @@ auto make_transform(const glm::mat4& root,
     return glm::scale(transform, half_extent * 2.0F);
 }
 
-void append_box(CreatureMeshData& mesh,
+auto make_uniform_uvs(CreatureAtlasTile tile) -> std::array<BoxUvRect, 6> {
+    const auto tile_coordinates = creature_atlas_tile_coordinates(tile);
+    const auto uv_step = 1.0F / kCreatureAtlasTilesPerAxis;
+    const auto u0 = static_cast<float>(tile_coordinates[0]) * uv_step;
+    const auto v0 = static_cast<float>(tile_coordinates[1]) * uv_step;
+    const auto rect = BoxUvRect {u0, v0, u0 + uv_step, v0 + uv_step};
+    std::array<BoxUvRect, 6> face_uvs {};
+    face_uvs.fill(rect);
+    return face_uvs;
+}
+
+void append_box(std::vector<CreaturePartInstance>& parts,
                 const glm::mat4& root,
                 const glm::vec3& center,
                 const glm::vec3& half_extent,
@@ -186,53 +197,18 @@ void append_box(CreatureMeshData& mesh,
         return;
     }
 
-    const auto transform = make_transform(root, center, rotation_radians, half_extent);
-    const auto normal_matrix = glm::transpose(glm::inverse(glm::mat3(transform)));
-    const auto tile_coordinates = creature_atlas_tile_coordinates(tile);
-    const auto uv_step = 1.0F / kCreatureAtlasTilesPerAxis;
-    const auto u0 = static_cast<float>(tile_coordinates[0]) * uv_step;
-    const auto v0 = static_cast<float>(tile_coordinates[1]) * uv_step;
-    const auto u1 = u0 + uv_step;
-    const auto v1 = v0 + uv_step;
-    const std::array<std::array<float, 2>, 4> uvs {{
-        {u1, v0},
-        {u1, v1},
-        {u0, v1},
-        {u0, v0},
-    }};
-
-    for (const auto& face : box_faces()) {
-        const auto face_normal = glm::normalize(normal_matrix * face.normal);
-        const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
-        for (std::size_t vertex_index = 0; vertex_index < face.corners.size(); ++vertex_index) {
-            const auto world_position = transform * glm::vec4(face.corners[vertex_index], 1.0F);
-            mesh.vertices.push_back({
-                world_position.x,
-                world_position.y,
-                world_position.z,
-                uvs[vertex_index][0],
-                uvs[vertex_index][1],
-                face_normal.x,
-                face_normal.y,
-                face_normal.z,
-                nightmare_factor,
-                tension,
-                material_class,
-                cavity_mask,
-                emissive_strength,
-            });
-        }
-
-        mesh.indices.insert(mesh.indices.end(), {
-            base_index + 0U, base_index + 1U, base_index + 2U,
-            base_index + 0U, base_index + 2U, base_index + 3U,
-        });
-    }
-
-    ++mesh.part_count;
+    parts.push_back({
+        make_transform(root, center, rotation_radians, half_extent),
+        make_uniform_uvs(tile),
+        nightmare_factor,
+        tension,
+        material_class,
+        cavity_mask,
+        emissive_strength,
+    });
 }
 
-void append_pair(CreatureMeshData& mesh,
+void append_pair(std::vector<CreaturePartInstance>& parts,
                  const glm::mat4& root,
                  const glm::vec3& center,
                  float z_offset,
@@ -247,7 +223,7 @@ void append_pair(CreatureMeshData& mesh,
                  float emissive_strength) {
     for (const auto side : kSides) {
         append_box(
-            mesh,
+            parts,
             root,
             center + glm::vec3 {0.0F, 0.0F, side * z_offset},
             half_extent,
@@ -276,7 +252,7 @@ auto build_visual_state(const CreatureRenderInstance& creature) noexcept -> Crea
     };
 }
 
-void append_transition_accents(CreatureMeshData& mesh,
+void append_transition_accents(std::vector<CreaturePartInstance>& mesh,
                                const CreatureRenderInstance& creature,
                                const CreatureVisualState& state,
                                const glm::mat4& root) {
@@ -375,7 +351,7 @@ void append_transition_accents(CreatureMeshData& mesh,
     }
 }
 
-void append_day_pig(CreatureMeshData& mesh,
+void append_day_pig(std::vector<CreaturePartInstance>& mesh,
                     const CreatureRenderInstance& creature,
                     const CreatureVisualState& state,
                     const glm::mat4& root) {
@@ -486,7 +462,7 @@ void append_day_pig(CreatureMeshData& mesh,
                state.morph, tension, kMaterialSkin, 0.04F, 0.0F);
 }
 
-void append_day_cow(CreatureMeshData& mesh,
+void append_day_cow(std::vector<CreaturePartInstance>& mesh,
                     const CreatureRenderInstance& creature,
                     const CreatureVisualState& state,
                     const glm::mat4& root) {
@@ -603,7 +579,7 @@ void append_day_cow(CreatureMeshData& mesh,
                state.morph, tension, kMaterialSkin, 0.04F, 0.0F);
 }
 
-void append_day_sheep(CreatureMeshData& mesh,
+void append_day_sheep(std::vector<CreaturePartInstance>& mesh,
                       const CreatureRenderInstance& creature,
                       const CreatureVisualState& state,
                       const glm::mat4& root) {
@@ -702,7 +678,7 @@ void append_day_sheep(CreatureMeshData& mesh,
                state.morph, tension, kMaterialWool, 0.04F, 0.0F);
 }
 
-void append_night_pig(CreatureMeshData& mesh,
+void append_night_pig(std::vector<CreaturePartInstance>& mesh,
                       const CreatureRenderInstance& creature,
                       const CreatureVisualState& state,
                       const glm::mat4& root) {
@@ -727,44 +703,52 @@ void append_night_pig(CreatureMeshData& mesh,
     const auto leg_swing = stride * (0.26F + motion * 0.10F) + attack * 0.08F;
     const auto jaw_open = 0.05F + attack * 0.12F + tension * 0.04F;
     const auto pulse = (0.78F + 0.22F * std::sin(creature.animation_time * 8.4F + phase)) * state.corruption;
-    const auto scale = 0.38F + 0.62F * presence;
-    const auto shoulder_span = 0.22F + seed_detail_signed(creature.appearance_seed, 1) * 0.015F;
-    const auto hip_span = 0.16F + seed_detail_signed(creature.appearance_seed, 2) * 0.010F;
-    const auto head_length = 0.18F + seed_detail_unit(creature.appearance_seed, 3) * 0.03F;
-    const auto ear_length = 0.12F + seed_detail_unit(creature.appearance_seed, 4) * 0.02F;
+    const auto scale = 0.42F + 0.58F * presence;
+    const auto shoulder_span = 0.20F + seed_detail_signed(creature.appearance_seed, 1) * 0.014F;
+    const auto hip_span = 0.15F + seed_detail_signed(creature.appearance_seed, 2) * 0.010F;
+    const auto head_length = 0.20F + seed_detail_unit(creature.appearance_seed, 3) * 0.03F;
+    const auto ear_length = 0.10F + seed_detail_unit(creature.appearance_seed, 4) * 0.02F;
 
     append_box(mesh, root, glm::vec3 {-0.06F, 0.98F + body_bob, 0.0F},
-               glm::vec3 {0.12F * scale, 0.18F * scale, 0.10F * scale},
+               glm::vec3 {0.13F * scale, 0.18F * scale, 0.12F * scale},
                glm::vec3 {0.02F, 0.0F, 0.04F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.42F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.34F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.02F, 1.24F + body_bob, 0.0F},
-               glm::vec3 {0.14F * scale, 0.19F * scale, 0.12F * scale},
+               glm::vec3 {0.16F * scale, 0.20F * scale, 0.14F * scale},
                glm::vec3 {0.06F, 0.0F, 0.06F + body_roll * 0.4F}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.36F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.28F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.12F, 1.50F + body_bob, 0.0F},
-               glm::vec3 {0.18F * scale, 0.22F * scale, 0.14F * scale},
+               glm::vec3 {0.21F * scale, 0.24F * scale, 0.17F * scale},
                glm::vec3 {0.08F, 0.0F, 0.10F + body_roll}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.38F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.30F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.10F, 1.68F + body_bob, 0.0F},
+               glm::vec3 {0.15F * scale, 0.10F * scale, 0.18F * scale},
+               glm::vec3 {0.18F, 0.0F, 0.12F + body_roll * 0.75F}, CreatureAtlasTile::ZombieFlesh,
+               presence, tension, kMaterialZombieFlesh, 0.22F, pulse * 0.10F);
     append_box(mesh, root, glm::vec3 {0.00F, 1.42F + body_bob, 0.0F},
-               glm::vec3 {0.05F * scale, 0.34F * scale, 0.04F * scale},
+               glm::vec3 {0.06F * scale, 0.32F * scale, 0.05F * scale},
                glm::vec3 {0.12F, 0.0F, 0.06F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.72F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.60F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.34F, 1.70F + body_bob, 0.0F},
-               glm::vec3 {0.06F * scale, 0.10F * scale, 0.05F * scale},
+               glm::vec3 {0.08F * scale, 0.12F * scale, 0.06F * scale},
                glm::vec3 {head_pitch * 0.35F, head_yaw, head_roll * 0.2F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.50F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.38F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.52F, 1.86F + body_bob, 0.0F},
-               glm::vec3 {head_length * scale, 0.16F * scale, 0.13F * scale},
+               glm::vec3 {head_length * scale, 0.18F * scale, 0.15F * scale},
                glm::vec3 {head_pitch, head_yaw, head_roll}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.46F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.34F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.58F, 1.74F + body_bob, 0.0F},
+               glm::vec3 {0.13F * scale, 0.08F * scale, 0.11F * scale},
+               glm::vec3 {head_pitch * 0.55F, head_yaw, head_roll * 0.40F}, CreatureAtlasTile::ZombieBone,
+               presence, tension, kMaterialZombieBone, 0.30F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.74F, 1.80F + body_bob, 0.0F},
                glm::vec3 {0.14F * scale, 0.05F * scale, 0.12F * scale},
                glm::vec3 {head_pitch * 0.55F, head_yaw, head_roll * 0.35F}, CreatureAtlasTile::ZombieMouth,
-               presence, tension, kMaterialZombieFlesh, 0.54F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.42F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.72F, 1.66F + body_bob, 0.0F},
                glm::vec3 {0.13F * scale, 0.04F * scale, 0.11F * scale},
                glm::vec3 {head_pitch + jaw_open * 3.2F, head_yaw, head_roll * 0.25F}, CreatureAtlasTile::ZombieMouth,
-               presence, tension, kMaterialZombieFlesh, 0.58F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.46F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.63F, 1.90F + body_bob, 0.0F}, 0.09F,
                 glm::vec3 {0.035F * scale, 0.050F * scale, 0.022F * scale},
                 glm::vec3 {head_pitch * 0.2F, head_yaw, head_roll * 0.15F}, glm::vec3 {0.0F, 0.0F, 0.02F},
@@ -783,25 +767,25 @@ void append_night_pig(CreatureMeshData& mesh,
                 CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.18F, 0.0F);
 
     append_pair(mesh, root, glm::vec3 {0.10F, 1.42F + body_bob, 0.0F}, shoulder_span,
-                glm::vec3 {0.055F * scale, 0.24F * scale, 0.045F * scale},
+                glm::vec3 {0.062F * scale, 0.22F * scale, 0.054F * scale},
                 glm::vec3 {0.02F, 0.0F, -0.44F - attack * 0.12F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.03F},
-                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.24F, 0.0F);
+                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.18F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.24F, 0.94F + body_bob, 0.0F}, shoulder_span + 0.02F,
-                glm::vec3 {0.045F * scale, 0.30F * scale, 0.038F * scale},
+                glm::vec3 {0.050F * scale, 0.28F * scale, 0.044F * scale},
                 glm::vec3 {-0.10F, 0.0F, -0.18F - attack * 0.40F + arm_swing * 0.8F}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.36F, 0.0F);
+                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.26F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.34F, 0.42F + body_bob, 0.0F}, shoulder_span + 0.03F,
-                glm::vec3 {0.035F * scale, 0.13F * scale, 0.028F * scale},
+                glm::vec3 {0.042F * scale, 0.11F * scale, 0.036F * scale},
                 glm::vec3 {0.20F, 0.0F, -0.24F - attack * 0.55F}, glm::vec3 {0.0F, 0.0F, 0.05F},
                 CreatureAtlasTile::ZombieClaw, presence, tension, kMaterialKeratin, 0.22F, 0.0F);
     append_pair(mesh, root, glm::vec3 {-0.10F, 0.62F + body_bob, 0.0F}, hip_span,
-                glm::vec3 {0.055F * scale, 0.33F * scale, 0.050F * scale},
+                glm::vec3 {0.060F * scale, 0.31F * scale, 0.054F * scale},
                 glm::vec3 {0.0F, 0.0F, leg_swing}, glm::vec3 {0.0F, 0.0F, -0.03F},
-                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.20F, 0.0F);
+                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.16F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.05F, 0.14F + body_bob, 0.0F}, hip_span,
-                glm::vec3 {0.045F * scale, 0.42F * scale, 0.040F * scale},
+                glm::vec3 {0.050F * scale, 0.38F * scale, 0.044F * scale},
                 glm::vec3 {0.08F, 0.0F, -0.18F - leg_swing * 0.55F}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.30F, 0.0F);
+                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.22F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.18F, 0.06F + body_bob, 0.0F}, hip_span,
                 glm::vec3 {0.10F * scale, 0.06F * scale, 0.06F * scale},
                 glm::vec3 {0.0F, 0.0F, 0.03F + attack * 0.04F}, glm::vec3 {0.0F, 0.0F, -0.02F},
@@ -824,7 +808,7 @@ void append_night_pig(CreatureMeshData& mesh,
     }
 }
 
-void append_night_cow(CreatureMeshData& mesh,
+void append_night_cow(std::vector<CreaturePartInstance>& mesh,
                       const CreatureRenderInstance& creature,
                       const CreatureVisualState& state,
                       const glm::mat4& root) {
@@ -848,45 +832,53 @@ void append_night_cow(CreatureMeshData& mesh,
     const auto leg_swing = stride * (0.30F + motion * 0.12F) + attack * 0.06F;
     const auto jaw_open = 0.04F + attack * 0.10F + tension * 0.03F;
     const auto pulse = (0.80F + 0.20F * std::sin(creature.animation_time * 8.0F + phase)) * state.corruption;
-    const auto scale = 0.40F + 0.60F * presence;
-    const auto shoulder_span = 0.24F + seed_detail_signed(creature.appearance_seed, 1) * 0.016F;
+    const auto scale = 0.44F + 0.56F * presence;
+    const auto shoulder_span = 0.23F + seed_detail_signed(creature.appearance_seed, 1) * 0.016F;
     const auto hip_span = 0.17F + seed_detail_signed(creature.appearance_seed, 2) * 0.012F;
-    const auto horn_height = 0.18F + seed_detail_unit(creature.appearance_seed, 3) * 0.04F;
+    const auto horn_height = 0.20F + seed_detail_unit(creature.appearance_seed, 3) * 0.04F;
     const auto horn_curl = seed_detail_signed(creature.appearance_seed, 4) * 0.08F;
-    const auto muzzle_length = 0.16F + seed_detail_unit(creature.appearance_seed, 5) * 0.03F;
+    const auto muzzle_length = 0.18F + seed_detail_unit(creature.appearance_seed, 5) * 0.03F;
 
     append_box(mesh, root, glm::vec3 {-0.08F, 1.02F + body_bob, 0.0F},
-               glm::vec3 {0.11F * scale, 0.20F * scale, 0.10F * scale},
+               glm::vec3 {0.12F * scale, 0.21F * scale, 0.12F * scale},
                glm::vec3 {0.02F, 0.0F, 0.02F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.42F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.34F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.00F, 1.28F + body_bob, 0.0F},
-               glm::vec3 {0.13F * scale, 0.18F * scale, 0.12F * scale},
+               glm::vec3 {0.16F * scale, 0.20F * scale, 0.15F * scale},
                glm::vec3 {0.05F, 0.0F, 0.05F}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.38F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.28F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.08F, 1.58F + body_bob, 0.0F},
-               glm::vec3 {0.16F * scale, 0.24F * scale, 0.13F * scale},
+               glm::vec3 {0.20F * scale, 0.27F * scale, 0.17F * scale},
                glm::vec3 {0.08F, 0.0F, 0.08F + body_roll}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.40F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.30F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.06F, 1.82F + body_bob, 0.0F},
+               glm::vec3 {0.19F * scale, 0.11F * scale, 0.20F * scale},
+               glm::vec3 {0.16F, 0.0F, 0.10F + body_roll * 0.80F}, CreatureAtlasTile::ZombieFlesh,
+               presence, tension, kMaterialZombieFlesh, 0.22F, pulse * 0.10F);
     append_box(mesh, root, glm::vec3 {-0.02F, 1.48F + body_bob, 0.0F},
-               glm::vec3 {0.05F * scale, 0.38F * scale, 0.04F * scale},
+               glm::vec3 {0.06F * scale, 0.36F * scale, 0.05F * scale},
                glm::vec3 {0.10F, 0.0F, 0.04F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.74F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.60F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.30F, 1.76F + body_bob, 0.0F},
-               glm::vec3 {0.06F * scale, 0.11F * scale, 0.05F * scale},
+               glm::vec3 {0.08F * scale, 0.13F * scale, 0.06F * scale},
                glm::vec3 {head_pitch * 0.30F, head_yaw, 0.0F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.50F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.36F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.50F, 1.92F + body_bob, 0.0F},
-               glm::vec3 {0.14F * scale, 0.15F * scale, 0.12F * scale},
+               glm::vec3 {0.16F * scale, 0.18F * scale, 0.14F * scale},
                glm::vec3 {head_pitch, head_yaw, body_roll * 0.4F}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.48F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.34F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.36F, 1.58F + body_bob, 0.0F},
+               glm::vec3 {0.10F * scale, 0.14F * scale, 0.09F * scale},
+               glm::vec3 {head_pitch * 0.18F, head_yaw, body_roll * 0.20F}, CreatureAtlasTile::ZombieFlesh,
+               presence, tension, kMaterialZombieFlesh, 0.24F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.70F, 1.84F + body_bob, 0.0F},
                glm::vec3 {muzzle_length * scale, 0.05F * scale, 0.10F * scale},
                glm::vec3 {head_pitch * 0.55F, head_yaw, 0.0F}, CreatureAtlasTile::ZombieMouth,
-               presence, tension, kMaterialZombieFlesh, 0.56F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.44F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.68F, 1.70F + body_bob, 0.0F},
                glm::vec3 {muzzle_length * 0.90F * scale, 0.04F * scale, 0.09F * scale},
                glm::vec3 {head_pitch + jaw_open * 3.0F, head_yaw, 0.0F}, CreatureAtlasTile::ZombieMouth,
-               presence, tension, kMaterialZombieFlesh, 0.58F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.48F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.60F, 1.96F + body_bob, 0.0F}, 0.08F,
                 glm::vec3 {0.030F * scale, 0.046F * scale, 0.020F * scale},
                 glm::vec3 {head_pitch * 0.2F, head_yaw, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.02F},
@@ -901,25 +893,25 @@ void append_night_cow(CreatureMeshData& mesh,
                 CreatureAtlasTile::ZombieHorn, presence, tension, kMaterialHorn, 0.20F, 0.0F);
 
     append_pair(mesh, root, glm::vec3 {0.06F, 1.46F + body_bob, 0.0F}, shoulder_span,
-                glm::vec3 {0.050F * scale, 0.22F * scale, 0.042F * scale},
+                glm::vec3 {0.058F * scale, 0.22F * scale, 0.052F * scale},
                 glm::vec3 {0.00F, 0.0F, -0.36F - attack * 0.10F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.24F, 0.0F);
+                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.18F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.18F, 0.98F + body_bob, 0.0F}, shoulder_span + 0.01F,
-                glm::vec3 {0.042F * scale, 0.29F * scale, 0.036F * scale},
+                glm::vec3 {0.048F * scale, 0.28F * scale, 0.042F * scale},
                 glm::vec3 {-0.08F, 0.0F, -0.16F - attack * 0.22F + arm_swing * 0.75F}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.36F, 0.0F);
+                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.26F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.28F, 0.46F + body_bob, 0.0F}, shoulder_span + 0.01F,
-                glm::vec3 {0.038F * scale, 0.11F * scale, 0.030F * scale},
+                glm::vec3 {0.044F * scale, 0.11F * scale, 0.038F * scale},
                 glm::vec3 {0.10F, 0.0F, -0.12F - attack * 0.18F}, glm::vec3 {0.0F, 0.0F, 0.04F},
                 CreatureAtlasTile::ZombieClaw, presence, tension, kMaterialKeratin, 0.20F, 0.0F);
     append_pair(mesh, root, glm::vec3 {-0.10F, 0.68F + body_bob, 0.0F}, hip_span,
-                glm::vec3 {0.052F * scale, 0.37F * scale, 0.048F * scale},
+                glm::vec3 {0.058F * scale, 0.35F * scale, 0.054F * scale},
                 glm::vec3 {0.0F, 0.0F, leg_swing}, glm::vec3 {0.0F, 0.0F, -0.02F},
-                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.20F, 0.0F);
+                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.16F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.06F, 0.18F + body_bob, 0.0F}, hip_span,
-                glm::vec3 {0.044F * scale, 0.46F * scale, 0.040F * scale},
+                glm::vec3 {0.050F * scale, 0.42F * scale, 0.044F * scale},
                 glm::vec3 {0.10F, 0.0F, -0.18F - leg_swing * 0.55F}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.30F, 0.0F);
+                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.22F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.18F, 0.06F + body_bob, 0.0F}, hip_span,
                 glm::vec3 {0.095F * scale, 0.06F * scale, 0.065F * scale},
                 glm::vec3 {0.0F, 0.0F, 0.02F}, glm::vec3 {0.0F, 0.0F, -0.02F},
@@ -942,7 +934,7 @@ void append_night_cow(CreatureMeshData& mesh,
     }
 }
 
-void append_night_sheep(CreatureMeshData& mesh,
+void append_night_sheep(std::vector<CreaturePartInstance>& mesh,
                         const CreatureRenderInstance& creature,
                         const CreatureVisualState& state,
                         const glm::mat4& root) {
@@ -966,48 +958,52 @@ void append_night_sheep(CreatureMeshData& mesh,
     const auto leg_swing = stride * (0.32F + motion * 0.14F) + attack * 0.06F;
     const auto jaw_open = 0.05F + attack * 0.10F + tension * 0.04F;
     const auto pulse = (0.80F + 0.20F * std::sin(creature.animation_time * 8.6F + phase)) * state.corruption;
-    const auto scale = 0.38F + 0.62F * presence;
-    const auto shoulder_span = 0.20F + seed_detail_signed(creature.appearance_seed, 1) * 0.014F;
+    const auto scale = 0.42F + 0.58F * presence;
+    const auto shoulder_span = 0.19F + seed_detail_signed(creature.appearance_seed, 1) * 0.014F;
     const auto hip_span = 0.15F + seed_detail_signed(creature.appearance_seed, 2) * 0.010F;
-    const auto head_length = 0.20F + seed_detail_unit(creature.appearance_seed, 3) * 0.03F;
-    const auto mane_height = 0.16F + seed_detail_unit(creature.appearance_seed, 4) * 0.03F;
+    const auto head_length = 0.22F + seed_detail_unit(creature.appearance_seed, 3) * 0.03F;
+    const auto mane_height = 0.18F + seed_detail_unit(creature.appearance_seed, 4) * 0.03F;
 
     append_box(mesh, root, glm::vec3 {-0.06F, 1.00F + body_bob, 0.0F},
-               glm::vec3 {0.10F * scale, 0.18F * scale, 0.09F * scale},
+               glm::vec3 {0.11F * scale, 0.18F * scale, 0.11F * scale},
                glm::vec3 {0.02F, 0.0F, 0.04F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.42F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.34F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.02F, 1.24F + body_bob, 0.0F},
-               glm::vec3 {0.12F * scale, 0.18F * scale, 0.11F * scale},
+               glm::vec3 {0.15F * scale, 0.19F * scale, 0.14F * scale},
                glm::vec3 {0.05F, 0.0F, 0.06F}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.38F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.28F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.10F, 1.52F + body_bob, 0.0F},
-               glm::vec3 {0.14F * scale, 0.24F * scale, 0.12F * scale},
+               glm::vec3 {0.18F * scale, 0.26F * scale, 0.16F * scale},
                glm::vec3 {0.08F, 0.0F, 0.10F + body_roll}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.42F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.30F, 0.0F);
     append_box(mesh, root, glm::vec3 {-0.02F, 1.42F + body_bob, 0.0F},
-               glm::vec3 {0.04F * scale, 0.36F * scale, 0.04F * scale},
+               glm::vec3 {0.05F * scale, 0.34F * scale, 0.05F * scale},
                glm::vec3 {0.10F, 0.0F, 0.04F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.74F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.60F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.04F, 1.72F + body_bob, 0.0F},
-               glm::vec3 {0.16F * scale, mane_height * scale, 0.18F * scale},
+               glm::vec3 {0.20F * scale, mane_height * scale, 0.22F * scale},
                glm::vec3 {0.06F, 0.0F, 0.04F}, CreatureAtlasTile::ZombieWool,
                presence, tension, kMaterialWool, 0.24F, pulse * 0.16F);
+    append_box(mesh, root, glm::vec3 {-0.04F, 1.42F + body_bob, 0.0F},
+               glm::vec3 {0.17F * scale, 0.12F * scale, 0.20F * scale},
+               glm::vec3 {0.04F, 0.0F, 0.05F + body_roll * 0.45F}, CreatureAtlasTile::ZombieWool,
+               presence, tension, kMaterialWool, 0.18F, pulse * 0.10F);
     append_box(mesh, root, glm::vec3 {0.30F, 1.72F + body_bob, 0.0F},
-               glm::vec3 {0.05F * scale, 0.11F * scale, 0.04F * scale},
+               glm::vec3 {0.07F * scale, 0.12F * scale, 0.05F * scale},
                glm::vec3 {head_pitch * 0.35F, head_yaw, 0.0F}, CreatureAtlasTile::ZombieBone,
-               presence, tension, kMaterialZombieBone, 0.50F, 0.0F);
+               presence, tension, kMaterialZombieBone, 0.36F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.52F, 1.86F + body_bob, 0.0F},
-               glm::vec3 {head_length * scale, 0.13F * scale, 0.10F * scale},
+               glm::vec3 {head_length * scale, 0.15F * scale, 0.12F * scale},
                glm::vec3 {head_pitch, head_yaw, body_roll * 0.25F}, CreatureAtlasTile::ZombieFlesh,
-               presence, tension, kMaterialZombieFlesh, 0.52F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.36F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.74F, 1.76F + body_bob, 0.0F},
                glm::vec3 {0.13F * scale, 0.05F * scale, 0.08F * scale},
                glm::vec3 {head_pitch * 0.55F, head_yaw, 0.0F}, CreatureAtlasTile::ZombieMouth,
-               presence, tension, kMaterialZombieFlesh, 0.58F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.46F, 0.0F);
     append_box(mesh, root, glm::vec3 {0.72F, 1.64F + body_bob, 0.0F},
                glm::vec3 {0.12F * scale, 0.04F * scale, 0.07F * scale},
                glm::vec3 {head_pitch + jaw_open * 3.2F, head_yaw, 0.0F}, CreatureAtlasTile::ZombieMouth,
-               presence, tension, kMaterialZombieFlesh, 0.60F, 0.0F);
+               presence, tension, kMaterialZombieFlesh, 0.48F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.64F, 1.90F + body_bob, 0.0F}, 0.07F,
                 glm::vec3 {0.028F * scale, 0.048F * scale, 0.018F * scale},
                 glm::vec3 {head_pitch * 0.2F, head_yaw, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.02F},
@@ -1022,25 +1018,25 @@ void append_night_sheep(CreatureMeshData& mesh,
                 CreatureAtlasTile::ZombieWool, presence, tension, kMaterialWool, 0.20F, pulse * 0.12F);
 
     append_pair(mesh, root, glm::vec3 {0.08F, 1.44F + body_bob, 0.0F}, shoulder_span,
-                glm::vec3 {0.046F * scale, 0.24F * scale, 0.038F * scale},
+                glm::vec3 {0.054F * scale, 0.22F * scale, 0.046F * scale},
                 glm::vec3 {0.0F, 0.0F, -0.48F - attack * 0.10F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.24F, 0.0F);
+                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.18F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.22F, 0.92F + body_bob, 0.0F}, shoulder_span + 0.02F,
-                glm::vec3 {0.036F * scale, 0.32F * scale, 0.030F * scale},
+                glm::vec3 {0.044F * scale, 0.30F * scale, 0.038F * scale},
                 glm::vec3 {-0.10F, 0.0F, -0.20F - attack * 0.24F + arm_swing * 0.80F}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.36F, 0.0F);
+                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.26F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.32F, 0.38F + body_bob, 0.0F}, shoulder_span + 0.03F,
-                glm::vec3 {0.030F * scale, 0.15F * scale, 0.024F * scale},
+                glm::vec3 {0.038F * scale, 0.13F * scale, 0.032F * scale},
                 glm::vec3 {0.18F, 0.0F, -0.18F - attack * 0.24F}, glm::vec3 {0.0F, 0.0F, 0.04F},
                 CreatureAtlasTile::ZombieClaw, presence, tension, kMaterialKeratin, 0.20F, 0.0F);
     append_pair(mesh, root, glm::vec3 {-0.10F, 0.64F + body_bob, 0.0F}, hip_span,
-                glm::vec3 {0.048F * scale, 0.36F * scale, 0.044F * scale},
+                glm::vec3 {0.056F * scale, 0.34F * scale, 0.050F * scale},
                 glm::vec3 {0.0F, 0.0F, leg_swing}, glm::vec3 {0.0F, 0.0F, -0.02F},
-                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.20F, 0.0F);
+                CreatureAtlasTile::ZombieFlesh, presence, tension, kMaterialZombieFlesh, 0.16F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.06F, 0.16F + body_bob, 0.0F}, hip_span,
-                glm::vec3 {0.040F * scale, 0.44F * scale, 0.036F * scale},
+                glm::vec3 {0.048F * scale, 0.40F * scale, 0.040F * scale},
                 glm::vec3 {0.10F, 0.0F, -0.20F - leg_swing * 0.55F}, glm::vec3 {0.0F, 0.0F, 0.02F},
-                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.30F, 0.0F);
+                CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.22F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.18F, 0.06F + body_bob, 0.0F}, hip_span,
                 glm::vec3 {0.09F * scale, 0.06F * scale, 0.05F * scale},
                 glm::vec3 {0.0F, 0.0F, 0.02F}, glm::vec3 {0.0F, 0.0F, -0.02F},
@@ -1061,6 +1057,85 @@ void append_night_sheep(CreatureMeshData& mesh,
                    glm::vec3 {0.08F * static_cast<float>(index), 0.0F, 0.10F * (index % 2 == 0 ? 1.0F : -1.0F)},
                    CreatureAtlasTile::ZombieBone, presence, tension, kMaterialZombieBone, 0.74F, 0.0F);
     }
+}
+
+void append_day_villager(std::vector<CreaturePartInstance>& mesh,
+                         const CreatureRenderInstance& creature,
+                         const CreatureVisualState& state,
+                         const glm::mat4& root) {
+    const auto presence = state.day_presence;
+    if (presence <= 1.0e-4F) {
+        return;
+    }
+
+    const auto motion = saturate(creature.motion_amount);
+    const auto gaze = saturate(creature.gaze_weight);
+    const auto tension = saturate(creature.tension);
+    const auto phase = seed_unit(creature.appearance_seed, 22) * kTwoPi;
+    const auto stride = std::sin(creature.animation_time * (4.8F + motion * 3.6F) + phase);
+    const auto breath = std::sin(creature.animation_time * 2.0F + phase * 0.35F) * 0.018F;
+    const auto body_bob = motion * 0.02F * std::sin(creature.animation_time * 9.0F + phase);
+    const auto head_pitch = 0.02F + gaze * 0.08F;
+    const auto head_yaw = std::sin(creature.animation_time * 1.4F + phase) * 0.04F + gaze * 0.14F;
+    const auto arm_swing = stride * (0.18F + motion * 0.16F);
+    const auto leg_swing = -stride * (0.24F + motion * 0.18F);
+    const auto scale = 0.96F + seed_detail_signed(creature.appearance_seed, 1) * 0.05F;
+    const auto shoulder_span = 0.18F * scale;
+    const auto hip_span = 0.11F * scale;
+    const auto torso_half = glm::vec3 {
+        (0.13F + seed_detail_unit(creature.appearance_seed, 2) * 0.01F) * scale,
+        (0.32F + seed_detail_unit(creature.appearance_seed, 3) * 0.03F) * scale,
+        (0.09F + seed_detail_unit(creature.appearance_seed, 4) * 0.01F) * scale,
+    };
+    const auto head_half = glm::vec3 {
+        (0.14F + seed_detail_unit(creature.appearance_seed, 5) * 0.01F) * scale,
+        (0.16F + seed_detail_unit(creature.appearance_seed, 6) * 0.01F) * scale,
+        (0.14F + seed_detail_unit(creature.appearance_seed, 7) * 0.01F) * scale,
+    };
+    const auto upper_arm_half = glm::vec3 {0.050F * scale, 0.20F * scale, 0.050F * scale};
+    const auto lower_arm_half = glm::vec3 {0.042F * scale, 0.18F * scale, 0.042F * scale};
+    const auto upper_leg_half = glm::vec3 {0.055F * scale, 0.22F * scale, 0.055F * scale};
+    const auto lower_leg_half = glm::vec3 {0.050F * scale, 0.20F * scale, 0.050F * scale};
+    const auto apron_half = glm::vec3 {torso_half.x * 0.86F, torso_half.y * 0.78F, torso_half.z * 0.14F};
+    const auto hair_half = glm::vec3 {head_half.x * 1.02F, head_half.y * 0.26F, head_half.z * 1.02F};
+    const auto nose_half = glm::vec3 {0.050F * scale, 0.070F * scale, 0.034F * scale};
+
+    append_box(mesh, root, glm::vec3 {0.0F, 1.12F + breath + body_bob, 0.0F},
+               torso_half, glm::vec3 {0.01F, 0.0F, 0.02F}, CreatureAtlasTile::VillagerCloth,
+               state.morph, tension, kMaterialHide, 0.14F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.0F, 1.02F + breath + body_bob, torso_half.z + apron_half.z * 0.72F},
+               apron_half, glm::vec3 {0.02F, 0.0F, 0.0F}, CreatureAtlasTile::VillagerApron,
+               state.morph, tension, kMaterialTransitionHide, 0.06F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.0F, 1.76F + breath * 0.4F + body_bob, 0.0F},
+               head_half, glm::vec3 {head_pitch, head_yaw, 0.0F}, CreatureAtlasTile::VillagerSkin,
+               state.morph, tension, kMaterialSkin, 0.12F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.0F, 1.94F + body_bob, 0.0F},
+               hair_half, glm::vec3 {head_pitch * 0.3F, head_yaw, 0.0F}, CreatureAtlasTile::VillagerHair,
+               state.morph, tension, kMaterialKeratin, 0.08F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.17F * scale, 1.72F + body_bob, 0.0F},
+               nose_half, glm::vec3 {head_pitch * 0.7F, head_yaw, 0.0F}, CreatureAtlasTile::VillagerSkin,
+               state.morph, tension, kMaterialSkin, 0.04F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.13F * scale, 1.80F + body_bob, 0.0F}, 0.07F * scale,
+                glm::vec3 {0.014F * scale, 0.030F * scale, 0.012F * scale},
+                glm::vec3 {head_pitch * 0.3F, head_yaw, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.01F},
+                CreatureAtlasTile::VillagerEye, state.morph, tension, kMaterialSkin, 0.88F, 0.0F);
+
+    append_pair(mesh, root, glm::vec3 {0.02F, 1.14F + body_bob, 0.0F}, shoulder_span,
+                upper_arm_half,
+                glm::vec3 {0.0F, 0.0F, -0.10F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.02F},
+                CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.06F, 0.70F + body_bob, 0.0F}, shoulder_span,
+                lower_arm_half,
+                glm::vec3 {0.02F, 0.0F, -0.16F + arm_swing * 0.78F}, glm::vec3 {0.0F, 0.0F, 0.02F},
+                CreatureAtlasTile::VillagerSkin, state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {-0.01F, 0.68F + body_bob, 0.0F}, hip_span,
+                upper_leg_half,
+                glm::vec3 {0.0F, 0.0F, leg_swing}, glm::vec3 {0.0F, 0.0F, -0.02F},
+                CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.10F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.08F, 0.20F + body_bob, 0.0F}, hip_span,
+                lower_leg_half,
+                glm::vec3 {0.04F, 0.0F, leg_swing * 0.84F}, glm::vec3 {0.0F, 0.0F, -0.01F},
+                CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.10F, 0.0F);
 }
 
 auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std::array<std::uint8_t, 4> {
@@ -1150,16 +1225,19 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
     case CreatureAtlasTile::ZombieFlesh: {
         const auto bruise = tile_noise(x * 3, y * 3, 77);
         const auto sick = 0.5F + 0.5F * std::sin(nx * 8.0F + ny * 6.0F + grain * 5.0F);
-        return make_rgba(92.0F + grain * 18.0F,
-                         116.0F + soft_grain * 18.0F - bruise * 12.0F,
-                         96.0F + sick * 12.0F - bruise * 8.0F,
+        const auto sinew = 0.5F + 0.5F * std::sin(nx * 18.0F + ny * 4.0F + soft_grain * 7.0F);
+        const auto pallor = radial_falloff(nx, ny, 0.48F, 0.36F, 0.72F);
+        return make_rgba(112.0F + sinew * 18.0F + pallor * 10.0F + grain * 8.0F - bruise * 10.0F,
+                         128.0F + soft_grain * 16.0F + pallor * 10.0F - bruise * 10.0F,
+                         102.0F + sick * 18.0F + pallor * 6.0F - bruise * 8.0F,
                          0.0F);
     }
     case CreatureAtlasTile::ZombieBone: {
-        const auto crack = (x + y) % 7 == 0 ? 24.0F : 0.0F;
-        return make_rgba(218.0F - crack + grain * 10.0F,
-                         208.0F - crack * 0.8F + soft_grain * 8.0F,
-                         184.0F - crack * 0.7F + grain * 8.0F,
+        const auto crack = (x + y) % 7 == 0 ? 28.0F : 0.0F;
+        const auto ridge = 0.5F + 0.5F * std::sin(nx * 10.0F + ny * 6.0F + grain * 5.0F);
+        return make_rgba(210.0F + ridge * 18.0F - crack + grain * 8.0F,
+                         198.0F + ridge * 16.0F - crack * 0.7F + soft_grain * 8.0F,
+                         176.0F + ridge * 12.0F - crack * 0.6F + grain * 6.0F,
                          0.0F);
     }
     case CreatureAtlasTile::ZombieMouth: {
@@ -1180,29 +1258,30 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
         const auto sclera = radial_falloff(nx, ny, 0.5F, 0.5F, 0.46F);
         const auto pupil = radial_falloff(nx, ny, 0.52F, 0.52F, 0.12F);
         const auto iris = radial_falloff(nx, ny, 0.50F, 0.50F, 0.20F) * (1.0F - pupil);
-        const auto alpha = 92.0F + sclera * 138.0F;
-        return make_rgba(212.0F + sclera * 28.0F - pupil * 170.0F,
-                         192.0F + sclera * 26.0F - pupil * 160.0F + iris * 44.0F,
-                         186.0F + sclera * 20.0F - pupil * 178.0F,
+        const auto ember = radial_falloff(nx, ny, 0.50F, 0.50F, 0.28F) * (1.0F - pupil * 0.55F);
+        const auto alpha = 116.0F + sclera * 132.0F;
+        return make_rgba(232.0F + sclera * 18.0F + ember * 12.0F - pupil * 188.0F,
+                         144.0F + ember * 84.0F + iris * 32.0F - pupil * 138.0F,
+                         84.0F + ember * 48.0F - pupil * 104.0F,
                          alpha);
     }
     case CreatureAtlasTile::ZombieVein: {
         const auto wave = std::sin(nx * 15.0F + ny * 4.0F + grain * 6.0F) + 0.45F * std::sin(nx * 5.0F - ny * 14.0F + soft_grain * 5.0F);
         const auto mask = smooth_range(0.72F, 0.92F, std::abs(wave));
-        return make_rgba(164.0F + mask * 32.0F,
-                         34.0F + mask * 18.0F,
-                         28.0F + mask * 12.0F,
-                         mask * (38.0F + soft_grain * 92.0F));
+        return make_rgba(172.0F + mask * 34.0F,
+                         42.0F + mask * 24.0F,
+                         34.0F + mask * 16.0F,
+                         mask * (48.0F + soft_grain * 108.0F));
     }
     case CreatureAtlasTile::ZombieScar: {
         const auto line_a = std::abs((nx - 0.24F) * 0.70F + (ny - 0.54F)) < 0.05F;
         const auto line_b = std::abs((nx - 0.66F) * 0.80F - (ny - 0.34F)) < 0.05F;
         const auto line_c = std::abs((nx - 0.44F) * 0.28F + (ny - 0.72F)) < 0.04F;
         const auto mask = (line_a || line_b || line_c) ? 1.0F : 0.0F;
-        return make_rgba(180.0F + grain * 18.0F,
-                         36.0F + soft_grain * 10.0F,
-                         32.0F + grain * 8.0F,
-                         mask * 142.0F);
+        return make_rgba(198.0F + grain * 16.0F,
+                         54.0F + soft_grain * 16.0F,
+                         42.0F + grain * 10.0F,
+                         mask * 168.0F);
     }
     case CreatureAtlasTile::PigBelly:
         return make_rgba(240.0F + grain * 8.0F, 190.0F + soft_grain * 10.0F, 198.0F + grain * 10.0F, 0.0F);
@@ -1237,14 +1316,14 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
     }
     case CreatureAtlasTile::ZombieClaw: {
         const auto highlight = 0.5F + 0.5F * std::sin(nx * 7.0F + ny * 3.0F + grain * 4.0F);
-        return make_rgba(42.0F + highlight * 18.0F, 38.0F + highlight * 14.0F, 46.0F + highlight * 18.0F, 0.0F);
+        return make_rgba(52.0F + highlight * 20.0F, 44.0F + highlight * 16.0F, 54.0F + highlight * 20.0F, 0.0F);
     }
     case CreatureAtlasTile::ZombieWool: {
         const auto curl = std::sin(nx * 16.0F + grain * 5.0F) * std::sin(ny * 12.0F + soft_grain * 4.0F);
         const auto stain = radial_falloff(nx, ny, 0.60F, 0.64F, 0.32F);
-        return make_rgba(176.0F + curl * 12.0F,
-                         170.0F + grain * 10.0F - stain * 22.0F,
-                         164.0F + soft_grain * 10.0F - stain * 18.0F,
+        return make_rgba(188.0F + curl * 14.0F,
+                         178.0F + grain * 12.0F - stain * 22.0F,
+                         168.0F + soft_grain * 12.0F - stain * 18.0F,
                          0.0F);
     }
     case CreatureAtlasTile::ZombieHorn: {
@@ -1253,6 +1332,44 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
                          128.0F - gradient * 38.0F,
                          102.0F - gradient * 34.0F,
                          0.0F);
+    }
+    case CreatureAtlasTile::VillagerCloth: {
+        const auto weave = 0.5F + 0.5F * std::sin(nx * 12.0F + ny * 7.0F + grain * 5.0F);
+        return make_rgba(76.0F + weave * 26.0F,
+                         112.0F + soft_grain * 20.0F,
+                         148.0F + weave * 34.0F + grain * 10.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::VillagerSkin: {
+        const auto warmth = radial_falloff(nx, ny, 0.48F, 0.52F, 0.70F);
+        return make_rgba(204.0F + warmth * 18.0F + grain * 10.0F,
+                         156.0F + soft_grain * 14.0F + warmth * 8.0F,
+                         122.0F + grain * 10.0F + warmth * 6.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::VillagerHair: {
+        const auto streak = 0.5F + 0.5F * std::sin(nx * 16.0F + soft_grain * 6.0F);
+        return make_rgba(82.0F + streak * 24.0F,
+                         58.0F + grain * 14.0F,
+                         34.0F + soft_grain * 10.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::VillagerApron: {
+        const auto seam = line_mask(nx, 0.50F, 0.04F) * line_mask(ny, 0.52F, 0.32F);
+        return make_rgba(188.0F + grain * 12.0F - seam * 18.0F,
+                         176.0F + soft_grain * 10.0F - seam * 14.0F,
+                         146.0F + grain * 10.0F - seam * 10.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::VillagerEye: {
+        const auto eye_white = radial_falloff(nx, ny, 0.50F, 0.50F, 0.42F);
+        const auto pupil = radial_falloff(nx, ny, 0.54F, 0.52F, 0.12F);
+        const auto brow = smooth_range(0.52F, 0.84F, line_mask(ny, 0.24F, 0.08F));
+        const auto alpha = std::max(eye_white, pupil) > 0.12F ? 196.0F : 0.0F;
+        return make_rgba(220.0F + eye_white * 26.0F - pupil * 220.0F - brow * 28.0F,
+                         206.0F + eye_white * 18.0F - pupil * 180.0F - brow * 18.0F,
+                         194.0F + eye_white * 14.0F - pupil * 160.0F - brow * 12.0F,
+                         alpha);
     }
     case CreatureAtlasTile::Count:
         break;
@@ -1280,8 +1397,9 @@ auto build_creature_atlas_pixels() -> std::vector<std::uint8_t> {
     return pixels;
 }
 
-auto build_creature_mesh(const CreatureRenderInstance& creature) -> CreatureMeshData {
-    CreatureMeshData mesh {};
+auto build_creature_parts(const CreatureRenderInstance& creature) -> std::vector<CreaturePartInstance> {
+    std::vector<CreaturePartInstance> mesh {};
+    mesh.reserve(96U);
 
     auto root = glm::translate(glm::mat4(1.0F), creature.position);
     root = glm::rotate(root, creature.yaw_radians, glm::vec3 {0.0F, 1.0F, 0.0F});
@@ -1299,6 +1417,9 @@ auto build_creature_mesh(const CreatureRenderInstance& creature) -> CreatureMesh
         append_transition_accents(mesh, creature, state, root);
         append_night_cow(mesh, creature, state, root);
         break;
+    case CreatureSpecies::Villager:
+        append_day_villager(mesh, creature, state, root);
+        break;
     case CreatureSpecies::Sheep:
     default:
         append_day_sheep(mesh, creature, state, root);
@@ -1308,6 +1429,62 @@ auto build_creature_mesh(const CreatureRenderInstance& creature) -> CreatureMesh
     }
 
     return mesh;
+}
+
+auto build_creature_mesh(std::span<const CreaturePartInstance> parts) -> CreatureMeshData {
+    CreatureMeshData mesh {};
+    mesh.vertices.reserve(parts.size() * 24U);
+    mesh.indices.reserve(parts.size() * 36U);
+    mesh.part_count = parts.size();
+
+    const std::array<std::array<float, 2>, 4> kFaceUvs {{
+        {1.0F, 0.0F},
+        {1.0F, 1.0F},
+        {0.0F, 1.0F},
+        {0.0F, 0.0F},
+    }};
+
+    for (const auto& part : parts) {
+        const auto normal_matrix = glm::transpose(glm::inverse(glm::mat3(part.transform)));
+        for (std::size_t face_index = 0; face_index < box_faces().size(); ++face_index) {
+            const auto& face = box_faces()[face_index];
+            const auto& uv_rect = part.face_uvs[face_index];
+            const auto face_normal = glm::normalize(normal_matrix * face.normal);
+            const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
+            for (std::size_t vertex_index = 0; vertex_index < face.corners.size(); ++vertex_index) {
+                const auto world_position = part.transform * glm::vec4(face.corners[vertex_index], 1.0F);
+                const auto u = glm::mix(uv_rect.u0, uv_rect.u1, kFaceUvs[vertex_index][0]);
+                const auto v = glm::mix(uv_rect.v0, uv_rect.v1, kFaceUvs[vertex_index][1]);
+                mesh.vertices.push_back({
+                    world_position.x,
+                    world_position.y,
+                    world_position.z,
+                    u,
+                    v,
+                    face_normal.x,
+                    face_normal.y,
+                    face_normal.z,
+                    part.nightmare_factor,
+                    part.tension,
+                    part.material_class,
+                    part.cavity_mask,
+                    part.emissive_strength,
+                });
+            }
+
+            mesh.indices.insert(mesh.indices.end(), {
+                base_index + 0U, base_index + 1U, base_index + 2U,
+                base_index + 0U, base_index + 2U, base_index + 3U,
+            });
+        }
+    }
+
+    return mesh;
+}
+
+auto build_creature_mesh(const CreatureRenderInstance& creature) -> CreatureMeshData {
+    const auto parts = build_creature_parts(creature);
+    return build_creature_mesh(std::span<const CreaturePartInstance>(parts.data(), parts.size()));
 }
 
 } // namespace valcraft

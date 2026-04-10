@@ -84,6 +84,21 @@ struct BrokenBlockResult {
     BlockId block_id = to_block_id(BlockType::Air);
 };
 
+struct PlacedBlockResult {
+    BlockCoord block {};
+    BlockId block_id = to_block_id(BlockType::Air);
+};
+
+struct BlockBreakProgress {
+    bool active = false;
+    BlockCoord block {};
+    BlockId block_id = to_block_id(BlockType::Air);
+    float elapsed_seconds = 0.0F;
+    float duration_seconds = 0.0F;
+    float progress = 0.0F;
+    std::uint8_t crack_stage = 0;
+};
+
 class PlayerController {
 public:
     explicit PlayerController(glm::vec3 spawn_position = {0.0F, 70.0F, 0.0F});
@@ -100,6 +115,7 @@ public:
     [[nodiscard]] auto max_air_seconds() const noexcept -> float;
     [[nodiscard]] auto is_dead() const noexcept -> bool;
 
+    void load_state(const PlayerState& state) noexcept;
     void set_position(const glm::vec3& position) noexcept;
     void set_velocity(const glm::vec3& velocity) noexcept;
     void set_selected_block(BlockId block_id) noexcept;
@@ -109,8 +125,12 @@ public:
     void apply_external_damage(float amount, PlayerDeathCause cause) noexcept;
 
     [[nodiscard]] auto current_target(const World& world, float max_distance = 8.0F) const -> RaycastHit;
+    auto update_block_breaking(World& world, float dt, bool breaking_held, float max_distance = 8.0F)
+        -> std::optional<BrokenBlockResult>;
+    void cancel_block_breaking() noexcept;
+    [[nodiscard]] auto block_break_progress() const noexcept -> const BlockBreakProgress&;
     auto try_break_block(World& world, float max_distance = 8.0F) const -> std::optional<BrokenBlockResult>;
-    auto try_place_block(World& world, float max_distance = 8.0F) const -> bool;
+    auto try_place_block(World& world, float max_distance = 8.0F) const -> std::optional<PlacedBlockResult>;
     [[nodiscard]] auto collides_at(const World& world, const glm::vec3& feet_position) const -> bool;
 
 private:
@@ -132,6 +152,7 @@ private:
     [[nodiscard]] auto sample_water_contact(const World& world, const glm::vec3& feet_position) const noexcept -> WaterContactState;
 
     PlayerState state_ {};
+    BlockBreakProgress block_break_progress_ {};
     BlockId selected_block_ = to_block_id(BlockType::Grass);
     static constexpr float kPlayerWidth = 0.6F;
     static constexpr float kPlayerHeight = 1.8F;

@@ -15,6 +15,27 @@ inline constexpr int kCreatureActivationRadiusChunks = 3;
 inline constexpr int kCreatureKeepAliveRadiusChunks = 4;
 inline constexpr std::size_t kCreatureMaxActiveCount = 18;
 
+struct CreatureAuditStats {
+    std::size_t spawned = 0;
+    std::size_t despawned = 0;
+    std::size_t attacks = 0;
+    std::size_t active_creatures = 0;
+};
+
+struct ResidentProfile {
+    CreatureSpawnAnchor anchor {};
+    CreatureResidentRole role = CreatureResidentRole::Artisan;
+    glm::vec3 home_position {0.0F};
+    glm::vec3 interior_position {0.0F};
+    glm::vec3 work_position {0.0F};
+    glm::vec3 social_position {0.0F};
+    glm::vec3 garden_position {0.0F};
+    float walk_radius = 3.5F;
+    float home_radius = 1.8F;
+    float roam_radius = 10.0F;
+    std::uint32_t routine_seed = 0;
+};
+
 class CreatureSystem {
 public:
     void update(float dt,
@@ -28,6 +49,10 @@ public:
     [[nodiscard]] auto active_creatures() const noexcept -> std::span<const CreatureInstance>;
     [[nodiscard]] auto render_instances() const noexcept -> std::span<const CreatureRenderInstance>;
     [[nodiscard]] auto recent_attacks() const noexcept -> std::span<const CreatureAttackEvent>;
+    [[nodiscard]] auto consume_audit_stats() noexcept -> CreatureAuditStats;
+    void set_settlement_residents(std::vector<CreatureSpawnAnchor> residents);
+    void load_creatures(const std::vector<CreatureInstance>& creatures, const EnvironmentState& environment);
+    void clear() noexcept;
 
 private:
     void sync_active_creatures(const World& world, const glm::vec3& player_position, const CreatureCycleState& cycle);
@@ -43,10 +68,19 @@ private:
         -> std::optional<CreatureSpawnAnchor>;
     [[nodiscard]] auto find_creature(const ChunkCoord& coord) -> CreatureInstance*;
     [[nodiscard]] auto find_creature(const ChunkCoord& coord) const -> const CreatureInstance*;
+    [[nodiscard]] auto find_resident(const CreatureSpawnAnchor& anchor) const -> const CreatureSpawnAnchor*;
+    [[nodiscard]] auto find_resident_creature(const CreatureSpawnAnchor& anchor) -> CreatureInstance*;
+    [[nodiscard]] auto find_resident_creature(const CreatureSpawnAnchor& anchor) const -> const CreatureInstance*;
+    [[nodiscard]] auto find_resident_profile(const CreatureSpawnAnchor& anchor) -> ResidentProfile*;
+    [[nodiscard]] auto find_resident_profile(const CreatureSpawnAnchor& anchor) const -> const ResidentProfile*;
 
     std::vector<CreatureInstance> creatures_ {};
     std::vector<CreatureRenderInstance> render_instances_ {};
     std::vector<CreatureAttackEvent> attacks_ {};
+    std::vector<CreatureSpawnAnchor> settlement_residents_ {};
+    std::vector<ResidentProfile> resident_profiles_ {};
+    glm::vec3 settlement_center_ {0.0F};
+    CreatureAuditStats audit_stats_ {};
 };
 
 } // namespace valcraft

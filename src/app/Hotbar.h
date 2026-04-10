@@ -31,6 +31,7 @@ struct HotbarState {
 };
 
 inline constexpr auto make_item_stack(BlockId block_id, std::uint8_t count) noexcept -> HotbarSlot {
+    block_id = block_item_id(block_id);
     if (block_id == to_block_id(BlockType::Air) || count == 0) {
         return {};
     }
@@ -50,6 +51,7 @@ inline constexpr void normalize_item_stack(HotbarSlot& slot) noexcept {
         slot = {};
         return;
     }
+    slot.block_id = block_item_id(slot.block_id);
     if (slot.count > kMaxItemStackCount) {
         slot.count = kMaxItemStackCount;
     }
@@ -74,8 +76,12 @@ inline auto make_default_hotbar_state() noexcept -> HotbarState {
 
 inline constexpr auto selected_hotbar_block(const HotbarState& state) noexcept -> BlockId {
     return hotbar_slot_has_item(state.selected_slot())
-               ? state.selected_slot().block_id
+               ? block_item_id(state.selected_slot().block_id)
                : to_block_id(BlockType::Air);
+}
+
+inline constexpr auto selected_hotbar_emits_local_light(const HotbarState& state) noexcept -> bool {
+    return selected_hotbar_block(state) == to_block_id(BlockType::Torch);
 }
 
 inline constexpr auto hotbar_index_from_number_key(int number_key) noexcept -> std::optional<std::size_t> {

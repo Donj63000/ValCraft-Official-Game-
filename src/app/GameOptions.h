@@ -1,8 +1,10 @@
 #pragma once
 
+#include "app/Audit.h"
 #include "world/World.h"
 
 #include <span>
+#include <vector>
 #include <string>
 #include <string_view>
 
@@ -26,14 +28,14 @@ struct PerformanceOptions {
     std::string perf_scenario {};
 
     [[nodiscard]] auto world_budget() const noexcept -> WorldWorkBudget {
-        return {
-            chunk_generation_budget,
-            mesh_rebuild_budget,
-            light_node_budget,
-            max_generation_ms,
-            max_lighting_ms,
-            max_meshing_ms,
-        };
+        WorldWorkBudget budget {};
+        budget.chunk_generation_budget = chunk_generation_budget;
+        budget.mesh_rebuild_budget = mesh_rebuild_budget;
+        budget.light_node_budget = light_node_budget;
+        budget.max_generation_ms = max_generation_ms;
+        budget.max_lighting_ms = max_lighting_ms;
+        budget.max_meshing_ms = max_meshing_ms;
+        return budget;
     }
 };
 
@@ -44,6 +46,8 @@ struct GameOptions {
     bool freeze_time = false;
     float initial_time_of_day = 8.0F;
     PerformanceOptions performance {};
+    AuditOptions audit {};
+    std::vector<std::string> raw_arguments {};
 };
 
 struct GameOptionParseResult {

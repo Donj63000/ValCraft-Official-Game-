@@ -4,13 +4,18 @@
 #include "app/GameLoop.h"
 
 #include <glm/geometric.hpp>
+#include <glm/trigonometric.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -98,6 +103,38 @@ auto safe_drop_direction(const glm::vec3& look_direction) noexcept -> glm::vec3 
     return glm::normalize(look_direction);
 }
 
+auto executable_directory_from_sdl() -> std::filesystem::path {
+    std::filesystem::path executable_directory;
+    if (char* base_path = SDL_GetBasePath(); base_path != nullptr) {
+        executable_directory = std::filesystem::path(base_path);
+        SDL_free(base_path);
+    }
+
+    return executable_directory;
+}
+
+void apply_window_icon(SDL_Window* window) noexcept {
+    if (window == nullptr) {
+        return;
+    }
+
+    try {
+        const auto icon_path = resolve_window_icon_path(std::filesystem::current_path(), executable_directory_from_sdl());
+        if (!icon_path.has_value()) {
+            return;
+        }
+
+        SDL_Surface* icon_surface = SDL_LoadBMP(icon_path->string().c_str());
+        if (icon_surface == nullptr) {
+            return;
+        }
+
+        SDL_SetWindowIcon(window, icon_surface);
+        SDL_FreeSurface(icon_surface);
+    } catch (...) {
+    }
+}
+
 } // namespace
 
 Game::Game(GameOptions options)
@@ -105,9 +142,17 @@ Game::Game(GameOptions options)
       renderer_(),
       world_(1337, options.performance.stream_radius),
       options_(std::move(options)) {
+    runtime_shadows_enabled_ = options_.performance.shadows_enabled;
+    runtime_post_process_enabled_ = options_.performance.post_process_enabled;
     if (should_capture_performance()) {
-        frame_samples_.reserve(static_cast<std::size_t>(std::max(options_.smoke_frames, 0)));
+        const auto reserved_frames = options_.smoke_test
+                                         ? static_cast<std::size_t>(std::max(options_.smoke_frames, 0))
+                                         : static_cast<std::size_t>(1024);
+        frame_samples_.reserve(reserved_frames);
+        performance_events_.reserve(options_.smoke_test ? 64U : 256U);
     }
+    audit_second_accumulator_.reset(0);
+    initialize_audit();
     sync_selected_hotbar_slot();
 }
 
@@ -116,11 +161,30 @@ Game::~Game() {
 }
 
 auto Game::run() -> int {
+    PerformanceRunReport final_report {};
+    auto final_status = AuditRunStatus::Aborted;
+
     try {
         if (!initialize()) {
+            if (should_capture_performance()) {
+                final_report = build_performance_report();
+                finalize_audit(final_report, AuditRunStatus::Aborted);
+            }
             shutdown();
             return 1;
         }
+
+        record_audit_event(
+            AuditEventCategory::Session,
+            "initialize_complete",
+            AuditSeverity::Info,
+            audit_json_object({
+                {"smoke_test", audit_json_bool(options_.smoke_test)},
+                {"hidden_window", audit_json_bool(options_.hidden_window)},
+                {"window_width", audit_json_number(window_width_)},
+                {"window_height", audit_json_number(window_height_)},
+            }),
+            AuditPriority::Critical);
 
         using clock = std::chrono::steady_clock;
         constexpr auto fixed_step = std::chrono::duration<double>(1.0 / 60.0);
@@ -131,6 +195,8 @@ auto Game::run() -> int {
         while (running_) {
             const auto frame_begin = clock::now();
             FramePerformanceStats frame_stats {};
+            frame_raw_input_events_ = 0;
+            frame_input_action_events_ = 0;
             process_events();
 
             const auto now = clock::now();
@@ -154,14 +220,21 @@ auto Game::run() -> int {
             update_world_pipeline(frame_stats);
 
             const auto environment_state = environment_.current_state();
+            const auto creature_cycle = environment_.current_creature_cycle();
+            music_.sync_environment(environment_state, creature_cycle, has_active_session_, front_end_visible());
+            music_.pump();
             item_drops_.build_render_instances(world_, item_drop_render_instances_);
             renderer_.render_frame(
                 world_,
-                player_,
+                render_player(),
                 hotbar_,
                 inventory_menu_,
                 death_screen_,
                 pause_menu_,
+                main_menu_,
+                save_slot_menu_,
+                options_menu_,
+                confirm_dialog_,
                 creatures_.render_instances(),
                 item_drop_render_instances_,
                 environment_state,
@@ -187,19 +260,36 @@ auto Game::run() -> int {
             }
         }
 
-        if (options_.smoke_test && should_capture_performance()) {
-            const auto report = build_performance_report();
-            write_performance_report(report);
+        if (should_capture_performance()) {
+            final_report = build_performance_report();
+            try {
+                write_performance_report(final_report);
+            } catch (const std::exception& exception) {
+                if (audit_) {
+                    audit_->record_error(std::string("Performance report write failed: ") + exception.what());
+                }
+                std::cerr << "ValCraft audit warning: " << exception.what() << std::endl;
+            }
+            final_status = AuditRunStatus::Completed;
+            finalize_audit(final_report, final_status);
         }
 
         shutdown();
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << "ValCraft fatal error: " << exception.what() << std::endl;
+        if (should_capture_performance()) {
+            final_report = build_performance_report();
+            finalize_audit(final_report, AuditRunStatus::Aborted);
+        }
         shutdown();
         return 1;
     } catch (...) {
         std::cerr << "ValCraft fatal error: unknown exception" << std::endl;
+        if (should_capture_performance()) {
+            final_report = build_performance_report();
+            finalize_audit(final_report, AuditRunStatus::Aborted);
+        }
         shutdown();
         return 1;
     }
@@ -231,6 +321,8 @@ auto Game::initialize() -> bool {
         return false;
     }
 
+    apply_window_icon(window_);
+
     gl_context_ = SDL_GL_CreateContext(window_);
     if (gl_context_ == nullptr) {
         return false;
@@ -248,14 +340,18 @@ auto Game::initialize() -> bool {
     }
 
     RendererOptions renderer_options {};
-    renderer_options.shadows_enabled = options_.performance.shadows_enabled;
+    renderer_options.shadows_enabled = runtime_shadows_enabled_;
     renderer_options.shadow_map_size = options_.performance.shadow_map_size;
-    renderer_options.post_process_enabled = options_.performance.post_process_enabled;
+    renderer_options.post_process_enabled = runtime_post_process_enabled_;
     if (!renderer_.initialize(renderer_options)) {
         return false;
     }
 
-    set_mouse_capture(!options_.smoke_test);
+    if (!options_.smoke_test) {
+        (void)music_.initialize();
+    }
+
+    save_root_directory_ = resolve_save_root_directory();
     normalize_inventory_state(inventory_menu_, hotbar_);
     inventory_menu_.visible = false;
     inventory_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
@@ -268,32 +364,107 @@ auto Game::initialize() -> bool {
     pause_menu_.selected_action = PauseMenuAction::Resume;
     pause_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
     pause_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
+    main_menu_.visible = false;
+    main_menu_.selected_action = MainMenuAction::Play;
+    main_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    main_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
+    save_slot_menu_.visible = false;
+    save_slot_menu_.selected_index = 0;
+    save_slot_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    save_slot_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
+    options_menu_.visible = false;
+    options_menu_.parent = OptionsMenuParent::MainMenu;
+    options_menu_.selected_action = OptionsMenuAction::ToggleShadows;
+    options_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    options_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
+    options_menu_.shadows_enabled = runtime_shadows_enabled_;
+    options_menu_.post_process_enabled = runtime_post_process_enabled_;
+    confirm_dialog_.visible = false;
+    confirm_dialog_.cursor_x = static_cast<float>(window_width_) * 0.5F;
+    confirm_dialog_.cursor_y = static_cast<float>(window_height_) * 0.5F;
 
-    const auto preload_radius = options_.performance.spawn_preload_radius;
-    const auto preload_center = world_.world_to_chunk(0, 0);
-    for (int dz = -preload_radius; dz <= preload_radius; ++dz) {
-        for (int dx = -preload_radius; dx <= preload_radius; ++dx) {
-            world_.ensure_chunk_loaded({preload_center.x + dx, preload_center.z + dz});
-        }
+    present_loading_screen("VALCRAFT", "PREPARATION DU MENU", 0.05F);
+    initialize_preview_world();
+    if (!running_) {
+        return false;
     }
-    world_.rebuild_dirty_meshes();
+    present_loading_screen("VALCRAFT", "LECTURE DES SAUVEGARDES", 0.92F);
+    refresh_save_slots();
 
     if (options_.smoke_test) {
-        spawn_position_ = {0.5F, 80.0F, 0.5F};
-        player_.set_position(spawn_position_);
+        has_active_session_ = true;
+        player_.set_position({0.5F, 80.0F, 0.5F});
         player_.set_velocity({});
+        set_mouse_capture(true);
+        environment_.set_frozen(true);
     } else {
-        spawn_position_ = find_initial_spawn_position();
-        player_.set_position(spawn_position_);
+        has_active_session_ = false;
+        set_mouse_capture(false);
+        open_main_menu(false);
     }
-
-    (void)world_.update_streaming(player_.position());
-    const auto environment_state = environment_.current_state();
-    creatures_.update(0.0F, world_, player_.position(), environment_state, environment_.current_creature_cycle());
+    SDL_SetWindowTitle(window_, kGameWindowTitle.data());
     return true;
 }
 
+void Game::initialize_audit() {
+    if (!options_.audit.enabled) {
+        return;
+    }
+
+    AuditStartContext context {};
+    context.platform = std::string(kPerformancePlatform);
+    context.build_type = std::string(kPerformanceBuildType.empty() ? std::string_view("unknown") : kPerformanceBuildType);
+    context.working_directory = std::filesystem::current_path();
+    context.arguments = options_.raw_arguments;
+    context.smoke_test = options_.smoke_test;
+
+    audit_ = std::make_unique<AuditRecorder>(options_.audit, std::move(context));
+    last_audit_ui_screen_ = active_ui_screen();
+    last_audit_mouse_captured_ = mouse_captured_;
+
+    record_audit_event(
+        AuditEventCategory::Session,
+        "session_start",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"mode", audit_json_string(audit_mode_name(options_.audit.mode))},
+            {"label", audit_json_string(options_.audit.label)},
+            {"smoke_test", audit_json_bool(options_.smoke_test)},
+            {"freeze_time", audit_json_bool(options_.freeze_time)},
+            {"stream_radius", audit_json_number(options_.performance.stream_radius)},
+            {"shadow_map_size", audit_json_number(options_.performance.shadow_map_size)},
+            {"shadows_enabled", audit_json_bool(options_.performance.shadows_enabled)},
+            {"post_process_enabled", audit_json_bool(options_.performance.post_process_enabled)},
+        }),
+        AuditPriority::Critical);
+}
+
+void Game::finalize_audit(const PerformanceRunReport& report, AuditRunStatus status) {
+    if (!audit_) {
+        return;
+    }
+
+    flush_audit_second_sample(true);
+    record_audit_event(
+        AuditEventCategory::Session,
+        status == AuditRunStatus::Completed ? "session_stop" : "session_abort",
+        status == AuditRunStatus::Completed ? AuditSeverity::Info : AuditSeverity::Error,
+        audit_json_object({
+            {"status", audit_json_string(audit_run_status_name(status))},
+            {"frames", audit_json_number(report.summary.frame_count)},
+            {"spikes", audit_json_number(report.spike_windows.size())},
+            {"events", audit_json_number(report.event_summary.total_events)},
+        }),
+        AuditPriority::Critical);
+
+    AuditFinalizeContext context {};
+    context.status = status;
+    context.performance_report = report;
+    audit_->finalize(context);
+}
+
 void Game::shutdown() {
+    music_.shutdown();
     renderer_.shutdown();
 
     if (gl_context_ != nullptr) {
@@ -313,6 +484,7 @@ void Game::shutdown() {
 void Game::process_events() {
     SDL_Event event {};
     while (SDL_PollEvent(&event) != 0) {
+        record_raw_input_event(event);
         if (options_.smoke_test) {
             if (event.type == SDL_QUIT) {
                 running_ = false;
@@ -331,9 +503,34 @@ void Game::process_events() {
             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 window_width_ = event.window.data1;
                 window_height_ = event.window.data2;
+                record_audit_event(
+                    AuditEventCategory::Ui,
+                    "window_resized",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"width", audit_json_number(window_width_)},
+                        {"height", audit_json_number(window_height_)},
+                    }),
+                    AuditPriority::Normal);
+                if (confirm_dialog_.visible) {
+                    clamp_ui_cursor(confirm_dialog_.cursor_x, confirm_dialog_.cursor_y, window_width_, window_height_);
+                    refresh_confirm_dialog_hover();
+                }
                 if (death_screen_visible_) {
                     clamp_ui_cursor(death_screen_.cursor_x, death_screen_.cursor_y, window_width_, window_height_);
                     refresh_death_screen_hover();
+                }
+                if (save_slot_menu_.visible) {
+                    clamp_ui_cursor(save_slot_menu_.cursor_x, save_slot_menu_.cursor_y, window_width_, window_height_);
+                    refresh_save_slot_menu_hover();
+                }
+                if (options_menu_.visible) {
+                    clamp_ui_cursor(options_menu_.cursor_x, options_menu_.cursor_y, window_width_, window_height_);
+                    refresh_options_menu_hover();
+                }
+                if (main_menu_.visible) {
+                    clamp_ui_cursor(main_menu_.cursor_x, main_menu_.cursor_y, window_width_, window_height_);
+                    refresh_main_menu_hover();
                 }
                 if (inventory_visible_) {
                     clamp_ui_cursor(inventory_menu_.cursor_x, inventory_menu_.cursor_y, window_width_, window_height_);
@@ -346,10 +543,34 @@ void Game::process_events() {
             }
             break;
         case SDL_MOUSEMOTION:
+            if (confirm_dialog_.visible) {
+                confirm_dialog_.cursor_x = static_cast<float>(event.motion.x);
+                confirm_dialog_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_confirm_dialog_hover();
+                break;
+            }
             if (death_screen_visible_) {
                 death_screen_.cursor_x = static_cast<float>(event.motion.x);
                 death_screen_.cursor_y = static_cast<float>(event.motion.y);
                 refresh_death_screen_hover();
+                break;
+            }
+            if (save_slot_menu_.visible) {
+                save_slot_menu_.cursor_x = static_cast<float>(event.motion.x);
+                save_slot_menu_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_save_slot_menu_hover();
+                break;
+            }
+            if (options_menu_.visible) {
+                options_menu_.cursor_x = static_cast<float>(event.motion.x);
+                options_menu_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_options_menu_hover();
+                break;
+            }
+            if (main_menu_.visible) {
+                main_menu_.cursor_x = static_cast<float>(event.motion.x);
+                main_menu_.cursor_y = static_cast<float>(event.motion.y);
+                refresh_main_menu_hover();
                 break;
             }
             if (inventory_visible_) {
@@ -370,6 +591,19 @@ void Game::process_events() {
             }
             break;
         case SDL_MOUSEBUTTONDOWN:
+            if (confirm_dialog_.visible) {
+                confirm_dialog_.cursor_x = static_cast<float>(event.button.x);
+                confirm_dialog_.cursor_y = static_cast<float>(event.button.y);
+                refresh_confirm_dialog_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    const auto layout = build_confirm_dialog_layout(window_width_, window_height_, confirm_dialog_);
+                    const auto choice = confirm_dialog_choice_at(layout, confirm_dialog_.cursor_x, confirm_dialog_.cursor_y);
+                    if (choice.has_value()) {
+                        activate_confirm_dialog_choice(*choice);
+                    }
+                }
+                break;
+            }
             if (death_screen_visible_) {
                 death_screen_.cursor_x = static_cast<float>(event.button.x);
                 death_screen_.cursor_y = static_cast<float>(event.button.y);
@@ -379,6 +613,50 @@ void Game::process_events() {
                     const auto action = death_screen_action_at(layout, death_screen_.cursor_x, death_screen_.cursor_y);
                     if (action.has_value()) {
                         activate_death_screen_action(*action);
+                    }
+                }
+                break;
+            }
+            if (save_slot_menu_.visible) {
+                save_slot_menu_.cursor_x = static_cast<float>(event.button.x);
+                save_slot_menu_.cursor_y = static_cast<float>(event.button.y);
+                refresh_save_slot_menu_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    const auto layout = build_save_slot_menu_layout(window_width_, window_height_, save_slot_menu_);
+                    if (const auto delete_slot_index = save_slot_delete_at(layout, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y);
+                        delete_slot_index.has_value()) {
+                        set_confirm_dialog_visible(true, ConfirmDialogIntent::DeleteSlot, *delete_slot_index);
+                    } else if (const auto card_slot_index = save_slot_card_at(layout, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y);
+                        card_slot_index.has_value()) {
+                        activate_save_slot_selection(*card_slot_index);
+                    } else if (save_slot_back_hovered(layout, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y)) {
+                        close_frontend_menu_to_parent();
+                    }
+                }
+                break;
+            }
+            if (options_menu_.visible) {
+                options_menu_.cursor_x = static_cast<float>(event.button.x);
+                options_menu_.cursor_y = static_cast<float>(event.button.y);
+                refresh_options_menu_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    const auto layout = build_options_menu_layout(window_width_, window_height_, options_menu_);
+                    const auto action = options_menu_action_at(layout, options_menu_.cursor_x, options_menu_.cursor_y);
+                    if (action.has_value()) {
+                        activate_options_menu_action(*action);
+                    }
+                }
+                break;
+            }
+            if (main_menu_.visible) {
+                main_menu_.cursor_x = static_cast<float>(event.button.x);
+                main_menu_.cursor_y = static_cast<float>(event.button.y);
+                refresh_main_menu_hover();
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    const auto layout = build_main_menu_layout(window_width_, window_height_, main_menu_);
+                    const auto action = main_menu_action_at(layout, main_menu_.cursor_x, main_menu_.cursor_y);
+                    if (action.has_value()) {
+                        activate_main_menu_action(*action);
                     }
                 }
                 break;
@@ -409,16 +687,62 @@ void Game::process_events() {
             }
             if (!mouse_captured_) {
                 set_mouse_capture(true);
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "mouse_capture_request",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"button", audit_json_number(event.button.button)},
+                        {"x", audit_json_number(event.button.x)},
+                        {"y", audit_json_number(event.button.y)},
+                    }),
+                    AuditPriority::Normal);
                 break;
             }
             if (event.button.button == SDL_BUTTON_LEFT) {
                 pending_break_block_ = true;
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "primary_action_pressed",
+                    AuditSeverity::Trace,
+                    audit_json_object({
+                        {"x", audit_json_number(event.button.x)},
+                        {"y", audit_json_number(event.button.y)},
+                    }),
+                    AuditPriority::Normal);
             } else if (event.button.button == SDL_BUTTON_RIGHT) {
                 pending_place_block_ = true;
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "secondary_action_pressed",
+                    AuditSeverity::Trace,
+                    audit_json_object({
+                        {"x", audit_json_number(event.button.x)},
+                        {"y", audit_json_number(event.button.y)},
+                    }),
+                    AuditPriority::Normal);
+            }
+            break;
+        case SDL_MOUSEBUTTONUP:
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                pending_break_block_ = false;
+                player_.cancel_block_breaking();
+                if (mouse_captured_ && !front_end_visible() && !paused_ && !inventory_visible_ && !death_screen_visible_) {
+                    record_audit_event(
+                        AuditEventCategory::InputAction,
+                        "primary_action_released",
+                        AuditSeverity::Trace,
+                        audit_json_object({
+                            {"x", audit_json_number(event.button.x)},
+                            {"y", audit_json_number(event.button.y)},
+                        }),
+                        AuditPriority::Normal);
+                }
             }
             break;
         case SDL_MOUSEWHEEL: {
-            if (death_screen_visible_ || paused_ || inventory_visible_) {
+            if (confirm_dialog_.visible || death_screen_visible_ || paused_ || inventory_visible_ ||
+                save_slot_menu_.visible || options_menu_.visible || main_menu_.visible) {
                 break;
             }
             auto scroll_y = event.wheel.y;
@@ -427,11 +751,45 @@ void Game::process_events() {
             }
             if (scroll_y != 0) {
                 cycle_hotbar_selection(-scroll_y);
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "hotbar_cycle",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"delta", audit_json_number(-scroll_y)},
+                        {"selected_index", audit_json_number(hotbar_.selected_index)},
+                    }),
+                    AuditPriority::Normal);
             }
             break;
         }
         case SDL_KEYDOWN:
             if (event.key.repeat != 0) {
+                break;
+            }
+
+            if (confirm_dialog_.visible) {
+                switch (event.key.keysym.sym) {
+                case SDLK_ESCAPE:
+                    set_confirm_dialog_visible(false);
+                    break;
+                case SDLK_LEFT:
+                case SDLK_RIGHT:
+                case SDLK_a:
+                case SDLK_d:
+                case SDLK_TAB:
+                    confirm_dialog_.selected_choice = next_confirm_dialog_choice(
+                        confirm_dialog_.selected_choice,
+                        (event.key.keysym.mod & KMOD_SHIFT) != 0 ? -1 : 1);
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    activate_confirm_dialog_choice(confirm_dialog_.selected_choice);
+                    break;
+                default:
+                    break;
+                }
                 break;
             }
 
@@ -453,6 +811,92 @@ void Game::process_events() {
                 case SDLK_SPACE:
                 case SDLK_r:
                     activate_death_screen_action(death_screen_.selected_action);
+                    break;
+                default:
+                    break;
+                }
+                break;
+            }
+
+            if (save_slot_menu_.visible) {
+                switch (event.key.keysym.sym) {
+                case SDLK_ESCAPE:
+                    close_frontend_menu_to_parent();
+                    break;
+                case SDLK_UP:
+                case SDLK_w:
+                case SDLK_LEFT:
+                case SDLK_a:
+                    save_slot_menu_.selected_index = next_save_slot_menu_index(save_slot_menu_, -1);
+                    break;
+                case SDLK_DOWN:
+                case SDLK_s:
+                case SDLK_RIGHT:
+                case SDLK_d:
+                case SDLK_TAB:
+                    save_slot_menu_.selected_index = next_save_slot_menu_index(
+                        save_slot_menu_,
+                        (event.key.keysym.mod & KMOD_SHIFT) != 0 ? -1 : 1);
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    if (save_slot_menu_.selected_index >= kSaveSlotCount) {
+                        close_frontend_menu_to_parent();
+                    } else {
+                        activate_save_slot_selection(save_slot_menu_.selected_index);
+                    }
+                    break;
+                default:
+                    break;
+                }
+                break;
+            }
+
+            if (options_menu_.visible) {
+                switch (event.key.keysym.sym) {
+                case SDLK_ESCAPE:
+                    close_frontend_menu_to_parent();
+                    break;
+                case SDLK_UP:
+                case SDLK_w:
+                    options_menu_.selected_action = next_options_menu_action(options_menu_.selected_action, -1);
+                    break;
+                case SDLK_DOWN:
+                case SDLK_s:
+                case SDLK_TAB:
+                    options_menu_.selected_action = next_options_menu_action(
+                        options_menu_.selected_action,
+                        (event.key.keysym.mod & KMOD_SHIFT) != 0 ? -1 : 1);
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    activate_options_menu_action(options_menu_.selected_action);
+                    break;
+                default:
+                    break;
+                }
+                break;
+            }
+
+            if (main_menu_.visible) {
+                switch (event.key.keysym.sym) {
+                case SDLK_UP:
+                case SDLK_w:
+                    main_menu_.selected_action = next_main_menu_action(main_menu_.selected_action, -1);
+                    break;
+                case SDLK_DOWN:
+                case SDLK_s:
+                case SDLK_TAB:
+                    main_menu_.selected_action = next_main_menu_action(
+                        main_menu_.selected_action,
+                        (event.key.keysym.mod & KMOD_SHIFT) != 0 ? -1 : 1);
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    activate_main_menu_action(main_menu_.selected_action);
                     break;
                 default:
                     break;
@@ -484,6 +928,14 @@ void Game::process_events() {
 
             if (event.key.keysym.sym == SDLK_ESCAPE) {
                 set_paused(!paused_);
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "pause_toggle",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"paused", audit_json_bool(paused_)},
+                    }),
+                    AuditPriority::Normal);
                 break;
             }
 
@@ -514,12 +966,44 @@ void Game::process_events() {
 
             if (event.key.keysym.sym == SDLK_e) {
                 set_inventory_visible(true);
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "inventory_open",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"visible", audit_json_bool(inventory_visible_)},
+                    }),
+                    AuditPriority::Normal);
             } else if (is_drop_action_key(event.key.keysym)) {
                 drop_selected_hotbar_items((event.key.keysym.mod & KMOD_CTRL) != 0);
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "hotbar_drop",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"full_stack", audit_json_bool((event.key.keysym.mod & KMOD_CTRL) != 0)},
+                    }),
+                    AuditPriority::Normal);
             } else if (event.key.keysym.sym == SDLK_f) {
                 pending_toggle_fly_ = true;
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "fly_toggle_request",
+                    AuditSeverity::Info,
+                    audit_json_object({}),
+                    AuditPriority::Normal);
             } else {
                 select_hotbar_slot_from_keycode(event.key.keysym.sym);
+                if (hotbar_number_from_keycode(event.key.keysym.sym) != 0) {
+                    record_audit_event(
+                        AuditEventCategory::InputAction,
+                        "hotbar_select",
+                        AuditSeverity::Info,
+                        audit_json_object({
+                            {"selected_index", audit_json_number(hotbar_.selected_index)},
+                        }),
+                        AuditPriority::Normal);
+                }
             }
             break;
         default:
@@ -529,12 +1013,41 @@ void Game::process_events() {
 }
 
 void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
+    if (!options_.smoke_test && front_end_visible()) {
+        sync_menu_preview_environment();
+        update_menu_preview_camera(dt);
+        const auto environment_state = environment_.current_state();
+        creatures_.update(dt, world_, preview_player_.position(), environment_state, environment_.current_creature_cycle());
+        if (const auto creature_stats = creatures_.consume_audit_stats();
+            creature_stats.spawned != 0 || creature_stats.despawned != 0 || creature_stats.attacks != 0) {
+            audit_second_accumulator_.creature_spawns += creature_stats.spawned;
+            audit_second_accumulator_.creature_despawns += creature_stats.despawned;
+            audit_second_accumulator_.creature_attacks += creature_stats.attacks;
+            audit_second_accumulator_.active_creatures_max =
+                std::max(audit_second_accumulator_.active_creatures_max, creature_stats.active_creatures);
+            record_audit_event(
+                AuditEventCategory::Creatures,
+                "creature_activity",
+                AuditSeverity::Info,
+                audit_json_object({
+                    {"spawned", audit_json_number(creature_stats.spawned)},
+                    {"despawned", audit_json_number(creature_stats.despawned)},
+                    {"attacks", audit_json_number(creature_stats.attacks)},
+                    {"active_creatures", audit_json_number(creature_stats.active_creatures)},
+                }),
+                AuditPriority::Normal);
+        }
+        (void)frame_stats;
+        return;
+    }
+
     if (!options_.smoke_test && (death_screen_visible_ || paused_)) {
         (void)dt;
         (void)frame_stats;
         return;
     }
 
+    environment_.set_frozen(options_.freeze_time || options_.smoke_test);
     environment_.update(dt);
     const auto environment_state = environment_.current_state();
     const auto creature_cycle = environment_.current_creature_cycle();
@@ -550,9 +1063,6 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         input.look_delta_x = mouse_captured_ ? std::exchange(pending_look_x_, 0.0F) : 0.0F;
         input.look_delta_y = mouse_captured_ ? std::exchange(pending_look_y_, 0.0F) : 0.0F;
 
-        if (!inventory_visible_ && pending_break_block_) {
-            player_.trigger_primary_action();
-        }
         if (!inventory_visible_ && pending_place_block_) {
             player_.trigger_secondary_action();
         }
@@ -560,7 +1070,11 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         player_.update(input, dt, world_);
 
         if (!inventory_visible_ && pending_break_block_) {
-            if (const auto broken_block = player_.try_break_block(world_); broken_block.has_value()) {
+            if (const auto broken_block = player_.update_block_breaking(world_, dt, true); broken_block.has_value()) {
+                record_performance_event(
+                    PerformanceEventKind::BlockBreak,
+                    broken_block->block,
+                    inventory_item_label(broken_block->block_id));
                 const auto drop_direction = safe_drop_direction(player_.look_direction());
                 const auto drop_origin = glm::vec3 {
                     static_cast<float>(broken_block->block.x) + 0.5F,
@@ -572,36 +1086,109 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     drop_origin,
                     drop_direction * 1.4F + glm::vec3 {0.0F, 1.8F, 0.0F});
             }
-            pending_break_block_ = false;
+        } else {
+            player_.cancel_block_breaking();
         }
         if (!inventory_visible_ && pending_place_block_) {
             auto& selected_slot = hotbar_.slots[hotbar_.selected_index];
-            if (inventory_slot_has_item(selected_slot) && player_.try_place_block(world_)) {
-                (void)inventory_take_from_slot(selected_slot, 1);
-                normalize_inventory_state(inventory_menu_, hotbar_);
-                sync_selected_hotbar_slot();
+            if (inventory_slot_has_item(selected_slot)) {
+                const auto placed_block = player_.try_place_block(world_);
+                if (placed_block.has_value()) {
+                    record_performance_event(
+                        PerformanceEventKind::BlockPlace,
+                        placed_block->block,
+                        inventory_item_label(placed_block->block_id));
+                    (void)inventory_take_from_slot(selected_slot, 1);
+                    normalize_inventory_state(inventory_menu_, hotbar_);
+                    sync_selected_hotbar_slot();
+                }
             }
             pending_place_block_ = false;
         }
         if (inventory_visible_) {
             pending_break_block_ = false;
             pending_place_block_ = false;
+            player_.cancel_block_breaking();
         }
 
         item_drops_.update(dt, world_, player_.position(), inventory_menu_, hotbar_);
+        if (const auto item_stats = item_drops_.consume_audit_stats();
+            item_stats.spawned != 0 || item_stats.merged != 0 || item_stats.picked_up != 0 || item_stats.expired != 0) {
+            audit_second_accumulator_.item_spawns += item_stats.spawned;
+            audit_second_accumulator_.item_merges += item_stats.merged;
+            audit_second_accumulator_.item_pickups += item_stats.picked_up;
+            audit_second_accumulator_.item_expired += item_stats.expired;
+            audit_second_accumulator_.active_item_drops_max =
+                std::max(audit_second_accumulator_.active_item_drops_max, item_stats.active_drops);
+            record_audit_event(
+                AuditEventCategory::Items,
+                "item_drop_activity",
+                AuditSeverity::Info,
+                audit_json_object({
+                    {"spawned", audit_json_number(item_stats.spawned)},
+                    {"merged", audit_json_number(item_stats.merged)},
+                    {"picked_up", audit_json_number(item_stats.picked_up)},
+                    {"expired", audit_json_number(item_stats.expired)},
+                    {"active_drops", audit_json_number(item_stats.active_drops)},
+                    {"rejected_spawns", audit_json_number(item_stats.rejected_spawns)},
+                }),
+                AuditPriority::Normal);
+        }
         sync_selected_hotbar_slot();
     }
 
     creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
+    if (const auto creature_stats = creatures_.consume_audit_stats();
+        creature_stats.spawned != 0 || creature_stats.despawned != 0 || creature_stats.attacks != 0) {
+        audit_second_accumulator_.creature_spawns += creature_stats.spawned;
+        audit_second_accumulator_.creature_despawns += creature_stats.despawned;
+        audit_second_accumulator_.creature_attacks += creature_stats.attacks;
+        audit_second_accumulator_.active_creatures_max =
+            std::max(audit_second_accumulator_.active_creatures_max, creature_stats.active_creatures);
+        record_audit_event(
+            AuditEventCategory::Creatures,
+            "creature_activity",
+            AuditSeverity::Info,
+            audit_json_object({
+                {"spawned", audit_json_number(creature_stats.spawned)},
+                {"despawned", audit_json_number(creature_stats.despawned)},
+                {"attacks", audit_json_number(creature_stats.attacks)},
+                {"active_creatures", audit_json_number(creature_stats.active_creatures)},
+            }),
+            AuditPriority::Normal);
+    }
 
     if (!options_.smoke_test) {
         for (const auto& attack : creatures_.recent_attacks()) {
             player_.apply_external_damage(attack.damage, PlayerDeathCause::Zombie);
         }
 
+        if (!creatures_.recent_attacks().empty()) {
+            record_audit_event(
+                AuditEventCategory::Creatures,
+                "creature_attack",
+                AuditSeverity::Warning,
+                audit_json_object({
+                    {"count", audit_json_number(creatures_.recent_attacks().size())},
+                }),
+                AuditPriority::High);
+        }
+
         if (player_.is_dead()) {
+            record_audit_event(
+                AuditEventCategory::Player,
+                "player_death",
+                AuditSeverity::Error,
+                audit_json_object({
+                    {"cause", audit_json_number(static_cast<int>(player_.state().death_cause))},
+                }),
+                AuditPriority::Critical);
             set_death_screen_visible(true, player_.state().death_cause);
             return;
+        }
+
+        if (has_active_session_) {
+            mark_session_dirty();
         }
     }
 }
@@ -609,19 +1196,33 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
 void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
     using clock = std::chrono::steady_clock;
 
-    if (!options_.smoke_test && (death_screen_visible_ || paused_)) {
+    if (!options_.smoke_test && (death_screen_visible_ || paused_) && !front_end_visible()) {
         (void)frame_stats;
         return;
     }
 
     const auto stream_start = clock::now();
-    const auto stream_stats = world_.update_streaming(player_.position());
+    const auto stream_stats = world_.update_streaming(streaming_focus_position());
     frame_stats.streaming_ms +=
         std::chrono::duration<double, std::milli>(clock::now() - stream_start).count();
     frame_stats.stream_chunk_changes += stream_stats.chunk_changed ? 1U : 0U;
     frame_stats.generation_enqueued += stream_stats.generation_enqueued;
     frame_stats.generation_pruned += stream_stats.generation_pruned;
     frame_stats.unloaded_chunks += stream_stats.unloaded_chunks;
+    if (stream_stats.chunk_changed || stream_stats.generation_enqueued != 0 || stream_stats.generation_pruned != 0 ||
+        stream_stats.unloaded_chunks != 0) {
+        record_audit_event(
+            AuditEventCategory::World,
+            "stream_update",
+            AuditSeverity::Info,
+            audit_json_object({
+                {"chunk_changed", audit_json_bool(stream_stats.chunk_changed)},
+                {"generation_enqueued", audit_json_number(stream_stats.generation_enqueued)},
+                {"generation_pruned", audit_json_number(stream_stats.generation_pruned)},
+                {"unloaded_chunks", audit_json_number(stream_stats.unloaded_chunks)},
+            }),
+            AuditPriority::High);
+    }
 
     const auto world_stats = world_.process_pending_work(options_.performance.world_budget());
     frame_stats.generation_ms += world_stats.generation_ms;
@@ -634,6 +1235,24 @@ void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
     frame_stats.pending_mesh = std::max(frame_stats.pending_mesh, world_stats.pending_mesh);
     frame_stats.pending_lighting = std::max(frame_stats.pending_lighting, world_stats.pending_lighting);
     frame_stats.lighting_jobs_completed += world_stats.lighting_jobs_completed;
+    if (world_stats.generated_chunks != 0 || world_stats.meshed_chunks != 0 || world_stats.light_nodes_processed != 0 ||
+        world_stats.lighting_jobs_completed != 0 || world_stats.pending_generation != 0 || world_stats.pending_mesh != 0 ||
+        world_stats.pending_lighting != 0) {
+        record_audit_event(
+            AuditEventCategory::World,
+            "world_work",
+            AuditSeverity::Info,
+            audit_json_object({
+                {"generated_chunks", audit_json_number(world_stats.generated_chunks)},
+                {"meshed_chunks", audit_json_number(world_stats.meshed_chunks)},
+                {"light_nodes_processed", audit_json_number(world_stats.light_nodes_processed)},
+                {"lighting_jobs_completed", audit_json_number(world_stats.lighting_jobs_completed)},
+                {"pending_generation", audit_json_number(world_stats.pending_generation)},
+                {"pending_mesh", audit_json_number(world_stats.pending_mesh)},
+                {"pending_lighting", audit_json_number(world_stats.pending_lighting)},
+            }),
+            AuditPriority::High);
+    }
 
     if (options_.smoke_test) {
         validate_smoke_frame(options_.performance.world_budget(), world_stats);
@@ -641,15 +1260,33 @@ void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
 }
 
 void Game::set_mouse_capture(bool captured) {
+    const auto changed = mouse_captured_ != captured;
     mouse_captured_ = captured;
     pending_look_x_ = 0.0F;
     pending_look_y_ = 0.0F;
+    if (!captured) {
+        pending_break_block_ = false;
+        player_.cancel_block_breaking();
+    }
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
     SDL_ShowCursor(captured ? SDL_DISABLE : SDL_ENABLE);
+    if (changed) {
+        record_audit_event(
+            AuditEventCategory::Ui,
+            "mouse_capture_changed",
+            AuditSeverity::Info,
+            audit_json_object({
+                {"captured", audit_json_bool(captured)},
+            }),
+            AuditPriority::High);
+    }
 }
 
 void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     if (options_.smoke_test) {
+        return;
+    }
+    if (!has_active_session_) {
         return;
     }
     if (death_screen_visible_ == visible && (!visible || death_screen_.cause == cause)) {
@@ -661,6 +1298,7 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
     pending_place_block_ = false;
+    player_.cancel_block_breaking();
 
     if (death_screen_visible_) {
         if (inventory_visible_) {
@@ -675,6 +1313,14 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
         set_mouse_capture(false);
         center_ui_cursor(window_, window_width_, window_height_, death_screen_.cursor_x, death_screen_.cursor_y);
         refresh_death_screen_hover();
+        record_audit_event(
+            AuditEventCategory::Ui,
+            "death_screen_opened",
+            AuditSeverity::Warning,
+            audit_json_object({
+                {"cause", audit_json_number(static_cast<int>(cause))},
+            }),
+            AuditPriority::High);
         return;
     }
 
@@ -682,13 +1328,19 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     if (!paused_ && !inventory_visible_) {
         set_mouse_capture(true);
     }
+    record_audit_event(
+        AuditEventCategory::Ui,
+        "death_screen_closed",
+        AuditSeverity::Info,
+        audit_json_object({}),
+        AuditPriority::High);
 }
 
 void Game::set_paused(bool paused) {
     if (options_.smoke_test) {
         return;
     }
-    if (death_screen_visible_) {
+    if (death_screen_visible_ || front_end_visible() || !has_active_session_) {
         return;
     }
 
@@ -698,6 +1350,7 @@ void Game::set_paused(bool paused) {
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
     pending_place_block_ = false;
+    player_.cancel_block_breaking();
 
     if (paused_) {
         if (inventory_visible_) {
@@ -709,13 +1362,21 @@ void Game::set_paused(bool paused) {
     } else if (!inventory_visible_) {
         set_mouse_capture(true);
     }
+    record_audit_event(
+        AuditEventCategory::Ui,
+        paused ? "pause_opened" : "pause_closed",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"paused", audit_json_bool(paused)},
+        }),
+        AuditPriority::High);
 }
 
 void Game::set_inventory_visible(bool visible) {
     if (options_.smoke_test) {
         return;
     }
-    if (visible && (paused_ || death_screen_visible_)) {
+    if (visible && (paused_ || death_screen_visible_ || front_end_visible() || !has_active_session_)) {
         return;
     }
     if (inventory_visible_ == visible) {
@@ -727,11 +1388,18 @@ void Game::set_inventory_visible(bool visible) {
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
     pending_place_block_ = false;
+    player_.cancel_block_breaking();
 
     if (inventory_visible_) {
         set_mouse_capture(false);
         center_ui_cursor(window_, window_width_, window_height_, inventory_menu_.cursor_x, inventory_menu_.cursor_y);
         refresh_inventory_hover();
+        record_audit_event(
+            AuditEventCategory::Ui,
+            "inventory_opened",
+            AuditSeverity::Info,
+            audit_json_object({}),
+            AuditPriority::High);
         return;
     }
 
@@ -745,6 +1413,42 @@ void Game::set_inventory_visible(bool visible) {
         set_mouse_capture(true);
     }
     sync_selected_hotbar_slot();
+    record_audit_event(
+        AuditEventCategory::Ui,
+        "inventory_closed",
+        AuditSeverity::Info,
+        audit_json_object({}),
+        AuditPriority::High);
+}
+
+void Game::set_confirm_dialog_visible(bool visible,
+                                      ConfirmDialogIntent intent,
+                                      std::optional<std::size_t> slot_index) {
+    if (options_.smoke_test) {
+        return;
+    }
+
+    confirm_dialog_.visible = visible;
+    confirm_dialog_.intent = visible ? intent : ConfirmDialogIntent::None;
+    confirm_dialog_.selected_choice = ConfirmDialogChoice::Confirm;
+    pending_confirm_slot_ = visible ? slot_index : std::nullopt;
+
+    if (confirm_dialog_.visible) {
+        set_mouse_capture(false);
+        center_ui_cursor(window_, window_width_, window_height_, confirm_dialog_.cursor_x, confirm_dialog_.cursor_y);
+        refresh_confirm_dialog_hover();
+    } else if (!death_screen_visible_ && !inventory_visible_ && !paused_ && !front_end_visible()) {
+        set_mouse_capture(true);
+    }
+    record_audit_event(
+        AuditEventCategory::Ui,
+        visible ? "confirm_dialog_opened" : "confirm_dialog_closed",
+        visible ? AuditSeverity::Warning : AuditSeverity::Info,
+        audit_json_object({
+            {"intent", audit_json_number(static_cast<int>(intent))},
+            {"has_slot", audit_json_bool(slot_index.has_value())},
+        }),
+        AuditPriority::High);
 }
 
 void Game::activate_death_screen_action(DeathScreenAction action) {
@@ -765,11 +1469,124 @@ void Game::activate_pause_menu_action(PauseMenuAction action) {
     case PauseMenuAction::Resume:
         set_paused(false);
         break;
+    case PauseMenuAction::Save:
+        open_save_slot_menu(SaveSlotMenuMode::SaveGame, SaveSlotMenuParent::PauseMenu);
+        break;
+    case PauseMenuAction::Load:
+        open_save_slot_menu(SaveSlotMenuMode::LoadGame, SaveSlotMenuParent::PauseMenu);
+        break;
     case PauseMenuAction::Options:
+        open_options_menu(OptionsMenuParent::PauseMenu);
         break;
-    case PauseMenuAction::Quit:
-        running_ = false;
+    case PauseMenuAction::ReturnToMainMenu:
+        request_return_to_main_menu();
         break;
+    default:
+        break;
+    }
+}
+
+void Game::activate_main_menu_action(MainMenuAction action) {
+    switch (action) {
+    case MainMenuAction::Play:
+        open_save_slot_menu(SaveSlotMenuMode::NewGame, SaveSlotMenuParent::MainMenu);
+        break;
+    case MainMenuAction::Load:
+        open_save_slot_menu(SaveSlotMenuMode::LoadGame, SaveSlotMenuParent::MainMenu);
+        break;
+    case MainMenuAction::Options:
+        open_options_menu(OptionsMenuParent::MainMenu);
+        break;
+    default:
+        break;
+    }
+}
+
+void Game::activate_save_slot_selection(std::size_t slot_index) {
+    switch (resolve_save_slot_primary_action(save_slot_menu_, slot_index, session_dirty_)) {
+    case SaveSlotPrimaryAction::StartNewGame:
+        start_new_game_in_slot(slot_index);
+        break;
+    case SaveSlotPrimaryAction::LoadGame:
+        (void)load_game_from_slot(slot_index);
+        break;
+    case SaveSlotPrimaryAction::SaveGame:
+        save_game_to_slot(slot_index);
+        close_frontend_menu_to_parent();
+        break;
+    case SaveSlotPrimaryAction::ConfirmOverwrite:
+        set_confirm_dialog_visible(true, ConfirmDialogIntent::OverwriteSlot, slot_index);
+        break;
+    case SaveSlotPrimaryAction::ConfirmLoad:
+        set_confirm_dialog_visible(true, ConfirmDialogIntent::LoadSlot, slot_index);
+        break;
+    case SaveSlotPrimaryAction::None:
+    default:
+        break;
+    }
+}
+
+void Game::activate_options_menu_action(OptionsMenuAction action) {
+    switch (action) {
+    case OptionsMenuAction::ToggleShadows:
+        runtime_shadows_enabled_ = !runtime_shadows_enabled_;
+        options_menu_.shadows_enabled = runtime_shadows_enabled_;
+        apply_renderer_options();
+        break;
+    case OptionsMenuAction::TogglePostProcess:
+        runtime_post_process_enabled_ = !runtime_post_process_enabled_;
+        options_menu_.post_process_enabled = runtime_post_process_enabled_;
+        apply_renderer_options();
+        break;
+    case OptionsMenuAction::Back:
+        close_frontend_menu_to_parent();
+        break;
+    default:
+        break;
+    }
+}
+
+void Game::activate_confirm_dialog_choice(ConfirmDialogChoice choice) {
+    if (choice == ConfirmDialogChoice::Cancel) {
+        set_confirm_dialog_visible(false);
+        return;
+    }
+
+    const auto intent = confirm_dialog_.intent;
+    const auto slot_index = pending_confirm_slot_;
+    set_confirm_dialog_visible(false);
+
+    switch (intent) {
+    case ConfirmDialogIntent::OverwriteSlot:
+        if (!slot_index.has_value()) {
+            return;
+        }
+        if (save_slot_menu_.mode == SaveSlotMenuMode::NewGame) {
+            start_new_game_in_slot(*slot_index);
+        } else if (save_slot_menu_.mode == SaveSlotMenuMode::SaveGame) {
+            save_game_to_slot(*slot_index);
+            close_frontend_menu_to_parent();
+        }
+        break;
+    case ConfirmDialogIntent::LoadSlot:
+        if (slot_index.has_value()) {
+            (void)load_game_from_slot(*slot_index);
+        }
+        break;
+    case ConfirmDialogIntent::DeleteSlot:
+        if (slot_index.has_value()) {
+            (void)remove_save_slot(save_root_directory_, *slot_index);
+            refresh_save_slots();
+            if (!save_slot_menu_slot_enabled(save_slot_menu_, save_slot_menu_.selected_index)) {
+                save_slot_menu_.selected_index = first_save_slot_menu_index(save_slot_menu_);
+            }
+            refresh_save_slot_menu_hover();
+        }
+        break;
+    case ConfirmDialogIntent::ReturnToMainMenu:
+        open_main_menu(true);
+        break;
+    case ConfirmDialogIntent::None:
     default:
         break;
     }
@@ -803,6 +1620,59 @@ void Game::refresh_inventory_hover() noexcept {
 
     const auto layout = build_inventory_menu_layout(window_width_, window_height_, inventory_menu_, hotbar_);
     inventory_menu_.hovered_slot = inventory_slot_at(layout, inventory_menu_.cursor_x, inventory_menu_.cursor_y);
+}
+
+void Game::refresh_main_menu_hover() noexcept {
+    if (!main_menu_.visible) {
+        return;
+    }
+
+    const auto layout = build_main_menu_layout(window_width_, window_height_, main_menu_);
+    const auto hovered_action = main_menu_action_at(layout, main_menu_.cursor_x, main_menu_.cursor_y);
+    if (hovered_action.has_value()) {
+        main_menu_.selected_action = *hovered_action;
+    }
+}
+
+void Game::refresh_save_slot_menu_hover() noexcept {
+    if (!save_slot_menu_.visible) {
+        return;
+    }
+
+    const auto layout = build_save_slot_menu_layout(window_width_, window_height_, save_slot_menu_);
+    if (const auto delete_slot_index = save_slot_delete_at(layout, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y);
+        delete_slot_index.has_value()) {
+        save_slot_menu_.selected_index = *delete_slot_index;
+    } else if (const auto card_slot_index = save_slot_card_at(layout, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y);
+        card_slot_index.has_value()) {
+        save_slot_menu_.selected_index = *card_slot_index;
+    } else if (save_slot_back_hovered(layout, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y)) {
+        save_slot_menu_.selected_index = kSaveSlotCount;
+    }
+}
+
+void Game::refresh_options_menu_hover() noexcept {
+    if (!options_menu_.visible) {
+        return;
+    }
+
+    const auto layout = build_options_menu_layout(window_width_, window_height_, options_menu_);
+    const auto hovered_action = options_menu_action_at(layout, options_menu_.cursor_x, options_menu_.cursor_y);
+    if (hovered_action.has_value()) {
+        options_menu_.selected_action = *hovered_action;
+    }
+}
+
+void Game::refresh_confirm_dialog_hover() noexcept {
+    if (!confirm_dialog_.visible) {
+        return;
+    }
+
+    const auto layout = build_confirm_dialog_layout(window_width_, window_height_, confirm_dialog_);
+    const auto hovered_choice = confirm_dialog_choice_at(layout, confirm_dialog_.cursor_x, confirm_dialog_.cursor_y);
+    if (hovered_choice.has_value()) {
+        confirm_dialog_.selected_choice = *hovered_choice;
+    }
 }
 
 void Game::click_inventory_slot(bool secondary) {
@@ -923,6 +1793,10 @@ void Game::select_hotbar_slot_from_keycode(SDL_Keycode keycode) {
 }
 
 auto Game::find_initial_spawn_position() -> glm::vec3 {
+    if (starting_village_enabled_ && !starting_village_.buildings.empty()) {
+        return starting_village_.player_spawn;
+    }
+
     constexpr int kSpawnSearchRadius = 12;
 
     for (int radius = 0; radius <= kSpawnSearchRadius; ++radius) {
@@ -933,8 +1807,7 @@ auto Game::find_initial_spawn_position() -> glm::vec3 {
                 }
 
                 const auto surface_y = world_.surface_height(x, z);
-                const auto surface_block = world_.get_block(x, surface_y, z);
-                if (is_block_liquid(surface_block)) {
+                if (world_.has_water(x, surface_y + 1, z)) {
                     continue;
                 }
                 if (world_.get_block(x, surface_y + 1, z) != to_block_id(BlockType::Air)) {
@@ -964,6 +1837,578 @@ void Game::respawn_player() {
     set_death_screen_visible(false);
     (void)world_.update_streaming(player_.position());
     creatures_.update(0.0F, world_, player_.position(), environment_.current_state(), environment_.current_creature_cycle());
+    record_audit_event(
+        AuditEventCategory::Player,
+        "respawn",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"x", audit_json_number(spawn_position_.x)},
+            {"y", audit_json_number(spawn_position_.y)},
+            {"z", audit_json_number(spawn_position_.z)},
+        }),
+        AuditPriority::High);
+}
+
+auto Game::active_ui_screen() const noexcept -> UiScreen {
+    if (death_screen_visible_) {
+        return UiScreen::Death;
+    }
+    if (save_slot_menu_.visible) {
+        return UiScreen::SaveSlots;
+    }
+    if (options_menu_.visible) {
+        return UiScreen::Options;
+    }
+    if (main_menu_.visible) {
+        return UiScreen::MainMenu;
+    }
+    if (inventory_visible_) {
+        return UiScreen::Inventory;
+    }
+    if (paused_) {
+        return UiScreen::Pause;
+    }
+    return UiScreen::Gameplay;
+}
+
+auto Game::front_end_visible() const noexcept -> bool {
+    return main_menu_.visible ||
+           (save_slot_menu_.visible && save_slot_menu_.parent == SaveSlotMenuParent::MainMenu) ||
+           (options_menu_.visible && options_menu_.parent == OptionsMenuParent::MainMenu);
+}
+
+auto Game::gameplay_interaction_blocked() const noexcept -> bool {
+    return death_screen_visible_ || paused_ || confirm_dialog_.visible || front_end_visible();
+}
+
+auto Game::render_player() const noexcept -> const PlayerController& {
+    return front_end_visible() ? preview_player_ : player_;
+}
+
+auto Game::streaming_focus_position() const noexcept -> glm::vec3 {
+    return front_end_visible() ? preview_player_.position() : player_.position();
+}
+
+auto Game::current_renderer_options() const noexcept -> RendererOptions {
+    RendererOptions renderer_options {};
+    renderer_options.shadows_enabled = runtime_shadows_enabled_;
+    renderer_options.shadow_map_size = options_.performance.shadow_map_size;
+    renderer_options.post_process_enabled = runtime_post_process_enabled_;
+    return renderer_options;
+}
+
+auto Game::resolve_save_root_directory() const -> std::filesystem::path {
+    if (char* pref_path = SDL_GetPrefPath("ValCraft", "ValCraft"); pref_path != nullptr) {
+        std::filesystem::path root(pref_path);
+        SDL_free(pref_path);
+        return root;
+    }
+
+    return std::filesystem::current_path() / "saves";
+}
+
+auto Game::make_world_snapshot() const -> SaveGameSnapshot {
+    SaveGameSnapshot snapshot {};
+    snapshot.chunk_snapshots = world_.modified_chunk_snapshots();
+    snapshot.metadata.exists = true;
+    snapshot.metadata.seed = world_.seed();
+    snapshot.metadata.time_of_day = environment_.time_of_day();
+    snapshot.metadata.modified_chunk_count = static_cast<std::uint32_t>(std::min<std::size_t>(
+        snapshot.chunk_snapshots.size(),
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    snapshot.metadata.has_starting_village = starting_village_enabled_;
+    snapshot.spawn_position = spawn_position_;
+    snapshot.player_state = player_.state();
+    snapshot.hotbar = hotbar_;
+    snapshot.inventory = inventory_menu_;
+    snapshot.inventory.visible = false;
+    snapshot.inventory.hovered_slot.reset();
+    snapshot.creatures.assign(creatures_.active_creatures().begin(), creatures_.active_creatures().end());
+    snapshot.item_drops = item_drops_.drops();
+    return snapshot;
+}
+
+void Game::configure_starting_village(bool enabled, bool apply_layout_to_world) {
+    starting_village_enabled_ = enabled;
+    if (!enabled) {
+        starting_village_ = {};
+        creatures_.set_settlement_residents({});
+        return;
+    }
+
+    StartingVillageGenerator generator(world_.seed());
+    starting_village_ = generator.build_layout();
+    if (apply_layout_to_world) {
+        generator.apply(world_, starting_village_);
+    }
+    creatures_.set_settlement_residents(starting_village_.residents);
+}
+
+void Game::apply_renderer_options() {
+    if (!renderer_.initialize(current_renderer_options())) {
+        throw std::runtime_error("Unable to reconfigure renderer options");
+    }
+}
+
+void Game::pump_loading_events() noexcept {
+    SDL_Event event {};
+    while (SDL_PollEvent(&event) != 0) {
+        if (event.type == SDL_QUIT) {
+            running_ = false;
+            return;
+        }
+        if (event.type == SDL_WINDOWEVENT &&
+            event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+            window_width_ = std::max(event.window.data1, 1);
+            window_height_ = std::max(event.window.data2, 1);
+        }
+    }
+}
+
+void Game::present_loading_screen(std::string_view title, std::string_view detail, float progress) {
+    if (window_ == nullptr || options_.hidden_window) {
+        return;
+    }
+
+    std::string window_title(kGameWindowTitle);
+    if (!detail.empty()) {
+        window_title += " - ";
+        window_title += detail;
+    }
+    SDL_SetWindowTitle(window_, window_title.c_str());
+    renderer_.render_loading_screen(title, detail, progress, window_width_, window_height_);
+    SDL_GL_SwapWindow(window_);
+}
+
+auto Game::preload_readiness(const glm::vec3& focus, int radius) const -> float {
+    const auto target_radius = std::max(radius, 0);
+    const auto center = world_.world_to_chunk(
+        static_cast<int>(std::floor(focus.x)),
+        static_cast<int>(std::floor(focus.z)));
+
+    auto total_chunks = 0;
+    auto ready_chunks = 0;
+    for (int dz = -target_radius; dz <= target_radius; ++dz) {
+        for (int dx = -target_radius; dx <= target_radius; ++dx) {
+            ++total_chunks;
+            const ChunkCoord coord {center.x + dx, center.z + dz};
+            const auto* chunk = world_.find_chunk(coord);
+            if (chunk == nullptr) {
+                continue;
+            }
+            if (world_.mesh_revision(coord) == 0 || chunk->is_dirty() || chunk->is_lighting_dirty()) {
+                continue;
+            }
+            ++ready_chunks;
+        }
+    }
+
+    if (total_chunks == 0) {
+        return 1.0F;
+    }
+    return static_cast<float>(ready_chunks) / static_cast<float>(total_chunks);
+}
+
+void Game::refresh_save_slots() {
+    if (save_root_directory_.empty()) {
+        return;
+    }
+
+    save_slot_menu_.slots = scan_save_slots(save_root_directory_);
+    save_slot_menu_.active_slot = active_save_slot_;
+}
+
+void Game::prime_world_around(const glm::vec3& focus, std::string_view loading_title, std::string_view loading_detail) {
+    const auto center = world_.world_to_chunk(
+        static_cast<int>(std::floor(focus.x)),
+        static_cast<int>(std::floor(focus.z)));
+    const auto preload_radius = std::max(options_.performance.spawn_preload_radius, 1);
+    for (int dz = -preload_radius; dz <= preload_radius; ++dz) {
+        for (int dx = -preload_radius; dx <= preload_radius; ++dx) {
+            world_.ensure_chunk_loaded({center.x + dx, center.z + dz});
+        }
+    }
+
+    (void)world_.update_streaming(focus);
+
+    WorldWorkBudget warm_budget {};
+    warm_budget.chunk_generation_budget = std::max<std::size_t>(options_.performance.chunk_generation_budget * 4U, 24U);
+    warm_budget.mesh_rebuild_budget = std::max<std::size_t>(options_.performance.mesh_rebuild_budget * 4U, 24U);
+    warm_budget.light_node_budget = std::max<std::size_t>(options_.performance.light_node_budget * 2U, 32768U);
+    warm_budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    warm_budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    warm_budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+    warm_budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    warm_budget.fluid_cell_budget = std::max<std::size_t>(warm_budget.light_node_budget / 4U, 2048U);
+
+    auto last_presented_progress = -1.0F;
+    // Only block on the immediate gameplay neighborhood. The wider stream radius
+    // can keep filling in once rendering has started.
+    while (running_ && !world_.are_chunks_ready(focus, preload_radius)) {
+        pump_loading_events();
+        if (!running_) {
+            return;
+        }
+
+        (void)world_.process_pending_work(warm_budget);
+        const auto readiness = preload_readiness(focus, preload_radius);
+        if (readiness - last_presented_progress >= 0.04F || readiness >= 0.999F) {
+            present_loading_screen(loading_title, loading_detail, readiness);
+            last_presented_progress = readiness;
+        }
+    }
+}
+
+void Game::prepare_game_session() {
+    main_menu_.visible = false;
+    save_slot_menu_.visible = false;
+    options_menu_.visible = false;
+    confirm_dialog_.visible = false;
+    confirm_dialog_.intent = ConfirmDialogIntent::None;
+    pending_confirm_slot_.reset();
+    paused_ = false;
+    pause_menu_.visible = false;
+    pause_menu_.selected_action = PauseMenuAction::Resume;
+    inventory_visible_ = false;
+    inventory_menu_.visible = false;
+    inventory_menu_.hovered_slot.reset();
+    death_screen_visible_ = false;
+    death_screen_.visible = false;
+    death_screen_.cause = PlayerDeathCause::None;
+    set_mouse_capture(true);
+    record_audit_event(
+        AuditEventCategory::Session,
+        "game_session_prepared",
+        AuditSeverity::Info,
+        audit_json_object({}),
+        AuditPriority::Critical);
+}
+
+void Game::sync_menu_preview_environment() noexcept {
+    if (front_end_visible()) {
+        environment_.set_time_of_day(menu_preview_time_of_day_);
+        environment_.set_frozen(true);
+        return;
+    }
+
+    environment_.set_frozen(options_.freeze_time || options_.smoke_test);
+}
+
+void Game::initialize_preview_world() {
+    present_loading_screen("VALCRAFT", "CREATION DU MONDE DE MENU", 0.12F);
+    world_ = World(1337, options_.performance.stream_radius);
+    creatures_.clear();
+    item_drops_.clear();
+    hotbar_ = make_default_hotbar_state();
+    inventory_menu_ = make_default_inventory_menu_state();
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    sync_selected_hotbar_slot();
+
+    menu_preview_time_of_day_ = 8.25F;
+    sync_menu_preview_environment();
+
+    // The main menu only needs a scenic background; building the whole starting
+    // village here causes a long black startup before the first frame.
+    configure_starting_village(false, false);
+    present_loading_screen("VALCRAFT", "POSITIONNEMENT DE LA CAMERA", 0.28F);
+    spawn_position_ = find_initial_spawn_position();
+    player_.respawn(spawn_position_);
+    preview_player_.respawn(spawn_position_);
+    prime_world_around(spawn_position_, "VALCRAFT", "CHARGEMENT DU PAYSAGE");
+    if (!running_) {
+        return;
+    }
+    update_menu_preview_camera(0.0F);
+    creatures_.update(0.0F, world_, spawn_position_, environment_.current_state(), environment_.current_creature_cycle());
+    present_loading_screen("VALCRAFT", "FINALISATION DU MENU", 1.0F);
+}
+
+void Game::open_main_menu(bool from_session) {
+    main_menu_.visible = true;
+    main_menu_.selected_action = MainMenuAction::Play;
+    save_slot_menu_.visible = false;
+    options_menu_.visible = false;
+    paused_ = false;
+    pause_menu_.visible = false;
+    inventory_visible_ = false;
+    inventory_menu_.visible = false;
+    death_screen_visible_ = false;
+    death_screen_.visible = false;
+    set_confirm_dialog_visible(false);
+
+    menu_preview_time_of_day_ = 8.25F;
+    if (from_session && has_active_session_) {
+        menu_preview_time_of_day_ = environment_.time_of_day();
+    }
+    sync_menu_preview_environment();
+    update_menu_preview_camera(0.0F);
+    set_mouse_capture(false);
+    center_ui_cursor(window_, window_width_, window_height_, main_menu_.cursor_x, main_menu_.cursor_y);
+    refresh_main_menu_hover();
+    record_audit_event(
+        AuditEventCategory::Ui,
+        "main_menu_opened",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"from_session", audit_json_bool(from_session)},
+        }),
+        AuditPriority::High);
+}
+
+void Game::open_save_slot_menu(SaveSlotMenuMode mode, SaveSlotMenuParent parent) {
+    refresh_save_slots();
+    save_slot_menu_.visible = true;
+    save_slot_menu_.mode = mode;
+    save_slot_menu_.parent = parent;
+    save_slot_menu_.active_slot = active_save_slot_;
+    main_menu_.visible = false;
+    options_menu_.visible = false;
+    pause_menu_.visible = false;
+
+    if (mode == SaveSlotMenuMode::SaveGame && active_save_slot_.has_value()) {
+        save_slot_menu_.selected_index = *active_save_slot_;
+    } else {
+        save_slot_menu_.selected_index = first_save_slot_menu_index(save_slot_menu_);
+    }
+
+    set_mouse_capture(false);
+    center_ui_cursor(window_, window_width_, window_height_, save_slot_menu_.cursor_x, save_slot_menu_.cursor_y);
+    refresh_save_slot_menu_hover();
+    record_audit_event(
+        AuditEventCategory::Ui,
+        "save_slot_menu_opened",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"mode", audit_json_number(static_cast<int>(mode))},
+            {"parent", audit_json_number(static_cast<int>(parent))},
+        }),
+        AuditPriority::High);
+}
+
+void Game::open_options_menu(OptionsMenuParent parent) {
+    options_menu_.visible = true;
+    options_menu_.parent = parent;
+    options_menu_.selected_action = OptionsMenuAction::ToggleShadows;
+    options_menu_.shadows_enabled = runtime_shadows_enabled_;
+    options_menu_.post_process_enabled = runtime_post_process_enabled_;
+    main_menu_.visible = false;
+    save_slot_menu_.visible = false;
+    pause_menu_.visible = false;
+
+    set_mouse_capture(false);
+    center_ui_cursor(window_, window_width_, window_height_, options_menu_.cursor_x, options_menu_.cursor_y);
+    refresh_options_menu_hover();
+    record_audit_event(
+        AuditEventCategory::Ui,
+        "options_menu_opened",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"parent", audit_json_number(static_cast<int>(parent))},
+        }),
+        AuditPriority::High);
+}
+
+void Game::close_frontend_menu_to_parent() {
+    if (options_menu_.visible) {
+        const auto parent = options_menu_.parent;
+        options_menu_.visible = false;
+        if (parent == OptionsMenuParent::PauseMenu) {
+            pause_menu_.visible = true;
+            center_ui_cursor(window_, window_width_, window_height_, pause_menu_.cursor_x, pause_menu_.cursor_y);
+            refresh_pause_menu_hover();
+        } else {
+            main_menu_.visible = true;
+            center_ui_cursor(window_, window_width_, window_height_, main_menu_.cursor_x, main_menu_.cursor_y);
+            refresh_main_menu_hover();
+        }
+        set_mouse_capture(false);
+        return;
+    }
+
+    if (save_slot_menu_.visible) {
+        const auto parent = save_slot_menu_.parent;
+        save_slot_menu_.visible = false;
+        if (parent == SaveSlotMenuParent::PauseMenu) {
+            pause_menu_.visible = true;
+            center_ui_cursor(window_, window_width_, window_height_, pause_menu_.cursor_x, pause_menu_.cursor_y);
+            refresh_pause_menu_hover();
+        } else {
+            main_menu_.visible = true;
+            center_ui_cursor(window_, window_width_, window_height_, main_menu_.cursor_x, main_menu_.cursor_y);
+            refresh_main_menu_hover();
+        }
+        set_mouse_capture(false);
+    }
+}
+
+void Game::request_return_to_main_menu() {
+    if (has_active_session_ && session_dirty_) {
+        set_confirm_dialog_visible(true, ConfirmDialogIntent::ReturnToMainMenu);
+        return;
+    }
+
+    open_main_menu(true);
+}
+
+void Game::start_new_game_in_slot(std::size_t slot_index) {
+    const auto time_seed = static_cast<std::uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::random_device random_device {};
+    const auto seed = static_cast<int>(time_seed ^ random_device() ^ static_cast<std::uint32_t>(slot_index * 7919U));
+
+    present_loading_screen("NOUVELLE PARTIE", "CONSTRUCTION DU VILLAGE", 0.08F);
+    world_ = World(seed, options_.performance.stream_radius);
+    creatures_.clear();
+    item_drops_.clear();
+    hotbar_ = make_default_hotbar_state();
+    inventory_menu_ = make_default_inventory_menu_state();
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    configure_starting_village(true, true);
+    present_loading_screen("NOUVELLE PARTIE", "PREPARATION DU POINT D'APPARITION", 0.24F);
+    spawn_position_ = find_initial_spawn_position();
+    player_.respawn(spawn_position_);
+    sync_selected_hotbar_slot();
+
+    environment_.set_time_of_day(8.25F);
+    environment_.set_frozen(options_.freeze_time);
+    prime_world_around(spawn_position_, "NOUVELLE PARTIE", "CHARGEMENT DES CHUNKS");
+    if (!running_) {
+        return;
+    }
+    creatures_.update(0.0F, world_, player_.position(), environment_.current_state(), environment_.current_creature_cycle());
+    preview_orbit_radians_ = 0.0F;
+    update_menu_preview_camera(0.0F);
+
+    present_loading_screen("NOUVELLE PARTIE", "INITIALISATION DU RENDU", 0.94F);
+    renderer_.shutdown();
+    apply_renderer_options();
+    SDL_SetWindowTitle(window_, kGameWindowTitle.data());
+
+    has_active_session_ = true;
+    active_save_slot_ = slot_index;
+    session_dirty_ = false;
+    prepare_game_session();
+    save_game_to_slot(slot_index);
+    record_audit_event(
+        AuditEventCategory::Session,
+        "new_game_started",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"slot_index", audit_json_number(slot_index)},
+            {"seed", audit_json_number(world_.seed())},
+        }),
+        AuditPriority::Critical);
+}
+
+auto Game::load_game_from_slot(std::size_t slot_index) -> bool {
+    const auto snapshot = load_save_slot(save_root_directory_, slot_index);
+    if (!snapshot.has_value()) {
+        refresh_save_slots();
+        return false;
+    }
+
+    load_snapshot_into_session(*snapshot, slot_index);
+    return true;
+}
+
+void Game::load_snapshot_into_session(const SaveGameSnapshot& snapshot, std::optional<std::size_t> slot_index) {
+    present_loading_screen("CHARGEMENT", "LECTURE DE LA SAUVEGARDE", 0.08F);
+    world_ = World(snapshot.metadata.seed, options_.performance.stream_radius);
+    world_.replace_chunk_snapshots(snapshot.chunk_snapshots);
+    hotbar_ = snapshot.hotbar;
+    inventory_menu_ = snapshot.inventory;
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    inventory_menu_.visible = false;
+    inventory_menu_.hovered_slot.reset();
+    item_drops_.load_drops(snapshot.item_drops);
+    creatures_.clear();
+    configure_starting_village(snapshot.metadata.has_starting_village, false);
+    spawn_position_ = snapshot.spawn_position;
+    player_.load_state(snapshot.player_state);
+    sync_selected_hotbar_slot();
+
+    environment_.set_time_of_day(snapshot.metadata.time_of_day);
+    environment_.set_frozen(options_.freeze_time);
+    prime_world_around(player_.position(), "CHARGEMENT", "RESTAURATION DU MONDE");
+    if (!running_) {
+        return;
+    }
+    creatures_.load_creatures(snapshot.creatures, environment_.current_state());
+    preview_orbit_radians_ = 0.0F;
+    menu_preview_time_of_day_ = snapshot.metadata.time_of_day;
+    update_menu_preview_camera(0.0F);
+
+    present_loading_screen("CHARGEMENT", "INITIALISATION DU RENDU", 0.94F);
+    renderer_.shutdown();
+    apply_renderer_options();
+    SDL_SetWindowTitle(window_, kGameWindowTitle.data());
+
+    has_active_session_ = true;
+    active_save_slot_ = slot_index;
+    session_dirty_ = false;
+    prepare_game_session();
+    refresh_save_slots();
+    record_audit_event(
+        AuditEventCategory::Session,
+        "game_loaded",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"has_slot", audit_json_bool(slot_index.has_value())},
+            {"seed", audit_json_number(snapshot.metadata.seed)},
+        }),
+        AuditPriority::Critical);
+}
+
+void Game::save_game_to_slot(std::size_t slot_index) {
+    if (!has_active_session_) {
+        return;
+    }
+
+    auto snapshot = make_world_snapshot();
+    write_save_slot(save_root_directory_, slot_index, snapshot);
+    active_save_slot_ = slot_index;
+    session_dirty_ = false;
+    refresh_save_slots();
+    record_audit_event(
+        AuditEventCategory::Session,
+        "game_saved",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"slot_index", audit_json_number(slot_index)},
+            {"modified_chunks", audit_json_number(snapshot.metadata.modified_chunk_count)},
+        }),
+        AuditPriority::High);
+}
+
+void Game::mark_session_dirty() noexcept {
+    session_dirty_ = true;
+}
+
+void Game::update_menu_preview_camera(float dt) {
+    constexpr float kTwoPi = 6.28318530718F;
+    preview_orbit_radians_ = std::fmod(preview_orbit_radians_ + dt * 0.12F, kTwoPi);
+    const auto focus = spawn_position_ + glm::vec3 {0.0F, 5.0F, 0.0F};
+    const auto radius = 26.0F;
+    const auto position = glm::vec3 {
+        focus.x + std::cos(preview_orbit_radians_) * radius,
+        focus.y + 7.0F + std::sin(preview_orbit_radians_ * 0.7F) * 1.8F,
+        focus.z + std::sin(preview_orbit_radians_) * radius,
+    };
+    const auto eye_position = position + glm::vec3 {0.0F, 1.62F, 0.0F};
+    const auto direction = glm::normalize(focus - eye_position);
+
+    auto preview_state = preview_player_.state();
+    preview_state.position = position;
+    preview_state.velocity = {};
+    preview_state.fly_mode = true;
+    preview_state.on_ground = false;
+    preview_state.dead = false;
+    preview_state.head_underwater = false;
+    preview_state.swimming = false;
+    preview_state.animation_time += std::max(dt, 0.0F);
+    preview_state.yaw_degrees = glm::degrees(std::atan2(direction.z, direction.x));
+    preview_state.pitch_degrees = glm::degrees(std::asin(std::clamp(direction.y, -1.0F, 1.0F)));
+    preview_state.body_yaw_degrees = preview_state.yaw_degrees;
+    preview_player_.load_state(preview_state);
 }
 
 void Game::update_smoke_player(float dt) {
@@ -1011,7 +2456,7 @@ void Game::record_frame_stats(const FramePerformanceStats& frame_stats) {
         return;
     }
 
-    frame_samples_.push_back({
+    const auto sample = FramePerformanceSample {
         static_cast<std::size_t>(rendered_frames_),
         frame_stats.frame_total_ms,
         frame_stats.streaming_ms,
@@ -1037,29 +2482,396 @@ void Game::record_frame_stats(const FramePerformanceStats& frame_stats) {
         frame_stats.shadow_chunks,
         frame_stats.world_chunks,
         PerformanceStage::Unattributed,
+    };
+    frame_samples_.push_back(sample);
+    note_frame_for_audit(frame_stats);
+}
+
+void Game::record_performance_event(PerformanceEventKind kind, const BlockCoord& block, std::string_view label) {
+    if (!should_capture_performance()) {
+        return;
+    }
+
+    const auto chunk_coord = world_.world_to_chunk(block.x, block.z);
+    performance_events_.push_back({
+        static_cast<std::size_t>(rendered_frames_),
+        kind,
+        std::string(label),
+        block.x,
+        block.y,
+        block.z,
+        chunk_coord.x,
+        chunk_coord.z,
+        world_.pending_generation_count(),
+        world_.pending_mesh_count(),
+        world_.pending_lighting_count(),
     });
+
+    record_audit_event(
+        AuditEventCategory::Player,
+        kind == PerformanceEventKind::BlockBreak ? "block_break" : "block_place",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"label", audit_json_string(label)},
+            {"world_x", audit_json_number(block.x)},
+            {"world_y", audit_json_number(block.y)},
+            {"world_z", audit_json_number(block.z)},
+            {"chunk_x", audit_json_number(chunk_coord.x)},
+            {"chunk_z", audit_json_number(chunk_coord.z)},
+            {"pending_generation", audit_json_number(world_.pending_generation_count())},
+            {"pending_mesh", audit_json_number(world_.pending_mesh_count())},
+            {"pending_lighting", audit_json_number(world_.pending_lighting_count())},
+        }),
+        AuditPriority::High);
+}
+
+void Game::record_audit_event(AuditEventCategory category,
+                              std::string_view kind,
+                              AuditSeverity severity,
+                              std::string payload_json,
+                              AuditPriority priority) {
+    if (!audit_ || !audit_->enabled()) {
+        return;
+    }
+
+    note_audit_event(category, kind);
+    AuditEvent event {};
+    event.frame_index = static_cast<std::size_t>(rendered_frames_);
+    event.second_index = audit_second_accumulator_.second_index;
+    event.category = category;
+    event.kind = std::string(kind);
+    event.severity = severity;
+    event.payload_json = std::move(payload_json);
+    audit_->record_event(std::move(event), priority);
+}
+
+void Game::record_raw_input_event(const SDL_Event& event) {
+    if (!audit_ || !audit_->enabled() || options_.audit.mode != AuditMode::Forensic) {
+        return;
+    }
+
+    std::string payload_json = audit_json_object({
+        {"type", audit_json_number(event.type)},
+    });
+
+    switch (event.type) {
+    case SDL_QUIT:
+        payload_json = audit_json_object({});
+        break;
+    case SDL_WINDOWEVENT:
+        payload_json = audit_json_object({
+            {"event", audit_json_number(event.window.event)},
+            {"data1", audit_json_number(event.window.data1)},
+            {"data2", audit_json_number(event.window.data2)},
+        });
+        break;
+    case SDL_MOUSEMOTION:
+        payload_json = audit_json_object({
+            {"x", audit_json_number(event.motion.x)},
+            {"y", audit_json_number(event.motion.y)},
+            {"xrel", audit_json_number(event.motion.xrel)},
+            {"yrel", audit_json_number(event.motion.yrel)},
+        });
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+        payload_json = audit_json_object({
+            {"button", audit_json_number(event.button.button)},
+            {"x", audit_json_number(event.button.x)},
+            {"y", audit_json_number(event.button.y)},
+        });
+        break;
+    case SDL_MOUSEWHEEL:
+        payload_json = audit_json_object({
+            {"x", audit_json_number(event.wheel.x)},
+            {"y", audit_json_number(event.wheel.y)},
+            {"direction", audit_json_number(event.wheel.direction)},
+        });
+        break;
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        payload_json = audit_json_object({
+            {"sym", audit_json_number(event.key.keysym.sym)},
+            {"scancode", audit_json_number(event.key.keysym.scancode)},
+            {"repeat", audit_json_number(event.key.repeat)},
+            {"mod", audit_json_number(event.key.keysym.mod)},
+        });
+        break;
+    default:
+        break;
+    }
+
+    record_audit_event(
+        AuditEventCategory::InputRaw,
+        "sdl_event",
+        AuditSeverity::Trace,
+        std::move(payload_json),
+        AuditPriority::Low);
+}
+
+void Game::note_audit_event(AuditEventCategory category, std::string_view kind) {
+    switch (category) {
+    case AuditEventCategory::InputRaw:
+        ++frame_raw_input_events_;
+        ++audit_second_accumulator_.input_raw_events;
+        break;
+    case AuditEventCategory::InputAction:
+        ++frame_input_action_events_;
+        ++audit_second_accumulator_.input_action_events;
+        break;
+    case AuditEventCategory::Ui:
+        ++audit_second_accumulator_.ui_events;
+        break;
+    case AuditEventCategory::Player:
+        ++audit_second_accumulator_.player_events;
+        if (kind == "block_break") {
+            ++audit_second_accumulator_.block_breaks;
+        } else if (kind == "block_place") {
+            ++audit_second_accumulator_.block_places;
+        }
+        break;
+    case AuditEventCategory::Creatures:
+        break;
+    case AuditEventCategory::Items:
+    case AuditEventCategory::World:
+    case AuditEventCategory::Render:
+    case AuditEventCategory::Performance:
+    case AuditEventCategory::Session:
+    default:
+        break;
+    }
+}
+
+void Game::note_frame_for_audit(const FramePerformanceStats& frame_stats) {
+    if (!audit_ || !audit_->enabled()) {
+        return;
+    }
+
+    audit_elapsed_ms_ += frame_stats.frame_total_ms;
+    audit_second_accumulator_.frame_ms_values.push_back(frame_stats.frame_total_ms);
+    if (frame_stats.frame_total_ms > 0.0) {
+        audit_second_accumulator_.fps_values.push_back(1000.0 / frame_stats.frame_total_ms);
+    }
+
+    audit_second_accumulator_.streaming_ms_total += frame_stats.streaming_ms;
+    audit_second_accumulator_.generation_ms_total += frame_stats.generation_ms;
+    audit_second_accumulator_.lighting_ms_total += frame_stats.lighting_ms;
+    audit_second_accumulator_.meshing_ms_total += frame_stats.meshing_ms;
+    audit_second_accumulator_.upload_ms_total += frame_stats.upload_ms;
+    audit_second_accumulator_.shadow_ms_total += frame_stats.shadow_ms;
+    audit_second_accumulator_.world_ms_total += frame_stats.world_ms;
+    audit_second_accumulator_.stream_chunk_changes += frame_stats.stream_chunk_changes;
+    audit_second_accumulator_.generation_enqueued += frame_stats.generation_enqueued;
+    audit_second_accumulator_.generation_pruned += frame_stats.generation_pruned;
+    audit_second_accumulator_.unloaded_chunks += frame_stats.unloaded_chunks;
+    audit_second_accumulator_.generated_chunks += frame_stats.generated_chunks;
+    audit_second_accumulator_.meshed_chunks += frame_stats.meshed_chunks;
+    audit_second_accumulator_.light_nodes_processed += frame_stats.light_nodes_processed;
+    audit_second_accumulator_.lighting_jobs_completed += frame_stats.lighting_jobs_completed;
+    audit_second_accumulator_.uploaded_meshes += frame_stats.uploaded_meshes;
+    audit_second_accumulator_.visible_chunks_max =
+        std::max(audit_second_accumulator_.visible_chunks_max, frame_stats.visible_chunks);
+    audit_second_accumulator_.shadow_chunks_max =
+        std::max(audit_second_accumulator_.shadow_chunks_max, frame_stats.shadow_chunks);
+    audit_second_accumulator_.world_chunks_max =
+        std::max(audit_second_accumulator_.world_chunks_max, frame_stats.world_chunks);
+    audit_second_accumulator_.pending_generation_max =
+        std::max(audit_second_accumulator_.pending_generation_max, frame_stats.pending_generation);
+    audit_second_accumulator_.pending_mesh_max =
+        std::max(audit_second_accumulator_.pending_mesh_max, frame_stats.pending_mesh);
+    audit_second_accumulator_.pending_lighting_max =
+        std::max(audit_second_accumulator_.pending_lighting_max, frame_stats.pending_lighting);
+    audit_second_accumulator_.active_creatures_max =
+        std::max(audit_second_accumulator_.active_creatures_max, creatures_.active_creatures().size());
+    audit_second_accumulator_.active_item_drops_max =
+        std::max(audit_second_accumulator_.active_item_drops_max, item_drops_.active_drop_count());
+
+    if (frame_stats.frame_total_ms > kPerformanceLagThreshold16Ms) {
+        ++audit_second_accumulator_.spike_frames;
+        record_audit_event(
+            AuditEventCategory::Performance,
+            "frame_spike",
+            frame_stats.frame_total_ms > kPerformanceLagThreshold50Ms ? AuditSeverity::Error : AuditSeverity::Warning,
+            audit_json_object({
+                {"frame_total_ms", audit_json_number(frame_stats.frame_total_ms)},
+                {"streaming_ms", audit_json_number(frame_stats.streaming_ms)},
+                {"generation_ms", audit_json_number(frame_stats.generation_ms)},
+                {"lighting_ms", audit_json_number(frame_stats.lighting_ms)},
+                {"meshing_ms", audit_json_number(frame_stats.meshing_ms)},
+                {"upload_ms", audit_json_number(frame_stats.upload_ms)},
+                {"shadow_ms", audit_json_number(frame_stats.shadow_ms)},
+                {"world_ms", audit_json_number(frame_stats.world_ms)},
+            }),
+            AuditPriority::High);
+    }
+
+    audit_->record_frame(make_audit_frame_sample(frame_stats), AuditPriority::Low);
+    flush_audit_second_sample(false);
+}
+
+void Game::flush_audit_second_sample(bool force) {
+    if (!audit_ || !audit_->enabled()) {
+        return;
+    }
+    if (audit_second_accumulator_.frame_ms_values.empty()) {
+        return;
+    }
+    if (!force && audit_elapsed_ms_ < 1000.0) {
+        return;
+    }
+
+    AuditSecondSample sample {};
+    sample.second_index = audit_second_accumulator_.second_index;
+    sample.frame_count = audit_second_accumulator_.frame_ms_values.size();
+    sample.fps_avg = summarize_metric(audit_second_accumulator_.fps_values).average;
+    sample.fps_min = audit_second_accumulator_.fps_values.empty()
+                         ? 0.0
+                         : *std::min_element(audit_second_accumulator_.fps_values.begin(), audit_second_accumulator_.fps_values.end());
+    sample.fps_max = audit_second_accumulator_.fps_values.empty()
+                         ? 0.0
+                         : *std::max_element(audit_second_accumulator_.fps_values.begin(), audit_second_accumulator_.fps_values.end());
+    const auto frame_metrics = summarize_metric(audit_second_accumulator_.frame_ms_values);
+    sample.frame_ms_avg = frame_metrics.average;
+    sample.frame_ms_p95 = frame_metrics.p95;
+    sample.frame_ms_max = frame_metrics.maximum;
+    const auto frame_count = static_cast<double>(sample.frame_count);
+    sample.streaming_ms_avg = audit_second_accumulator_.streaming_ms_total / frame_count;
+    sample.generation_ms_avg = audit_second_accumulator_.generation_ms_total / frame_count;
+    sample.lighting_ms_avg = audit_second_accumulator_.lighting_ms_total / frame_count;
+    sample.meshing_ms_avg = audit_second_accumulator_.meshing_ms_total / frame_count;
+    sample.upload_ms_avg = audit_second_accumulator_.upload_ms_total / frame_count;
+    sample.shadow_ms_avg = audit_second_accumulator_.shadow_ms_total / frame_count;
+    sample.world_ms_avg = audit_second_accumulator_.world_ms_total / frame_count;
+    sample.input_raw_events = audit_second_accumulator_.input_raw_events;
+    sample.input_action_events = audit_second_accumulator_.input_action_events;
+    sample.ui_events = audit_second_accumulator_.ui_events;
+    sample.player_events = audit_second_accumulator_.player_events;
+    sample.block_breaks = audit_second_accumulator_.block_breaks;
+    sample.block_places = audit_second_accumulator_.block_places;
+    sample.stream_chunk_changes = audit_second_accumulator_.stream_chunk_changes;
+    sample.generation_enqueued = audit_second_accumulator_.generation_enqueued;
+    sample.generation_pruned = audit_second_accumulator_.generation_pruned;
+    sample.unloaded_chunks = audit_second_accumulator_.unloaded_chunks;
+    sample.generated_chunks = audit_second_accumulator_.generated_chunks;
+    sample.meshed_chunks = audit_second_accumulator_.meshed_chunks;
+    sample.light_nodes_processed = audit_second_accumulator_.light_nodes_processed;
+    sample.lighting_jobs_completed = audit_second_accumulator_.lighting_jobs_completed;
+    sample.uploaded_meshes = audit_second_accumulator_.uploaded_meshes;
+    sample.visible_chunks_max = audit_second_accumulator_.visible_chunks_max;
+    sample.shadow_chunks_max = audit_second_accumulator_.shadow_chunks_max;
+    sample.world_chunks_max = audit_second_accumulator_.world_chunks_max;
+    sample.pending_generation_max = audit_second_accumulator_.pending_generation_max;
+    sample.pending_mesh_max = audit_second_accumulator_.pending_mesh_max;
+    sample.pending_lighting_max = audit_second_accumulator_.pending_lighting_max;
+    sample.creature_spawns = audit_second_accumulator_.creature_spawns;
+    sample.creature_despawns = audit_second_accumulator_.creature_despawns;
+    sample.creature_attacks = audit_second_accumulator_.creature_attacks;
+    sample.active_creatures_max = audit_second_accumulator_.active_creatures_max;
+    sample.item_spawns = audit_second_accumulator_.item_spawns;
+    sample.item_merges = audit_second_accumulator_.item_merges;
+    sample.item_pickups = audit_second_accumulator_.item_pickups;
+    sample.item_expired = audit_second_accumulator_.item_expired;
+    sample.active_item_drops_max = audit_second_accumulator_.active_item_drops_max;
+    sample.spike_frames = audit_second_accumulator_.spike_frames;
+    audit_->record_second(std::move(sample), AuditPriority::High);
+
+    audit_elapsed_ms_ = force ? 0.0 : std::max(0.0, audit_elapsed_ms_ - 1000.0);
+    audit_second_accumulator_.reset(audit_second_accumulator_.second_index + 1);
+}
+
+auto Game::make_audit_frame_sample(const FramePerformanceStats& frame_stats) const -> AuditFrameSample {
+    AuditFrameSample sample {};
+    sample.frame_index = static_cast<std::size_t>(rendered_frames_);
+    sample.second_index = audit_second_accumulator_.second_index;
+    sample.fps = frame_stats.frame_total_ms > 0.0 ? 1000.0 / frame_stats.frame_total_ms : 0.0;
+    switch (active_ui_screen()) {
+    case UiScreen::MainMenu:
+        sample.ui_screen = "main_menu";
+        break;
+    case UiScreen::SaveSlots:
+        sample.ui_screen = "save_slots";
+        break;
+    case UiScreen::Options:
+        sample.ui_screen = "options";
+        break;
+    case UiScreen::Inventory:
+        sample.ui_screen = "inventory";
+        break;
+    case UiScreen::Pause:
+        sample.ui_screen = "pause";
+        break;
+    case UiScreen::Death:
+        sample.ui_screen = "death";
+        break;
+    case UiScreen::Gameplay:
+    default:
+        sample.ui_screen = "gameplay";
+        break;
+    }
+    sample.mouse_captured = mouse_captured_;
+    sample.input_raw_events = frame_raw_input_events_;
+    sample.input_action_events = frame_input_action_events_;
+    sample.active_creatures = creatures_.active_creatures().size();
+    sample.active_item_drops = item_drops_.active_drop_count();
+    sample.performance = {
+        static_cast<std::size_t>(rendered_frames_),
+        frame_stats.frame_total_ms,
+        frame_stats.streaming_ms,
+        frame_stats.generation_ms,
+        frame_stats.lighting_ms,
+        frame_stats.meshing_ms,
+        frame_stats.upload_ms,
+        frame_stats.shadow_ms,
+        frame_stats.world_ms,
+        frame_stats.generated_chunks,
+        frame_stats.meshed_chunks,
+        frame_stats.light_nodes_processed,
+        frame_stats.uploaded_meshes,
+        frame_stats.pending_generation,
+        frame_stats.pending_mesh,
+        frame_stats.pending_lighting,
+        frame_stats.stream_chunk_changes,
+        frame_stats.generation_enqueued,
+        frame_stats.generation_pruned,
+        frame_stats.unloaded_chunks,
+        frame_stats.lighting_jobs_completed,
+        frame_stats.visible_chunks,
+        frame_stats.shadow_chunks,
+        frame_stats.world_chunks,
+        PerformanceStage::Unattributed,
+    };
+    sample.performance.dominant_stage = detect_dominant_stage(sample.performance);
+    return sample;
 }
 
 auto Game::should_capture_performance() const noexcept -> bool {
-    return options_.smoke_test &&
-           (options_.performance.report_frame_stats ||
-            !options_.performance.perf_json_path.empty() ||
-            options_.performance.perf_trace_enabled ||
-            !options_.performance.perf_scenario.empty());
+    return options_.performance.report_frame_stats ||
+           !options_.performance.perf_json_path.empty() ||
+           options_.audit.enabled;
 }
 
 auto Game::build_performance_report() const -> PerformanceRunReport {
     PerformanceReportMetadata metadata {};
     metadata.platform = std::string(kPerformancePlatform);
     metadata.build_type = std::string(kPerformanceBuildType.empty() ? std::string_view("unknown") : kPerformanceBuildType);
-    metadata.smoke_frames = static_cast<std::size_t>(options_.smoke_frames);
+    metadata.capture_mode = options_.audit.enabled
+                                ? std::string(audit_mode_name(options_.audit.mode))
+                                : (options_.smoke_test ? "smoke" : "interactive");
+    metadata.smoke_frames = options_.smoke_test ? static_cast<std::size_t>(options_.smoke_frames) : 0U;
     metadata.stream_radius = options_.performance.stream_radius;
-    metadata.shadows_enabled = options_.performance.shadows_enabled;
+    metadata.shadows_enabled = runtime_shadows_enabled_;
     metadata.shadow_map_size = options_.performance.shadow_map_size;
-    metadata.post_process_enabled = options_.performance.post_process_enabled;
+    metadata.post_process_enabled = runtime_post_process_enabled_;
     metadata.freeze_time = options_.freeze_time || options_.smoke_test;
-    metadata.scenario = options_.performance.perf_scenario.empty() ? "smoke" : options_.performance.perf_scenario;
-    return valcraft::build_performance_report(metadata, frame_samples_, options_.performance.perf_trace_enabled);
+    metadata.scenario = !options_.performance.perf_scenario.empty()
+                            ? options_.performance.perf_scenario
+                            : options_.audit.label;
+    return valcraft::build_performance_report(
+        metadata,
+        frame_samples_,
+        options_.performance.perf_trace_enabled || options_.audit.trace_frames || options_.audit.mode == AuditMode::Forensic,
+        10,
+        performance_events_);
 }
 
 void Game::write_performance_report(const PerformanceRunReport& report) const {
@@ -1070,7 +2882,7 @@ void Game::write_performance_report(const PerformanceRunReport& report) const {
         }
     }
 
-    if (options_.performance.perf_json_path.empty()) {
+    if (options_.performance.perf_json_path.empty() || options_.audit.enabled) {
         return;
     }
 

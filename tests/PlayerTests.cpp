@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace valcraft {
 
@@ -170,6 +171,19 @@ void settle_viewmodel(PlayerController& player, const World& world, int frames =
     for (int i = 0; i < frames; ++i) {
         player.update(PlayerInput {}, 1.0F / 60.0F, world);
     }
+}
+
+auto find_unloaded_generated_face_block(const World& world, int world_x) -> std::optional<BlockCoord> {
+    for (int world_z = 0; world_z < kChunkSizeZ; ++world_z) {
+        for (int world_y = 2; world_y < kWorldMaxY; ++world_y) {
+            if (!is_block_collidable(world.peek_block_or_generated(world_x, world_y, world_z))) {
+                continue;
+            }
+            return BlockCoord {world_x, world_y, world_z};
+        }
+    }
+
+    return std::nullopt;
 }
 
 } // namespace
@@ -345,6 +359,53 @@ TEST_CASE("player cannot move through a solid wall") {
     CHECK(player.state().on_ground);
 }
 
+TEST_CASE("player collision still sees generated solid blocks in unloaded chunks") {
+    World world(2201, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    REQUIRE(world.find_chunk({1, 0}) == nullptr);
+    const auto generated_block = find_unloaded_generated_face_block(world, kChunkSizeX);
+    REQUIRE(generated_block.has_value());
+
+    PlayerController player({
+        static_cast<float>(generated_block->x) + 0.5F,
+        static_cast<float>(generated_block->y),
+        static_cast<float>(generated_block->z) + 0.5F,
+    });
+
+    CHECK(player.collides_at(world, player.position()));
+}
+
+TEST_CASE("player cannot walk into generated terrain before the neighbor chunk finishes streaming") {
+    World world(2202, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    REQUIRE(world.find_chunk({1, 0}) == nullptr);
+    const auto generated_block = find_unloaded_generated_face_block(world, kChunkSizeX);
+    REQUIRE(generated_block.has_value());
+    REQUIRE(generated_block->y >= 2);
+
+    const auto floor_y = generated_block->y - 1;
+    const auto floor_min_z = std::max(0, generated_block->z - 1);
+    const auto floor_max_z = std::min(kChunkSizeZ - 1, generated_block->z + 1);
+    test::make_flat_floor(world, kChunkSizeX - 4, kChunkSizeX - 1, floor_y, floor_min_z, floor_max_z);
+
+    PlayerController player({
+        static_cast<float>(kChunkSizeX) - 0.55F,
+        static_cast<float>(floor_y + 1) + 0.001F,
+        static_cast<float>(generated_block->z) + 0.5F,
+    });
+    PlayerInput input {};
+    input.move_right = 1.0F;
+
+    for (int frame = 0; frame < 20; ++frame) {
+        player.update(input, 1.0F / 60.0F, world);
+    }
+
+    CHECK(player.position().x < static_cast<float>(generated_block->x) - 0.29F);
+    CHECK_FALSE(player.collides_at(world, player.position()));
+}
+
 TEST_CASE("positive and negative strafe inputs move on the expected horizontal side") {
     World world(23, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -441,6 +502,35 @@ TEST_CASE("hotbar torch slot places a torch that emits light") {
     CHECK(world.get_block_light(0, 5, -1) == 14);
 }
 
+TEST_CASE("torches can be placed on walls like minecraft") {
+    World world(352, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 5, 0, to_block_id(BlockType::Stone));
+
+    PlayerController player({3.5F, 3.88F, 0.5F});
+    auto state = player.state();
+    state.position = {3.5F, 3.88F, 0.5F};
+    state.yaw_degrees = 180.0F;
+    state.pitch_degrees = 0.0F;
+    state.body_yaw_degrees = 180.0F;
+    player.load_state(state);
+    player.set_selected_block(to_block_id(BlockType::Torch));
+
+    const auto hit = player.current_target(world, 6.0F);
+    REQUIRE(hit.hit);
+    CHECK(hit.block == BlockCoord {1, 5, 0});
+    CHECK(hit.adjacent == BlockCoord {2, 5, 0});
+
+    const auto placed = player.try_place_block(world, 6.0F);
+    REQUIRE(placed.has_value());
+    world.rebuild_lighting();
+
+    CHECK(placed->block == BlockCoord {2, 5, 0});
+    CHECK(placed->block_id == to_block_id(BlockType::TorchWallNegativeX));
+    CHECK(world.get_block(2, 5, 0) == to_block_id(BlockType::TorchWallNegativeX));
+    CHECK(world.get_block_light(2, 5, 0) == 14);
+}
+
 TEST_CASE("torches cannot be placed inside water") {
     World world(351, 1);
     test::make_chunk_empty(world, {0, -1});
@@ -488,6 +578,119 @@ TEST_CASE("breaking a block reports the harvested block type and clears the worl
     CHECK(broken->block == BlockCoord {0, 4, -1});
     CHECK(broken->block_id == to_block_id(BlockType::Stone));
     CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
+}
+
+TEST_CASE("the deepest world layer cannot be broken instantly") {
+    World world(36101, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, kWorldMinY, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 1.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    const auto hit = player.current_target(world, 4.0F);
+    REQUIRE(hit.hit);
+    CHECK(hit.block == BlockCoord {0, kWorldMinY, -1});
+    CHECK(hit.block_id == to_block_id(BlockType::Stone));
+
+    CHECK_FALSE(player.try_break_block(world, 4.0F).has_value());
+    CHECK(world.get_block(0, kWorldMinY, -1) == to_block_id(BlockType::Stone));
+}
+
+TEST_CASE("the deepest world layer does not start held breaking progress") {
+    World world(36102, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, kWorldMinY, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 1.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    CHECK_FALSE(player.update_block_breaking(world, 1.0F, true, 4.0F).has_value());
+    CHECK_FALSE(player.block_break_progress().active);
+    CHECK(world.get_block(0, kWorldMinY, -1) == to_block_id(BlockType::Stone));
+}
+
+TEST_CASE("held block breaking waits for the configured duration before removing the target") {
+    World world(3611, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    const auto stone_duration = block_break_duration_seconds(to_block_id(BlockType::Stone));
+    REQUIRE(stone_duration > 1.0F);
+
+    const auto first_attempt = player.update_block_breaking(world, stone_duration - 0.05F, true, 4.0F);
+    CHECK_FALSE(first_attempt.has_value());
+    CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Stone));
+    CHECK(player.block_break_progress().active);
+    CHECK(player.block_break_progress().progress < 1.0F);
+
+    const auto completed_break = player.update_block_breaking(world, 0.05F, true, 4.0F);
+    REQUIRE(completed_break.has_value());
+    CHECK(completed_break->block == BlockCoord {0, 4, -1});
+    CHECK(completed_break->block_id == to_block_id(BlockType::Stone));
+    CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
+    CHECK_FALSE(player.block_break_progress().active);
+}
+
+TEST_CASE("releasing the break input cancels the current breaking progress") {
+    World world(3612, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, 4, -1, to_block_id(BlockType::Dirt));
+
+    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    const auto dirt_duration = block_break_duration_seconds(to_block_id(BlockType::Dirt));
+    REQUIRE(dirt_duration > 0.2F);
+
+    CHECK_FALSE(player.update_block_breaking(world, dirt_duration * 0.45F, true, 4.0F).has_value());
+    REQUIRE(player.block_break_progress().active);
+    CHECK(player.block_break_progress().progress > 0.0F);
+
+    CHECK_FALSE(player.update_block_breaking(world, 0.0F, false, 4.0F).has_value());
+    CHECK_FALSE(player.block_break_progress().active);
+    CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Dirt));
+
+    CHECK_FALSE(player.update_block_breaking(world, 0.10F, true, 4.0F).has_value());
+    REQUIRE(player.block_break_progress().active);
+    CHECK(player.block_break_progress().elapsed_seconds == doctest::Approx(0.10F));
+}
+
+TEST_CASE("changing the targeted block resets the breaking progress to the new material duration") {
+    World world(3613, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    CHECK_FALSE(player.update_block_breaking(world, 0.45F, true, 4.0F).has_value());
+    REQUIRE(player.block_break_progress().active);
+    CHECK(player.block_break_progress().block_id == to_block_id(BlockType::Stone));
+    CHECK(player.block_break_progress().elapsed_seconds == doctest::Approx(0.45F));
+
+    world.set_block(0, 4, -1, to_block_id(BlockType::Dirt));
+
+    CHECK_FALSE(player.update_block_breaking(world, 0.10F, true, 4.0F).has_value());
+    REQUIRE(player.block_break_progress().active);
+    CHECK(player.block_break_progress().block_id == to_block_id(BlockType::Dirt));
+    CHECK(player.block_break_progress().duration_seconds ==
+          doctest::Approx(block_break_duration_seconds(to_block_id(BlockType::Dirt))));
+    CHECK(player.block_break_progress().elapsed_seconds == doctest::Approx(0.10F));
+    CHECK(player.block_break_progress().elapsed_seconds < 0.45F);
 }
 
 TEST_CASE("item drops are picked up into inventory and respect 64 item stacks") {
@@ -822,6 +1025,43 @@ TEST_CASE("player avatar action triggers deterministically change the first pers
     CHECK_FALSE(meshes_match_exactly(mining_viewmodel.mesh, placing_viewmodel.mesh));
     CHECK(mining_viewmodel.pose.action_swing > idle_viewmodel.pose.action_swing);
     CHECK(placing_viewmodel.pose.action_swing > idle_viewmodel.pose.action_swing);
+}
+
+TEST_CASE("player parts tessellate identically to the public mesh builders") {
+    World world(6011, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    settle_viewmodel(player, world);
+
+    const auto world_parts = build_player_world_avatar_parts(player);
+    const auto world_mesh = build_player_world_avatar_mesh(player);
+    const auto tessellated_world_mesh = build_creature_mesh(std::span<const CreaturePartInstance>(world_parts.data(), world_parts.size()));
+
+    REQUIRE_FALSE(world_parts.empty());
+    CHECK(world_mesh.part_count == world_parts.size());
+    CHECK(tessellated_world_mesh.part_count == world_parts.size());
+    CHECK(meshes_match_exactly(world_mesh, tessellated_world_mesh));
+
+    const auto viewmodel_parts = build_player_viewmodel_parts(player);
+    const auto viewmodel_mesh = build_player_viewmodel_mesh(player);
+    const auto tessellated_viewmodel_mesh =
+        build_creature_mesh(std::span<const CreaturePartInstance>(viewmodel_parts.parts.data(), viewmodel_parts.parts.size()));
+
+    REQUIRE_FALSE(viewmodel_parts.empty());
+    CHECK(viewmodel_mesh.mesh.part_count == viewmodel_parts.parts.size());
+    CHECK(tessellated_viewmodel_mesh.part_count == viewmodel_parts.parts.size());
+    CHECK(meshes_match_exactly(viewmodel_mesh.mesh, tessellated_viewmodel_mesh));
+    CHECK(viewmodel_mesh.pose.root_position.x == doctest::Approx(viewmodel_parts.pose.root_position.x));
+    CHECK(viewmodel_mesh.pose.root_position.y == doctest::Approx(viewmodel_parts.pose.root_position.y));
+    CHECK(viewmodel_mesh.pose.root_position.z == doctest::Approx(viewmodel_parts.pose.root_position.z));
+    CHECK(viewmodel_mesh.pose.wrist_position.x == doctest::Approx(viewmodel_parts.pose.wrist_position.x));
+    CHECK(viewmodel_mesh.pose.wrist_position.y == doctest::Approx(viewmodel_parts.pose.wrist_position.y));
+    CHECK(viewmodel_mesh.pose.wrist_position.z == doctest::Approx(viewmodel_parts.pose.wrist_position.z));
+    CHECK(viewmodel_mesh.pose.item_socket_transform[3].x == doctest::Approx(viewmodel_parts.pose.item_socket_transform[3].x));
+    CHECK(viewmodel_mesh.pose.item_socket_transform[3].y == doctest::Approx(viewmodel_parts.pose.item_socket_transform[3].y));
+    CHECK(viewmodel_mesh.pose.item_socket_transform[3].z == doctest::Approx(viewmodel_parts.pose.item_socket_transform[3].z));
 }
 
 } // namespace valcraft

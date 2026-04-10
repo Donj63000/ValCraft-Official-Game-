@@ -46,6 +46,77 @@ auto radial_falloff(float x, float y, float center_x, float center_y, float radi
     return saturate(1.0F - distance / std::max(radius, 0.001F));
 }
 
+auto distance_to_segment(float px, float py, float ax, float ay, float bx, float by) noexcept -> float {
+    const auto abx = bx - ax;
+    const auto aby = by - ay;
+    const auto apx = px - ax;
+    const auto apy = py - ay;
+    const auto ab_length_squared = abx * abx + aby * aby;
+    if (ab_length_squared <= 1.0e-5F) {
+        const auto dx = px - ax;
+        const auto dy = py - ay;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+    const auto projection = std::clamp((apx * abx + apy * aby) / ab_length_squared, 0.0F, 1.0F);
+    const auto closest_x = ax + abx * projection;
+    const auto closest_y = ay + aby * projection;
+    const auto dx = px - closest_x;
+    const auto dy = py - closest_y;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+struct CrackStroke {
+    float ax = 0.0F;
+    float ay = 0.0F;
+    float bx = 0.0F;
+    float by = 0.0F;
+    int first_stage = 0;
+    float thickness = 0.7F;
+};
+
+constexpr std::array<CrackStroke, 10> kCrackStrokes {{
+    {7.8F, 1.0F, 7.2F, 14.2F, 0, 0.95F},
+    {7.6F, 6.6F, 12.8F, 2.0F, 1, 0.78F},
+    {7.4F, 7.4F, 2.0F, 3.2F, 2, 0.74F},
+    {7.2F, 8.3F, 12.9F, 13.6F, 3, 0.76F},
+    {6.8F, 9.2F, 2.6F, 14.0F, 4, 0.78F},
+    {3.0F, 7.8F, 12.8F, 7.2F, 5, 0.68F},
+    {4.0F, 2.4F, 2.2F, 6.2F, 5, 0.58F},
+    {10.6F, 2.8F, 13.6F, 6.2F, 6, 0.56F},
+    {4.2F, 11.0F, 1.6F, 13.0F, 6, 0.54F},
+    {10.4F, 10.6F, 14.1F, 11.8F, 7, 0.52F},
+}};
+
+auto crack_strength(int x, int y, int stage) noexcept -> float {
+    const auto px = static_cast<float>(x) + 0.5F;
+    const auto py = static_cast<float>(y) + 0.5F;
+    auto strongest = 0.0F;
+
+    for (const auto& stroke : kCrackStrokes) {
+        if (stage < stroke.first_stage) {
+            continue;
+        }
+
+        const auto distance = distance_to_segment(px, py, stroke.ax, stroke.ay, stroke.bx, stroke.by);
+        const auto stage_growth = static_cast<float>(stage - stroke.first_stage) * 0.08F;
+        const auto jitter = (tile_noise(x, y, 70 + stroke.first_stage * 3 + stage) - 0.5F) * 0.16F;
+        const auto thickness = std::max(0.20F, stroke.thickness + stage_growth + jitter);
+        const auto strength = saturate(1.0F - distance / thickness);
+        strongest = std::max(strongest, strength);
+    }
+
+    if (stage >= 4) {
+        const auto chip_noise = tile_noise(x, y, 101 + stage * 5);
+        const auto center_falloff = radial_falloff(px, py, 7.5F, 7.5F, 8.6F);
+        const auto chipped =
+            chip_noise > (0.91F - static_cast<float>(stage - 4) * 0.035F) ? center_falloff * 0.72F : 0.0F;
+        strongest = std::max(strongest, chipped);
+    }
+
+    return strongest;
+}
+
 void set_texel(std::vector<std::uint8_t>& pixels, int x, int y, const std::array<std::uint8_t, 4>& rgba) {
     const auto index = static_cast<std::size_t>((y * kBlockAtlasSize + x) * 4);
     pixels[index + 0] = rgba[0];
@@ -252,6 +323,26 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
         }
         return make_rgba(68.0F + grain, 44.0F + grain * 0.45F, 22.0F + grain * 0.25F, 255.0F);
     });
+    fill_tile(pixels, 1, 4, [](int x, int y) {
+        const auto border = x == 0 || x == 15 || y == 0 || y == 15;
+        const auto mullion = x == 7 || x == 8 || y == 7 || y == 8;
+        const auto pane_corner = (x <= 2 || x >= 13) && (y <= 2 || y >= 13);
+        const auto frame = border || mullion;
+        const auto reflection =
+            std::sin((static_cast<float>(x) * 0.82F + static_cast<float>(y) * 0.34F) * 1.2F) * 7.0F +
+            tile_noise(x, y, 41) * 12.0F;
+
+        if (frame) {
+            const auto wood_grain = ((x + y) % 5 == 0) ? 8.0F : 0.0F;
+            return make_rgba(104.0F + wood_grain, 80.0F + wood_grain * 0.42F, 54.0F + wood_grain * 0.24F, 255.0F);
+        }
+
+        if (pane_corner) {
+            return make_rgba(156.0F + reflection * 0.22F, 196.0F + reflection * 0.30F, 224.0F + reflection * 0.38F, 255.0F);
+        }
+
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
     fill_tile(pixels, 1, 3, [](int x, int y) {
         const auto stem = ((x == 7) || (x == 8)) && y > 5;
         const auto blade_a = y > 4 && x >= 3 && x <= 6 && x <= y;
@@ -323,6 +414,21 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
             184.0F);
     });
 
+    for (int stage = 0; stage < static_cast<int>(kBlockBreakStageCount); ++stage) {
+        fill_tile(pixels, stage, kBlockBreakCrackAtlasRow, [stage](int x, int y) {
+            const auto strength = crack_strength(x, y, stage);
+            if (strength <= 0.40F) {
+                return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+            }
+
+            // Je garde des fissures bien contrastees avec un peu de matiere autour
+            // pour que la casse reste lisible meme dans les zones ombrees.
+            const auto soot = 12.0F + (1.0F - strength) * 38.0F + tile_noise(x, y, 131 + stage) * 10.0F;
+            const auto rim = strength > 0.86F ? 10.0F : 0.0F;
+            return make_rgba(soot + rim * 0.20F, soot + 3.0F + rim * 0.14F, soot + 6.0F + rim * 0.08F, 255.0F);
+        });
+    }
+
     return pixels;
 }
 
@@ -330,25 +436,28 @@ auto build_accent_atlas_pixels() -> std::vector<std::uint8_t> {
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kAccentAtlasSize * kAccentAtlasSize * 4), 0);
 
     fill_tile(pixels, kAccentAtlasSize, kAccentAtlasTileSize, 0, 0, [](int x, int y) {
-        const auto glow = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 7.4F);
-        const auto core = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 4.4F);
-        const auto alpha = saturate(glow * 0.95F + core * 0.45F);
+        const auto outer = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 7.6F);
+        const auto disc = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 5.2F);
+        const auto core = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.1F, 7.0F, 3.1F);
+        const auto corona = saturate(outer * 0.78F + disc * 0.40F);
+        const auto alpha = saturate(outer * 0.72F + disc * 0.45F);
         return make_rgba(
-            235.0F + core * 18.0F,
-            176.0F + glow * 56.0F,
-            78.0F + glow * 24.0F,
+            236.0F + disc * 18.0F + core * 14.0F,
+            182.0F + corona * 54.0F + core * 10.0F,
+            88.0F + corona * 24.0F,
             alpha * 255.0F);
     });
     fill_tile(pixels, kAccentAtlasSize, kAccentAtlasTileSize, 1, 0, [](int x, int y) {
         const auto disc = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 6.6F);
-        const auto crater_a = radial_falloff(static_cast<float>(x), static_cast<float>(y), 5.5F, 6.5F, 1.8F);
-        const auto crater_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 10.3F, 9.2F, 1.6F);
-        const auto crater_c = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.8F, 4.3F, 1.3F);
-        const auto crater_shadow = crater_a * 18.0F + crater_b * 14.0F + crater_c * 10.0F;
+        const auto crater_a = radial_falloff(static_cast<float>(x), static_cast<float>(y), 5.4F, 6.3F, 1.7F);
+        const auto crater_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 10.1F, 9.0F, 1.5F);
+        const auto crater_c = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.6F, 4.1F, 1.2F);
+        const auto limb = saturate((9.5F - static_cast<float>(x)) / 9.5F);
+        const auto crater_shadow = crater_a * 16.0F + crater_b * 12.0F + crater_c * 9.0F;
         return make_rgba(
-            206.0F + disc * 18.0F - crater_shadow,
-            220.0F + disc * 16.0F - crater_shadow * 0.7F,
-            246.0F + disc * 8.0F - crater_shadow * 0.4F,
+            204.0F + disc * 18.0F + limb * 8.0F - crater_shadow,
+            216.0F + disc * 18.0F + limb * 6.0F - crater_shadow * 0.7F,
+            238.0F + disc * 14.0F + limb * 4.0F - crater_shadow * 0.4F,
             disc * 255.0F);
     });
     fill_tile(pixels, kAccentAtlasSize, kAccentAtlasTileSize, 2, 0, [](int x, int y) {
@@ -356,33 +465,40 @@ auto build_accent_atlas_pixels() -> std::vector<std::uint8_t> {
         const auto vertical = x >= 7 && x <= 8 ? radial_falloff(7.5F, static_cast<float>(y), 7.5F, 7.5F, 7.0F) : 0.0F;
         const auto horizontal =
             y >= 7 && y <= 8 ? radial_falloff(static_cast<float>(x), 7.5F, 7.5F, 7.5F, 7.0F) : 0.0F;
-        const auto sparkle = std::max(center, std::max(vertical, horizontal));
+        const auto diagonal_a = std::abs(x - y) <= 1 ? 0.60F - std::abs(static_cast<float>(x) - 7.5F) * 0.08F : 0.0F;
+        const auto diagonal_b = std::abs((x + y) - 15) <= 1 ? 0.60F - std::abs(static_cast<float>(x) - 7.5F) * 0.08F : 0.0F;
+        const auto sparkle = saturate(std::max(std::max(center, vertical), std::max(horizontal, std::max(diagonal_a, diagonal_b))));
         return make_rgba(
-            232.0F + sparkle * 20.0F,
-            238.0F + sparkle * 14.0F,
-            255.0F,
+            228.0F + sparkle * 24.0F,
+            236.0F + sparkle * 16.0F,
+            248.0F + sparkle * 7.0F,
             sparkle * 255.0F);
     });
     fill_tile(pixels, kAccentAtlasSize, kAccentAtlasTileSize, 3, 0, [](int x, int y) {
-        const auto puff_a = radial_falloff(static_cast<float>(x), static_cast<float>(y), 4.6F, 8.2F, 4.9F);
-        const auto puff_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.0F, 5.6F, 4.7F);
-        const auto puff_c = radial_falloff(static_cast<float>(x), static_cast<float>(y), 11.4F, 8.4F, 4.6F);
-        const auto cloud = saturate(std::max({puff_a, puff_b, puff_c}) * 0.95F);
+        const auto puff_a = radial_falloff(static_cast<float>(x), static_cast<float>(y), 4.4F, 8.6F, 4.7F);
+        const auto puff_b = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.2F, 5.5F, 4.5F);
+        const auto puff_c = radial_falloff(static_cast<float>(x), static_cast<float>(y), 11.8F, 8.1F, 4.4F);
+        const auto puff_d = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.6F, 9.4F, 3.8F);
+        const auto trailing = radial_falloff(static_cast<float>(x), static_cast<float>(y), 2.6F, 9.4F, 3.2F);
+        const auto notch = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.4F, 6.1F, 1.8F);
+        const auto cloud = saturate(std::max({puff_a, puff_b, puff_c, puff_d, trailing * 0.72F}) * 0.96F - notch * 0.24F);
+        const auto alpha = saturate(cloud * 0.82F + trailing * 0.08F);
         return make_rgba(
-            234.0F + cloud * 10.0F,
-            238.0F + cloud * 12.0F,
-            248.0F + cloud * 7.0F,
-            cloud * 190.0F);
+            226.0F + cloud * 18.0F,
+            232.0F + cloud * 18.0F,
+            244.0F + cloud * 10.0F,
+            alpha * 196.0F);
     });
     fill_tile(pixels, kAccentAtlasSize, kAccentAtlasTileSize, 0, 1, [](int x, int y) {
         const auto outer = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 7.2F);
-        const auto inner = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 5.4F);
-        const auto ring = saturate(outer - inner * 0.96F);
+        const auto mid = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 6.0F);
+        const auto inner = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 4.5F);
+        const auto ring = saturate((outer - mid * 0.92F) + (mid - inner * 0.98F) * 0.30F);
         return make_rgba(
-            100.0F + ring * 70.0F,
-            226.0F + ring * 16.0F,
-            232.0F + ring * 14.0F,
-            ring * 235.0F);
+            124.0F + ring * 78.0F,
+            214.0F + ring * 28.0F,
+            228.0F + ring * 20.0F,
+            ring * 224.0F);
     });
     fill_tile(pixels, kAccentAtlasSize, kAccentAtlasTileSize, 1, 1, [](int x, int y) {
         const auto vertical = x >= 7 && x <= 8 ? radial_falloff(7.5F, static_cast<float>(y), 7.5F, 7.5F, 5.6F) : 0.0F;

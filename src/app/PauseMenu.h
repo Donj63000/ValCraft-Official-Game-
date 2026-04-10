@@ -12,8 +12,10 @@ namespace valcraft {
 
 enum class PauseMenuAction : std::uint8_t {
     Resume = 0,
-    Options = 1,
-    Quit = 2,
+    Save = 1,
+    Load = 2,
+    Options = 3,
+    ReturnToMainMenu = 4,
 };
 
 struct PauseMenuState {
@@ -37,7 +39,7 @@ struct PauseMenuButtonLayout {
     bool hovered = false;
 };
 
-constexpr std::size_t kPauseMenuButtonCount = 3;
+constexpr std::size_t kPauseMenuButtonCount = 5;
 
 struct PauseMenuLayout {
     float panel_x = 0.0F;
@@ -55,17 +57,22 @@ inline constexpr auto pause_menu_action_label(PauseMenuAction action) noexcept -
     switch (action) {
     case PauseMenuAction::Resume:
         return "REPRENDRE";
+    case PauseMenuAction::Save:
+        return "SAUVEGARDER";
+    case PauseMenuAction::Load:
+        return "CHARGER";
     case PauseMenuAction::Options:
         return "OPTIONS";
-    case PauseMenuAction::Quit:
-        return "QUITTER";
+    case PauseMenuAction::ReturnToMainMenu:
+        return "MENU PRINCIPAL";
     default:
         return "";
     }
 }
 
 inline constexpr auto pause_menu_action_enabled(PauseMenuAction action) noexcept -> bool {
-    return action != PauseMenuAction::Options;
+    (void)action;
+    return true;
 }
 
 inline constexpr auto pause_menu_action_index(PauseMenuAction action) noexcept -> std::size_t {
@@ -77,10 +84,14 @@ inline constexpr auto pause_menu_action_from_index(std::size_t index) noexcept -
     case 0:
         return PauseMenuAction::Resume;
     case 1:
-        return PauseMenuAction::Options;
+        return PauseMenuAction::Save;
     case 2:
+        return PauseMenuAction::Load;
+    case 3:
+        return PauseMenuAction::Options;
+    case 4:
     default:
-        return PauseMenuAction::Quit;
+        return PauseMenuAction::ReturnToMainMenu;
     }
 }
 

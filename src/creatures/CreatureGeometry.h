@@ -2,8 +2,11 @@
 
 #include "creatures/CreatureTypes.h"
 
+#include <glm/mat4x4.hpp>
+
 #include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace valcraft {
@@ -39,7 +42,12 @@ enum class CreatureAtlasTile : std::uint8_t {
     ZombieClaw = 23,
     ZombieWool = 24,
     ZombieHorn = 25,
-    Count = 26,
+    VillagerCloth = 26,
+    VillagerSkin = 27,
+    VillagerHair = 28,
+    VillagerApron = 29,
+    VillagerEye = 30,
+    Count = 31,
 };
 
 struct CreatureVertex {
@@ -68,8 +76,27 @@ struct CreatureMeshData {
     }
 };
 
+struct BoxUvRect {
+    float u0 = 0.0F;
+    float v0 = 0.0F;
+    float u1 = 0.0F;
+    float v1 = 0.0F;
+};
+
+struct CreaturePartInstance {
+    glm::mat4 transform {1.0F};
+    std::array<BoxUvRect, 6> face_uvs {};
+    float nightmare_factor = 0.0F;
+    float tension = 0.0F;
+    float material_class = 0.0F;
+    float cavity_mask = 0.0F;
+    float emissive_strength = 0.0F;
+};
+
 [[nodiscard]] auto creature_atlas_tile_coordinates(CreatureAtlasTile tile) noexcept -> std::array<int, 2>;
 [[nodiscard]] auto build_creature_atlas_pixels() -> std::vector<std::uint8_t>;
+[[nodiscard]] auto build_creature_parts(const CreatureRenderInstance& creature) -> std::vector<CreaturePartInstance>;
+[[nodiscard]] auto build_creature_mesh(std::span<const CreaturePartInstance> parts) -> CreatureMeshData;
 [[nodiscard]] auto build_creature_mesh(const CreatureRenderInstance& creature) -> CreatureMeshData;
 
 } // namespace valcraft
