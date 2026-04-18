@@ -941,6 +941,92 @@ TEST_CASE("world generator fills every submerged column up to the global sea lev
     }
 }
 
+TEST_CASE("pressurized reservoirs fill large adjacent basins without fading by distance") {
+    World world(18301, 2);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_chunk_empty(world, {1, 0});
+
+    constexpr int floor_y = 68;
+    constexpr int water_min_y = floor_y + 1;
+    constexpr int water_max_y = floor_y + 3;
+    constexpr int min_x = 0;
+    constexpr int separator_x = 5;
+    constexpr int max_x = 24;
+    constexpr int min_z = 0;
+    constexpr int max_z = 6;
+    constexpr int cavity_far_x = 20;
+    constexpr int cavity_mid_z = 3;
+
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = min_x; x <= max_x; ++x) {
+        for (int z = min_z; z <= max_z; ++z) {
+            world.set_block(x, floor_y, z, stone);
+        }
+    }
+
+    for (int y = water_min_y; y <= water_max_y + 1; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            world.set_block(x, y, min_z, stone);
+            world.set_block(x, y, max_z, stone);
+        }
+        for (int z = min_z; z <= max_z; ++z) {
+            world.set_block(min_x, y, z, stone);
+            world.set_block(max_x, y, z, stone);
+            world.set_block(separator_x, y, z, stone);
+        }
+    }
+
+    test::flush_pending_work(world);
+
+    for (int y = water_min_y; y <= water_max_y; ++y) {
+        for (int z = min_z + 1; z < max_z; ++z) {
+            for (int x = min_x + 1; x < separator_x; ++x) {
+                world.set_block(x, y, z, to_block_id(BlockType::Water));
+            }
+        }
+    }
+
+    test::flush_pending_work(world);
+    CHECK_FALSE(world.has_water(cavity_far_x, water_max_y, cavity_mid_z));
+
+    for (int y = water_min_y; y <= water_max_y; ++y) {
+        for (int z = min_z + 1; z < max_z; ++z) {
+            world.set_block(separator_x, y, z, to_block_id(BlockType::Air));
+        }
+    }
+
+    test::flush_pending_work(world);
+
+    CHECK(world.water_level(cavity_far_x, water_min_y, cavity_mid_z) == kMaxWaterLevel);
+    CHECK(world.water_level(cavity_far_x, water_min_y + 1, cavity_mid_z) == kMaxWaterLevel);
+    CHECK(world.water_level(cavity_far_x, water_max_y, cavity_mid_z) == kMaxWaterLevel);
+}
+
+TEST_CASE("single isolated source keeps a localized spread on a flat floor") {
+    World world(18302, 2);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_chunk_empty(world, {1, 0});
+
+    constexpr int floor_y = 79;
+    constexpr int water_y = floor_y + 1;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = 0; x <= 24; ++x) {
+        for (int z = 0; z <= 4; ++z) {
+            world.set_block(x, floor_y, z, stone);
+        }
+    }
+
+    test::flush_pending_work(world);
+
+    world.set_block(2, water_y, 2, to_block_id(BlockType::Water));
+    test::flush_pending_work(world);
+
+    CHECK(world.water_level(2, water_y, 2) == kMaxWaterLevel);
+    CHECK_FALSE(world.has_water(14, water_y, 2));
+}
+
 TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
     World world(183, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -2223,6 +2309,12 @@ TEST_CASE("environment state keeps day crisp dusk warm and night cool with softe
     CHECK(noon_sky_span > 0.16F);
     CHECK(midnight_sky_span < noon_sky_span * 0.35F);
     CHECK(midnight.distant_fog_color.b > midnight.night_tint_color.b);
+    CHECK(noon.cloud_shadow_strength > midnight.cloud_shadow_strength);
+    CHECK(dusk.atmospheric_scatter_strength > noon.atmospheric_scatter_strength);
+    CHECK(midnight.height_fog_density > noon.height_fog_density);
+    CHECK(noon.post_sharpen_strength > midnight.post_sharpen_strength);
+    CHECK(dusk.post_edge_strength >= noon.post_edge_strength);
+    CHECK(noon.wind_strength > 0.20F);
 }
 
 TEST_CASE("environment clock respects freeze mode") {

@@ -302,7 +302,7 @@ private:
     bool session_dirty_ = false;
     bool starting_village_enabled_ = false;
     bool runtime_shadows_enabled_ = true;
-    bool runtime_post_process_enabled_ = false;
+    bool runtime_post_process_enabled_ = true;
     UiScreen last_audit_ui_screen_ = UiScreen::Gameplay;
     bool last_audit_mouse_captured_ = true;
     AuditSecondAccumulator audit_second_accumulator_ {};

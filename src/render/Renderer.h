@@ -32,7 +32,7 @@ namespace valcraft {
 struct RendererOptions {
     bool shadows_enabled = true;
     int shadow_map_size = 1024;
-    bool post_process_enabled = false;
+    bool post_process_enabled = true;
     float viewmodel_fov_degrees = 62.0F;
 };
 
@@ -88,6 +88,7 @@ public:
                                float progress,
                                int width,
                                int height);
+    void drain_pending_world_meshes(World& world, std::size_t max_events, double max_ms);
     [[nodiscard]] auto last_frame_stats() const noexcept -> const RendererFrameStats&;
 
 private:
@@ -113,10 +114,16 @@ private:
         GLint ambient_color = -1;
         GLint fog_color = -1;
         GLint distant_fog_color = -1;
+        GLint horizon_glow_color = -1;
         GLint night_tint_color = -1;
         GLint daylight_factor = -1;
         GLint sun_visibility = -1;
         GLint time_of_day = -1;
+        GLint cloud_intensity = -1;
+        GLint cloud_shadow_strength = -1;
+        GLint wind_strength = -1;
+        GLint atmospheric_scatter_strength = -1;
+        GLint height_fog_density = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint scene_color = -1;
@@ -127,6 +134,8 @@ private:
 
     struct ShadowUniformLocations {
         GLint light_view_projection = -1;
+        GLint time_of_day = -1;
+        GLint wind_strength = -1;
         GLint atlas = -1;
     };
 
@@ -152,12 +161,15 @@ private:
     struct PostProcessUniformLocations {
         GLint scene_texture = -1;
         GLint glow_texture = -1;
+        GLint scene_depth = -1;
         GLint exposure = -1;
         GLint saturation_boost = -1;
         GLint contrast = -1;
         GLint vignette_strength = -1;
         GLint night_tint_color = -1;
         GLint glow_strength = -1;
+        GLint sharpen_strength = -1;
+        GLint edge_strength = -1;
     };
 
     struct GlowExtractUniformLocations {
@@ -187,9 +199,14 @@ private:
         GLint ambient_color = -1;
         GLint fog_color = -1;
         GLint distant_fog_color = -1;
+        GLint horizon_glow_color = -1;
         GLint night_tint_color = -1;
         GLint daylight_factor = -1;
         GLint sun_visibility = -1;
+        GLint cloud_intensity = -1;
+        GLint cloud_shadow_strength = -1;
+        GLint atmospheric_scatter_strength = -1;
+        GLint height_fog_density = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint shadows_enabled = -1;
@@ -285,7 +302,7 @@ private:
         std::vector<HudVertex> vertices {};
     };
 
-    void sync_gpu_meshes(World& world, RendererFrameStats& frame_stats);
+    void sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, std::size_t max_events, double max_ms);
     void upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision);
     void destroy_gpu_mesh(GpuMesh& mesh);
     auto compile_shader(GLenum type, const char* source) -> GLuint;
@@ -362,7 +379,7 @@ private:
     GLuint water_scene_depth_texture_ = 0;
     GLuint scene_framebuffer_ = 0;
     GLuint scene_color_texture_ = 0;
-    GLuint scene_depth_renderbuffer_ = 0;
+    GLuint scene_depth_texture_ = 0;
     GLuint glow_extract_framebuffer_ = 0;
     GLuint glow_extract_texture_ = 0;
     GLuint glow_ping_framebuffer_ = 0;

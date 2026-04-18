@@ -337,7 +337,7 @@ TEST_CASE("default performance options favor lighter frame pacing defaults") {
     CHECK(options.stream_radius == 5);
     CHECK(options.shadows_enabled);
     CHECK(options.shadow_map_size == 1024);
-    CHECK_FALSE(options.post_process_enabled);
+    CHECK(options.post_process_enabled);
 }
 
 TEST_CASE("dominant stage detection chooses the largest measured subsystem") {

@@ -2051,11 +2051,16 @@ void Game::prime_world_around(const glm::vec3& focus, std::string_view loading_t
         }
 
         (void)world_.process_pending_work(warm_budget);
+        renderer_.drain_pending_world_meshes(world_, 32U, 1.5);
         const auto readiness = preload_readiness(focus, preload_radius);
         if (readiness - last_presented_progress >= 0.04F || readiness >= 0.999F) {
             present_loading_screen(loading_title, loading_detail, readiness);
             last_presented_progress = readiness;
         }
+    }
+
+    if (running_) {
+        renderer_.drain_pending_world_meshes(world_, 1024U, std::numeric_limits<double>::infinity());
     }
 }
 

@@ -28,7 +28,7 @@ struct OptionsMenuState {
     float cursor_x = 0.0F;
     float cursor_y = 0.0F;
     bool shadows_enabled = true;
-    bool post_process_enabled = false;
+    bool post_process_enabled = true;
 
     auto operator==(const OptionsMenuState&) const -> bool = default;
 };

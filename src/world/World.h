@@ -215,6 +215,11 @@ private:
     [[nodiscard]] auto is_chunk_loaded_for_world(int x, int z) const noexcept -> bool;
     [[nodiscard]] auto set_water_state(int x, int y, int z, WaterState water_state) -> bool;
     [[nodiscard]] auto try_prepare_cell_for_water(int x, int y, int z) -> bool;
+    [[nodiscard]] auto is_pressure_root(const BlockCoord& world_coord, WaterState water_state) const -> bool;
+    [[nodiscard]] auto has_pressure_support(const BlockCoord& world_coord,
+                                            WaterState water_state,
+                                            std::unordered_set<BlockCoord, BlockCoordHash>& supported_cache,
+                                            std::unordered_set<BlockCoord, BlockCoordHash>& unsupported_cache) const -> bool;
     void update_chunk_override_after_cell_change(const ChunkCoord& coord,
                                                  const BlockCoord& local_coord,
                                                  BlockId previous_block,

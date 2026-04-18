@@ -148,12 +148,18 @@ auto EnvironmentClock::compute_state(float time_of_day) -> EnvironmentState {
     state.star_intensity = saturate(night_factor * (1.0F - glow_presence * 0.82F));
     state.cloud_intensity =
         glm::mix(0.18F, 0.58F, daylight) * glm::mix(0.74F, 1.00F, 1.0F - night_factor) + twilight_presence * 0.06F;
+    state.cloud_shadow_strength = glm::mix(0.08F, 0.18F, daylight) + twilight_presence * 0.04F;
+    state.wind_strength = glm::mix(0.20F, 0.34F, saturate(state.cloud_intensity)) + low_sun * 0.04F;
+    state.atmospheric_scatter_strength = glm::mix(0.10F, 0.18F, daylight) + glow_presence * 0.16F;
+    state.height_fog_density = glm::mix(0.020F, 0.012F, daylight) + glow_presence * 0.005F;
     state.exposure = glm::mix(0.84F, 1.06F, daylight) + glow_presence * 0.05F;
     state.saturation_boost = glm::mix(0.95F, 1.04F, daylight) + twilight_presence * 0.08F;
     state.contrast = glm::mix(1.06F, 1.12F, daylight) + twilight_presence * 0.03F;
     state.vignette_strength = glm::mix(0.22F, 0.10F, daylight);
     state.glow_threshold = glm::mix(0.55F, 0.78F, daylight) - twilight_presence * 0.04F;
     state.glow_strength = glm::mix(0.30F, 0.20F, daylight) + twilight_presence * 0.10F;
+    state.post_sharpen_strength = glm::mix(0.10F, 0.18F, daylight);
+    state.post_edge_strength = glm::mix(0.17F, 0.11F, daylight) + twilight_presence * 0.04F;
 
     return state;
 }

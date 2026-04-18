@@ -2241,7 +2241,7 @@ void Renderer::render_frame(World& world,
     RendererFrameStats frame_stats {};
 
     const auto upload_start = clock::now();
-    sync_gpu_meshes(world, frame_stats);
+    sync_gpu_meshes(world, frame_stats, kMaxGpuMeshEventsPerFrame, kMaxGpuMeshSyncMsPerFrame);
     frame_stats.upload_ms = std::chrono::duration<double, std::milli>(clock::now() - upload_start).count();
 
     const auto aspect = static_cast<float>(width) / static_cast<float>(std::max(height, 1));
@@ -2353,6 +2353,8 @@ void Renderer::render_frame(World& world,
 
         glUseProgram(shadow_program_);
         glUniformMatrix4fv(shadow_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+        glUniform1f(shadow_uniforms_.time_of_day, environment.time_of_day);
+        glUniform1f(shadow_uniforms_.wind_strength, environment.wind_strength);
         glUniform1i(shadow_uniforms_.atlas, 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, atlas_texture_);
@@ -2413,10 +2415,16 @@ void Renderer::render_frame(World& world,
     glUniform3fv(world_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
     glUniform3fv(world_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
     glUniform3fv(world_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
+    glUniform3fv(world_uniforms_.horizon_glow_color, 1, glm::value_ptr(environment.horizon_glow_color));
     glUniform3fv(world_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
     glUniform1f(world_uniforms_.daylight_factor, environment.daylight_factor);
     glUniform1f(world_uniforms_.sun_visibility, sun_visible ? 1.0F : 0.0F);
     glUniform1f(world_uniforms_.time_of_day, environment.time_of_day);
+    glUniform1f(world_uniforms_.cloud_intensity, environment.cloud_intensity);
+    glUniform1f(world_uniforms_.cloud_shadow_strength, environment.cloud_shadow_strength);
+    glUniform1f(world_uniforms_.wind_strength, environment.wind_strength);
+    glUniform1f(world_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
+    glUniform1f(world_uniforms_.height_fog_density, environment.height_fog_density);
     glUniform1i(world_uniforms_.atlas, 0);
     glUniform1i(world_uniforms_.shadow_map, 1);
     glUniform1i(world_uniforms_.scene_color, 2);
@@ -2771,12 +2779,23 @@ auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
     return last_frame_stats_;
 }
 
-void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats) {
+void Renderer::drain_pending_world_meshes(World& world, std::size_t max_events, double max_ms) {
+    RendererFrameStats ignored_stats {};
+    sync_gpu_meshes(world, ignored_stats, max_events, max_ms);
+}
+
+void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, std::size_t max_events, double max_ms) {
     using clock = std::chrono::steady_clock;
 
-    const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(kMaxGpuMeshSyncMsPerFrame);
+    if (max_events == 0) {
+        return;
+    }
+
+    const auto time_limited = std::isfinite(max_ms);
+    const auto deadline =
+        time_limited ? clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms)) : clock::time_point::max();
     std::size_t processed_events = 0;
-    while (processed_events < kMaxGpuMeshEventsPerFrame && clock::now() < deadline) {
+    while (processed_events < max_events && clock::now() < deadline) {
         const auto unloads = world.consume_pending_gpu_unloads(1);
         if (!unloads.empty()) {
             const auto iterator = gpu_meshes_.find(unloads.front());
@@ -3047,6 +3066,7 @@ uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
 uniform float u_time_of_day;
+uniform float u_wind_strength;
 
 out vec2 v_uv;
 out vec3 v_normal;
@@ -3071,8 +3091,27 @@ float water_wave_height(vec2 world_xz, float time_phase) {
     return wave_a * 0.020 + wave_b * 0.012 + wave_c * 0.008;
 }
 
+vec2 vegetation_wind_offset(vec3 world_position, float material_class, float time_phase) {
+    float foliage_mask = material_mask(material_class, 4.0);
+    float flora_mask = material_mask(material_class, 5.0);
+    float wind_mask = max(foliage_mask * 0.35, flora_mask);
+    if (wind_mask <= 0.0) {
+        return vec2(0.0);
+    }
+
+    float gust_a = sin(world_position.x * 0.18 + world_position.z * 0.11 + time_phase * 1.35);
+    float gust_b = cos(world_position.x * -0.13 + world_position.z * 0.21 + time_phase * 1.65);
+    float flutter = sin((world_position.x + world_position.z) * 0.75 + world_position.y * 0.45 + time_phase * 2.40);
+    float local_height = clamp(fract(world_position.y), 0.0, 1.0);
+    local_height = mix(1.0, smoothstep(0.02, 0.98, local_height), flora_mask);
+    float amplitude = u_wind_strength * wind_mask * mix(0.010, 0.032, flora_mask);
+    return vec2(gust_a * 0.70 + flutter * 0.30, gust_b * 0.60 - gust_a * 0.22) * amplitude * local_height;
+}
+
 void main() {
     vec4 world_position = vec4(a_position, 1.0);
+    world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
+
     float water_mask = material_mask(a_material_class, 6.0);
     float wave_weight = clamp(a_wave_weight, 0.0, 1.0) * water_mask;
     if (wave_weight > 0.0) {
@@ -3279,11 +3318,16 @@ uniform vec3 u_sun_color;
 uniform vec3 u_ambient_color;
 uniform vec3 u_fog_color;
 uniform vec3 u_distant_fog_color;
+uniform vec3 u_horizon_glow_color;
 uniform vec3 u_night_tint_color;
 uniform mat4 u_inverse_view_projection;
 uniform float u_daylight_factor;
 uniform float u_sun_visibility;
 uniform float u_time_of_day;
+uniform float u_cloud_intensity;
+uniform float u_cloud_shadow_strength;
+uniform float u_atmospheric_scatter_strength;
+uniform float u_height_fog_density;
 uniform int u_shadows_enabled;
 
 out vec4 frag_color;
@@ -3314,6 +3358,41 @@ float sample_shadow(vec3 normal) {
         }
     }
     return visibility / 9.0;
+}
+
+float hash12(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float value_noise2(vec2 p) {
+    vec2 cell = floor(p);
+    vec2 local = fract(p);
+    vec2 blend = local * local * (3.0 - 2.0 * local);
+
+    float n00 = hash12(cell);
+    float n10 = hash12(cell + vec2(1.0, 0.0));
+    float n01 = hash12(cell + vec2(0.0, 1.0));
+    float n11 = hash12(cell + vec2(1.0, 1.0));
+    float nx0 = mix(n00, n10, blend.x);
+    float nx1 = mix(n01, n11, blend.x);
+    return mix(nx0, nx1, blend.y);
+}
+
+float sample_cloud_shadow(vec3 world_position, vec3 sun_direction) {
+    float cloud_factor = clamp(u_cloud_intensity, 0.0, 1.0);
+    float daylight = clamp(u_daylight_factor, 0.0, 1.0);
+    if (cloud_factor <= 0.01 || u_cloud_shadow_strength <= 0.001 || daylight <= 0.20 || sun_direction.y <= 0.02) {
+        return 1.0;
+    }
+
+    float projection_scale = (96.0 - world_position.y) / max(sun_direction.y, 0.12);
+    vec2 projected = world_position.xz + sun_direction.xz * projection_scale;
+    vec2 flow = projected * 0.0032 + vec2(u_time_of_day * 0.085, -u_time_of_day * 0.061);
+    float base = value_noise2(flow);
+    float detail = value_noise2(flow * 2.17 + vec2(9.3, 4.7));
+    float cloud = smoothstep(0.52, 0.84, base * 0.68 + detail * 0.32);
+    float coverage = smoothstep(0.10, 0.58, cloud_factor);
+    return 1.0 - cloud * coverage * u_cloud_shadow_strength;
 }
 
 vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
@@ -3383,6 +3462,7 @@ void main() {
     float sky_light = clamp(v_sky_light, 0.0, 1.0);
     float block_light = clamp(v_block_light, 0.0, 1.0);
     float shadow = sample_shadow(normal);
+    float cloud_shadow = sample_cloud_shadow(v_world_position + normal * 0.35, sun_direction);
 
     float rock_mask = material_mask(v_material_class, 1.0);
     float sand_mask = material_mask(v_material_class, 2.0);
@@ -3401,7 +3481,7 @@ void main() {
     ambient *= mix(0.88, 1.08, smoothstep(-0.25, 1.0, normal.y));
 
     float direct = mix(sun_alignment, sun_alignment * sun_alignment, 0.45);
-    vec3 sunlight = u_sun_color * direct * shadow * u_sun_visibility * daylight * (0.72 + 0.28 * sky_light);
+    vec3 sunlight = u_sun_color * direct * shadow * cloud_shadow * u_sun_visibility * daylight * (0.72 + 0.28 * sky_light);
 
     float bounce_factor = smoothstep(-0.35, 1.0, normal.y) * sky_light;
     vec3 bounce_light = mix(u_fog_color, u_distant_fog_color, 0.42) * bounce_factor * (0.12 + 0.12 * daylight);
@@ -3417,7 +3497,14 @@ void main() {
     specular_power = mix(specular_power, 42.0, glass_mask);
     float specular = pow(max(dot(reflected, view_direction), 0.0), specular_power);
     vec3 specular_color =
-        u_sun_color * specular * shadow * (0.12 * rock_mask + 0.08 * wood_mask + 0.05 * snow_mask + 0.22 * glass_mask);
+        u_sun_color * specular * shadow * cloud_shadow * (0.12 * rock_mask + 0.08 * wood_mask + 0.05 * snow_mask + 0.22 * glass_mask);
+
+    float leaf_backlight = pow(max(dot(-normal, sun_direction), 0.0), 1.8);
+    vec3 leaf_translucency =
+        albedo * u_sun_color * leaf_backlight * mix(0.0, 0.06, foliage_mask) * u_sun_visibility * daylight * (0.35 + 0.65 * sky_light);
+    leaf_translucency +=
+        albedo * u_sun_color * leaf_backlight * mix(0.0, 0.10, flora_mask) * u_sun_visibility * daylight * (0.40 + 0.60 * sky_light);
+    leaf_translucency *= mix(0.75, 1.0, cloud_shadow);
 
     vec3 material_tint = vec3(1.0);
     material_tint = mix(material_tint, vec3(1.03, 0.99, 0.92), sand_mask);
@@ -3427,6 +3514,7 @@ void main() {
     material_tint = mix(material_tint, vec3(1.02, 0.98, 0.94), wood_mask * 0.45);
 
     vec3 lit_color = albedo * material_tint * face_light * (ambient + bounce_light + sunlight + torch_light);
+    lit_color += leaf_translucency;
     lit_color += rim_color + specular_color;
     lit_color += u_night_tint_color * (0.05 + 0.05 * sky_light) * (1.0 - daylight);
 
@@ -3479,7 +3567,7 @@ void main() {
         vec3 sun_reflection = reflect(-sun_direction, normal);
         float sparkle = pow(max(dot(sun_reflection, view_direction), 0.0), 72.0);
         vec3 reflection = sky_reflection * fresnel * (0.18 + 0.16 * daylight);
-        reflection += u_sun_color * sparkle * shadow * (0.12 + 0.18 * daylight);
+        reflection += u_sun_color * sparkle * shadow * cloud_shadow * (0.12 + 0.18 * daylight);
 
         float shallow_foam = (1.0 - smoothstep(0.08, 0.70, body_depth)) * (0.40 + 0.60 * water_surface_mask);
         vec3 foam = mix(u_fog_color, vec3(0.86, 0.94, 1.0), 0.65) * shallow_foam * (0.10 + 0.06 * daylight);
@@ -3492,12 +3580,16 @@ void main() {
 
     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
 
-    float fog = clamp(v_distance / 170.0, 0.0, 1.0);
-    fog = fog * fog;
-    float ground_haze = clamp((32.0 - v_world_position.y) / 28.0, 0.0, 1.0);
-    ground_haze *= clamp(v_distance / 84.0, 0.0, 1.0) * (0.14 + 0.22 * (1.0 - daylight));
-    fog = clamp(fog + ground_haze, 0.0, 1.0);
+    vec3 view_ray = normalize(v_world_position - u_camera_position);
+    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.00005);
+    float height_haze = 1.0 - exp(-max(30.0 - v_world_position.y, 0.0) * u_height_fog_density);
+    height_haze *= clamp(v_distance / 120.0, 0.0, 1.0) * (0.35 + 0.35 * (1.0 - daylight));
+    float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
+    float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
+    float horizon = 1.0 - clamp(abs(view_ray.y), 0.0, 1.0);
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
+    fog_color += mix(u_horizon_glow_color, u_sun_color, 0.35 + 0.20 * daylight) *
+                 sun_scatter * horizon * u_atmospheric_scatter_strength * (0.18 + 0.82 * daylight);
     frag_color = vec4(mix(lit_color, fog_color, fog), output_alpha);
 }
 )";
@@ -3591,10 +3683,15 @@ uniform vec3 u_sun_color;
 uniform vec3 u_ambient_color;
 uniform vec3 u_fog_color;
 uniform vec3 u_distant_fog_color;
+uniform vec3 u_horizon_glow_color;
 uniform vec3 u_night_tint_color;
 uniform float u_daylight_factor;
 uniform float u_sun_visibility;
 uniform float u_time_of_day;
+uniform float u_cloud_intensity;
+uniform float u_cloud_shadow_strength;
+uniform float u_atmospheric_scatter_strength;
+uniform float u_height_fog_density;
 uniform int u_shadows_enabled;
 uniform float u_player_light_strength;
 
@@ -3624,6 +3721,41 @@ float sample_shadow(vec3 normal) {
     return visibility / 9.0;
 }
 
+float hash12(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float value_noise2(vec2 p) {
+    vec2 cell = floor(p);
+    vec2 local = fract(p);
+    vec2 blend = local * local * (3.0 - 2.0 * local);
+
+    float n00 = hash12(cell);
+    float n10 = hash12(cell + vec2(1.0, 0.0));
+    float n01 = hash12(cell + vec2(0.0, 1.0));
+    float n11 = hash12(cell + vec2(1.0, 1.0));
+    float nx0 = mix(n00, n10, blend.x);
+    float nx1 = mix(n01, n11, blend.x);
+    return mix(nx0, nx1, blend.y);
+}
+
+float sample_cloud_shadow(vec3 world_position, vec3 sun_direction) {
+    float cloud_factor = clamp(u_cloud_intensity, 0.0, 1.0);
+    float daylight = clamp(u_daylight_factor, 0.0, 1.0);
+    if (cloud_factor <= 0.01 || u_cloud_shadow_strength <= 0.001 || daylight <= 0.20 || sun_direction.y <= 0.02) {
+        return 1.0;
+    }
+
+    float projection_scale = (96.0 - world_position.y) / max(sun_direction.y, 0.12);
+    vec2 projected = world_position.xz + sun_direction.xz * projection_scale;
+    vec2 flow = projected * 0.0032 + vec2(u_time_of_day * 0.085, -u_time_of_day * 0.061);
+    float base = value_noise2(flow);
+    float detail = value_noise2(flow * 2.17 + vec2(9.3, 4.7));
+    float cloud = smoothstep(0.52, 0.84, base * 0.68 + detail * 0.32);
+    float coverage = smoothstep(0.10, 0.58, cloud_factor);
+    return 1.0 - cloud * coverage * u_cloud_shadow_strength;
+}
+
 void main() {
     vec4 sampled = texture(u_atlas, v_uv);
     vec3 albedo = sampled.rgb;
@@ -3633,6 +3765,7 @@ void main() {
     vec3 sun_direction = normalize(u_sun_direction);
 
     float shadow = sample_shadow(normal);
+    float cloud_shadow = sample_cloud_shadow(v_world_position + normal * 0.50, sun_direction);
     float sky_mix = clamp(u_daylight_factor, 0.0, 1.0);
     float cavity = clamp(v_cavity_mask, 0.0, 1.0);
     float hard_material = smoothstep(0.44, 0.90, v_material_class);
@@ -3645,10 +3778,10 @@ void main() {
 
     float wrap = mix(0.34, 0.10, hard_material);
     float sun_wrap = clamp((dot(normal, sun_direction) + wrap) / (1.0 + wrap), 0.0, 1.0);
-    vec3 sunlight = u_sun_color * (sun_wrap * sky_mix * shadow * u_sun_visibility);
+    vec3 sunlight = u_sun_color * (sun_wrap * sky_mix * shadow * cloud_shadow * u_sun_visibility);
 
     float backlight = pow(max(dot(normal, -sun_direction), 0.0), 1.8);
-    vec3 translucency = u_sun_color * backlight * thin_surface * sky_mix * u_sun_visibility * (0.04 + 0.10 * soft_fiber);
+    vec3 translucency = u_sun_color * backlight * thin_surface * sky_mix * u_sun_visibility * cloud_shadow * (0.04 + 0.10 * soft_fiber);
 
     float player_light_distance = length((u_camera_position + vec3(0.0, -0.18, 0.0)) - v_world_position);
     float player_light_falloff = 1.0 - smoothstep(1.2, 8.8, player_light_distance);
@@ -3664,7 +3797,7 @@ void main() {
     vec3 reflected = reflect(-sun_direction, normal);
     float specular = pow(max(dot(reflected, view_direction), 0.0), mix(42.0, 16.0, hard_material));
     float hard_specular = specular * smoothstep(0.52, 0.90, v_material_class);
-    vec3 specular_color = u_sun_color * hard_specular * shadow * sky_mix * u_sun_visibility * (0.03 + 0.18 * v_nightmare_factor);
+    vec3 specular_color = u_sun_color * hard_specular * shadow * cloud_shadow * sky_mix * u_sun_visibility * (0.03 + 0.18 * v_nightmare_factor);
 
     float pulse = 0.84 + 0.16 * sin(u_time_of_day * 1.7 + v_tension * 7.0 + v_world_position.y * 2.2);
     vec3 nightmare_glow =
@@ -3674,9 +3807,16 @@ void main() {
     lit_color *= cavity_occlusion;
     lit_color += rim_light + specular_color;
     lit_color += u_night_tint_color * (0.09 + 0.08 * v_nightmare_factor) * (1.0 - sky_mix);
-    float fog = clamp(v_distance / 160.0, 0.0, 1.0);
-    fog = fog * fog;
+    vec3 view_ray = normalize(v_world_position - u_camera_position);
+    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.00006);
+    float height_haze = 1.0 - exp(-max(28.0 - v_world_position.y, 0.0) * u_height_fog_density);
+    height_haze *= clamp(v_distance / 110.0, 0.0, 1.0) * (0.24 + 0.18 * (1.0 - sky_mix));
+    float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
+    float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
+    float horizon = 1.0 - clamp(abs(view_ray.y), 0.0, 1.0);
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
+    fog_color += mix(u_horizon_glow_color, u_sun_color, 0.34 + 0.20 * sky_mix) *
+                 sun_scatter * horizon * u_atmospheric_scatter_strength * (0.16 + 0.78 * sky_mix);
     vec3 fogged_color = mix(lit_color, fog_color, fog);
     vec3 fogged_glow = nightmare_glow * (1.0 - fog * 0.72);
     frag_color = vec4(fogged_color + fogged_glow, 1.0);
@@ -3686,13 +3826,39 @@ void main() {
     static constexpr auto* shadow_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
+layout(location = 7) in float a_material_class;
 
 uniform mat4 u_light_view_projection;
+uniform float u_time_of_day;
+uniform float u_wind_strength;
 
 out vec2 v_uv;
 
+float material_mask(float material, float expected) {
+    return 1.0 - step(0.25, abs(material - expected));
+}
+
+vec2 vegetation_wind_offset(vec3 world_position, float material_class, float time_phase) {
+    float foliage_mask = material_mask(material_class, 4.0);
+    float flora_mask = material_mask(material_class, 5.0);
+    float wind_mask = max(foliage_mask * 0.35, flora_mask);
+    if (wind_mask <= 0.0) {
+        return vec2(0.0);
+    }
+
+    float gust_a = sin(world_position.x * 0.18 + world_position.z * 0.11 + time_phase * 1.35);
+    float gust_b = cos(world_position.x * -0.13 + world_position.z * 0.21 + time_phase * 1.65);
+    float flutter = sin((world_position.x + world_position.z) * 0.75 + world_position.y * 0.45 + time_phase * 2.40);
+    float local_height = clamp(fract(world_position.y), 0.0, 1.0);
+    local_height = mix(1.0, smoothstep(0.02, 0.98, local_height), flora_mask);
+    float amplitude = u_wind_strength * wind_mask * mix(0.010, 0.032, flora_mask);
+    return vec2(gust_a * 0.70 + flutter * 0.30, gust_b * 0.60 - gust_a * 0.22) * amplitude * local_height;
+}
+
 void main() {
-    gl_Position = u_light_view_projection * vec4(a_position, 1.0);
+    vec4 world_position = vec4(a_position, 1.0);
+    world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
+    gl_Position = u_light_view_projection * world_position;
     v_uv = a_uv;
 }
 )";
@@ -3703,6 +3869,9 @@ in vec2 v_uv;
 uniform sampler2D u_atlas;
 
 void main() {
+    if (texture(u_atlas, v_uv).a < 0.1) {
+        discard;
+    }
 }
 )";
 
@@ -3810,12 +3979,15 @@ in vec2 v_uv;
 
 uniform sampler2D u_scene_texture;
 uniform sampler2D u_glow_texture;
+uniform sampler2D u_scene_depth;
 uniform float u_exposure;
 uniform float u_saturation_boost;
 uniform float u_contrast;
 uniform float u_vignette_strength;
 uniform vec3 u_night_tint_color;
 uniform float u_glow_strength;
+uniform float u_sharpen_strength;
+uniform float u_edge_strength;
 
 out vec4 frag_color;
 
@@ -3824,8 +3996,45 @@ vec3 apply_saturation(vec3 color, float saturation) {
     return mix(vec3(luma), color, saturation);
 }
 
+vec3 sample_scene(vec2 uv) {
+    return texture(u_scene_texture, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+}
+
+float linearize_depth(float depth_sample) {
+    const float near_plane = 0.1;
+    const float far_plane = 320.0;
+    float z = depth_sample * 2.0 - 1.0;
+    return (2.0 * near_plane * far_plane) / max(far_plane + near_plane - z * (far_plane - near_plane), 0.0001);
+}
+
 void main() {
+    vec2 texel = 1.0 / vec2(textureSize(u_scene_texture, 0));
     vec3 scene = texture(u_scene_texture, v_uv).rgb;
+
+    float center_depth = linearize_depth(texture(u_scene_depth, v_uv).r);
+    float left_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(-texel.x, 0.0)).r);
+    float right_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(texel.x, 0.0)).r);
+    float down_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(0.0, -texel.y)).r);
+    float up_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(0.0, texel.y)).r);
+
+    float depth_edge = abs(left_depth - center_depth) + abs(right_depth - center_depth) +
+                       abs(down_depth - center_depth) + abs(up_depth - center_depth);
+    depth_edge /= max(center_depth * 0.75, 1.0);
+    depth_edge = smoothstep(0.002, 0.035, depth_edge);
+
+    float geometry_mask = 1.0 - smoothstep(120.0, 280.0, center_depth);
+    scene *= 1.0 - depth_edge * u_edge_strength * geometry_mask;
+
+    vec3 blur = scene * 0.50;
+    blur += sample_scene(v_uv + vec2(texel.x, 0.0)) * 0.125;
+    blur += sample_scene(v_uv + vec2(-texel.x, 0.0)) * 0.125;
+    blur += sample_scene(v_uv + vec2(0.0, texel.y)) * 0.125;
+    blur += sample_scene(v_uv + vec2(0.0, -texel.y)) * 0.125;
+
+    vec3 detail = scene - blur;
+    float sharpen_mask = geometry_mask * (1.0 - depth_edge * 0.85);
+    scene += detail * u_sharpen_strength * sharpen_mask;
+
     vec3 glow = texture(u_glow_texture, v_uv).rgb * u_glow_strength;
     vec3 color = scene + glow;
     color = vec3(1.0) - exp(-color * max(u_exposure, 0.001));
@@ -3904,10 +4113,16 @@ void main() {
     world_uniforms_.ambient_color = glGetUniformLocation(world_program_, "u_ambient_color");
     world_uniforms_.fog_color = glGetUniformLocation(world_program_, "u_fog_color");
     world_uniforms_.distant_fog_color = glGetUniformLocation(world_program_, "u_distant_fog_color");
+    world_uniforms_.horizon_glow_color = glGetUniformLocation(world_program_, "u_horizon_glow_color");
     world_uniforms_.night_tint_color = glGetUniformLocation(world_program_, "u_night_tint_color");
     world_uniforms_.daylight_factor = glGetUniformLocation(world_program_, "u_daylight_factor");
     world_uniforms_.sun_visibility = glGetUniformLocation(world_program_, "u_sun_visibility");
     world_uniforms_.time_of_day = glGetUniformLocation(world_program_, "u_time_of_day");
+    world_uniforms_.cloud_intensity = glGetUniformLocation(world_program_, "u_cloud_intensity");
+    world_uniforms_.cloud_shadow_strength = glGetUniformLocation(world_program_, "u_cloud_shadow_strength");
+    world_uniforms_.wind_strength = glGetUniformLocation(world_program_, "u_wind_strength");
+    world_uniforms_.atmospheric_scatter_strength = glGetUniformLocation(world_program_, "u_atmospheric_scatter_strength");
+    world_uniforms_.height_fog_density = glGetUniformLocation(world_program_, "u_height_fog_density");
     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
     world_uniforms_.scene_color = glGetUniformLocation(world_program_, "u_scene_color");
@@ -3923,10 +4138,16 @@ void main() {
     item_drop_uniforms_.ambient_color = glGetUniformLocation(item_drop_program_, "u_ambient_color");
     item_drop_uniforms_.fog_color = glGetUniformLocation(item_drop_program_, "u_fog_color");
     item_drop_uniforms_.distant_fog_color = glGetUniformLocation(item_drop_program_, "u_distant_fog_color");
+    item_drop_uniforms_.horizon_glow_color = glGetUniformLocation(item_drop_program_, "u_horizon_glow_color");
     item_drop_uniforms_.night_tint_color = glGetUniformLocation(item_drop_program_, "u_night_tint_color");
     item_drop_uniforms_.daylight_factor = glGetUniformLocation(item_drop_program_, "u_daylight_factor");
     item_drop_uniforms_.sun_visibility = glGetUniformLocation(item_drop_program_, "u_sun_visibility");
     item_drop_uniforms_.time_of_day = glGetUniformLocation(item_drop_program_, "u_time_of_day");
+    item_drop_uniforms_.cloud_intensity = glGetUniformLocation(item_drop_program_, "u_cloud_intensity");
+    item_drop_uniforms_.cloud_shadow_strength = glGetUniformLocation(item_drop_program_, "u_cloud_shadow_strength");
+    item_drop_uniforms_.wind_strength = glGetUniformLocation(item_drop_program_, "u_wind_strength");
+    item_drop_uniforms_.atmospheric_scatter_strength = glGetUniformLocation(item_drop_program_, "u_atmospheric_scatter_strength");
+    item_drop_uniforms_.height_fog_density = glGetUniformLocation(item_drop_program_, "u_height_fog_density");
     item_drop_uniforms_.atlas = glGetUniformLocation(item_drop_program_, "u_atlas");
     item_drop_uniforms_.shadow_map = glGetUniformLocation(item_drop_program_, "u_shadow_map");
     item_drop_uniforms_.scene_color = glGetUniformLocation(item_drop_program_, "u_scene_color");
@@ -3942,9 +4163,14 @@ void main() {
     creature_uniforms_.ambient_color = glGetUniformLocation(creature_program_, "u_ambient_color");
     creature_uniforms_.fog_color = glGetUniformLocation(creature_program_, "u_fog_color");
     creature_uniforms_.distant_fog_color = glGetUniformLocation(creature_program_, "u_distant_fog_color");
+    creature_uniforms_.horizon_glow_color = glGetUniformLocation(creature_program_, "u_horizon_glow_color");
     creature_uniforms_.night_tint_color = glGetUniformLocation(creature_program_, "u_night_tint_color");
     creature_uniforms_.daylight_factor = glGetUniformLocation(creature_program_, "u_daylight_factor");
     creature_uniforms_.sun_visibility = glGetUniformLocation(creature_program_, "u_sun_visibility");
+    creature_uniforms_.cloud_intensity = glGetUniformLocation(creature_program_, "u_cloud_intensity");
+    creature_uniforms_.cloud_shadow_strength = glGetUniformLocation(creature_program_, "u_cloud_shadow_strength");
+    creature_uniforms_.atmospheric_scatter_strength = glGetUniformLocation(creature_program_, "u_atmospheric_scatter_strength");
+    creature_uniforms_.height_fog_density = glGetUniformLocation(creature_program_, "u_height_fog_density");
     creature_uniforms_.atlas = glGetUniformLocation(creature_program_, "u_atlas");
     creature_uniforms_.shadow_map = glGetUniformLocation(creature_program_, "u_shadow_map");
     creature_uniforms_.shadows_enabled = glGetUniformLocation(creature_program_, "u_shadows_enabled");
@@ -3952,6 +4178,8 @@ void main() {
     creature_uniforms_.player_light_strength = glGetUniformLocation(creature_program_, "u_player_light_strength");
 
     shadow_uniforms_.light_view_projection = glGetUniformLocation(shadow_program_, "u_light_view_projection");
+    shadow_uniforms_.time_of_day = glGetUniformLocation(shadow_program_, "u_time_of_day");
+    shadow_uniforms_.wind_strength = glGetUniformLocation(shadow_program_, "u_wind_strength");
     shadow_uniforms_.atlas = glGetUniformLocation(shadow_program_, "u_atlas");
     hud_uniforms_.atlas = glGetUniformLocation(hud_program_, "u_atlas");
     sky_uniforms_.inverse_view_projection = glGetUniformLocation(sky_program_, "u_inverse_view_projection");
@@ -3972,12 +4200,15 @@ void main() {
     glow_blur_uniforms_.texel_direction = glGetUniformLocation(glow_blur_program_, "u_texel_direction");
     post_process_uniforms_.scene_texture = glGetUniformLocation(post_process_program_, "u_scene_texture");
     post_process_uniforms_.glow_texture = glGetUniformLocation(post_process_program_, "u_glow_texture");
+    post_process_uniforms_.scene_depth = glGetUniformLocation(post_process_program_, "u_scene_depth");
     post_process_uniforms_.exposure = glGetUniformLocation(post_process_program_, "u_exposure");
     post_process_uniforms_.saturation_boost = glGetUniformLocation(post_process_program_, "u_saturation_boost");
     post_process_uniforms_.contrast = glGetUniformLocation(post_process_program_, "u_contrast");
     post_process_uniforms_.vignette_strength = glGetUniformLocation(post_process_program_, "u_vignette_strength");
     post_process_uniforms_.night_tint_color = glGetUniformLocation(post_process_program_, "u_night_tint_color");
     post_process_uniforms_.glow_strength = glGetUniformLocation(post_process_program_, "u_glow_strength");
+    post_process_uniforms_.sharpen_strength = glGetUniformLocation(post_process_program_, "u_sharpen_strength");
+    post_process_uniforms_.edge_strength = glGetUniformLocation(post_process_program_, "u_edge_strength");
     menu_background_uniforms_.scene_texture = glGetUniformLocation(menu_background_program_, "u_scene_texture");
     menu_background_uniforms_.blur_texture = glGetUniformLocation(menu_background_program_, "u_blur_texture");
     menu_background_uniforms_.blur_mix = glGetUniformLocation(menu_background_program_, "u_blur_mix");
@@ -4290,9 +4521,10 @@ void Renderer::ensure_post_process_targets(int width, int height) {
     const auto glow_width = std::max(target_width / 2, 1);
     const auto glow_height = std::max(target_height / 2, 1);
 
-    const auto scene_matches = scene_framebuffer_ != 0 && scene_target_width_ == target_width && scene_target_height_ == target_height;
-    const auto glow_matches = glow_extract_framebuffer_ != 0 && glow_ping_framebuffer_ != 0 && glow_target_width_ == glow_width &&
-                              glow_target_height_ == glow_height;
+    const auto scene_matches = scene_framebuffer_ != 0 && scene_color_texture_ != 0 && scene_depth_texture_ != 0 &&
+                               scene_target_width_ == target_width && scene_target_height_ == target_height;
+    const auto glow_matches = glow_extract_framebuffer_ != 0 && glow_extract_texture_ != 0 && glow_ping_framebuffer_ != 0 &&
+                              glow_ping_texture_ != 0 && glow_target_width_ == glow_width && glow_target_height_ == glow_height;
     if (scene_matches && glow_matches) {
         return;
     }
@@ -4311,10 +4543,14 @@ void Renderer::ensure_post_process_targets(int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene_color_texture_, 0);
 
-    glGenRenderbuffers(1, &scene_depth_renderbuffer_);
-    glBindRenderbuffer(GL_RENDERBUFFER, scene_depth_renderbuffer_);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, target_width, target_height);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, scene_depth_renderbuffer_);
+    glGenTextures(1, &scene_depth_texture_);
+    glBindTexture(GL_TEXTURE_2D, scene_depth_texture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, target_width, target_height, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene_depth_texture_, 0);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         throw std::runtime_error("Scene framebuffer is incomplete");
@@ -4356,9 +4592,9 @@ void Renderer::ensure_post_process_targets(int width, int height) {
 }
 
 void Renderer::destroy_post_process_targets() {
-    if (scene_depth_renderbuffer_ != 0) {
-        glDeleteRenderbuffers(1, &scene_depth_renderbuffer_);
-        scene_depth_renderbuffer_ = 0;
+    if (scene_depth_texture_ != 0) {
+        glDeleteTextures(1, &scene_depth_texture_);
+        scene_depth_texture_ = 0;
     }
     if (scene_color_texture_ != 0) {
         glDeleteTextures(1, &scene_color_texture_);
@@ -4432,7 +4668,7 @@ void Renderer::draw_sky(const PlayerController& player, const EnvironmentState& 
 
 void Renderer::run_post_process(const EnvironmentState& environment, int width, int height) {
     if (post_process_program_ == 0 || glow_extract_program_ == 0 || glow_blur_program_ == 0 || screen_quad_vao_ == 0 ||
-        scene_color_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
+        scene_color_texture_ == 0 || scene_depth_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
         return;
     }
 
@@ -4471,16 +4707,21 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glUseProgram(post_process_program_);
     glUniform1i(post_process_uniforms_.scene_texture, 0);
     glUniform1i(post_process_uniforms_.glow_texture, 1);
+    glUniform1i(post_process_uniforms_.scene_depth, 2);
     glUniform1f(post_process_uniforms_.exposure, environment.exposure);
     glUniform1f(post_process_uniforms_.saturation_boost, environment.saturation_boost);
     glUniform1f(post_process_uniforms_.contrast, environment.contrast);
     glUniform1f(post_process_uniforms_.vignette_strength, environment.vignette_strength);
     glUniform3fv(post_process_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
     glUniform1f(post_process_uniforms_.glow_strength, environment.glow_strength);
+    glUniform1f(post_process_uniforms_.sharpen_strength, environment.post_sharpen_strength);
+    glUniform1f(post_process_uniforms_.edge_strength, environment.post_edge_strength);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, scene_depth_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glActiveTexture(GL_TEXTURE0);
 }
@@ -4575,10 +4816,16 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
     glUniform3fv(item_drop_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
     glUniform3fv(item_drop_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
     glUniform3fv(item_drop_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
+    glUniform3fv(item_drop_uniforms_.horizon_glow_color, 1, glm::value_ptr(environment.horizon_glow_color));
     glUniform3fv(item_drop_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
     glUniform1f(item_drop_uniforms_.daylight_factor, environment.daylight_factor);
     glUniform1f(item_drop_uniforms_.sun_visibility, sun_visible ? 1.0F : 0.0F);
     glUniform1f(item_drop_uniforms_.time_of_day, environment.time_of_day);
+    glUniform1f(item_drop_uniforms_.cloud_intensity, environment.cloud_intensity);
+    glUniform1f(item_drop_uniforms_.cloud_shadow_strength, environment.cloud_shadow_strength);
+    glUniform1f(item_drop_uniforms_.wind_strength, environment.wind_strength);
+    glUniform1f(item_drop_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
+    glUniform1f(item_drop_uniforms_.height_fog_density, environment.height_fog_density);
     glUniform1i(item_drop_uniforms_.atlas, 0);
     glUniform1i(item_drop_uniforms_.shadow_map, 1);
     glUniform1i(item_drop_uniforms_.scene_color, 2);
@@ -4693,9 +4940,14 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
     glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(environment.fog_color));
     glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(environment.distant_fog_color));
+    glUniform3fv(creature_uniforms_.horizon_glow_color, 1, glm::value_ptr(environment.horizon_glow_color));
     glUniform3fv(creature_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
     glUniform1f(creature_uniforms_.daylight_factor, environment.daylight_factor);
     glUniform1f(creature_uniforms_.sun_visibility, environment.sun_direction.y > 0.0F ? 1.0F : 0.0F);
+    glUniform1f(creature_uniforms_.cloud_intensity, environment.cloud_intensity);
+    glUniform1f(creature_uniforms_.cloud_shadow_strength, environment.cloud_shadow_strength);
+    glUniform1f(creature_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
+    glUniform1f(creature_uniforms_.height_fog_density, environment.height_fog_density);
     glUniform1i(creature_uniforms_.atlas, 0);
     glUniform1i(creature_uniforms_.shadow_map, 1);
     glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
@@ -4757,9 +5009,14 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(viewmodel_ambient));
     glUniform3fv(creature_uniforms_.fog_color, 1, glm::value_ptr(viewmodel_fog));
     glUniform3fv(creature_uniforms_.distant_fog_color, 1, glm::value_ptr(viewmodel_fog));
+    glUniform3fv(creature_uniforms_.horizon_glow_color, 1, glm::value_ptr(environment.horizon_glow_color));
     glUniform3fv(creature_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
     glUniform1f(creature_uniforms_.daylight_factor, std::max(environment.daylight_factor, 0.20F));
     glUniform1f(creature_uniforms_.sun_visibility, environment.sun_direction.y > 0.0F ? 1.0F : 0.0F);
+    glUniform1f(creature_uniforms_.cloud_intensity, environment.cloud_intensity);
+    glUniform1f(creature_uniforms_.cloud_shadow_strength, environment.cloud_shadow_strength);
+    glUniform1f(creature_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
+    glUniform1f(creature_uniforms_.height_fog_density, environment.height_fog_density);
     glUniform1i(creature_uniforms_.atlas, 0);
     glUniform1i(creature_uniforms_.shadow_map, 1);
     glUniform1i(creature_uniforms_.shadows_enabled, 0);

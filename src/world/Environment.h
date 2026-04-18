@@ -21,12 +21,18 @@ struct EnvironmentState {
     glm::vec3 moon_disk_color {0.80F, 0.90F, 1.00F};
     float star_intensity = 0.0F;
     float cloud_intensity = 0.22F;
+    float cloud_shadow_strength = 0.18F;
+    float wind_strength = 0.26F;
+    float atmospheric_scatter_strength = 0.16F;
+    float height_fog_density = 0.014F;
     float exposure = 1.0F;
     float saturation_boost = 1.0F;
     float contrast = 1.0F;
     float vignette_strength = 0.14F;
     float glow_threshold = 0.72F;
     float glow_strength = 0.22F;
+    float post_sharpen_strength = 0.16F;
+    float post_edge_strength = 0.14F;
 };
 
 enum class CreaturePhase : unsigned char {

@@ -42,6 +42,17 @@ constexpr std::array<BlockCoord, 6> kLightNeighborOffsets {{
     {0, 0, -1},
 }};
 
+constexpr std::array<BlockCoord, 6> kPressureNeighborOffsets {{
+    {1, 0, 0},
+    {-1, 0, 0},
+    {0, 0, 1},
+    {0, 0, -1},
+    {0, 1, 0},
+    {0, -1, 0},
+}};
+
+constexpr std::size_t kPressureSearchVisitLimit = 768U;
+
 constexpr auto kUnlimitedBudget = std::numeric_limits<std::size_t>::max() / 4U;
 constexpr auto kSkyColumnCount = static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
 constexpr auto kMeshInvalidationPriorityRadius = 2;
@@ -1394,6 +1405,15 @@ void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStat
 
     const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
     auto remaining = budget;
+
+    // Cache local au batch courant : il evite de refaire en boucle la meme
+    // recherche de reservoir de pression quand plusieurs cellules voisines sont
+    // traitees dans la meme frame.
+    std::unordered_set<BlockCoord, BlockCoordHash> pressure_supported_cache {};
+    std::unordered_set<BlockCoord, BlockCoordHash> pressure_unsupported_cache {};
+    pressure_supported_cache.reserve(256U);
+    pressure_unsupported_cache.reserve(128U);
+
     while (remaining > 0 && !pending_fluid_queue_.empty()) {
         if (time_limited && clock::now() >= deadline) {
             break;
@@ -1428,16 +1448,108 @@ void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStat
             world_coord.z,
         };
 
+        const auto has_pressure_outlet = [&]() {
+            if (can_water_flow_into_loaded(below.x, below.y, below.z) &&
+                water_level(below.x, below.y, below.z) < kMaxWaterLevel) {
+                return true;
+            }
+
+            for (const auto& offset : kNeighborOffsets) {
+                const BlockCoord neighbor {
+                    world_coord.x + offset.x,
+                    world_coord.y,
+                    world_coord.z + offset.z,
+                };
+                if (!can_water_flow_into_loaded(neighbor.x, neighbor.y, neighbor.z)) {
+                    continue;
+                }
+                if (water_level(neighbor.x, neighbor.y, neighbor.z) < kMaxWaterLevel) {
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        // Les masses d'eau reliees a un vrai reservoir (mer, grand bassin de
+        // sources) gardent une surface pleine et poussent l'eau dans les zones
+        // voisines, au lieu de se degrader en pente 8/7/6/... comme une simple
+        // source isolee.
+        const auto current_has_pressure =
+            current_level == kMaxWaterLevel &&
+            has_pressure_outlet() &&
+            has_pressure_support(world_coord, current_state, pressure_supported_cache, pressure_unsupported_cache);
+
+        if (current_has_pressure) {
+            std::array<BlockCoord, 5> changed_cells {};
+            std::size_t changed_cell_count = 0;
+            const auto remember_change = [&](const BlockCoord& changed_coord) {
+                if (changed_cell_count < changed_cells.size()) {
+                    changed_cells[changed_cell_count++] = changed_coord;
+                }
+            };
+
+            if (can_water_flow_into_loaded(below.x, below.y, below.z) && try_prepare_cell_for_water(below.x, below.y, below.z)) {
+                const auto below_state = raw_water_state(below.x, below.y, below.z);
+                if (water_level_from_state(below_state) < kMaxWaterLevel) {
+                    if (set_water_state(below.x, below.y, below.z, water_state_with_level(below_state, kMaxWaterLevel))) {
+                        remember_change(below);
+                    }
+                }
+            }
+
+            for (const auto& offset : kNeighborOffsets) {
+                const BlockCoord neighbor {
+                    world_coord.x + offset.x,
+                    world_coord.y,
+                    world_coord.z + offset.z,
+                };
+                if (!can_water_flow_into_loaded(neighbor.x, neighbor.y, neighbor.z)) {
+                    continue;
+                }
+                if (!try_prepare_cell_for_water(neighbor.x, neighbor.y, neighbor.z)) {
+                    continue;
+                }
+
+                const auto neighbor_state = raw_water_state(neighbor.x, neighbor.y, neighbor.z);
+                if (water_level_from_state(neighbor_state) >= kMaxWaterLevel) {
+                    continue;
+                }
+
+                if (set_water_state(
+                        neighbor.x,
+                        neighbor.y,
+                        neighbor.z,
+                        water_state_with_level(neighbor_state, kMaxWaterLevel))) {
+                    remember_change(neighbor);
+                }
+            }
+
+            if (changed_cell_count > 0) {
+                enqueue_adjacent_fluid_cells(world_coord);
+                for (std::size_t index = 0; index < changed_cell_count; ++index) {
+                    enqueue_adjacent_fluid_cells(changed_cells[index]);
+                }
+            }
+            continue;
+        }
+
         auto vertical_transfer_happened = false;
         if (can_water_flow_into_loaded(below.x, below.y, below.z) && try_prepare_cell_for_water(below.x, below.y, below.z)) {
             const auto below_state = raw_water_state(below.x, below.y, below.z);
             const auto below_level = water_level_from_state(below_state);
             if (below_level < kMaxWaterLevel) {
                 const auto available_level = current_is_source ? kMaxWaterLevel : current_level;
-                const auto transfer = std::min<std::uint8_t>(available_level, static_cast<std::uint8_t>(kMaxWaterLevel - below_level));
+                const auto transfer = std::min<std::uint8_t>(
+                    available_level,
+                    static_cast<std::uint8_t>(kMaxWaterLevel - below_level));
                 if (transfer > 0) {
                     const auto next_below_level = static_cast<std::uint8_t>(below_level + transfer);
-                    (void)set_water_state(below.x, below.y, below.z, make_water_state(next_below_level));
+                    (void)set_water_state(
+                        below.x,
+                        below.y,
+                        below.z,
+                        water_state_with_level(below_state, next_below_level));
 
                     if (current_is_source) {
                         (void)set_water_state(world_coord.x, world_coord.y, world_coord.z, make_water_state(kMaxWaterLevel, true));
@@ -1462,7 +1574,9 @@ void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStat
         }
 
         auto mutable_current_level = current_is_source ? kMaxWaterLevel : current_level;
-        std::vector<BlockCoord> changed_neighbors;
+        std::array<BlockCoord, 4> changed_neighbors {};
+        std::size_t changed_neighbor_count = 0;
+
         while (mutable_current_level > 0) {
             auto best_neighbor = std::optional<BlockCoord> {};
             auto best_level = std::numeric_limits<int>::max();
@@ -1494,10 +1608,19 @@ void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStat
                 break;
             }
 
-            const auto next_neighbor_level =
-                static_cast<std::uint8_t>(water_level(best_neighbor->x, best_neighbor->y, best_neighbor->z) + 1);
-            (void)set_water_state(best_neighbor->x, best_neighbor->y, best_neighbor->z, make_water_state(next_neighbor_level));
-            changed_neighbors.push_back(*best_neighbor);
+            const auto best_neighbor_state =
+                raw_water_state(best_neighbor->x, best_neighbor->y, best_neighbor->z);
+            const auto next_neighbor_level = static_cast<std::uint8_t>(
+                water_level_from_state(best_neighbor_state) + 1);
+            if (set_water_state(
+                    best_neighbor->x,
+                    best_neighbor->y,
+                    best_neighbor->z,
+                    water_state_with_level(best_neighbor_state, next_neighbor_level))) {
+                if (changed_neighbor_count < changed_neighbors.size()) {
+                    changed_neighbors[changed_neighbor_count++] = *best_neighbor;
+                }
+            }
 
             if (!current_is_source) {
                 --mutable_current_level;
@@ -1516,10 +1639,10 @@ void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStat
             (void)set_water_state(world_coord.x, world_coord.y, world_coord.z, make_water_state(kMaxWaterLevel, true));
         }
 
-        if (!changed_neighbors.empty()) {
+        if (changed_neighbor_count > 0) {
             enqueue_adjacent_fluid_cells(world_coord);
-            for (const auto& changed_neighbor : changed_neighbors) {
-                enqueue_adjacent_fluid_cells(changed_neighbor);
+            for (std::size_t index = 0; index < changed_neighbor_count; ++index) {
+                enqueue_adjacent_fluid_cells(changed_neighbors[index]);
             }
         }
     }
@@ -2243,6 +2366,153 @@ auto World::try_prepare_cell_for_water(int x, int y, int z) -> bool {
 
     set_block(x, y, z, to_block_id(BlockType::Air));
     return get_block(x, y, z) == to_block_id(BlockType::Air);
+}
+
+auto World::is_pressure_root(const BlockCoord& world_coord, WaterState water_state) const -> bool {
+    if (!is_world_y_valid(world_coord.y)) {
+        return false;
+    }
+
+    if (!water_state_is_source(water_state) || water_level_from_state(water_state) < kMaxWaterLevel) {
+        return false;
+    }
+
+    // L'eau naturelle du generateur represente deja un reservoir infini
+    // (mer/ocean). On l'autorise donc a pousser l'eau a pleine hauteur
+    // dans les cavites connectees.
+    if (water_state_is_source(generator_.sample_water_state(world_coord.x, world_coord.y, world_coord.z))) {
+        return true;
+    }
+
+    if (is_world_y_valid(world_coord.y + 1)) {
+        const auto above_state = raw_water_state(world_coord.x, world_coord.y + 1, world_coord.z);
+        if (water_state_is_source(above_state) && water_level_from_state(above_state) == kMaxWaterLevel) {
+            return true;
+        }
+    }
+
+    auto horizontal_source_neighbors = 0;
+    for (const auto& offset : kNeighborOffsets) {
+        const BlockCoord neighbor {
+            world_coord.x + offset.x,
+            world_coord.y,
+            world_coord.z + offset.z,
+        };
+        if (!is_chunk_loaded_for_world(neighbor.x, neighbor.z)) {
+            continue;
+        }
+
+        const auto neighbor_state = raw_water_state(neighbor.x, neighbor.y, neighbor.z);
+        if (water_state_is_source(neighbor_state) && water_level_from_state(neighbor_state) == kMaxWaterLevel) {
+            ++horizontal_source_neighbors;
+            if (horizontal_source_neighbors >= 2) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+auto World::has_pressure_support(const BlockCoord& world_coord,
+                                 WaterState water_state,
+                                 std::unordered_set<BlockCoord, BlockCoordHash>& supported_cache,
+                                 std::unordered_set<BlockCoord, BlockCoordHash>& unsupported_cache) const -> bool {
+    if (!is_world_y_valid(world_coord.y) || !is_chunk_loaded_for_world(world_coord.x, world_coord.z)) {
+        return false;
+    }
+
+    if (water_level_from_state(water_state) < kMaxWaterLevel) {
+        return false;
+    }
+
+    if (supported_cache.contains(world_coord)) {
+        return true;
+    }
+    if (unsupported_cache.contains(world_coord)) {
+        return false;
+    }
+
+    if (is_pressure_root(world_coord, water_state)) {
+        supported_cache.insert(world_coord);
+        return true;
+    }
+
+    std::vector<BlockCoord> frontier {};
+    frontier.reserve(96U);
+    std::vector<BlockCoord> visited {};
+    visited.reserve(96U);
+    std::unordered_set<BlockCoord, BlockCoordHash> seen {};
+    seen.reserve(192U);
+
+    frontier.push_back(world_coord);
+    seen.insert(world_coord);
+
+    std::size_t frontier_index = 0;
+    auto reached_search_limit = false;
+
+    while (frontier_index < frontier.size()) {
+        const auto current = frontier[frontier_index++];
+        visited.push_back(current);
+
+        const auto current_state = raw_water_state(current.x, current.y, current.z);
+        if (water_level_from_state(current_state) < kMaxWaterLevel) {
+            continue;
+        }
+
+        if (supported_cache.contains(current) || is_pressure_root(current, current_state)) {
+            for (const auto& supported_coord : visited) {
+                supported_cache.insert(supported_coord);
+            }
+            supported_cache.insert(current);
+            return true;
+        }
+
+        if (visited.size() >= kPressureSearchVisitLimit) {
+            reached_search_limit = true;
+            break;
+        }
+
+        for (const auto& offset : kPressureNeighborOffsets) {
+            const BlockCoord neighbor {
+                current.x + offset.x,
+                current.y + offset.y,
+                current.z + offset.z,
+            };
+            if (!is_world_y_valid(neighbor.y) || !is_chunk_loaded_for_world(neighbor.x, neighbor.z)) {
+                continue;
+            }
+            if (!seen.insert(neighbor).second) {
+                continue;
+            }
+
+            if (supported_cache.contains(neighbor)) {
+                for (const auto& supported_coord : visited) {
+                    supported_cache.insert(supported_coord);
+                }
+                supported_cache.insert(neighbor);
+                return true;
+            }
+            if (unsupported_cache.contains(neighbor)) {
+                continue;
+            }
+
+            const auto neighbor_state = raw_water_state(neighbor.x, neighbor.y, neighbor.z);
+            if (water_level_from_state(neighbor_state) < kMaxWaterLevel) {
+                continue;
+            }
+
+            frontier.push_back(neighbor);
+        }
+    }
+
+    if (!reached_search_limit && frontier_index >= frontier.size()) {
+        for (const auto& unsupported_coord : visited) {
+            unsupported_cache.insert(unsupported_coord);
+        }
+    }
+
+    return false;
 }
 
 auto World::set_water_state(int x, int y, int z, WaterState water_state) -> bool {
