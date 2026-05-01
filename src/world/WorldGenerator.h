@@ -16,6 +16,13 @@ enum class BiomeType : std::uint8_t {
     Taiga = 4,
 };
 
+struct TerrainSurfaceSample {
+    BiomeType biome = BiomeType::Meadow;
+    int surface_height = 0;
+    int water_level = kWorldMinY - 1;
+    BlockId surface_block = to_block_id(BlockType::Grass);
+};
+
 class WorldGenerator {
 public:
     explicit WorldGenerator(int seed = 1337);
@@ -29,6 +36,7 @@ public:
     void generate_chunk(Chunk& chunk);
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto biome_at(int world_x, int world_z) const noexcept -> BiomeType;
+    [[nodiscard]] auto sample_surface(int world_x, int world_z) const noexcept -> TerrainSurfaceSample;
     [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept -> BlockId;
     [[nodiscard]] auto sample_water_state(int world_x, int y, int world_z) const noexcept -> WaterState;
 

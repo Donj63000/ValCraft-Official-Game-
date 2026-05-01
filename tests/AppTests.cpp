@@ -547,7 +547,8 @@ TEST_CASE("hotbar layout stays centered and anchored to the bottom across resolu
 
         CHECK(layout.slots.size() == kHotbarSlotCount);
         CHECK(layout.bar_left + layout.bar_width * 0.5F == doctest::Approx(static_cast<float>(width) * 0.5F));
-        CHECK(layout.bar_bottom == doctest::Approx(layout.safe_margin));
+        CHECK(layout.bar_bottom >= layout.safe_margin);
+        CHECK(layout.bar_bottom - layout.safe_margin <= std::max(2.0F, layout.slot_size * 0.07F));
         CHECK(layout.bar_bottom < static_cast<float>(height) * 0.5F);
     }
 
@@ -933,7 +934,16 @@ TEST_CASE("default inventory menu exposes a populated storage and an empty carri
     CHECK(inventory_slot_has_item(inventory.storage_slots[13]));
     CHECK(inventory.storage_slots[13].block_id == to_block_id(BlockType::Torch));
     CHECK(inventory.storage_slots[13].count == 16);
+    CHECK(inventory.storage_slots[18].block_id == to_block_id(BlockType::Pastron));
+    CHECK(inventory.storage_slots[19].block_id == to_block_id(BlockType::RoundShield));
+    CHECK(inventory.storage_slots[20].block_id == to_block_id(BlockType::Sword));
+    CHECK(inventory.storage_slots[21].block_id == to_block_id(BlockType::Spear));
+    CHECK(inventory.storage_slots[22].block_id == to_block_id(BlockType::Shoes));
+    CHECK(inventory.storage_slots[23].block_id == to_block_id(BlockType::Pants));
     CHECK_FALSE(inventory_slot_has_item(inventory.storage_slots.back()));
+    CHECK(std::all_of(inventory.equipment_slots.begin(), inventory.equipment_slots.end(), [](const HotbarSlot& slot) {
+        return !inventory_slot_has_item(slot);
+    }));
     CHECK_FALSE(inventory.carrying_item);
     CHECK_FALSE(inventory_slot_has_item(inventory.carried_slot));
 }
@@ -953,6 +963,9 @@ TEST_CASE("inventory layout stays centered and resolves hovered storage and hotb
     CHECK(layout.slots[4].hovered);
     CHECK(layout.slots[kInventoryStorageSlotCount + 7].is_hotbar);
     CHECK(layout.slots[kInventoryStorageSlotCount + hotbar.selected_index].is_selected_hotbar);
+    const auto equipment_layout_index = kInventoryStorageSlotCount + kHotbarSlotCount + equipment_slot_index(EquipmentSlot::Weapon);
+    CHECK(layout.slots[equipment_layout_index].is_equipment);
+    CHECK(layout.slots[equipment_layout_index].ref.group == InventorySlotGroup::Equipment);
 
     const auto hovered = inventory_slot_at(layout, inventory.cursor_x, inventory.cursor_y);
     REQUIRE(hovered.has_value());
@@ -960,14 +973,16 @@ TEST_CASE("inventory layout stays centered and resolves hovered storage and hotb
     CHECK(hovered->index == 4);
 }
 
-TEST_CASE("inventory layout stays centered on compact viewports") {
+TEST_CASE("inventory layout stays horizontally centered and visible on compact viewports") {
     const auto hotbar = make_default_hotbar_state();
     const auto inventory = make_default_inventory_menu_state();
 
     const auto layout = build_inventory_menu_layout(520, 320, inventory, hotbar);
 
     CHECK(layout.panel_x + layout.panel_width * 0.5F == doctest::Approx(260.0F));
-    CHECK(layout.panel_y + layout.panel_height * 0.5F == doctest::Approx(160.0F));
+    CHECK(layout.panel_y >= 0.0F);
+    CHECK(layout.panel_y <= 8.0F);
+    CHECK(layout.panel_y + layout.panel_height > 160.0F);
 }
 
 TEST_CASE("inventory primary click can pick and swap full stacks between storage and hotbar") {
@@ -1026,6 +1041,37 @@ TEST_CASE("inventory secondary click splits stacks and places single items") {
     CHECK(inventory.carried_slot.count == 3);
 }
 
+TEST_CASE("inventory equipment slots accept matching gear and expose combat stats") {
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    inventory.storage_slots[0] = inventory_make_slot(to_block_id(BlockType::Pastron), 1);
+    inventory.storage_slots[1] = inventory_make_slot(to_block_id(BlockType::RoundShield), 1);
+    inventory.storage_slots[2] = inventory_make_slot(to_block_id(BlockType::Sword), 1);
+    inventory.storage_slots[3] = inventory_make_slot(to_block_id(BlockType::Stone), 8);
+
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Storage, 0});
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Equipment, equipment_slot_index(EquipmentSlot::Chest)});
+    CHECK_FALSE(inventory.carrying_item);
+    CHECK(inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Chest)].block_id == to_block_id(BlockType::Pastron));
+
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Storage, 1});
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Equipment, equipment_slot_index(EquipmentSlot::Shield)});
+    CHECK(inventory_equipment_resistance_percent(inventory) == doctest::Approx(30.0F));
+
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Storage, 2});
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Equipment, equipment_slot_index(EquipmentSlot::Weapon)});
+    const auto equipped_weapon = inventory_active_weapon_stats(inventory, hotbar);
+    REQUIRE(equipped_weapon.has_value());
+    CHECK(equipped_weapon->damage == doctest::Approx(6.0F));
+    CHECK(equipped_weapon->range == doctest::Approx(3.1F));
+
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Storage, 3});
+    inventory_primary_click(inventory, hotbar, {InventorySlotGroup::Equipment, equipment_slot_index(EquipmentSlot::Feet)});
+    CHECK(inventory.carrying_item);
+    CHECK(inventory.carried_slot.block_id == to_block_id(BlockType::Stone));
+    CHECK_FALSE(inventory_slot_has_item(inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Feet)]));
+}
+
 TEST_CASE("inventory pickup helper fills matching stacks before using empty slots") {
     HotbarState hotbar {};
     hotbar.slots[0] = inventory_make_slot(to_block_id(BlockType::Stone), 63);
@@ -1063,6 +1109,7 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     snapshot.metadata.saved_at_unix_seconds = 1712185200;
     snapshot.metadata.seed = 987654;
     snapshot.metadata.time_of_day = 18.25F;
+    snapshot.metadata.weather_time_seconds = 735.5F;
     snapshot.metadata.has_starting_village = true;
     snapshot.spawn_position = {4.5F, 82.0F, -6.5F};
     snapshot.player_state.position = {11.0F, 65.0F, 3.0F};
@@ -1075,6 +1122,10 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     snapshot.hotbar.selected_index = 4;
     snapshot.inventory.storage_slots[0] = make_item_stack(to_block_id(BlockType::Wood), 8);
     snapshot.inventory.storage_slots[7] = make_item_stack(to_block_id(BlockType::Water), 2);
+    snapshot.inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Chest)] =
+        make_item_stack(to_block_id(BlockType::Pastron), 1);
+    snapshot.inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Weapon)] =
+        make_item_stack(to_block_id(BlockType::Spear), 1);
     snapshot.inventory.carried_slot = make_item_stack(to_block_id(BlockType::Dirt), 5);
     snapshot.inventory.carrying_item = true;
 
@@ -1088,6 +1139,7 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     creature.behavior_seed = 42;
     creature.appearance_seed = 7;
     creature.behavior_state = CreatureBehaviorState::Wander;
+    creature.health = 4.5F;
     snapshot.creatures.push_back(creature);
 
     ItemDrop drop {};
@@ -1114,6 +1166,7 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     CHECK(scanned[2].saved_at_unix_seconds == snapshot.metadata.saved_at_unix_seconds);
     CHECK(scanned[2].seed == snapshot.metadata.seed);
     CHECK(scanned[2].time_of_day == doctest::Approx(snapshot.metadata.time_of_day));
+    CHECK(scanned[2].weather_time_seconds == doctest::Approx(snapshot.metadata.weather_time_seconds));
     CHECK(scanned[2].modified_chunk_count == 1);
     CHECK(scanned[2].has_starting_village);
 
@@ -1121,6 +1174,7 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     REQUIRE(loaded.has_value());
     CHECK(loaded->metadata.exists);
     CHECK(loaded->metadata.seed == snapshot.metadata.seed);
+    CHECK(loaded->metadata.weather_time_seconds == doctest::Approx(snapshot.metadata.weather_time_seconds));
     CHECK(loaded->metadata.has_starting_village);
     CHECK(loaded->spawn_position.x == doctest::Approx(snapshot.spawn_position.x));
     CHECK(loaded->spawn_position.y == doctest::Approx(snapshot.spawn_position.y));
@@ -1137,10 +1191,16 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     CHECK(loaded->hotbar.selected_index == 4);
     CHECK(loaded->hotbar.slots[4].block_id == to_block_id(BlockType::Torch));
     CHECK(loaded->inventory.storage_slots[7].block_id == to_block_id(BlockType::Water));
+    CHECK(loaded->inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Chest)].block_id ==
+          to_block_id(BlockType::Pastron));
+    CHECK(loaded->inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Weapon)].block_id ==
+          to_block_id(BlockType::Spear));
+    CHECK(inventory_equipment_resistance_percent(loaded->inventory) == doctest::Approx(18.0F));
     CHECK(loaded->inventory.carrying_item);
     REQUIRE(loaded->creatures.size() == 1);
     CHECK(loaded->creatures[0].anchor.species == CreatureSpecies::Cow);
     CHECK(loaded->creatures[0].behavior_state == CreatureBehaviorState::Wander);
+    CHECK(loaded->creatures[0].health == doctest::Approx(4.5F));
     REQUIRE(loaded->item_drops.size() == 1);
     CHECK(loaded->item_drops[0].grounded);
     REQUIRE(loaded->chunk_snapshots.size() == 1);
@@ -1255,6 +1315,7 @@ TEST_CASE("save game loader preserves backward compatibility with version 1 file
     CHECK(scanned[0].saved_at_unix_seconds == saved_at);
     CHECK(scanned[0].seed == seed);
     CHECK(scanned[0].time_of_day == doctest::Approx(time_of_day));
+    CHECK(scanned[0].weather_time_seconds == doctest::Approx(0.0F));
     CHECK_FALSE(scanned[0].has_starting_village);
 
     const auto loaded = load_save_slot(save_root, 0);
@@ -1262,12 +1323,16 @@ TEST_CASE("save game loader preserves backward compatibility with version 1 file
     CHECK(loaded->metadata.exists);
     CHECK(loaded->metadata.seed == seed);
     CHECK(loaded->metadata.time_of_day == doctest::Approx(time_of_day));
+    CHECK(loaded->metadata.weather_time_seconds == doctest::Approx(0.0F));
     CHECK_FALSE(loaded->metadata.has_starting_village);
     CHECK(loaded->spawn_position.x == doctest::Approx(spawn_position.x));
     CHECK(loaded->spawn_position.y == doctest::Approx(spawn_position.y));
     CHECK(loaded->spawn_position.z == doctest::Approx(spawn_position.z));
     CHECK(loaded->player_state.fly_mode);
     CHECK(loaded->player_state.health == doctest::Approx(player_state.health));
+    CHECK(std::all_of(loaded->inventory.equipment_slots.begin(), loaded->inventory.equipment_slots.end(), [](const HotbarSlot& slot) {
+        return !inventory_slot_has_item(slot);
+    }));
     CHECK(loaded->creatures.empty());
     CHECK(loaded->item_drops.empty());
     CHECK(loaded->chunk_snapshots.empty());

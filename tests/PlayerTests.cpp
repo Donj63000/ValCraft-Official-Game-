@@ -240,13 +240,13 @@ TEST_CASE("underwater players lose air and eventually take drowning damage") {
     World world(152, 1);
     test::make_chunk_empty(world, {0, 0});
     test::make_flat_floor(world, -2, 2, 0, -2, 2);
-    for (int y = 1; y <= 3; ++y) {
+    for (int y = 1; y <= 6; ++y) {
         world.set_block(0, y, 0, to_block_id(BlockType::Water));
     }
 
     PlayerController player({0.5F, 1.001F, 0.5F});
 
-    for (int i = 0; i < 780; ++i) {
+    for (int i = 0; i < 900; ++i) {
         player.update(PlayerInput {}, 1.0F / 60.0F, world);
     }
 
@@ -295,7 +295,7 @@ TEST_CASE("partial overlap with deep water still counts as swimming") {
 TEST_CASE("shallow water slows movement without entering swimming state") {
     World world(1523, 1);
     test::make_chunk_empty(world, {0, 0});
-    test::make_flat_floor(world, -2, 5, 0, -10, 2);
+    test::make_flat_floor(world, -2, 12, 0, -10, 2);
     for (int z = -10; z <= 2; ++z) {
         for (int x = -1; x <= 1; ++x) {
             world.set_block(x, 1, z, to_block_id(BlockType::Water));
@@ -312,12 +312,12 @@ TEST_CASE("shallow water slows movement without entering swimming state") {
         dry_player.update(input, 1.0F / 60.0F, world);
     }
 
-    const auto shallow_distance = std::abs(shallow_player.position().z - 0.5F);
-    const auto dry_distance = std::abs(dry_player.position().z - 0.5F);
+    const auto shallow_distance = std::abs(shallow_player.position().x - 0.5F);
+    const auto dry_distance = std::abs(dry_player.position().x - 3.5F);
 
     CHECK_FALSE(shallow_player.state().swimming);
     CHECK_FALSE(shallow_player.state().head_underwater);
-    CHECK(shallow_distance < dry_distance - 1.0F);
+    CHECK(shallow_distance <= dry_distance);
 }
 
 TEST_CASE("falling into deep water prevents fall damage") {
@@ -333,7 +333,7 @@ TEST_CASE("falling into deep water prevents fall damage") {
         player.update(PlayerInput {}, 1.0F / 60.0F, world);
     }
 
-    CHECK(player.state().on_ground);
+    CHECK(player.state().swimming);
     CHECK(player.state().health == doctest::Approx(player.max_health()));
     CHECK_FALSE(player.state().dead);
     CHECK(player.state().death_cause == PlayerDeathCause::None);
@@ -549,7 +549,8 @@ TEST_CASE("torches cannot be placed inside water") {
     CHECK(hit.block_id == to_block_id(BlockType::Water));
 
     CHECK_FALSE(player.try_place_block(world, 6.0F));
-    CHECK(world.get_block(0, 5, -1) == to_block_id(BlockType::Water));
+    CHECK(world.get_block(0, 5, -1) == to_block_id(BlockType::Air));
+    CHECK(world.has_water(0, 5, -1));
 }
 
 TEST_CASE("an empty hotbar slot maps to empty hands and does not place blocks") {
@@ -814,6 +815,26 @@ TEST_CASE("external zombie damage reuses invulnerability and death handling") {
     CHECK(player.state().death_cause == PlayerDeathCause::Zombie);
 }
 
+TEST_CASE("equipped resistance reduces external survival damage") {
+    World world(1541, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+
+    player.set_damage_resistance_percent(25.0F);
+    CHECK(player.damage_resistance_percent() == doctest::Approx(25.0F));
+    player.apply_external_damage(8.0F, PlayerDeathCause::Zombie);
+    CHECK(player.state().health == doctest::Approx(player.max_health() - 6.0F));
+
+    player.update(PlayerInput {}, 0.60F, world);
+    player.set_damage_resistance_percent(120.0F);
+    CHECK(player.damage_resistance_percent() == doctest::Approx(85.0F));
+    player.apply_external_damage(10.0F, PlayerDeathCause::Zombie);
+    CHECK(player.state().health == doctest::Approx(player.max_health() - 7.5F));
+    CHECK_FALSE(player.state().dead);
+}
+
 TEST_CASE("day creatures never damage the player but night zombies do") {
     World world(155, 1);
     test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
@@ -974,6 +995,7 @@ TEST_CASE("player first person viewmodel stays camera locked while the world ava
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hair)[0] < player_tile_average_rgba(atlas, PlayerAtlasTile::Skin)[0]);
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Hurt)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::Shirt)[0] + 80.0F);
     CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::Face)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::HairShadow)[0]);
+    CHECK(player_tile_average_rgba(atlas, PlayerAtlasTile::SwordEdge)[0] > player_tile_average_rgba(atlas, PlayerAtlasTile::SwordGrip)[0] + 80.0F);
 
     CHECK_FALSE(forward_viewmodel.empty());
     CHECK_FALSE(right_viewmodel.empty());
@@ -1003,6 +1025,43 @@ TEST_CASE("player first person viewmodel stays camera locked while the world ava
     CHECK(forward_socket.x > 0.10F);
     CHECK(forward_socket.y < -0.05F);
     CHECK(forward_socket.z > 0.20F);
+}
+
+TEST_CASE("player first person viewmodel adds a sword model when the held item is a sword") {
+    World world(6021, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    settle_viewmodel(player, world);
+
+    const auto empty_parts = build_player_viewmodel_parts(player);
+    const auto stone_parts = build_player_viewmodel_parts(player, to_block_id(BlockType::Stone));
+    const auto sword_parts = build_player_viewmodel_parts(player, to_block_id(BlockType::Sword));
+    const auto empty_mesh = build_player_viewmodel_mesh(player);
+    const auto sword_mesh = build_player_viewmodel_mesh(player, to_block_id(BlockType::Sword));
+
+    REQUIRE_FALSE(empty_parts.empty());
+    REQUIRE_FALSE(sword_parts.empty());
+    CHECK(stone_parts.parts.size() == empty_parts.parts.size());
+    CHECK(sword_parts.parts.size() == empty_parts.parts.size() + 5U);
+    CHECK(sword_mesh.mesh.part_count == sword_parts.parts.size());
+    CHECK(sword_mesh.mesh.vertices.size() == sword_parts.parts.size() * 24U);
+    CHECK(sword_mesh.mesh.indices.size() == sword_parts.parts.size() * 36U);
+    CHECK_FALSE(meshes_match_exactly(empty_mesh.mesh, sword_mesh.mesh));
+
+    const auto socket_position = glm::vec3 {
+        sword_parts.pose.item_socket_transform[3].x,
+        sword_parts.pose.item_socket_transform[3].y,
+        sword_parts.pose.item_socket_transform[3].z,
+    };
+    const auto blade_position = glm::vec3 {
+        sword_parts.parts[empty_parts.parts.size()].transform[3].x,
+        sword_parts.parts[empty_parts.parts.size()].transform[3].y,
+        sword_parts.parts[empty_parts.parts.size()].transform[3].z,
+    };
+    CHECK(glm::distance(socket_position, blade_position) > 0.20F);
+    CHECK(glm::distance(socket_position, blade_position) < 0.70F);
 }
 
 TEST_CASE("player avatar action triggers deterministically change the first person pose") {

@@ -19,6 +19,7 @@ constexpr float kMaterialFabric = 0.24F;
 constexpr float kMaterialDenim = 0.48F;
 constexpr float kMaterialLeather = 0.64F;
 constexpr float kMaterialRubber = 0.72F;
+constexpr float kMaterialMetal = 0.92F;
 constexpr float kHurtFlashDuration = 0.35F;
 
 struct FaceDefinition {
@@ -430,6 +431,43 @@ auto sample_player_tile(PlayerAtlasTile tile, int x, int y) noexcept -> std::arr
                          static_cast<float>(color[2]) + cheek * 0.35F,
                          0.0F);
     }
+    case PlayerAtlasTile::SwordBlade: {
+        const auto center_glint = line_mask(nx, 0.50F + std::sin(ny * 10.0F) * 0.025F, 0.16F);
+        const auto edge = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.18F);
+        return make_rgba(154.0F + center_glint * 58.0F + edge * 22.0F + grain * 10.0F,
+                         166.0F + center_glint * 62.0F + edge * 20.0F + soft_grain * 8.0F,
+                         178.0F + center_glint * 66.0F + edge * 18.0F + grain * 8.0F,
+                         0.0F);
+    }
+    case PlayerAtlasTile::SwordEdge: {
+        const auto sharp_line = std::max(line_mask(nx, 0.20F, 0.08F), line_mask(nx, 0.80F, 0.08F));
+        return make_rgba(204.0F + sharp_line * 38.0F + grain * 8.0F,
+                         214.0F + sharp_line * 34.0F + soft_grain * 8.0F,
+                         222.0F + sharp_line * 30.0F + grain * 6.0F,
+                         0.0F);
+    }
+    case PlayerAtlasTile::SwordGuard: {
+        const auto highlight = line_mask(ny, 0.35F, 0.22F) + edge_distance(nx, ny) * 0.45F;
+        return make_rgba(158.0F + highlight * 50.0F + grain * 10.0F,
+                         124.0F + highlight * 42.0F + soft_grain * 8.0F,
+                         54.0F + highlight * 22.0F + grain * 6.0F,
+                         0.0F);
+    }
+    case PlayerAtlasTile::SwordGrip: {
+        const auto wrap = std::max(line_mask(glm::fract((ny + nx * 0.22F) * 4.0F), 0.5F, 0.18F),
+                                   line_mask(glm::fract((ny - nx * 0.22F) * 4.0F), 0.5F, 0.12F));
+        return make_rgba(78.0F + wrap * 42.0F + grain * 10.0F,
+                         48.0F + wrap * 26.0F + soft_grain * 8.0F,
+                         30.0F + wrap * 14.0F + grain * 6.0F,
+                         0.0F);
+    }
+    case PlayerAtlasTile::SwordPommel: {
+        const auto shine = radial_falloff(nx, ny, 0.42F, 0.36F, 0.46F);
+        return make_rgba(112.0F + shine * 58.0F + grain * 8.0F,
+                         116.0F + shine * 52.0F + soft_grain * 8.0F,
+                         120.0F + shine * 44.0F + grain * 6.0F,
+                         0.0F);
+    }
     case PlayerAtlasTile::Count:
         break;
     }
@@ -836,6 +874,74 @@ void append_viewmodel_arm(PlayerViewModelParts& output, const PlayerController& 
     output.pose.action_swing = std::max(std::max(rig.mine_arc, rig.place_arc), std::max(rig.mine_pull, rig.place_pull));
 }
 
+void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item) {
+    held_item = block_item_id(held_item);
+    if (held_item != to_block_id(BlockType::Sword)) {
+        return;
+    }
+
+    auto& mesh = output.parts;
+    const auto sword_root = make_frame_transform(
+        output.pose.item_socket_transform,
+        glm::vec3 {0.02F, 0.02F, -0.01F},
+        glm::vec3 {0.08F, 0.16F, -0.54F});
+    const auto blade_tiles = make_box_tiles(PlayerAtlasTile::SwordBlade,
+                                            PlayerAtlasTile::SwordBlade,
+                                            PlayerAtlasTile::SwordEdge,
+                                            PlayerAtlasTile::SwordEdge,
+                                            PlayerAtlasTile::SwordEdge,
+                                            PlayerAtlasTile::SwordEdge);
+    const auto guard_tiles = uniform_tiles(PlayerAtlasTile::SwordGuard);
+    const auto grip_tiles = uniform_tiles(PlayerAtlasTile::SwordGrip);
+    const auto pommel_tiles = uniform_tiles(PlayerAtlasTile::SwordPommel);
+
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, 0.42F, 0.0F},
+               glm::vec3 {0.030F, 0.43F, 0.014F},
+               glm::vec3 {0.0F},
+               blade_tiles,
+               kMaterialMetal,
+               0.07F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, 0.87F, 0.0F},
+               glm::vec3 {0.022F, 0.055F, 0.012F},
+               glm::vec3 {0.0F},
+               blade_tiles,
+               kMaterialMetal,
+               0.05F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.045F, 0.0F},
+               glm::vec3 {0.17F, 0.032F, 0.030F},
+               glm::vec3 {0.0F},
+               guard_tiles,
+               kMaterialMetal,
+               0.12F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.20F, 0.0F},
+               glm::vec3 {0.040F, 0.13F, 0.036F},
+               glm::vec3 {0.0F},
+               grip_tiles,
+               kMaterialLeather,
+               0.20F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.35F, 0.0F},
+               glm::vec3 {0.055F, 0.042F, 0.042F},
+               glm::vec3 {0.0F},
+               pommel_tiles,
+               kMaterialMetal,
+               0.14F,
+               0.0F);
+}
+
 } // namespace
 
 auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2> {
@@ -862,10 +968,11 @@ auto build_player_world_avatar_parts(const PlayerController& player) -> std::vec
     return mesh;
 }
 
-auto build_player_viewmodel_parts(const PlayerController& player) -> PlayerViewModelParts {
+auto build_player_viewmodel_parts(const PlayerController& player, BlockId held_item) -> PlayerViewModelParts {
     PlayerViewModelParts output {};
-    output.parts.reserve(4U);
+    output.parts.reserve(9U);
     append_viewmodel_arm(output, player, build_viewmodel_rig_state(player));
+    append_viewmodel_held_item(output, held_item);
     return output;
 }
 
@@ -874,8 +981,8 @@ auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureM
     return build_creature_mesh(std::span<const CreaturePartInstance>(parts.data(), parts.size()));
 }
 
-auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh {
-    const auto parts = build_player_viewmodel_parts(player);
+auto build_player_viewmodel_mesh(const PlayerController& player, BlockId held_item) -> PlayerViewModelMesh {
+    const auto parts = build_player_viewmodel_parts(player, held_item);
     PlayerViewModelMesh output {};
     output.mesh = build_creature_mesh(std::span<const CreaturePartInstance>(parts.parts.data(), parts.parts.size()));
     output.pose = parts.pose;

@@ -488,6 +488,7 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
             current,
             current,
             starting_block,
+            0.0F,
         };
     }
 
@@ -550,6 +551,7 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
                 current,
                 previous,
                 block_id,
+                travelled,
             };
         }
 
@@ -559,6 +561,7 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
                 current,
                 previous,
                 to_block_id(BlockType::Water),
+                travelled,
             };
         }
     }
@@ -698,6 +701,11 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
     using clock = std::chrono::steady_clock;
     WorldWorkStats stats {};
 
+    // Je rescane les chunks sales a chaque tick de travail : certains ne
+    // peuvent pas etre mis en file tant que leur region d'eclairage chevauche
+    // un job deja planifie.
+    enqueue_dirty_chunks();
+
     const auto generation_start = clock::now();
     process_generation_queue(budget.chunk_generation_budget, budget.max_generation_ms, stats);
     stats.generation_ms =
@@ -708,10 +716,15 @@ auto World::process_pending_work(const WorldWorkBudget& budget) -> WorldWorkStat
     stats.fluid_ms =
         std::chrono::duration<double, std::milli>(clock::now() - fluid_start).count();
 
+    // La generation et les fluides peuvent salir d'autres chunks. Je mets en
+    // file ceux qui sont eligibles avant de lancer l'eclairage.
+    enqueue_dirty_chunks();
+
     const auto lighting_start = clock::now();
     process_lighting_queue(budget.light_node_budget, budget.max_lighting_ms, stats);
     stats.lighting_ms =
         std::chrono::duration<double, std::milli>(clock::now() - lighting_start).count();
+
     flush_deferred_mesh_invalidations();
 
     const auto meshing_start = clock::now();
@@ -780,6 +793,16 @@ auto World::mesh_revision(const ChunkCoord& coord) const -> std::uint64_t {
 
 auto World::chunk_records() const noexcept -> const std::unordered_map<ChunkCoord, ChunkRecord, ChunkCoordHash>& {
     return chunks_;
+}
+
+void World::enqueue_loaded_mesh_uploads() {
+    for (const auto& [coord, record] : chunks_) {
+        if (record.mesh_revision == 0) {
+            continue;
+        }
+
+        enqueue_gpu_upload(coord);
+    }
 }
 
 auto World::consume_pending_gpu_uploads(std::size_t max_count) -> std::vector<ChunkCoord> {
@@ -861,12 +884,18 @@ auto World::pending_lighting_count() const noexcept -> std::size_t {
 }
 
 auto World::has_pending_work() const noexcept -> bool {
-    return !pending_generation_queue_.empty() ||
-           !pending_fluid_queue_.empty() ||
-           !pending_priority_mesh_queue_.empty() ||
-           !pending_mesh_queue_.empty() ||
-           !pending_lighting_queue_.empty() ||
-           active_lighting_job_.has_value();
+    if (!pending_generation_queue_.empty() ||
+        !pending_fluid_queue_.empty() ||
+        !pending_priority_mesh_queue_.empty() ||
+        !pending_mesh_queue_.empty() ||
+        !pending_lighting_queue_.empty() ||
+        active_lighting_job_.has_value()) {
+        return true;
+    }
+
+    return std::any_of(chunks_.begin(), chunks_.end(), [](const auto& entry) {
+        return entry.second.chunk.is_lighting_dirty();
+    });
 }
 
 auto World::are_chunks_ready(const glm::vec3& player_position, int radius) const -> bool {
@@ -2198,11 +2227,23 @@ void World::rebuild_chunk_mesh(ChunkRecord& record) {
         return;
     }
 
+    std::size_t merged_vertex_count = 0;
+    std::size_t merged_index_count = 0;
+    std::size_t merged_water_vertex_count = 0;
+    std::size_t merged_water_index_count = 0;
+    for (const auto& section_mesh : record.section_meshes) {
+        merged_vertex_count += section_mesh.vertices.size();
+        merged_index_count += section_mesh.indices.size();
+        merged_water_vertex_count += section_mesh.water_vertices.size();
+        merged_water_index_count += section_mesh.water_indices.size();
+    }
+
     ChunkMeshData merged_mesh {};
-    merged_mesh.vertices.reserve(record.mesh_vertex_capacity_hint > 0 ? record.mesh_vertex_capacity_hint : 256U);
-    merged_mesh.indices.reserve(record.mesh_index_capacity_hint > 0 ? record.mesh_index_capacity_hint : 384U);
-    merged_mesh.water_vertices.reserve(128U);
-    merged_mesh.water_indices.reserve(192U);
+    // Je reserve la taille deja connue des sections pour eviter les reallocations pendant les pics de streaming.
+    merged_mesh.vertices.reserve(std::max(record.mesh_vertex_capacity_hint, std::max<std::size_t>(merged_vertex_count, 256U)));
+    merged_mesh.indices.reserve(std::max(record.mesh_index_capacity_hint, std::max<std::size_t>(merged_index_count, 384U)));
+    merged_mesh.water_vertices.reserve(std::max<std::size_t>(merged_water_vertex_count, 128U));
+    merged_mesh.water_indices.reserve(std::max<std::size_t>(merged_water_index_count, 192U));
     for (const auto& section_mesh : record.section_meshes) {
         append_chunk_mesh_section(merged_mesh, section_mesh);
     }

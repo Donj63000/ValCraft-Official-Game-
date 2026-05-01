@@ -331,6 +331,10 @@ auto PlayerController::max_air_seconds() const noexcept -> float {
     return kMaxAirSeconds;
 }
 
+auto PlayerController::damage_resistance_percent() const noexcept -> float {
+    return damage_resistance_percent_;
+}
+
 auto PlayerController::is_dead() const noexcept -> bool {
     return state_.dead;
 }
@@ -360,6 +364,10 @@ void PlayerController::set_selected_block(BlockId block_id) noexcept {
     selected_block_ = block_item_id(block_id);
 }
 
+void PlayerController::set_damage_resistance_percent(float percent) noexcept {
+    damage_resistance_percent_ = std::clamp(percent, 0.0F, 85.0F);
+}
+
 void PlayerController::trigger_primary_action() noexcept {
     if (state_.dead) {
         return;
@@ -387,7 +395,8 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
 }
 
 void PlayerController::apply_external_damage(float amount, PlayerDeathCause cause) noexcept {
-    apply_damage(amount, cause, false);
+    const auto mitigated_amount = amount * (1.0F - damage_resistance_percent_ / 100.0F);
+    apply_damage(mitigated_amount, cause, false);
 }
 
 auto PlayerController::current_target(const World& world, float max_distance) const -> RaycastHit {
@@ -464,7 +473,7 @@ auto PlayerController::try_break_block(World& world, float max_distance) const -
 
 auto PlayerController::try_place_block(World& world, float max_distance) const -> std::optional<PlacedBlockResult> {
     const auto selected_block = block_item_id(selected_block_);
-    if (selected_block == to_block_id(BlockType::Air)) {
+    if (!is_placeable_item(selected_block)) {
         return std::nullopt;
     }
 

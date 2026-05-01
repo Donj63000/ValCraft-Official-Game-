@@ -124,6 +124,9 @@ private:
         GLint wind_strength = -1;
         GLint atmospheric_scatter_strength = -1;
         GLint height_fog_density = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint scene_color = -1;
@@ -155,6 +158,11 @@ private:
         GLint moon_disk_color = -1;
         GLint star_intensity = -1;
         GLint cloud_intensity = -1;
+        GLint overcast_intensity = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
+        GLint weather_time = -1;
         GLint accent_atlas = -1;
     };
 
@@ -170,6 +178,10 @@ private:
         GLint glow_strength = -1;
         GLint sharpen_strength = -1;
         GLint edge_strength = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
+        GLint weather_time = -1;
     };
 
     struct GlowExtractUniformLocations {
@@ -207,6 +219,9 @@ private:
         GLint cloud_shadow_strength = -1;
         GLint atmospheric_scatter_strength = -1;
         GLint height_fog_density = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint shadows_enabled = -1;
@@ -313,6 +328,7 @@ private:
     void create_creature_atlas_texture();
     void create_player_atlas_texture();
     void create_shadow_map();
+    void create_scene_sampler_fallback_textures();
     void create_creature_geometry();
     void create_item_drop_geometry();
     void create_screen_quad_geometry();
@@ -340,10 +356,11 @@ private:
                         const EnvironmentState& environment,
                         bool player_light_active);
     void draw_player_viewmodel(const PlayerController& player,
-                            const glm::mat4& view_projection,
-                            const glm::mat4& light_view_projection,
-                            const glm::vec3& camera_position,
-                            const EnvironmentState& environment);
+                               BlockId held_item,
+                               const glm::mat4& view_projection,
+                               const glm::mat4& light_view_projection,
+                               const glm::vec3& camera_position,
+                               const EnvironmentState& environment);
     void draw_block_break_overlay(const PlayerController& player);
     void draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& environment, int width, int height);
     void draw_inventory_menu(const InventoryMenuState& inventory_menu, const HotbarState& hotbar, int width, int height);
@@ -374,6 +391,8 @@ private:
     GLuint player_atlas_texture_ = 0;
     GLuint shadow_map_ = 0;
     GLuint shadow_framebuffer_ = 0;
+    GLuint scene_fallback_color_texture_ = 0;
+    GLuint scene_fallback_depth_texture_ = 0;
     GLuint water_scene_framebuffer_ = 0;
     GLuint water_scene_color_texture_ = 0;
     GLuint water_scene_depth_texture_ = 0;

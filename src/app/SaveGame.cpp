@@ -15,9 +15,16 @@ namespace valcraft {
 namespace {
 
 constexpr std::array<char, 8> kSaveMagic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
-constexpr std::uint32_t kSaveVersion = 3;
+constexpr std::uint32_t kSaveVersion = 5;
+constexpr std::uint32_t kSaveVersionEquipmentAndCreatureHealth = 5;
+constexpr std::uint32_t kSaveVersionWeatherCycle = 4;
+constexpr std::uint32_t kSaveVersionWaterState = 3;
 constexpr std::uint32_t kSaveVersionStartingVillage = 2;
 constexpr std::uint32_t kSaveVersionLegacy = 1;
+
+auto is_supported_save_version(std::uint32_t version) noexcept -> bool {
+    return version >= kSaveVersionLegacy && version <= kSaveVersion;
+}
 
 class BinaryWriter {
 public:
@@ -207,31 +214,40 @@ void write_creature(BinaryWriter& writer, const CreatureInstance& creature) {
     writer.write_value(creature.gaze_weight);
     writer.write_value(creature.attack_cooldown);
     writer.write_value(creature.attack_amount);
+    writer.write_value(creature.health);
 }
 
-auto read_creature(BinaryReader& reader, CreatureInstance& creature) -> bool {
-    return reader.read_value(creature.anchor.chunk.x) &&
-           reader.read_value(creature.anchor.chunk.z) &&
-           reader.read_value(creature.anchor.ground_block.x) &&
-           reader.read_value(creature.anchor.ground_block.y) &&
-           reader.read_value(creature.anchor.ground_block.z) &&
-           read_vec3(reader, creature.anchor.spawn_position) &&
-           read_enum(reader, creature.anchor.species) &&
-           read_vec3(reader, creature.position) &&
-           reader.read_value(creature.yaw_radians) &&
-           reader.read_value(creature.behavior_timer) &&
-           reader.read_value(creature.animation_time) &&
-           reader.read_value(creature.wander_heading) &&
-           reader.read_value(creature.nervous_intensity) &&
-           reader.read_value(creature.behavior_seed) &&
-           reader.read_value(creature.appearance_seed) &&
-           read_enum(reader, creature.behavior_state) &&
-           read_enum(reader, creature.phase) &&
-           reader.read_value(creature.morph_factor) &&
-           reader.read_value(creature.motion_amount) &&
-           reader.read_value(creature.gaze_weight) &&
-           reader.read_value(creature.attack_cooldown) &&
-           reader.read_value(creature.attack_amount);
+auto read_creature(BinaryReader& reader, CreatureInstance& creature, std::uint32_t version) -> bool {
+    if (!reader.read_value(creature.anchor.chunk.x) ||
+        !reader.read_value(creature.anchor.chunk.z) ||
+        !reader.read_value(creature.anchor.ground_block.x) ||
+        !reader.read_value(creature.anchor.ground_block.y) ||
+        !reader.read_value(creature.anchor.ground_block.z) ||
+        !read_vec3(reader, creature.anchor.spawn_position) ||
+        !read_enum(reader, creature.anchor.species) ||
+        !read_vec3(reader, creature.position) ||
+        !reader.read_value(creature.yaw_radians) ||
+        !reader.read_value(creature.behavior_timer) ||
+        !reader.read_value(creature.animation_time) ||
+        !reader.read_value(creature.wander_heading) ||
+        !reader.read_value(creature.nervous_intensity) ||
+        !reader.read_value(creature.behavior_seed) ||
+        !reader.read_value(creature.appearance_seed) ||
+        !read_enum(reader, creature.behavior_state) ||
+        !read_enum(reader, creature.phase) ||
+        !reader.read_value(creature.morph_factor) ||
+        !reader.read_value(creature.motion_amount) ||
+        !reader.read_value(creature.gaze_weight) ||
+        !reader.read_value(creature.attack_cooldown) ||
+        !reader.read_value(creature.attack_amount)) {
+        return false;
+    }
+    if (version >= kSaveVersionEquipmentAndCreatureHealth) {
+        return reader.read_value(creature.health);
+    }
+
+    creature.health = creature_max_health(creature.anchor.species);
+    return true;
 }
 
 void write_item_drop(BinaryWriter& writer, const ItemDrop& drop) {
@@ -265,7 +281,7 @@ auto load_metadata_from_file(const std::filesystem::path& file_path) -> std::opt
     if (!reader.read_bytes(magic.data(), magic.size()) ||
         magic != kSaveMagic ||
         !reader.read_value(version) ||
-        (version != kSaveVersion && version != kSaveVersionStartingVillage && version != kSaveVersionLegacy) ||
+        !is_supported_save_version(version) ||
         !reader.read_value(metadata.saved_at_unix_seconds) ||
         !reader.read_value(metadata.seed) ||
         !reader.read_value(metadata.time_of_day) ||
@@ -273,6 +289,9 @@ auto load_metadata_from_file(const std::filesystem::path& file_path) -> std::opt
         return std::nullopt;
     }
     if (version >= kSaveVersionStartingVillage && !read_bool(reader, metadata.has_starting_village)) {
+        return std::nullopt;
+    }
+    if (version >= kSaveVersionWeatherCycle && !reader.read_value(metadata.weather_time_seconds)) {
         return std::nullopt;
     }
 
@@ -328,7 +347,7 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
     if (!reader.read_bytes(magic.data(), magic.size()) ||
         magic != kSaveMagic ||
         !reader.read_value(version) ||
-        (version != kSaveVersion && version != kSaveVersionStartingVillage && version != kSaveVersionLegacy) ||
+        !is_supported_save_version(version) ||
         !reader.read_value(snapshot.metadata.saved_at_unix_seconds) ||
         !reader.read_value(snapshot.metadata.seed) ||
         !reader.read_value(snapshot.metadata.time_of_day) ||
@@ -336,6 +355,9 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
         return std::nullopt;
     }
     if (version >= kSaveVersionStartingVillage && !read_bool(reader, snapshot.metadata.has_starting_village)) {
+        return std::nullopt;
+    }
+    if (version >= kSaveVersionWeatherCycle && !reader.read_value(snapshot.metadata.weather_time_seconds)) {
         return std::nullopt;
     }
     if (!read_vec3(reader, snapshot.spawn_position) ||
@@ -364,6 +386,15 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
         !read_bool(reader, snapshot.inventory.carrying_item)) {
         return std::nullopt;
     }
+    if (version >= kSaveVersionEquipmentAndCreatureHealth) {
+        for (auto& slot : snapshot.inventory.equipment_slots) {
+            if (!read_hotbar_slot(reader, slot)) {
+                return std::nullopt;
+            }
+        }
+    } else {
+        snapshot.inventory.equipment_slots.fill(inventory_empty_slot());
+    }
     snapshot.inventory.visible = false;
     snapshot.inventory.hovered_slot.reset();
 
@@ -372,7 +403,7 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
     }
     snapshot.creatures.resize(creature_count);
     for (auto& creature : snapshot.creatures) {
-        if (!read_creature(reader, creature)) {
+        if (!read_creature(reader, creature, version)) {
             return std::nullopt;
         }
     }
@@ -397,7 +428,7 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
             !reader.read_bytes(chunk_snapshot.blocks.data(), chunk_snapshot.blocks.size() * sizeof(BlockId))) {
             return std::nullopt;
         }
-        if (version >= kSaveVersion) {
+        if (version >= kSaveVersionWaterState) {
             if (!reader.read_bytes(chunk_snapshot.water_state.data(), chunk_snapshot.water_state.size() * sizeof(WaterState))) {
                 return std::nullopt;
             }
@@ -491,6 +522,7 @@ void write_save_slot(const std::filesystem::path& root_directory, std::size_t sl
     writer.write_value(snapshot.metadata.time_of_day);
     writer.write_value(chunk_count);
     write_bool(writer, snapshot.metadata.has_starting_village);
+    writer.write_value(snapshot.metadata.weather_time_seconds);
     write_vec3(writer, snapshot.spawn_position);
     write_player_state(writer, snapshot.player_state);
 
@@ -504,6 +536,9 @@ void write_save_slot(const std::filesystem::path& root_directory, std::size_t sl
     }
     write_hotbar_slot(writer, snapshot.inventory.carried_slot);
     write_bool(writer, snapshot.inventory.carrying_item);
+    for (const auto& slot : snapshot.inventory.equipment_slots) {
+        write_hotbar_slot(writer, slot);
+    }
 
     writer.write_value(creature_count);
     for (std::size_t index = 0; index < creature_count; ++index) {

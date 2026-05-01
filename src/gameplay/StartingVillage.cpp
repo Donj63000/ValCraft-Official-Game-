@@ -107,32 +107,12 @@ auto is_overgrowth_block(BlockId block_id) noexcept -> bool {
 
 auto sample_generated_ground(const WorldGenerator& generator, int world_x, int world_z) -> GeneratedGroundSample {
     GeneratedGroundSample sample {};
-    sample.biome = generator.biome_at(world_x, world_z);
-
-    bool had_water = false;
-    for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
-        const auto block = generator.sample_block(world_x, y, world_z);
-        if (generator.sample_water_state(world_x, y, world_z) != 0) {
-            had_water = true;
-        }
-        if (block == to_block_id(BlockType::Air)) {
-            continue;
-        }
-        if (is_overgrowth_block(block)) {
-            continue;
-        }
-
-        sample.surface_y = y;
-        sample.surface_block = block;
-        sample.valid_land = !had_water;
-        sample.had_water = had_water;
-        return sample;
-    }
-
-    sample.surface_y = kWorldMinY;
-    sample.surface_block = to_block_id(BlockType::Dirt);
-    sample.valid_land = false;
-    sample.had_water = had_water;
+    const auto surface = generator.sample_surface(world_x, world_z);
+    sample.biome = surface.biome;
+    sample.surface_y = surface.surface_height;
+    sample.surface_block = surface.surface_block;
+    sample.had_water = surface.water_level > surface.surface_height;
+    sample.valid_land = !sample.had_water && !is_overgrowth_block(sample.surface_block);
     return sample;
 }
 
@@ -453,6 +433,13 @@ void set_block_if_needed(World& world, int x, int y, int z, BlockId block_id) {
         if (world.has_water(x, y, z)) {
             return;
         }
+        // Je force l'eau des structures apres le nivellement, sinon le puits
+        // ne peut pas remplacer les blocs solides poses pour la place.
+        if (world.get_block(x, y, z) != to_block_id(BlockType::Air)) {
+            world.set_block(x, y, z, to_block_id(BlockType::Air));
+        }
+        world.set_block(x, y, z, block_id);
+        return;
     } else if (block_id == to_block_id(BlockType::Air)) {
         if (world.get_block(x, y, z) == to_block_id(BlockType::Air) && !world.has_water(x, y, z)) {
             return;
@@ -514,14 +501,16 @@ void grade_column(World& world, int x, int z, int target_y, BlockId top_block, B
 }
 
 auto choose_road_block(std::uint32_t seed) noexcept -> BlockId {
-    switch (seed % 10U) {
+    switch (seed % 12U) {
     case 0U:
     case 1U:
-        return to_block_id(BlockType::MossyStone);
+        return to_block_id(BlockType::Sand);
     case 2U:
     case 3U:
+        return to_block_id(BlockType::MossyStone);
     case 4U:
-        return to_block_id(BlockType::Gravel);
+    case 5U:
+        return to_block_id(BlockType::Stone);
     default:
         return to_block_id(BlockType::Cobblestone);
     }
@@ -586,14 +575,17 @@ void build_path_patch(World& world, int min_x, int max_x, int min_z, int max_z, 
 }
 
 auto choose_garden_block(std::uint32_t seed) noexcept -> BlockId {
-    switch (seed % 7U) {
+    switch (seed % 9U) {
     case 0U:
-        return to_block_id(BlockType::RedFlower);
-    case 1U:
         return to_block_id(BlockType::YellowFlower);
+    case 1U:
+        return to_block_id(BlockType::DeadShrub);
     case 2U:
     case 3U:
+    case 4U:
         return to_block_id(BlockType::TallGrass);
+    case 5U:
+        return to_block_id(BlockType::RedFlower);
     default:
         return to_block_id(BlockType::Air);
     }
@@ -616,18 +608,39 @@ void decorate_green_patch(World& world, int center_x, int center_z, int half_ext
 void build_small_tree(World& world, int x, int z, int base_y, std::uint32_t seed, bool pine) {
     const auto trunk_block = pine ? to_block_id(BlockType::PineWood) : to_block_id(BlockType::Wood);
     const auto leaf_block = pine ? to_block_id(BlockType::PineLeaves) : to_block_id(BlockType::Leaves);
-    const auto trunk_height = pine ? 4 + static_cast<int>(seed % 2U) : 3 + static_cast<int>(seed % 2U);
+    const auto trunk_height = pine ? 5 + static_cast<int>(seed % 2U) : 3 + static_cast<int>(seed % 2U);
 
     grade_column(world, x, z, base_y, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
     for (int y = base_y + 1; y <= base_y + trunk_height; ++y) {
         set_block_if_needed(world, x, y, z, trunk_block);
     }
 
-    const auto canopy_base_y = base_y + trunk_height;
-    for (int dz = -2; dz <= 2; ++dz) {
-        for (int dx = -2; dx <= 2; ++dx) {
+    if (pine) {
+        for (int dy = -3; dy <= 2; ++dy) {
+            const auto radius = dy <= -1 ? 1 : 0;
+            const auto leaf_y = base_y + trunk_height + dy;
+            for (int dz = -radius; dz <= radius; ++dz) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (std::abs(dx) + std::abs(dz) > radius + 1) {
+                        continue;
+                    }
+                    const auto leaf_x = x + dx;
+                    const auto leaf_z = z + dz;
+                    if (world.get_block(leaf_x, leaf_y, leaf_z) == to_block_id(BlockType::Air)) {
+                        set_block_if_needed(world, leaf_x, leaf_y, leaf_z, leaf_block);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    const auto canopy_base_y = base_y + trunk_height - 1;
+    for (int dz = -3; dz <= 3; ++dz) {
+        for (int dx = -3; dx <= 3; ++dx) {
             for (int dy = 0; dy <= 2; ++dy) {
-                if (std::abs(dx) + std::abs(dz) + dy > 4) {
+                const auto distance = std::abs(dx) + std::abs(dz);
+                if (distance > 4 || (dy == 2 && distance > 2)) {
                     continue;
                 }
                 const auto leaf_x = x + dx;
@@ -687,102 +700,73 @@ auto doorway_world_cell(const StartingVillageBuilding& building) noexcept -> Blo
     }
 }
 
-auto chimney_world_cell(const StartingVillageBuilding& building) noexcept -> BlockCoord {
-    switch (building.facing) {
-    case VillageFacing::South:
-        return {
-            (building.variant_seed % 2U) == 0U ? building.min_x + 1 : building.max_x - 1,
-            building.base_y + 1,
-            building.min_z + 1,
-        };
-    case VillageFacing::North:
-        return {
-            (building.variant_seed % 2U) == 0U ? building.min_x + 1 : building.max_x - 1,
-            building.base_y + 1,
-            building.max_z - 1,
-        };
-    case VillageFacing::East:
-        return {
-            building.min_x + 1,
-            building.base_y + 1,
-            (building.variant_seed % 2U) == 0U ? building.min_z + 1 : building.max_z - 1,
-        };
-    case VillageFacing::West:
-    default:
-        return {
-            building.max_x - 1,
-            building.base_y + 1,
-            (building.variant_seed % 2U) == 0U ? building.min_z + 1 : building.max_z - 1,
-        };
-    }
-}
-
 auto foundation_block_for_role(VillageBuildingRole role, std::uint32_t seed) noexcept -> BlockId {
     switch (role) {
     case VillageBuildingRole::Workshop:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::Cobblestone) : to_block_id(BlockType::MossyStone);
+        return (seed % 2U) == 0U ? to_block_id(BlockType::Stone) : to_block_id(BlockType::Cobblestone);
     case VillageBuildingRole::Storehouse:
         return to_block_id(BlockType::Cobblestone);
     case VillageBuildingRole::Lodge:
-        return (seed % 3U) == 0U ? to_block_id(BlockType::MossyStone) : to_block_id(BlockType::Cobblestone);
+        return (seed % 3U) == 0U ? to_block_id(BlockType::MossyStone) : to_block_id(BlockType::Stone);
     case VillageBuildingRole::House:
     default:
-        return to_block_id(BlockType::Cobblestone);
+        return (seed % 3U) == 0U ? to_block_id(BlockType::Cobblestone) : to_block_id(BlockType::Stone);
     }
 }
 
 auto floor_block_for_role(VillageBuildingRole role, std::uint32_t seed) noexcept -> BlockId {
     switch (role) {
     case VillageBuildingRole::Storehouse:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::Planks) : to_block_id(BlockType::Cobblestone);
+        return (seed % 2U) == 0U ? to_block_id(BlockType::Sand) : to_block_id(BlockType::Cobblestone);
     case VillageBuildingRole::Workshop:
-        return (seed % 3U) == 0U ? to_block_id(BlockType::Cobblestone) : to_block_id(BlockType::Planks);
+        return (seed % 3U) == 0U ? to_block_id(BlockType::Cobblestone) : to_block_id(BlockType::Sand);
     case VillageBuildingRole::Lodge:
-        return to_block_id(BlockType::Planks);
+        return to_block_id(BlockType::Stone);
     case VillageBuildingRole::House:
     default:
-        return to_block_id(BlockType::Planks);
+        return to_block_id(BlockType::Sand);
     }
 }
 
 auto trim_block_for_role(VillageBuildingRole role, std::uint32_t seed) noexcept -> BlockId {
     switch (role) {
     case VillageBuildingRole::Lodge:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::PineWood) : to_block_id(BlockType::Wood);
+        return (seed % 2U) == 0U ? to_block_id(BlockType::Stone) : to_block_id(BlockType::MossyStone);
     case VillageBuildingRole::Workshop:
-        return (seed % 3U) == 0U ? to_block_id(BlockType::PineWood) : to_block_id(BlockType::Wood);
+        return (seed % 3U) == 0U ? to_block_id(BlockType::Cobblestone) : to_block_id(BlockType::Stone);
     case VillageBuildingRole::Storehouse:
+        return to_block_id(BlockType::Cobblestone);
     case VillageBuildingRole::House:
     default:
-        return to_block_id(BlockType::Wood);
+        return to_block_id(BlockType::Stone);
     }
 }
 
 auto wall_block_for_role(VillageBuildingRole role, std::uint32_t seed) noexcept -> BlockId {
     switch (role) {
     case VillageBuildingRole::Workshop:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::Planks) : to_block_id(BlockType::Cobblestone);
+        return (seed % 2U) == 0U ? to_block_id(BlockType::Sand) : to_block_id(BlockType::Stone);
     case VillageBuildingRole::Storehouse:
-        return (seed % 3U) == 0U ? to_block_id(BlockType::Planks) : to_block_id(BlockType::Wood);
+        return (seed % 3U) == 0U ? to_block_id(BlockType::Sand) : to_block_id(BlockType::Cobblestone);
     case VillageBuildingRole::Lodge:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::Planks) : to_block_id(BlockType::PineWood);
+        return (seed % 2U) == 0U ? to_block_id(BlockType::Sand) : to_block_id(BlockType::Stone);
     case VillageBuildingRole::House:
     default:
-        return to_block_id(BlockType::Planks);
+        return to_block_id(BlockType::Sand);
     }
 }
 
 auto roof_block_for_role(VillageBuildingRole role, std::uint32_t seed) noexcept -> BlockId {
     switch (role) {
     case VillageBuildingRole::Workshop:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::Wood) : to_block_id(BlockType::PineWood);
+        return (seed % 2U) == 0U ? to_block_id(BlockType::Planks) : to_block_id(BlockType::Wood);
     case VillageBuildingRole::Storehouse:
-        return (seed % 3U) == 0U ? to_block_id(BlockType::Wood) : to_block_id(BlockType::Planks);
+        return to_block_id(BlockType::Planks);
     case VillageBuildingRole::Lodge:
-        return to_block_id(BlockType::PineWood);
+        return to_block_id(BlockType::Planks);
     case VillageBuildingRole::House:
     default:
-        return (seed % 2U) == 0U ? to_block_id(BlockType::Planks) : to_block_id(BlockType::Wood);
+        return (seed % 5U) == 0U ? to_block_id(BlockType::Wood) : to_block_id(BlockType::Planks);
     }
 }
 
@@ -900,7 +884,7 @@ void build_village_well(World& world, int center_x, int center_z, int base_y, in
         701,
         to_block_id(BlockType::Dirt),
         [](std::uint32_t column_seed) {
-            return (column_seed % 3U) == 0U ? to_block_id(BlockType::MossyStone) : to_block_id(BlockType::Cobblestone);
+            return (column_seed % 4U) == 0U ? to_block_id(BlockType::MossyStone) : to_block_id(BlockType::Stone);
         });
 
     for (int z = center_z - 1; z <= center_z + 1; ++z) {
@@ -916,7 +900,7 @@ void build_village_well(World& world, int center_x, int center_z, int base_y, in
             if (!outer_ring) {
                 continue;
             }
-            set_block_if_needed(world, x, base_y + 1, z, to_block_id(BlockType::Cobblestone));
+            set_block_if_needed(world, x, base_y + 1, z, to_block_id(BlockType::Stone));
         }
     }
 
@@ -930,7 +914,7 @@ void build_village_well(World& world, int center_x, int center_z, int base_y, in
         const auto post_x = center_x + post_offset.first;
         const auto post_z = center_z + post_offset.second;
         for (int y = base_y + 2; y <= base_y + 4; ++y) {
-            set_block_if_needed(world, post_x, y, post_z, to_block_id(BlockType::Wood));
+            set_block_if_needed(world, post_x, y, post_z, to_block_id(BlockType::Stone));
         }
     }
 
@@ -938,11 +922,13 @@ void build_village_well(World& world, int center_x, int center_z, int base_y, in
         for (int x = center_x - 3; x <= center_x + 3; ++x) {
             const auto edge = x == center_x - 3 || x == center_x + 3 || z == center_z - 3 || z == center_z + 3;
             if (edge) {
-                set_block_if_needed(world, x, base_y + 5, z, to_block_id(BlockType::Planks));
+                set_block_if_needed(world, x, base_y + 5, z, to_block_id(BlockType::Cobblestone));
             }
         }
     }
 
+    set_block_if_needed(world, center_x, base_y + 2, center_z, to_block_id(BlockType::Stone));
+    set_block_if_needed(world, center_x, base_y + 3, center_z, to_block_id(BlockType::Stone));
     set_block_if_needed(world, center_x, base_y + 6, center_z, to_block_id(BlockType::Torch));
 }
 
@@ -1057,21 +1043,75 @@ void build_roof(World& world, const StartingVillageBuilding& building) {
     }
 }
 
-void build_chimney(World& world, const StartingVillageBuilding& building) {
-    if (building.role == VillageBuildingRole::House && (building.variant_seed % 2U) != 0U) {
-        return;
-    }
-    if (building.role == VillageBuildingRole::Storehouse) {
-        return;
+void build_roof_acroteria(World& world, const StartingVillageBuilding& building) {
+    const auto trim_block = trim_block_for_role(building.role, building.variant_seed);
+    const auto roof_top_y = roof_surface_y(building, building.door_x, building.facing == VillageFacing::North || building.facing == VillageFacing::South ? building.door_z - facing_forward(building.facing).second : building.door_z);
+    const auto corner_y = roof_base_y(building) + 1;
+
+    constexpr std::array<std::pair<int, int>, 4> kCornerOffsets {{
+        {-1, -1},
+        {1, -1},
+        {-1, 1},
+        {1, 1},
+    }};
+    for (const auto& corner : kCornerOffsets) {
+        const auto ornament_x = corner.first < 0 ? building.min_x - 1 : building.max_x + 1;
+        const auto ornament_z = corner.second < 0 ? building.min_z - 1 : building.max_z + 1;
+        set_block_if_needed(world, ornament_x, corner_y, ornament_z, trim_block);
     }
 
-    const auto chimney = chimney_world_cell(building);
+    set_block_if_needed(world, building.door_x, std::min(roof_top_y + 1, kWorldMaxY), building.door_z, trim_block);
+}
+
+void build_antique_portico(World& world, const StartingVillageBuilding& building) {
     const auto dimensions = choose_building_dimensions(building.role, building.variant_seed);
-    const auto chimney_top_y = building.base_y + dimensions.wall_height + 5;
-    for (int y = building.base_y + 1; y <= chimney_top_y; ++y) {
-        set_block_if_needed(world, chimney.x, y, chimney.z, to_block_id(BlockType::Cobblestone));
+    const auto forward = facing_forward(building.facing);
+    const auto right = facing_right(building.facing);
+    const auto forward_x = forward.first;
+    const auto forward_z = forward.second;
+    const auto right_x = right.first;
+    const auto right_z = right.second;
+    const auto column_block = trim_block_for_role(building.role, building.variant_seed);
+    const auto roof_block = roof_block_for_role(building.role, building.variant_seed);
+    const auto portico_y = building.base_y + dimensions.wall_height + 1;
+    const auto half_span = std::min((building.facing == VillageFacing::North || building.facing == VillageFacing::South)
+                                        ? (building.max_x - building.min_x) / 2
+                                        : (building.max_z - building.min_z) / 2,
+                                    building.role == VillageBuildingRole::Lodge ? 5 : 4);
+
+    for (int offset = -half_span; offset <= half_span; offset += 2) {
+        if (std::abs(offset) <= 1) {
+            continue;
+        }
+        const auto column_x = building.door_x + right_x * offset;
+        const auto column_z = building.door_z + right_z * offset;
+        set_block_if_needed(world, column_x, building.base_y, column_z, choose_road_block(hash_coords(column_x, column_z, building.base_y, 617)));
+        clear_column_above(world, column_x, column_z, building.base_y + 1, std::min(portico_y + 2, kWorldMaxY));
+        for (int y = building.base_y + 1; y <= portico_y - 1; ++y) {
+            set_block_if_needed(world, column_x, y, column_z, column_block);
+        }
+        set_block_if_needed(world, column_x, portico_y, column_z, to_block_id(BlockType::Cobblestone));
     }
-    set_block_if_needed(world, chimney.x, chimney_top_y + 1, chimney.z, to_block_id(BlockType::Torch));
+
+    for (int offset = -half_span; offset <= half_span; ++offset) {
+        const auto beam_x = building.door_x + right_x * offset;
+        const auto beam_z = building.door_z + right_z * offset;
+        set_block_if_needed(world, beam_x, portico_y, beam_z, column_block);
+        if ((offset + half_span) % 2 == 0) {
+            set_block_if_needed(world, beam_x, portico_y + 1, beam_z, roof_block);
+        }
+    }
+
+    const auto step_x = building.door_x + forward_x;
+    const auto step_z = building.door_z + forward_z;
+    for (int offset = -1; offset <= 1; ++offset) {
+        set_block_if_needed(
+            world,
+            step_x + right_x * offset,
+            building.base_y,
+            step_z + right_z * offset,
+            to_block_id(BlockType::Stone));
+    }
 }
 
 void build_building(World& world, const StartingVillageBuilding& building, int seed, int salt) {
@@ -1143,7 +1183,8 @@ void build_building(World& world, const StartingVillageBuilding& building, int s
 
     build_upper_walls_and_gables(world, building, wall_block, trim_block);
     build_roof(world, building);
-    build_chimney(world, building);
+    build_roof_acroteria(world, building);
+    build_antique_portico(world, building);
 
     const auto forward = facing_forward(building.facing);
     const auto forward_x = forward.first;
@@ -1194,10 +1235,10 @@ void build_plaza(World& world, const StartingVillageLayout& layout) {
     decorate_green_patch(world, layout.center_x + 6, layout.center_z + 6, 1, layout.base_y, layout.seed, 824);
 
     build_village_well(world, layout.center_x, layout.center_z, layout.base_y, layout.seed);
-    build_lamp_post(world, layout.center_x - 8, layout.center_z, layout.base_y, to_block_id(BlockType::Wood));
-    build_lamp_post(world, layout.center_x + 8, layout.center_z, layout.base_y, to_block_id(BlockType::Wood));
-    build_lamp_post(world, layout.center_x, layout.center_z - 8, layout.base_y, to_block_id(BlockType::Wood));
-    build_lamp_post(world, layout.center_x, layout.center_z + 8, layout.base_y, to_block_id(BlockType::Wood));
+    build_lamp_post(world, layout.center_x - 8, layout.center_z, layout.base_y, to_block_id(BlockType::Stone));
+    build_lamp_post(world, layout.center_x + 8, layout.center_z, layout.base_y, to_block_id(BlockType::Stone));
+    build_lamp_post(world, layout.center_x, layout.center_z - 8, layout.base_y, to_block_id(BlockType::Stone));
+    build_lamp_post(world, layout.center_x, layout.center_z + 8, layout.base_y, to_block_id(BlockType::Stone));
 }
 
 void build_outer_landscape(World& world, const StartingVillageLayout& layout) {

@@ -6,11 +6,14 @@
 #include <doctest/doctest.h>
 #include <glm/geometric.hpp>
 #include <glm/vec2.hpp>
+#include <glm/vec4.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <span>
+#include <vector>
 
 namespace valcraft {
 
@@ -69,6 +72,22 @@ auto make_test_creature(const CreatureSpawnAnchor& anchor, const glm::vec3& posi
     return creature;
 }
 
+auto make_test_resident_anchor(const BlockCoord& ground_block) -> CreatureSpawnAnchor {
+    CreatureSpawnAnchor anchor {};
+    anchor.chunk = {ground_block.x / kChunkSizeX, ground_block.z / kChunkSizeZ};
+    anchor.ground_block = ground_block;
+    anchor.spawn_position = {
+        static_cast<float>(ground_block.x) + 0.5F,
+        static_cast<float>(ground_block.y) + 1.001F,
+        static_cast<float>(ground_block.z) + 0.5F,
+    };
+    anchor.species = CreatureSpecies::Villager;
+    anchor.roam_radius = 12.0F;
+    anchor.patrol_points.fill(anchor.spawn_position);
+    anchor.patrol_point_count = static_cast<std::uint8_t>(anchor.patrol_points.size());
+    return anchor;
+}
+
 auto tile_average_rgba(const std::vector<std::uint8_t>& atlas, CreatureAtlasTile tile) -> std::array<float, 4> {
     const auto coordinates = creature_atlas_tile_coordinates(tile);
     const auto start_x = coordinates[0] * kCreatureAtlasTileSize;
@@ -113,6 +132,120 @@ struct MeshBounds {
     glm::vec3 min {0.0F};
     glm::vec3 max {0.0F};
 };
+
+using PartBounds = MeshBounds;
+
+auto part_bounds(const CreaturePartInstance& part) -> PartBounds {
+    static constexpr std::array<glm::vec3, 8> kCorners {{
+        {-0.5F, -0.5F, -0.5F},
+        {-0.5F, -0.5F, 0.5F},
+        {-0.5F, 0.5F, -0.5F},
+        {-0.5F, 0.5F, 0.5F},
+        {0.5F, -0.5F, -0.5F},
+        {0.5F, -0.5F, 0.5F},
+        {0.5F, 0.5F, -0.5F},
+        {0.5F, 0.5F, 0.5F},
+    }};
+
+    PartBounds bounds {
+        glm::vec3 {std::numeric_limits<float>::max()},
+        glm::vec3 {std::numeric_limits<float>::lowest()},
+    };
+    for (const auto& corner : kCorners) {
+        const auto world_position = part.transform * glm::vec4 {corner, 1.0F};
+        bounds.min.x = std::min(bounds.min.x, world_position.x);
+        bounds.min.y = std::min(bounds.min.y, world_position.y);
+        bounds.min.z = std::min(bounds.min.z, world_position.z);
+        bounds.max.x = std::max(bounds.max.x, world_position.x);
+        bounds.max.y = std::max(bounds.max.y, world_position.y);
+        bounds.max.z = std::max(bounds.max.z, world_position.z);
+    }
+    return bounds;
+}
+
+auto max_vertical_gap_at_z(std::span<const CreaturePartInstance> parts,
+                           float min_y,
+                           float max_y,
+                           float center_z,
+                           float half_depth) -> float {
+    std::vector<std::array<float, 2>> intervals {};
+    for (const auto& part : parts) {
+        const auto bounds = part_bounds(part);
+        if (bounds.max.z < center_z - half_depth ||
+            bounds.min.z > center_z + half_depth ||
+            bounds.max.y < min_y ||
+            bounds.min.y > max_y) {
+            continue;
+        }
+        intervals.push_back({
+            std::max(bounds.min.y, min_y),
+            std::min(bounds.max.y, max_y),
+        });
+    }
+
+    if (intervals.empty()) {
+        return max_y - min_y;
+    }
+
+    std::sort(intervals.begin(), intervals.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs[0] < rhs[0];
+    });
+
+    auto cursor = min_y;
+    auto largest_gap = 0.0F;
+    for (const auto& interval : intervals) {
+        if (interval[0] > cursor) {
+            largest_gap = std::max(largest_gap, interval[0] - cursor);
+        }
+        cursor = std::max(cursor, interval[1]);
+    }
+
+    return std::max(largest_gap, max_y - cursor);
+}
+
+auto max_vertical_gap_at_xz(std::span<const CreaturePartInstance> parts,
+                            float min_y,
+                            float max_y,
+                            float center_x,
+                            float half_width,
+                            float center_z,
+                            float half_depth) -> float {
+    std::vector<std::array<float, 2>> intervals {};
+    for (const auto& part : parts) {
+        const auto bounds = part_bounds(part);
+        if (bounds.max.x < center_x - half_width ||
+            bounds.min.x > center_x + half_width ||
+            bounds.max.z < center_z - half_depth ||
+            bounds.min.z > center_z + half_depth ||
+            bounds.max.y < min_y ||
+            bounds.min.y > max_y) {
+            continue;
+        }
+        intervals.push_back({
+            std::max(bounds.min.y, min_y),
+            std::min(bounds.max.y, max_y),
+        });
+    }
+
+    if (intervals.empty()) {
+        return max_y - min_y;
+    }
+
+    std::sort(intervals.begin(), intervals.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs[0] < rhs[0];
+    });
+
+    auto cursor = min_y;
+    auto largest_gap = 0.0F;
+    for (const auto& interval : intervals) {
+        if (interval[0] > cursor) {
+            largest_gap = std::max(largest_gap, interval[0] - cursor);
+        }
+        cursor = std::max(cursor, interval[1]);
+    }
+
+    return std::max(largest_gap, max_y - cursor);
+}
 
 auto mesh_bounds(const CreatureMeshData& mesh) -> MeshBounds {
     MeshBounds bounds {
@@ -501,6 +634,83 @@ TEST_CASE("creature locomotion keeps body yaw aligned with realised travel direc
     CHECK(glm::dot(travel_direction, facing_direction) > 0.97F);
 }
 
+TEST_CASE("day animals keep their rendered facing direction aligned with every realised step") {
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    struct SpeciesSpawn {
+        CreatureSpecies species;
+        ChunkCoord chunk;
+    };
+
+    const std::array<SpeciesSpawn, 3> species_to_check {{
+        {CreatureSpecies::Cow, {0, 0}},
+        {CreatureSpecies::Pig, {1, 0}},
+        {CreatureSpecies::Sheep, {2, 0}},
+    }};
+
+    for (const auto& spawn : species_to_check) {
+        CreatureSystem system {};
+        World world(90110, 3);
+        test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+        test::make_chunk_surface(world, {1, 0}, 13, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+        test::make_chunk_surface(world, {2, 0}, 52, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+        for (int x = 18; x < 30; x += 3) {
+            add_tree_patch(world, x, 6 + (x % 3), 14);
+        }
+        sculpt_sheep_hills(world, {2, 0}, 52);
+
+        const auto anchor = system.spawn_anchor_for_chunk(world, spawn.chunk);
+        REQUIRE(anchor.has_value());
+        REQUIRE(anchor->species == spawn.species);
+
+        auto creature = make_test_creature(*anchor, anchor->spawn_position);
+        creature.behavior_state = CreatureBehaviorState::Wander;
+        creature.behavior_timer = 3.0F;
+        creature.yaw_radians = -1.45F;
+        creature.wander_heading = 0.15F;
+        creature.motion_amount = 0.0F;
+        system.load_creatures({creature}, environment);
+
+        auto previous_position = system.active_creatures().front().position;
+        int moved_frames = 0;
+        const auto far_player_position = anchor->spawn_position + glm::vec3 {8.0F, 0.0F, 8.0F};
+        for (int frame = 0; frame < 120; ++frame) {
+            system.update(1.0F / 30.0F, world, far_player_position, environment, cycle);
+            const auto active_creatures = system.active_creatures();
+            const auto updated_it = std::find_if(active_creatures.begin(),
+                                                 active_creatures.end(),
+                                                 [&](const CreatureInstance& active) {
+                                                     return active.anchor == *anchor;
+                                                 });
+            REQUIRE(updated_it != active_creatures.end());
+            const auto updated_index = static_cast<std::size_t>(std::distance(active_creatures.begin(), updated_it));
+            REQUIRE(system.render_instances().size() > updated_index);
+
+            const auto& updated = *updated_it;
+            const glm::vec2 displacement {
+                updated.position.x - previous_position.x,
+                updated.position.z - previous_position.z,
+            };
+            const auto distance_squared = glm::dot(displacement, displacement);
+            if (distance_squared > 1.0e-7F) {
+                const auto travel_direction = glm::normalize(displacement);
+                const auto live_facing = yaw_direction(updated.yaw_radians);
+                const auto render_facing = yaw_direction(system.render_instances()[updated_index].yaw_radians);
+                CAPTURE(static_cast<int>(spawn.species));
+                CAPTURE(frame);
+                CHECK(glm::dot(travel_direction, live_facing) > 0.94F);
+                CHECK(glm::dot(travel_direction, render_facing) > 0.94F);
+                ++moved_frames;
+            }
+            previous_position = updated.position;
+        }
+
+        CAPTURE(static_cast<int>(spawn.species));
+        CHECK(moved_frames > 12);
+    }
+}
+
 TEST_CASE("creatures enter chase exactly at 19 and stop attacking immediately at dawn") {
     CreatureSystem system {};
     World world(9002, 1);
@@ -605,6 +815,97 @@ TEST_CASE("night melee attacks emit stable zombie damage and aggressive render s
 
     REQUIRE(attacked);
     CHECK(max_attack_amount > 0.6F);
+}
+
+TEST_CASE("player weapon ray damages and kills targeted creatures") {
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+
+    auto anchor = make_test_resident_anchor({0, 12, 2});
+    anchor.spawn_position = {0.5F, 13.001F, 3.0F};
+    auto villager = make_test_creature(anchor, anchor.spawn_position);
+    villager.health = creature_max_health(CreatureSpecies::Villager);
+    system.load_creatures({villager}, environment);
+
+    const glm::vec3 weapon_origin {0.5F, 13.751F, 0.5F};
+    const glm::vec3 weapon_direction {0.0F, 0.0F, 1.0F};
+    const auto hit = system.try_damage_from_player(weapon_origin, weapon_direction, 4.0F, 5.0F);
+
+    REQUIRE(hit.hit);
+    CHECK_FALSE(hit.killed);
+    CHECK(hit.species == CreatureSpecies::Villager);
+    CHECK(hit.remaining_health == doctest::Approx(creature_max_health(CreatureSpecies::Villager) - 5.0F));
+    CHECK(hit.distance == doctest::Approx(2.5F));
+    REQUIRE(system.active_creatures().size() == 1);
+    CHECK(system.active_creatures().front().health == doctest::Approx(hit.remaining_health));
+    CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Flee);
+
+    const auto kill = system.try_damage_from_player(weapon_origin, weapon_direction, 4.0F, 20.0F);
+
+    REQUIRE(kill.hit);
+    CHECK(kill.killed);
+    CHECK(kill.species == CreatureSpecies::Villager);
+    CHECK(kill.remaining_health == doctest::Approx(0.0F));
+    CHECK(system.active_creatures().empty());
+    CHECK(system.render_instances().empty());
+}
+
+TEST_CASE("player weapon range clipped by a world raycast does not hit creatures behind blocks") {
+    CreatureSystem system {};
+    World world(90041, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    world.set_block(0, 13, 2, to_block_id(BlockType::Stone));
+
+    auto anchor = make_test_resident_anchor({0, 12, 4});
+    anchor.spawn_position = {0.5F, 13.001F, 4.0F};
+    auto villager = make_test_creature(anchor, anchor.spawn_position);
+    villager.health = creature_max_health(CreatureSpecies::Villager);
+    system.load_creatures({villager}, EnvironmentClock::compute_state(12.0F));
+
+    const glm::vec3 weapon_origin {0.5F, 13.751F, 0.5F};
+    const glm::vec3 weapon_direction {0.0F, 0.0F, 1.0F};
+    const auto block_hit = world.raycast(weapon_origin, weapon_direction, 4.0F);
+
+    REQUIRE(block_hit.hit);
+    CHECK(block_hit.block == BlockCoord {0, 13, 2});
+    CHECK(block_hit.distance == doctest::Approx(1.5F));
+    CHECK_FALSE(system.try_damage_from_player(weapon_origin, weapon_direction, block_hit.distance, 6.0F).hit);
+
+    const auto unobstructed_hit = system.try_damage_from_player(weapon_origin, weapon_direction, 4.0F, 6.0F);
+    REQUIRE(unobstructed_hit.hit);
+    CHECK(unobstructed_hit.species == CreatureSpecies::Villager);
+}
+
+TEST_CASE("killed settlement residents do not respawn during the current session") {
+    CreatureSystem system {};
+    World world(90042, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto anchor = make_test_resident_anchor({4, 12, 4});
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    system.set_settlement_residents({anchor});
+
+    auto villager = make_test_creature(anchor, anchor.spawn_position);
+    villager.health = creature_max_health(CreatureSpecies::Villager);
+    system.load_creatures({villager}, environment);
+
+    const glm::vec3 weapon_origin {
+        anchor.spawn_position.x,
+        anchor.spawn_position.y + 0.75F,
+        anchor.spawn_position.z - 2.0F,
+    };
+    const glm::vec3 weapon_direction {0.0F, 0.0F, 1.0F};
+    const auto kill = system.try_damage_from_player(weapon_origin, weapon_direction, 4.0F, 99.0F);
+    REQUIRE(kill.hit);
+    REQUIRE(kill.killed);
+    CHECK(system.active_creatures().empty());
+
+    for (int frame = 0; frame < 8; ++frame) {
+        system.update(1.0F / 60.0F, world, anchor.spawn_position, environment, cycle);
+    }
+    CHECK(system.active_creatures().empty());
+    CHECK(system.render_instances().empty());
 }
 
 TEST_CASE("night melee attacks require the player to stay on the same floor layer") {
@@ -729,6 +1030,57 @@ TEST_CASE("night chase steers around a frontal wall instead of stalling") {
     CHECK(std::abs(updated.position.z - creature_position.z) > 0.10F);
 }
 
+TEST_CASE("settlement residents keep routine behavior until their timer expires") {
+    CreatureSystem system {};
+    World world(90034, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto anchor = make_test_resident_anchor({4, 12, 4});
+    system.set_settlement_residents({anchor});
+
+    const auto environment = EnvironmentClock::compute_state(21.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    auto resident = make_test_creature(anchor, anchor.spawn_position);
+    resident.behavior_state = CreatureBehaviorState::Idle;
+    resident.behavior_timer = 1.0F;
+    resident.yaw_radians = 0.35F;
+    resident.wander_heading = 0.35F;
+    system.load_creatures({resident}, environment);
+
+    constexpr float dt = 1.0F / 60.0F;
+    system.update(dt, world, {12.5F, 13.001F, 12.5F}, environment, cycle);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    const auto& updated = system.active_creatures().front();
+    CHECK(updated.behavior_state == CreatureBehaviorState::Idle);
+    CHECK(updated.behavior_timer == doctest::Approx(1.0F - dt).epsilon(0.001F));
+    CHECK(updated.yaw_radians == doctest::Approx(0.35F).epsilon(0.001F));
+}
+
+TEST_CASE("settlement residents stay on the village floor while steering around obstructions") {
+    CreatureSystem system {};
+    World world(90035, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    auto anchor = make_test_resident_anchor({4, 12, 4});
+    anchor.patrol_points[2] = {12.5F, anchor.spawn_position.y, 4.5F};
+    system.set_settlement_residents({anchor});
+
+    world.set_block(5, 13, 4, to_block_id(BlockType::Stone));
+
+    const auto environment = EnvironmentClock::compute_state(15.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    for (int frame = 0; frame < 210; ++frame) {
+        system.update(1.0F / 60.0F, world, {1.5F, anchor.spawn_position.y, 1.5F}, environment, cycle);
+    }
+
+    REQUIRE(system.active_creatures().size() == 1);
+    const auto& updated = system.active_creatures().front();
+    CHECK(updated.position.y == doctest::Approx(anchor.spawn_position.y).epsilon(0.001F));
+    CHECK(horizontal_distance_squared(updated.position, anchor.spawn_position) > 0.35F);
+    CHECK(std::abs(updated.position.z - anchor.spawn_position.z) > 0.05F);
+}
+
 TEST_CASE("dense grassy spawn regions still cap active creature counts") {
     CreatureSystem system {};
     World world(9004, 4);
@@ -788,11 +1140,16 @@ TEST_CASE("villager atlas and geometry build a readable passive NPC silhouette")
     REQUIRE(atlas.size() == static_cast<std::size_t>(kCreatureAtlasSize * kCreatureAtlasSize * 4));
 
     const auto cloth_average = tile_average_rgba(atlas, CreatureAtlasTile::VillagerCloth);
+    const auto apron_average = tile_average_rgba(atlas, CreatureAtlasTile::VillagerApron);
     const auto skin_average = tile_average_rgba(atlas, CreatureAtlasTile::VillagerSkin);
     const auto hair_average = tile_average_rgba(atlas, CreatureAtlasTile::VillagerHair);
     const auto eye_coverage = tile_alpha_coverage(atlas, CreatureAtlasTile::VillagerEye);
 
-    CHECK(cloth_average[2] > cloth_average[0] + 24.0F);
+    CHECK(cloth_average[0] > 190.0F);
+    CHECK(cloth_average[1] > 175.0F);
+    CHECK(cloth_average[0] > cloth_average[2] + 28.0F);
+    CHECK(apron_average[0] > apron_average[1] + 45.0F);
+    CHECK(apron_average[1] > apron_average[2] + 30.0F);
     CHECK(skin_average[0] > hair_average[0] + 80.0F);
     CHECK(eye_coverage > 0.02F);
     CHECK(eye_coverage < 0.50F);
@@ -817,12 +1174,115 @@ TEST_CASE("villager atlas and geometry build a readable passive NPC silhouette")
     const auto bounds = mesh_bounds(mesh);
 
     CHECK_FALSE(mesh.empty());
-    CHECK(mesh.part_count >= 10);
-    CHECK((bounds.max.y - bounds.min.y) > 1.75F);
-    CHECK((bounds.max.x - bounds.min.x) > 0.30F);
+    CHECK(mesh.part_count >= 18);
+    CHECK((bounds.max.y - bounds.min.y) > 1.95F);
+    CHECK((bounds.max.x - bounds.min.x) > 0.48F);
+    CHECK((bounds.max.z - bounds.min.z) > 0.48F);
+    CHECK(band_depth_span(mesh, 1.55F, 2.05F) > 0.34F);
+    CHECK(band_volume_proxy(mesh, 1.55F, 2.05F) > 0.06F);
     CHECK(band_volume_proxy(mesh, 0.90F, 1.90F) > 0.10F);
     CHECK(all_vertex_attributes_are_bounded(mesh));
     CHECK_FALSE(has_emissive_vertices(mesh));
+}
+
+TEST_CASE("villager walking animation keeps articulated body parts connected") {
+    const std::array<float, 5> animation_times {{0.0F, 0.22F, 0.48F, 0.73F, 1.05F}};
+
+    for (const auto animation_time : animation_times) {
+        const CreatureRenderInstance villager {
+            CreatureSpecies::Villager,
+            {0.0F, 0.0F, 0.0F},
+            0.0F,
+            animation_time,
+            0.0F,
+            1.0F,
+            0.18F,
+            31337U,
+            CreatureBehaviorState::Wander,
+            CreaturePhase::Day,
+            1.0F,
+            0.35F,
+            0.0F,
+        };
+
+        const auto parts = build_creature_parts(villager);
+        CAPTURE(animation_time);
+        CHECK(max_vertical_gap_at_z(std::span<const CreaturePartInstance>(parts.data(), parts.size()),
+                                    0.04F,
+                                    0.66F,
+                                    -0.11F,
+                                    0.08F) < 0.035F);
+        CHECK(max_vertical_gap_at_z(std::span<const CreaturePartInstance>(parts.data(), parts.size()),
+                                    0.04F,
+                                    0.66F,
+                                    0.11F,
+                                    0.08F) < 0.035F);
+        CHECK(max_vertical_gap_at_z(std::span<const CreaturePartInstance>(parts.data(), parts.size()),
+                                    1.43F,
+                                    1.58F,
+                                    0.0F,
+                                    0.10F) < 0.025F);
+    }
+}
+
+TEST_CASE("day animal walking animation keeps quadruped legs attached to the body") {
+    struct LegProbe {
+        CreatureSpecies species;
+        float front_x;
+        float rear_x;
+        float front_z;
+        float rear_z;
+        float max_y;
+    };
+
+    const std::array<LegProbe, 3> probes {{
+        {CreatureSpecies::Pig, 0.18F, -0.22F, 0.14F, 0.15F, 0.70F},
+        {CreatureSpecies::Cow, 0.22F, -0.34F, 0.16F, 0.17F, 0.76F},
+        {CreatureSpecies::Sheep, 0.16F, -0.24F, 0.14F, 0.15F, 0.72F},
+    }};
+    const std::array<float, 5> animation_times {{0.0F, 0.22F, 0.48F, 0.73F, 1.05F}};
+
+    for (const auto& probe : probes) {
+        for (const auto animation_time : animation_times) {
+            const CreatureRenderInstance animal {
+                probe.species,
+                {0.0F, 0.0F, 0.0F},
+                0.0F,
+                animation_time,
+                0.0F,
+                1.0F,
+                0.20F,
+                42420U,
+                CreatureBehaviorState::Wander,
+                CreaturePhase::Day,
+                1.0F,
+                0.25F,
+                0.0F,
+            };
+
+            const auto parts = build_creature_parts(animal);
+            const auto part_span = std::span<const CreaturePartInstance>(parts.data(), parts.size());
+            for (const auto side : std::array<float, 2> {-1.0F, 1.0F}) {
+                CAPTURE(static_cast<int>(probe.species));
+                CAPTURE(animation_time);
+                CAPTURE(side);
+                CHECK(max_vertical_gap_at_xz(part_span,
+                                             0.0F,
+                                             probe.max_y,
+                                             probe.front_x,
+                                             0.18F,
+                                             side * probe.front_z,
+                                             0.075F) < 0.065F);
+                CHECK(max_vertical_gap_at_xz(part_span,
+                                             0.0F,
+                                             probe.max_y,
+                                             probe.rear_x,
+                                             0.18F,
+                                             side * probe.rear_z,
+                                             0.075F) < 0.065F);
+            }
+        }
+    }
 }
 
 TEST_CASE("creature geometry stretches day animals into deterministic long-limbed zombies") {

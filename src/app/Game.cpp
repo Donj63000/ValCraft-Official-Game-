@@ -138,7 +138,7 @@ void apply_window_icon(SDL_Window* window) noexcept {
 } // namespace
 
 Game::Game(GameOptions options)
-    : environment_(options.initial_time_of_day, options.freeze_time || options.smoke_test),
+    : environment_(options.initial_time_of_day, options.freeze_time || options.smoke_test, 1337U),
       renderer_(),
       world_(1337, options.performance.stream_radius),
       options_(std::move(options)) {
@@ -353,6 +353,7 @@ auto Game::initialize() -> bool {
 
     save_root_directory_ = resolve_save_root_directory();
     normalize_inventory_state(inventory_menu_, hotbar_);
+    sync_selected_hotbar_slot();
     inventory_menu_.visible = false;
     inventory_menu_.cursor_x = static_cast<float>(window_width_) * 0.5F;
     inventory_menu_.cursor_y = static_cast<float>(window_height_) * 0.5F;
@@ -701,6 +702,7 @@ void Game::process_events() {
             }
             if (event.button.button == SDL_BUTTON_LEFT) {
                 pending_break_block_ = true;
+                pending_primary_attack_ = true;
                 record_audit_event(
                     AuditEventCategory::InputAction,
                     "primary_action_pressed",
@@ -726,6 +728,7 @@ void Game::process_events() {
         case SDL_MOUSEBUTTONUP:
             if (event.button.button == SDL_BUTTON_LEFT) {
                 pending_break_block_ = false;
+                pending_primary_attack_ = false;
                 player_.cancel_block_breaking();
                 if (mouse_captured_ && !front_end_visible() && !paused_ && !inventory_visible_ && !death_screen_visible_) {
                     record_audit_event(
@@ -1069,6 +1072,39 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
 
         player_.update(input, dt, world_);
 
+        if (!inventory_visible_ && pending_primary_attack_) {
+            pending_primary_attack_ = false;
+            if (const auto weapon = inventory_active_weapon_stats(inventory_menu_, hotbar_); weapon.has_value()) {
+                player_.trigger_primary_action();
+                player_.cancel_block_breaking();
+                pending_break_block_ = false;
+
+                auto weapon_range = weapon->range;
+                const auto block_hit = player_.current_target(world_, weapon_range);
+                if (block_hit.hit) {
+                    weapon_range = std::clamp(block_hit.distance, 0.0F, weapon_range);
+                }
+
+                const auto hit_result = creatures_.try_damage_from_player(
+                    player_.eye_position(),
+                    player_.look_direction(),
+                    weapon_range,
+                    weapon->damage);
+                if (hit_result.hit) {
+                    record_audit_event(
+                        AuditEventCategory::Creatures,
+                        hit_result.killed ? "creature_killed" : "creature_damaged",
+                        hit_result.killed ? AuditSeverity::Warning : AuditSeverity::Info,
+                        audit_json_object({
+                            {"species", audit_json_number(static_cast<int>(hit_result.species))},
+                            {"damage", audit_json_number(hit_result.damage)},
+                            {"remaining_health", audit_json_number(hit_result.remaining_health)},
+                        }),
+                        hit_result.killed ? AuditPriority::High : AuditPriority::Normal);
+                }
+            }
+        }
+
         if (!inventory_visible_ && pending_break_block_) {
             if (const auto broken_block = player_.update_block_breaking(world_, dt, true); broken_block.has_value()) {
                 record_performance_event(
@@ -1107,6 +1143,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         }
         if (inventory_visible_) {
             pending_break_block_ = false;
+            pending_primary_attack_ = false;
             pending_place_block_ = false;
             player_.cancel_block_breaking();
         }
@@ -1266,6 +1303,7 @@ void Game::set_mouse_capture(bool captured) {
     pending_look_y_ = 0.0F;
     if (!captured) {
         pending_break_block_ = false;
+        pending_primary_attack_ = false;
         player_.cancel_block_breaking();
     }
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
@@ -1297,6 +1335,7 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     death_screen_.visible = visible;
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
+    pending_primary_attack_ = false;
     pending_place_block_ = false;
     player_.cancel_block_breaking();
 
@@ -1349,6 +1388,7 @@ void Game::set_paused(bool paused) {
     pause_menu_.selected_action = PauseMenuAction::Resume;
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
+    pending_primary_attack_ = false;
     pending_place_block_ = false;
     player_.cancel_block_breaking();
 
@@ -1387,6 +1427,7 @@ void Game::set_inventory_visible(bool visible) {
     inventory_menu_.visible = visible;
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
+    pending_primary_attack_ = false;
     pending_place_block_ = false;
     player_.cancel_block_breaking();
 
@@ -1764,6 +1805,8 @@ void Game::drop_carried_inventory_stack(bool full_stack) noexcept {
         removed,
         player_.eye_position() + drop_direction * 0.45F + glm::vec3 {0.0F, -0.40F, 0.0F},
         drop_direction * (full_stack ? 3.8F : 2.7F) + glm::vec3 {0.0F, 1.3F, 0.0F});
+    normalize_inventory_state(inventory_menu_, hotbar_);
+    sync_selected_hotbar_slot();
 }
 
 void Game::spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin, const glm::vec3& initial_velocity) noexcept {
@@ -1772,6 +1815,7 @@ void Game::spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin,
 
 void Game::sync_selected_hotbar_slot() noexcept {
     player_.set_selected_block(selected_hotbar_block(hotbar_));
+    player_.set_damage_resistance_percent(inventory_equipment_resistance_percent(inventory_menu_));
 }
 
 void Game::select_hotbar_slot(std::size_t index) noexcept {
@@ -1913,6 +1957,7 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     snapshot.metadata.exists = true;
     snapshot.metadata.seed = world_.seed();
     snapshot.metadata.time_of_day = environment_.time_of_day();
+    snapshot.metadata.weather_time_seconds = environment_.weather_time_seconds();
     snapshot.metadata.modified_chunk_count = static_cast<std::uint32_t>(std::min<std::size_t>(
         snapshot.chunk_snapshots.size(),
         static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
@@ -1948,6 +1993,12 @@ void Game::apply_renderer_options() {
     if (!renderer_.initialize(current_renderer_options())) {
         throw std::runtime_error("Unable to reconfigure renderer options");
     }
+
+    world_.enqueue_loaded_mesh_uploads();
+    renderer_.drain_pending_world_meshes(
+        world_,
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<double>::infinity());
 }
 
 void Game::pump_loading_events() noexcept {
@@ -2110,6 +2161,8 @@ void Game::initialize_preview_world() {
     sync_selected_hotbar_slot();
 
     menu_preview_time_of_day_ = 8.25F;
+    environment_.set_weather_seed(1337U);
+    environment_.set_weather_time_seconds(0.0F);
     sync_menu_preview_environment();
 
     // The main menu only needs a scenic background; building the whole starting
@@ -2274,6 +2327,8 @@ void Game::start_new_game_in_slot(std::size_t slot_index) {
     sync_selected_hotbar_slot();
 
     environment_.set_time_of_day(8.25F);
+    environment_.set_weather_seed(static_cast<std::uint32_t>(seed));
+    environment_.set_weather_time_seconds(0.0F);
     environment_.set_frozen(options_.freeze_time);
     prime_world_around(spawn_position_, "NOUVELLE PARTIE", "CHARGEMENT DES CHUNKS");
     if (!running_) {
@@ -2332,6 +2387,8 @@ void Game::load_snapshot_into_session(const SaveGameSnapshot& snapshot, std::opt
     sync_selected_hotbar_slot();
 
     environment_.set_time_of_day(snapshot.metadata.time_of_day);
+    environment_.set_weather_seed(static_cast<std::uint32_t>(snapshot.metadata.seed));
+    environment_.set_weather_time_seconds(snapshot.metadata.weather_time_seconds);
     environment_.set_frozen(options_.freeze_time);
     prime_world_around(player_.position(), "CHARGEMENT", "RESTAURATION DU MONDE");
     if (!running_) {

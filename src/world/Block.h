@@ -36,6 +36,12 @@ enum class BlockType : BlockId {
     TorchWallPositiveZ = 23,
     TorchWallNegativeZ = 24,
     Glass = 25,
+    Pastron = 26,
+    RoundShield = 27,
+    Sword = 28,
+    Spear = 29,
+    Shoes = 30,
+    Pants = 31,
 };
 
 enum class BlockMeshType : std::uint8_t {
@@ -82,6 +88,7 @@ struct RaycastHit {
     BlockCoord block {};
     BlockCoord adjacent {};
     BlockId block_id = static_cast<BlockId>(BlockType::Air);
+    float distance = 0.0F;
 };
 
 struct ChunkCoordHash {
@@ -201,6 +208,57 @@ inline constexpr auto block_item_id(BlockId block_id) noexcept -> BlockId {
     return is_torch_block(block_id) ? to_block_id(BlockType::Torch) : block_id;
 }
 
+inline constexpr auto is_inventory_only_item(BlockId block_id) noexcept -> bool {
+    block_id = block_item_id(block_id);
+    switch (static_cast<BlockType>(block_id)) {
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+    case BlockType::Shoes:
+    case BlockType::Pants:
+        return true;
+    case BlockType::Air:
+    case BlockType::Grass:
+    case BlockType::Dirt:
+    case BlockType::Stone:
+    case BlockType::Sand:
+    case BlockType::Wood:
+    case BlockType::Leaves:
+    case BlockType::Torch:
+    case BlockType::Cobblestone:
+    case BlockType::Planks:
+    case BlockType::Gravel:
+    case BlockType::MossyStone:
+    case BlockType::Snow:
+    case BlockType::PineWood:
+    case BlockType::PineLeaves:
+    case BlockType::TallGrass:
+    case BlockType::RedFlower:
+    case BlockType::YellowFlower:
+    case BlockType::DeadShrub:
+    case BlockType::Cactus:
+    case BlockType::Water:
+    case BlockType::TorchWallPositiveX:
+    case BlockType::TorchWallNegativeX:
+    case BlockType::TorchWallPositiveZ:
+    case BlockType::TorchWallNegativeZ:
+    case BlockType::Glass:
+    default:
+        return false;
+    }
+}
+
+inline constexpr auto is_weapon_item(BlockId block_id) noexcept -> bool {
+    block_id = block_item_id(block_id);
+    return block_id == to_block_id(BlockType::Sword) || block_id == to_block_id(BlockType::Spear);
+}
+
+inline constexpr auto is_placeable_item(BlockId block_id) noexcept -> bool {
+    block_id = block_item_id(block_id);
+    return block_id != to_block_id(BlockType::Air) && !is_inventory_only_item(block_id);
+}
+
 inline constexpr auto torch_support_offset(BlockId block_id) noexcept -> BlockCoord {
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Torch:
@@ -234,6 +292,12 @@ inline constexpr auto torch_support_offset(BlockId block_id) noexcept -> BlockCo
     case BlockType::Cactus:
     case BlockType::Water:
     case BlockType::Glass:
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+    case BlockType::Shoes:
+    case BlockType::Pants:
     default:
         return {};
     }
@@ -278,6 +342,13 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
         return {false, true, false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     case BlockType::Water:
         return {false, false, false, true, BlockMeshType::Water, static_cast<std::uint8_t>(0)};
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+    case BlockType::Shoes:
+    case BlockType::Pants:
+        return {false, false, false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     case BlockType::Grass:
     case BlockType::Dirt:
     case BlockType::Stone:
@@ -296,7 +367,7 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
 }
 
 inline constexpr auto is_block_solid(BlockId block_id) noexcept -> bool {
-    return block_id != to_block_id(BlockType::Air);
+    return block_properties(block_id).collidable;
 }
 
 inline constexpr auto is_block_opaque(BlockId block_id) noexcept -> bool {
@@ -320,7 +391,7 @@ inline constexpr auto is_block_liquid(BlockId block_id) noexcept -> bool {
 }
 
 inline constexpr auto has_block_mesh(BlockId block_id) noexcept -> bool {
-    return block_id != to_block_id(BlockType::Air);
+    return block_id != to_block_id(BlockType::Air) && !is_inventory_only_item(block_id);
 }
 
 inline constexpr auto is_block_targetable(BlockId block_id) noexcept -> bool {
@@ -374,6 +445,13 @@ inline constexpr auto block_break_duration_seconds(BlockId block_id) noexcept ->
         return 0.42F;
     case BlockType::Water:
         return 0.65F;
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+    case BlockType::Shoes:
+    case BlockType::Pants:
+        return 0.0F;
     default:
         return 0.80F;
     }

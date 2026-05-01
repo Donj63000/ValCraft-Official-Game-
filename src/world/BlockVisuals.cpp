@@ -46,6 +46,10 @@ auto radial_falloff(float x, float y, float center_x, float center_y, float radi
     return saturate(1.0F - distance / std::max(radius, 0.001F));
 }
 
+auto line_mask(float value, float center, float half_width) noexcept -> float {
+    return saturate(1.0F - std::abs(value - center) / std::max(half_width, 0.001F));
+}
+
 auto distance_to_segment(float px, float py, float ax, float ay, float bx, float by) noexcept -> float {
     const auto abx = bx - ax;
     const auto aby = by - ay;
@@ -183,6 +187,94 @@ void blit_packed_tile(std::vector<std::uint8_t>& pixels,
     }
 }
 
+void overwrite_antique_theme_tiles(std::vector<std::uint8_t>& pixels) {
+    fill_tile(pixels, 3, 0, [](int x, int y) {
+        const auto noise = tile_noise(x, y, 103);
+        const auto soft = tile_noise(x + 4, y + 9, 137);
+        const auto vein = line_mask(std::sin((static_cast<float>(x) * 0.62F + static_cast<float>(y) * 0.34F) + soft * 2.4F), 0.0F, 0.12F);
+        const auto chisel = ((x == 0 || y == 0 || x == 15 || y == 15) ? -14.0F : 0.0F) + ((x == 7 || y == 8) ? -5.0F : 0.0F);
+        return make_rgba(
+            194.0F + noise * 28.0F - vein * 22.0F + chisel,
+            184.0F + soft * 26.0F - vein * 18.0F + chisel * 0.75F,
+            162.0F + noise * 18.0F - vein * 12.0F + chisel * 0.45F,
+            255.0F);
+    });
+
+    fill_tile(pixels, 4, 0, [](int x, int y) {
+        const auto noise = tile_noise(x, y, 109);
+        const auto plaster_wave = std::sin(static_cast<float>(x + y) * 0.52F + noise * 3.0F);
+        const auto hairline = line_mask(plaster_wave, 0.0F, 0.055F) * (tile_noise(x + 3, y + 5, 151) > 0.72F ? 1.0F : 0.0F);
+        return make_rgba(
+            214.0F + noise * 24.0F - hairline * 34.0F,
+            198.0F + noise * 19.0F - hairline * 28.0F,
+            162.0F + noise * 14.0F - hairline * 20.0F,
+            255.0F);
+    });
+
+    fill_tile(pixels, 5, 0, [](int x, int y) {
+        const auto block_x = x / 4;
+        const auto block_y = y / 4;
+        const auto mortar = x % 4 == 0 || y % 4 == 0;
+        const auto offset = static_cast<float>((block_x * 17 + block_y * 29) % 19) - 9.0F;
+        const auto chip = tile_noise(x, y, 127) > 0.78F ? tile_noise(x + 11, y + 13, 173) * 18.0F : 0.0F;
+        return make_rgba(
+            176.0F + offset + chip - (mortar ? 34.0F : 0.0F),
+            166.0F + offset * 0.8F + chip * 0.72F - (mortar ? 29.0F : 0.0F),
+            143.0F + offset * 0.55F + chip * 0.42F - (mortar ? 20.0F : 0.0F),
+            255.0F);
+    });
+
+    fill_tile(pixels, 6, 0, [](int x, int y) {
+        const auto pebble = tile_noise(x * 2, y * 2, 131);
+        const auto warm = tile_noise(x + 5, y + 7, 139);
+        const auto edge = ((x + y) % 5 == 0) ? -14.0F : 0.0F;
+        return make_rgba(
+            154.0F + pebble * 50.0F + warm * 10.0F + edge,
+            142.0F + pebble * 42.0F + edge * 0.78F,
+            124.0F + pebble * 32.0F + edge * 0.56F,
+            255.0F);
+    });
+
+    fill_tile(pixels, 7, 0, [](int x, int y) {
+        const auto noise = tile_noise(x, y, 149);
+        const auto patina = tile_noise(x / 2 + 3, y / 2 + 5, 181);
+        const auto growth = patina > 0.54F ? (patina - 0.54F) * 2.1F : 0.0F;
+        const auto crack = line_mask(std::sin(static_cast<float>(x) * 0.70F - static_cast<float>(y) * 0.42F + noise * 2.2F), 0.0F, 0.075F);
+        return make_rgba(
+            168.0F + noise * 22.0F - crack * 24.0F - growth * 34.0F,
+            164.0F + noise * 18.0F - crack * 16.0F + growth * 28.0F,
+            134.0F + noise * 14.0F - crack * 12.0F - growth * 22.0F,
+            255.0F);
+    });
+
+    fill_tile(pixels, 2, 1, [](int x, int y) {
+        const auto tile_row = y / 4;
+        const auto seam = y % 4 == 0 || x == 0 || x == 15;
+        const auto curve = std::sin((static_cast<float>(x) / 15.0F) * kFullTurnRadians) * 8.0F;
+        const auto weathering = tile_noise(x, y + tile_row * 5, 197) * 17.0F;
+        return make_rgba(
+            154.0F + weathering + curve - (seam ? 28.0F : 0.0F),
+            78.0F + weathering * 0.48F - (seam ? 16.0F : 0.0F),
+            42.0F + weathering * 0.26F - (seam ? 8.0F : 0.0F),
+            255.0F);
+    });
+
+    fill_tile(pixels, 1, 4, [](int x, int y) {
+        const auto border = x == 0 || x == 15 || y == 0 || y == 15;
+        const auto lattice = x == 7 || x == 8 || y == 7 || y == 8 ||
+                             (((x + y) % 9) == 0 && (x <= 3 || x >= 12 || y <= 3 || y >= 12));
+        const auto reflection = x <= 3 && y <= 3;
+        if (border || lattice) {
+            const auto bronze_highlight = ((x + y) % 5 == 0) ? 12.0F : 0.0F;
+            return make_rgba(118.0F + bronze_highlight, 78.0F + bronze_highlight * 0.65F, 42.0F + bronze_highlight * 0.35F, 255.0F);
+        }
+        if (reflection) {
+            return make_rgba(118.0F, 158.0F, 194.0F, 196.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+}
+
 } // namespace
 
 auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
@@ -211,6 +303,8 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
 
     blit_packed_tile(pixels, 0, 2, kSnowTopTile);
     blit_packed_tile(pixels, 1, 2, kSnowSideTile);
+
+    overwrite_antique_theme_tiles(pixels);
 
     fill_tile(pixels, 5, 2, [](int x, int y) {
         const auto rib = (x % 4 == 0) ? -18.0F : 0.0F;
@@ -341,6 +435,107 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
             return make_rgba(156.0F + reflection * 0.22F, 196.0F + reflection * 0.30F, 224.0F + reflection * 0.38F, 255.0F);
         }
 
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 2, 4, [](int x, int y) {
+        const auto torso = y >= 2 && y <= 13 && x >= 4 && x <= 11;
+        const auto waist = y >= 10 && y <= 13 && x >= 3 && x <= 12;
+        const auto neck_cut = y <= 4 && x >= 6 && x <= 9;
+        const auto rib = torso && (x == 5 || x == 10 || y == 7);
+        const auto highlight = torso && x <= 6 ? 18.0F : 0.0F;
+        const auto shadow = torso && (x == 11 || y == 13) ? -24.0F : 0.0F;
+        if (rib && !neck_cut) {
+            return make_rgba(218.0F, 154.0F, 74.0F, 255.0F);
+        }
+        if ((torso || waist) && !neck_cut) {
+            return make_rgba(174.0F + highlight + shadow, 112.0F + highlight * 0.45F + shadow * 0.42F, 52.0F + shadow * 0.20F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 3, 4, [](int x, int y) {
+        const auto dx = static_cast<float>(x) - 7.5F;
+        const auto dy = static_cast<float>(y) - 7.5F;
+        const auto distance = std::sqrt(dx * dx + dy * dy);
+        const auto rim = distance <= 7.0F && distance >= 5.6F;
+        const auto face = distance < 5.6F;
+        const auto boss = distance < 2.1F;
+        const auto spoke = (std::abs(x - 7) <= 1 || std::abs(y - 7) <= 1) && face;
+        if (rim) {
+            return make_rgba(196.0F, 138.0F, 58.0F, 255.0F);
+        }
+        if (boss) {
+            return make_rgba(230.0F, 174.0F, 86.0F, 255.0F);
+        }
+        if (spoke) {
+            return make_rgba(132.0F, 82.0F, 38.0F, 255.0F);
+        }
+        if (face) {
+            const auto grain = tile_noise(x, y, 211) * 22.0F;
+            return make_rgba(126.0F + grain, 78.0F + grain * 0.45F, 36.0F + grain * 0.25F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 4, 4, [](int x, int y) {
+        const auto blade_distance = distance_to_segment(static_cast<float>(x), static_cast<float>(y), 4.0F, 13.0F, 11.5F, 2.0F);
+        const auto hilt_distance = distance_to_segment(static_cast<float>(x), static_cast<float>(y), 3.0F, 12.0F, 6.0F, 14.0F);
+        const auto grip = x >= 2 && x <= 5 && y >= 12 && y <= 15;
+        if (blade_distance < 1.15F && y <= 13) {
+            const auto shine = blade_distance < 0.35F ? 30.0F : 0.0F;
+            return make_rgba(176.0F + shine, 184.0F + shine, 186.0F + shine, 255.0F);
+        }
+        if (hilt_distance < 1.0F) {
+            return make_rgba(202.0F, 142.0F, 54.0F, 255.0F);
+        }
+        if (grip) {
+            return make_rgba(82.0F, 48.0F, 24.0F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 5, 4, [](int x, int y) {
+        const auto shaft_distance = distance_to_segment(static_cast<float>(x), static_cast<float>(y), 3.0F, 14.0F, 12.0F, 3.0F);
+        const auto spear_head = y <= 5 && x >= 9 && x <= 14 && (x + y >= 13);
+        const auto butt = x <= 4 && y >= 12;
+        if (spear_head) {
+            const auto edge = x >= 13 || y <= 1 ? 24.0F : 0.0F;
+            return make_rgba(166.0F + edge, 174.0F + edge, 176.0F + edge, 255.0F);
+        }
+        if (shaft_distance < 0.85F) {
+            return make_rgba(118.0F, 74.0F, 34.0F, 255.0F);
+        }
+        if (butt) {
+            return make_rgba(188.0F, 132.0F, 54.0F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 6, 4, [](int x, int y) {
+        const auto left_sole = y >= 10 && y <= 13 && x >= 2 && x <= 7;
+        const auto right_sole = y >= 9 && y <= 12 && x >= 8 && x <= 13;
+        const auto left_strap = left_sole && (x == 4 || y == 11);
+        const auto right_strap = right_sole && (x == 10 || y == 10);
+        if (left_strap || right_strap) {
+            return make_rgba(92.0F, 50.0F, 26.0F, 255.0F);
+        }
+        if (left_sole || right_sole) {
+            const auto grain = tile_noise(x, y, 223) * 12.0F;
+            return make_rgba(142.0F + grain, 86.0F + grain * 0.45F, 42.0F + grain * 0.24F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 7, 4, [](int x, int y) {
+        const auto belt = y >= 2 && y <= 4 && x >= 4 && x <= 11;
+        const auto left_leg = y >= 5 && y <= 14 && x >= 4 && x <= 7;
+        const auto right_leg = y >= 5 && y <= 14 && x >= 8 && x <= 11;
+        const auto seam = y >= 5 && (x == 7 || x == 8);
+        if (belt) {
+            return make_rgba(112.0F, 62.0F, 28.0F, 255.0F);
+        }
+        if (seam) {
+            return make_rgba(58.0F, 72.0F, 88.0F, 255.0F);
+        }
+        if (left_leg || right_leg) {
+            const auto cloth = tile_noise(x, y, 229) * 18.0F;
+            return make_rgba(78.0F + cloth * 0.25F, 92.0F + cloth * 0.55F, 112.0F + cloth, 255.0F);
+        }
         return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
     });
     fill_tile(pixels, 1, 3, [](int x, int y) {

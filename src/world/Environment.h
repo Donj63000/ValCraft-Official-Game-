@@ -2,29 +2,48 @@
 
 #include <glm/vec3.hpp>
 
+#include <cstdint>
+
 namespace valcraft {
+
+enum class WeatherKind : std::uint8_t {
+    Clear = 0,
+    PartlyCloudy = 1,
+    Overcast = 2,
+    LightRain = 3,
+    LightStorm = 4,
+    HeavyStorm = 5,
+    Tempest = 6,
+};
 
 struct EnvironmentState {
     float time_of_day = 8.0F;
+    float weather_time_seconds = 0.0F;
     float daylight_factor = 1.0F;
+    WeatherKind weather = WeatherKind::Clear;
     glm::vec3 sun_direction {0.25F, 0.9F, 0.35F};
     glm::vec3 sun_color {1.0F, 0.95F, 0.82F};
     glm::vec3 ambient_color {0.42F, 0.48F, 0.56F};
-    glm::vec3 fog_color {0.60F, 0.76F, 0.94F};
+    glm::vec3 fog_color {0.52F, 0.68F, 0.86F};
     glm::vec3 sky_color {0.46F, 0.70F, 0.94F};
     glm::vec3 sky_zenith_color {0.38F, 0.66F, 0.98F};
     glm::vec3 sky_horizon_color {0.94F, 0.78F, 0.54F};
     glm::vec3 horizon_glow_color {1.00F, 0.66F, 0.34F};
-    glm::vec3 distant_fog_color {0.70F, 0.80F, 0.94F};
+    glm::vec3 distant_fog_color {0.60F, 0.76F, 0.92F};
     glm::vec3 night_tint_color {0.10F, 0.16F, 0.28F};
     glm::vec3 sun_disk_color {1.00F, 0.86F, 0.56F};
     glm::vec3 moon_disk_color {0.80F, 0.90F, 1.00F};
     float star_intensity = 0.0F;
     float cloud_intensity = 0.22F;
+    float overcast_intensity = 0.0F;
+    float precipitation_intensity = 0.0F;
+    float storm_intensity = 0.0F;
+    float lightning_intensity = 0.0F;
+    float weather_transition_factor = 1.0F;
     float cloud_shadow_strength = 0.18F;
     float wind_strength = 0.26F;
-    float atmospheric_scatter_strength = 0.16F;
-    float height_fog_density = 0.014F;
+    float atmospheric_scatter_strength = 0.070F;
+    float height_fog_density = 0.0025F;
     float exposure = 1.0F;
     float saturation_boost = 1.0F;
     float contrast = 1.0F;
@@ -49,22 +68,29 @@ struct CreatureCycleState {
 
 class EnvironmentClock {
 public:
-    explicit EnvironmentClock(float initial_time_of_day = 8.0F, bool frozen = false);
+    explicit EnvironmentClock(float initial_time_of_day = 8.0F, bool frozen = false, std::uint32_t weather_seed = 1337U);
 
     void update(float dt);
     void set_frozen(bool frozen) noexcept;
     void set_time_of_day(float time_of_day) noexcept;
+    void set_weather_seed(std::uint32_t weather_seed) noexcept;
+    void set_weather_time_seconds(float weather_time_seconds) noexcept;
 
     [[nodiscard]] auto is_frozen() const noexcept -> bool;
     [[nodiscard]] auto time_of_day() const noexcept -> float;
+    [[nodiscard]] auto weather_time_seconds() const noexcept -> float;
     [[nodiscard]] auto current_state() const -> EnvironmentState;
     [[nodiscard]] auto current_creature_cycle() const noexcept -> CreatureCycleState;
     [[nodiscard]] static auto normalize_time_of_day(float time_of_day) noexcept -> float;
     [[nodiscard]] static auto compute_state(float time_of_day) -> EnvironmentState;
+    [[nodiscard]] static auto compute_state(float time_of_day, std::uint32_t weather_seed, float weather_time_seconds)
+        -> EnvironmentState;
     [[nodiscard]] static auto classify_creature_cycle(float time_of_day) noexcept -> CreatureCycleState;
 
 private:
     float time_of_day_ = 8.0F;
+    float weather_time_seconds_ = 0.0F;
+    std::uint32_t weather_seed_ = 1337U;
     bool frozen_ = false;
 };
 

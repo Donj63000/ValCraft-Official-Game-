@@ -4,6 +4,7 @@
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/vec2.hpp>
 
 #include <algorithm>
 #include <array>
@@ -237,6 +238,124 @@ void append_pair(std::vector<CreaturePartInstance>& parts,
     }
 }
 
+auto segment_rotation_z(const glm::vec2& top, const glm::vec2& bottom) noexcept -> float {
+    const auto axis = top - bottom;
+    if (glm::dot(axis, axis) <= 1.0e-8F) {
+        return 0.0F;
+    }
+
+    return std::atan2(-axis.x, axis.y);
+}
+
+void append_limb_segment(std::vector<CreaturePartInstance>& parts,
+                         const glm::mat4& root,
+                         const glm::vec2& top,
+                         const glm::vec2& bottom,
+                         float z,
+                         float half_x,
+                         float half_z,
+                         float overlap,
+                         CreatureAtlasTile tile,
+                         float nightmare_factor,
+                         float tension,
+                         float material_class,
+                         float cavity_mask,
+                         float emissive_strength) {
+    // Je fais legerement chevaucher les segments pour eviter les trous visibles aux articulations.
+    const auto axis = top - bottom;
+    const auto length = glm::length(axis);
+    if (length <= 1.0e-4F) {
+        return;
+    }
+
+    const auto direction = axis / length;
+    const auto adjusted_top = top + direction * overlap;
+    const auto adjusted_bottom = bottom - direction * overlap;
+    const auto adjusted_length = glm::length(adjusted_top - adjusted_bottom);
+    const auto center = (adjusted_top + adjusted_bottom) * 0.5F;
+    append_box(parts,
+               root,
+               glm::vec3 {center.x, center.y, z},
+               glm::vec3 {half_x, adjusted_length * 0.5F, half_z},
+               glm::vec3 {0.0F, 0.0F, segment_rotation_z(adjusted_top, adjusted_bottom)},
+               tile,
+               nightmare_factor,
+               tension,
+               material_class,
+               cavity_mask,
+               emissive_strength);
+}
+
+void append_quadruped_leg(std::vector<CreaturePartInstance>& parts,
+                          const glm::mat4& root,
+                          float anchor_x,
+                          float anchor_y,
+                          float side_z,
+                          float foot_swing,
+                          float knee_bias,
+                          const glm::vec2& upper_half_xz,
+                          const glm::vec2& lower_half_xz,
+                          const glm::vec3& hoof_half,
+                          CreatureAtlasTile upper_tile,
+                          CreatureAtlasTile lower_tile,
+                          CreatureAtlasTile hoof_tile,
+                          float nightmare_factor,
+                          float tension,
+                          float leg_material_class,
+                          float hoof_material_class) {
+    const auto clamped_swing = std::clamp(foot_swing, -0.18F, 0.18F);
+    const auto hoof_top_y = std::max(hoof_half.y * 2.0F - 0.002F, 0.025F);
+    const glm::vec2 hip {anchor_x, anchor_y};
+    const glm::vec2 hoof_top {anchor_x + clamped_swing, hoof_top_y};
+    const auto lift = std::abs(clamped_swing) * 0.12F;
+    const glm::vec2 knee {
+        glm::mix(hip.x, hoof_top.x, 0.54F) + knee_bias,
+        glm::mix(hip.y, hoof_top.y, 0.54F) + lift,
+    };
+    const auto joint_overlap = std::max(0.010F, hoof_half.y * 0.30F);
+
+    append_limb_segment(parts,
+                        root,
+                        hip,
+                        knee,
+                        side_z,
+                        upper_half_xz.x,
+                        upper_half_xz.y,
+                        joint_overlap,
+                        upper_tile,
+                        nightmare_factor,
+                        tension,
+                        leg_material_class,
+                        0.08F,
+                        0.0F);
+    append_limb_segment(parts,
+                        root,
+                        knee,
+                        hoof_top,
+                        side_z,
+                        lower_half_xz.x,
+                        lower_half_xz.y,
+                        joint_overlap,
+                        lower_tile,
+                        nightmare_factor,
+                        tension,
+                        leg_material_class,
+                        0.07F,
+                        0.0F);
+
+    append_box(parts,
+               root,
+               glm::vec3 {hoof_top.x + clamped_swing * 0.10F, hoof_half.y, side_z},
+               hoof_half,
+               glm::vec3 {0.0F, 0.0F, clamped_swing * 0.12F},
+               hoof_tile,
+               nightmare_factor,
+               tension,
+               hoof_material_class,
+               0.03F,
+               0.0F);
+}
+
 auto build_visual_state(const CreatureRenderInstance& creature) noexcept -> CreatureVisualState {
     const auto morph = saturate(creature.morph_factor);
     auto transition = bell_range(morph, 0.50F, 0.38F);
@@ -382,8 +501,6 @@ void append_day_pig(std::vector<CreaturePartInstance>& mesh,
     const auto head_size = (0.15F + seed_detail_unit(creature.appearance_seed, 4) * 0.02F) * scale;
     const auto snout_length = (0.10F + seed_detail_unit(creature.appearance_seed, 5) * 0.02F) * scale;
     const auto ear_height = (0.05F + seed_detail_unit(creature.appearance_seed, 6) * 0.012F) * scale;
-    const auto leg_upper = (0.15F + seed_detail_unit(creature.appearance_seed, 7) * 0.04F) * scale;
-    const auto leg_lower = (0.08F + seed_detail_unit(creature.appearance_seed, 8) * 0.02F) * scale;
     const auto hoof_height = 0.035F * scale;
     const auto ear_tilt = 0.24F + std::sin(creature.animation_time * 4.0F + phase) * 0.10F;
 
@@ -395,6 +512,10 @@ void append_day_pig(std::vector<CreaturePartInstance>& mesh,
                glm::vec3 {body_length * 0.36F, body_height * 0.92F, body_width * 0.96F},
                glm::vec3 {-0.04F, 0.0F, 0.03F}, CreatureAtlasTile::PigHide,
                state.morph, tension, kMaterialHide, 0.18F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.36F, 0.78F + breath * 0.35F - collapse * 0.18F, 0.0F},
+               glm::vec3 {0.075F * scale, 0.105F * scale, body_width * 0.58F},
+               glm::vec3 {head_pitch * 0.25F, head_yaw * 0.20F, -0.03F}, CreatureAtlasTile::PigHide,
+               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
     append_box(mesh, root, glm::vec3 {-0.27F, 0.79F + breath * 0.4F - collapse * 0.25F, 0.0F},
                glm::vec3 {body_length * 0.30F, haunch_height, body_width},
                glm::vec3 {0.05F, 0.0F, -0.02F}, CreatureAtlasTile::PigHide,
@@ -419,37 +540,55 @@ void append_day_pig(std::vector<CreaturePartInstance>& mesh,
                glm::vec3 {head_size * 0.44F, head_size * 0.18F, head_size * 0.36F},
                glm::vec3 {head_pitch * 0.15F, head_yaw, -0.03F}, CreatureAtlasTile::PigBelly,
                state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.70F, 0.84F - collapse * 0.08F, 0.0F}, head_size * 0.62F,
+                glm::vec3 {0.014F * scale, 0.020F * scale, 0.008F * scale},
+                glm::vec3 {0.0F}, glm::vec3 {0.0F},
+                CreatureAtlasTile::PigHoof, state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.88F, 0.71F - collapse * 0.08F, 0.0F}, head_size * 0.28F,
+                glm::vec3 {0.012F * scale, 0.014F * scale, 0.006F * scale},
+                glm::vec3 {0.0F}, glm::vec3 {0.0F},
+                CreatureAtlasTile::PigHoof, state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.59F, 0.97F - collapse * 0.12F, 0.0F}, head_size * 0.46F,
                 glm::vec3 {head_size * 0.18F, ear_height, head_size * 0.12F},
                 glm::vec3 {-0.08F, 0.0F, 0.08F}, glm::vec3 {0.0F, 0.0F, -ear_tilt},
                 CreatureAtlasTile::PigEar, state.morph, tension, kMaterialSkin, 0.05F, 0.0F);
 
     for (const auto side : kSides) {
-        append_box(mesh, root, glm::vec3 {0.18F, hoof_height + leg_lower * 2.0F + leg_upper - collapse * 0.30F, side * 0.14F},
-                   glm::vec3 {0.046F * scale, leg_upper, 0.042F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing}, CreatureAtlasTile::PigHide,
-                   state.morph, tension, kMaterialSkin, 0.08F, 0.0F);
-        append_box(mesh, root, glm::vec3 {0.18F, hoof_height + leg_lower - collapse * 0.30F, side * 0.14F},
-                   glm::vec3 {0.040F * scale, leg_lower, 0.038F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * 0.35F}, CreatureAtlasTile::PigHoof,
-                   state.morph, tension, kMaterialHorn, 0.04F, 0.0F);
-        append_box(mesh, root, glm::vec3 {0.18F, hoof_height * 0.5F - collapse * 0.30F, side * 0.14F},
-                   glm::vec3 {0.048F * scale, hoof_height * 0.5F, 0.044F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * 0.12F}, CreatureAtlasTile::PigHoof,
-                   state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
-
-        append_box(mesh, root, glm::vec3 {-0.22F, hoof_height + leg_lower * 2.0F + leg_upper - collapse * 0.30F, side * 0.15F},
-                   glm::vec3 {0.050F * scale, leg_upper * 1.02F, 0.044F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing}, CreatureAtlasTile::PigHide,
-                   state.morph, tension, kMaterialSkin, 0.08F, 0.0F);
-        append_box(mesh, root, glm::vec3 {-0.22F, hoof_height + leg_lower - collapse * 0.30F, side * 0.15F},
-                   glm::vec3 {0.042F * scale, leg_lower, 0.038F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * 0.35F}, CreatureAtlasTile::PigHoof,
-                   state.morph, tension, kMaterialHorn, 0.04F, 0.0F);
-        append_box(mesh, root, glm::vec3 {-0.22F, hoof_height * 0.5F - collapse * 0.30F, side * 0.15F},
-                   glm::vec3 {0.048F * scale, hoof_height * 0.5F, 0.044F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * 0.12F}, CreatureAtlasTile::PigHoof,
-                   state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
+        const auto side_phase = side > 0.0F ? 1.0F : -1.0F;
+        append_quadruped_leg(mesh,
+                             root,
+                             0.18F,
+                             0.80F + breath * 0.5F - collapse * 0.25F - body_height * 0.92F + 0.026F,
+                             side * 0.14F,
+                             front_swing * side_phase * 0.34F,
+                             -0.020F * scale,
+                             glm::vec2 {0.046F * scale, 0.042F * scale},
+                             glm::vec2 {0.040F * scale, 0.038F * scale},
+                             glm::vec3 {0.052F * scale, hoof_height * 0.56F, 0.046F * scale},
+                             CreatureAtlasTile::PigHide,
+                             CreatureAtlasTile::PigHide,
+                             CreatureAtlasTile::PigHoof,
+                             state.morph,
+                             tension,
+                             kMaterialSkin,
+                             kMaterialHorn);
+        append_quadruped_leg(mesh,
+                             root,
+                             -0.22F,
+                             0.79F + breath * 0.4F - collapse * 0.25F - haunch_height + 0.026F,
+                             side * 0.15F,
+                             rear_swing * side_phase * 0.34F,
+                             0.018F * scale,
+                             glm::vec2 {0.050F * scale, 0.044F * scale},
+                             glm::vec2 {0.042F * scale, 0.038F * scale},
+                             glm::vec3 {0.054F * scale, hoof_height * 0.56F, 0.046F * scale},
+                             CreatureAtlasTile::PigHide,
+                             CreatureAtlasTile::PigHide,
+                             CreatureAtlasTile::PigHoof,
+                             state.morph,
+                             tension,
+                             kMaterialSkin,
+                             kMaterialHorn);
     }
 
     append_box(mesh, root, glm::vec3 {-0.44F, 0.84F - collapse * 0.20F, 0.0F},
@@ -492,8 +631,6 @@ void append_day_cow(std::vector<CreaturePartInstance>& mesh,
     const auto muzzle_length = (0.12F + seed_detail_unit(creature.appearance_seed, 5) * 0.02F) * scale;
     const auto horn_height = (0.11F + seed_detail_unit(creature.appearance_seed, 6) * 0.03F) * scale;
     const auto horn_curl = seed_detail_signed(creature.appearance_seed, 7) * 0.06F;
-    const auto leg_upper = (0.19F + seed_detail_unit(creature.appearance_seed, 8) * 0.05F) * scale;
-    const auto leg_lower = (0.10F + seed_detail_unit(creature.appearance_seed, 9) * 0.02F) * scale;
     const auto hoof_height = 0.040F * scale;
 
     append_box(mesh, root, glm::vec3 {-0.06F, 0.88F + breath - collapse * 0.30F, 0.0F},
@@ -504,6 +641,10 @@ void append_day_cow(std::vector<CreaturePartInstance>& mesh,
                glm::vec3 {torso_length * 0.34F, chest_height, torso_depth * 0.94F},
                glm::vec3 {-0.04F, 0.0F, 0.02F}, CreatureAtlasTile::CowHide,
                state.morph, tension, kMaterialHide, 0.18F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.42F, 0.91F + breath * 0.35F - collapse * 0.18F, 0.0F},
+               glm::vec3 {0.105F * scale, 0.125F * scale, torso_depth * 0.58F},
+               glm::vec3 {head_pitch * 0.22F, head_yaw * 0.18F, -0.025F}, CreatureAtlasTile::CowHide,
+               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
     append_box(mesh, root, glm::vec3 {-0.38F, 0.86F + breath * 0.4F - collapse * 0.24F, 0.0F},
                glm::vec3 {torso_length * 0.24F, torso_height * 0.92F, torso_depth},
                glm::vec3 {0.05F, 0.0F, -0.02F}, CreatureAtlasTile::CowHide,
@@ -528,6 +669,14 @@ void append_day_cow(std::vector<CreaturePartInstance>& mesh,
                glm::vec3 {head_length * 0.34F, head_length * 0.14F, head_length * 0.28F},
                glm::vec3 {head_pitch * 0.10F, head_yaw, -0.02F}, CreatureAtlasTile::CowMuzzle,
                state.morph, tension, kMaterialSkin, 0.12F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.87F, 0.94F - collapse * 0.08F, 0.0F}, head_length * 0.58F,
+                glm::vec3 {0.016F * scale, 0.022F * scale, 0.008F * scale},
+                glm::vec3 {0.0F}, glm::vec3 {0.0F},
+                CreatureAtlasTile::CowHoof, state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {1.10F, 0.80F - collapse * 0.08F, 0.0F}, head_length * 0.30F,
+                glm::vec3 {0.014F * scale, 0.016F * scale, 0.007F * scale},
+                glm::vec3 {0.0F}, glm::vec3 {0.0F},
+                CreatureAtlasTile::CowHoof, state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.76F, 1.13F - collapse * 0.12F, 0.0F}, head_length * 0.56F,
                 glm::vec3 {head_length * 0.10F, head_length * 0.10F, head_length * 0.10F},
                 glm::vec3 {0.02F, 0.0F, 0.10F}, glm::vec3 {0.0F, 0.0F, -0.04F},
@@ -538,31 +687,41 @@ void append_day_cow(std::vector<CreaturePartInstance>& mesh,
                 CreatureAtlasTile::CowHorn, state.morph, tension, kMaterialHorn, 0.06F, 0.0F);
 
     for (const auto side : kSides) {
-        append_box(mesh, root, glm::vec3 {0.22F, hoof_height + leg_lower * 2.0F + leg_upper - collapse * 0.30F, side * 0.16F},
-                   glm::vec3 {0.052F * scale, leg_upper, 0.048F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * side}, CreatureAtlasTile::CowHide,
-                   state.morph, tension, kMaterialSkin, 0.08F, 0.0F);
-        append_box(mesh, root, glm::vec3 {0.22F, hoof_height + leg_lower - collapse * 0.30F, side * 0.16F},
-                   glm::vec3 {0.046F * scale, leg_lower, 0.042F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * side * 0.35F}, CreatureAtlasTile::CowHoof,
-                   state.morph, tension, kMaterialHorn, 0.05F, 0.0F);
-        append_box(mesh, root, glm::vec3 {0.22F, hoof_height * 0.5F - collapse * 0.30F, side * 0.16F},
-                   glm::vec3 {0.060F * scale, hoof_height * 0.5F, 0.050F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * side * 0.12F}, CreatureAtlasTile::CowHoof,
-                   state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
-
-        append_box(mesh, root, glm::vec3 {-0.34F, hoof_height + leg_lower * 2.0F + leg_upper - collapse * 0.30F, side * 0.17F},
-                   glm::vec3 {0.056F * scale, leg_upper * 1.02F, 0.050F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * side}, CreatureAtlasTile::CowHide,
-                   state.morph, tension, kMaterialSkin, 0.08F, 0.0F);
-        append_box(mesh, root, glm::vec3 {-0.34F, hoof_height + leg_lower - collapse * 0.30F, side * 0.17F},
-                   glm::vec3 {0.048F * scale, leg_lower, 0.042F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * side * 0.35F}, CreatureAtlasTile::CowHoof,
-                   state.morph, tension, kMaterialHorn, 0.05F, 0.0F);
-        append_box(mesh, root, glm::vec3 {-0.34F, hoof_height * 0.5F - collapse * 0.30F, side * 0.17F},
-                   glm::vec3 {0.062F * scale, hoof_height * 0.5F, 0.052F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * side * 0.12F}, CreatureAtlasTile::CowHoof,
-                   state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
+        const auto side_phase = side > 0.0F ? 1.0F : -1.0F;
+        append_quadruped_leg(mesh,
+                             root,
+                             0.22F,
+                             0.92F + breath * 0.5F - collapse * 0.24F - chest_height + 0.030F,
+                             side * 0.16F,
+                             front_swing * side_phase * 0.42F,
+                             -0.028F * scale,
+                             glm::vec2 {0.054F * scale, 0.050F * scale},
+                             glm::vec2 {0.048F * scale, 0.044F * scale},
+                             glm::vec3 {0.066F * scale, hoof_height * 0.58F, 0.054F * scale},
+                             CreatureAtlasTile::CowHide,
+                             CreatureAtlasTile::CowHide,
+                             CreatureAtlasTile::CowHoof,
+                             state.morph,
+                             tension,
+                             kMaterialSkin,
+                             kMaterialHorn);
+        append_quadruped_leg(mesh,
+                             root,
+                             -0.34F,
+                             0.86F + breath * 0.4F - collapse * 0.24F - torso_height * 0.92F + 0.030F,
+                             side * 0.17F,
+                             rear_swing * side_phase * 0.42F,
+                             0.026F * scale,
+                             glm::vec2 {0.058F * scale, 0.052F * scale},
+                             glm::vec2 {0.050F * scale, 0.044F * scale},
+                             glm::vec3 {0.068F * scale, hoof_height * 0.58F, 0.056F * scale},
+                             CreatureAtlasTile::CowHide,
+                             CreatureAtlasTile::CowHide,
+                             CreatureAtlasTile::CowHoof,
+                             state.morph,
+                             tension,
+                             kMaterialSkin,
+                             kMaterialHorn);
     }
 
     append_box(mesh, root, glm::vec3 {-0.04F, 0.50F - collapse * 0.28F, 0.0F},
@@ -607,8 +766,6 @@ void append_day_sheep(std::vector<CreaturePartInstance>& mesh,
     const auto fleece_shell = (0.10F + seed_detail_unit(creature.appearance_seed, 4) * 0.03F) * scale;
     const auto head_length = (0.15F + seed_detail_unit(creature.appearance_seed, 5) * 0.02F) * scale;
     const auto muzzle_length = (0.08F + seed_detail_unit(creature.appearance_seed, 6) * 0.02F) * scale;
-    const auto leg_upper = (0.15F + seed_detail_unit(creature.appearance_seed, 7) * 0.03F) * scale;
-    const auto leg_lower = (0.09F + seed_detail_unit(creature.appearance_seed, 8) * 0.02F) * scale;
     const auto hoof_height = 0.032F * scale;
 
     append_box(mesh, root, glm::vec3 {-0.05F, 0.74F + breath - collapse * 0.28F, 0.0F},
@@ -623,6 +780,10 @@ void append_day_sheep(std::vector<CreaturePartInstance>& mesh,
                glm::vec3 {body_length * 0.36F, body_height + fleece_shell * 0.62F, body_depth + fleece_shell * 0.78F},
                glm::vec3 {-0.05F, 0.0F, 0.03F}, CreatureAtlasTile::SheepShadow,
                state.morph, tension, kMaterialWool, 0.14F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.32F, 0.82F + breath * 0.3F - collapse * 0.12F, 0.0F},
+               glm::vec3 {0.090F * scale, 0.115F * scale, body_depth * 0.66F},
+               glm::vec3 {head_pitch * 0.20F, head_yaw * 0.18F, -0.020F}, CreatureAtlasTile::SheepShadow,
+               state.morph, tension, kMaterialWool, 0.12F, 0.0F);
     append_box(mesh, root, glm::vec3 {-0.28F, 0.83F + breath * 0.3F - collapse * 0.16F, 0.0F},
                glm::vec3 {body_length * 0.24F, body_height + fleece_shell * 0.58F, body_depth + fleece_shell * 0.82F},
                glm::vec3 {0.05F, 0.0F, -0.02F}, CreatureAtlasTile::SheepShadow,
@@ -639,37 +800,55 @@ void append_day_sheep(std::vector<CreaturePartInstance>& mesh,
                glm::vec3 {muzzle_length, head_length * 0.18F, head_length * 0.26F},
                glm::vec3 {head_pitch * 0.35F, head_yaw, 0.0F}, CreatureAtlasTile::SheepFace,
                state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.56F, 0.81F - collapse * 0.08F, 0.0F}, head_length * 0.48F,
+                glm::vec3 {0.012F * scale, 0.018F * scale, 0.006F * scale},
+                glm::vec3 {0.0F}, glm::vec3 {0.0F},
+                CreatureAtlasTile::SheepHoof, state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {0.72F, 0.71F - collapse * 0.08F, 0.0F}, head_length * 0.22F,
+                glm::vec3 {0.010F * scale, 0.012F * scale, 0.005F * scale},
+                glm::vec3 {0.0F}, glm::vec3 {0.0F},
+                CreatureAtlasTile::SheepHoof, state.morph, tension, kMaterialHorn, 0.02F, 0.0F);
     append_pair(mesh, root, glm::vec3 {0.45F, 0.88F - collapse * 0.08F, 0.0F}, head_length * 0.50F,
                 glm::vec3 {head_length * 0.16F, head_length * 0.08F, head_length * 0.10F},
                 glm::vec3 {0.02F, 0.0F, 0.10F}, glm::vec3 {0.0F, 0.0F, -0.04F},
                 CreatureAtlasTile::SheepFace, state.morph, tension, kMaterialSkin, 0.05F, 0.0F);
 
     for (const auto side : kSides) {
-        append_box(mesh, root, glm::vec3 {0.16F, hoof_height + leg_lower * 2.0F + leg_upper - collapse * 0.28F, side * 0.14F},
-                   glm::vec3 {0.042F * scale, leg_upper, 0.040F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * side}, CreatureAtlasTile::SheepFace,
-                   state.morph, tension, kMaterialSkin, 0.06F, 0.0F);
-        append_box(mesh, root, glm::vec3 {0.16F, hoof_height + leg_lower - collapse * 0.28F, side * 0.14F},
-                   glm::vec3 {0.040F * scale, leg_lower, 0.038F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * side * 0.35F}, CreatureAtlasTile::SheepFace,
-                   state.morph, tension, kMaterialSkin, 0.05F, 0.0F);
-        append_box(mesh, root, glm::vec3 {0.16F, hoof_height * 0.5F - collapse * 0.28F, side * 0.14F},
-                   glm::vec3 {0.046F * scale, hoof_height * 0.5F, 0.042F * scale},
-                   glm::vec3 {0.0F, 0.0F, front_swing * side * 0.10F}, CreatureAtlasTile::SheepHoof,
-                   state.morph, tension, kMaterialHorn, 0.03F, 0.0F);
-
-        append_box(mesh, root, glm::vec3 {-0.24F, hoof_height + leg_lower * 2.0F + leg_upper - collapse * 0.28F, side * 0.15F},
-                   glm::vec3 {0.044F * scale, leg_upper * 1.02F, 0.040F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * side}, CreatureAtlasTile::SheepFace,
-                   state.morph, tension, kMaterialSkin, 0.06F, 0.0F);
-        append_box(mesh, root, glm::vec3 {-0.24F, hoof_height + leg_lower - collapse * 0.28F, side * 0.15F},
-                   glm::vec3 {0.040F * scale, leg_lower, 0.038F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * side * 0.35F}, CreatureAtlasTile::SheepFace,
-                   state.morph, tension, kMaterialSkin, 0.05F, 0.0F);
-        append_box(mesh, root, glm::vec3 {-0.24F, hoof_height * 0.5F - collapse * 0.28F, side * 0.15F},
-                   glm::vec3 {0.046F * scale, hoof_height * 0.5F, 0.042F * scale},
-                   glm::vec3 {0.0F, 0.0F, rear_swing * side * 0.10F}, CreatureAtlasTile::SheepHoof,
-                   state.morph, tension, kMaterialHorn, 0.03F, 0.0F);
+        const auto side_phase = side > 0.0F ? 1.0F : -1.0F;
+        append_quadruped_leg(mesh,
+                             root,
+                             0.16F,
+                             0.84F + breath * 0.3F - collapse * 0.16F - (body_height + fleece_shell * 0.62F) + 0.026F,
+                             side * 0.14F,
+                             front_swing * side_phase * 0.38F,
+                             -0.018F * scale,
+                             glm::vec2 {0.044F * scale, 0.042F * scale},
+                             glm::vec2 {0.040F * scale, 0.038F * scale},
+                             glm::vec3 {0.050F * scale, hoof_height * 0.56F, 0.044F * scale},
+                             CreatureAtlasTile::SheepFace,
+                             CreatureAtlasTile::SheepFace,
+                             CreatureAtlasTile::SheepHoof,
+                             state.morph,
+                             tension,
+                             kMaterialSkin,
+                             kMaterialHorn);
+        append_quadruped_leg(mesh,
+                             root,
+                             -0.24F,
+                             0.83F + breath * 0.3F - collapse * 0.16F - (body_height + fleece_shell * 0.58F) + 0.026F,
+                             side * 0.15F,
+                             rear_swing * side_phase * 0.38F,
+                             0.018F * scale,
+                             glm::vec2 {0.046F * scale, 0.042F * scale},
+                             glm::vec2 {0.040F * scale, 0.038F * scale},
+                             glm::vec3 {0.052F * scale, hoof_height * 0.56F, 0.044F * scale},
+                             CreatureAtlasTile::SheepFace,
+                             CreatureAtlasTile::SheepFace,
+                             CreatureAtlasTile::SheepHoof,
+                             state.morph,
+                             tension,
+                             kMaterialSkin,
+                             kMaterialHorn);
     }
 
     append_box(mesh, root, glm::vec3 {-0.45F, 0.88F - collapse * 0.16F, 0.0F},
@@ -1072,70 +1251,145 @@ void append_day_villager(std::vector<CreaturePartInstance>& mesh,
     const auto gaze = saturate(creature.gaze_weight);
     const auto tension = saturate(creature.tension);
     const auto phase = seed_unit(creature.appearance_seed, 22) * kTwoPi;
-    const auto stride = std::sin(creature.animation_time * (4.8F + motion * 3.6F) + phase);
+    const auto stride_wave = std::sin(creature.animation_time * (4.8F + motion * 3.6F) + phase);
+    const auto stride = stride_wave * motion;
     const auto breath = std::sin(creature.animation_time * 2.0F + phase * 0.35F) * 0.018F;
-    const auto body_bob = motion * 0.02F * std::sin(creature.animation_time * 9.0F + phase);
-    const auto head_pitch = 0.02F + gaze * 0.08F;
-    const auto head_yaw = std::sin(creature.animation_time * 1.4F + phase) * 0.04F + gaze * 0.14F;
-    const auto arm_swing = stride * (0.18F + motion * 0.16F);
-    const auto leg_swing = -stride * (0.24F + motion * 0.18F);
-    const auto scale = 0.96F + seed_detail_signed(creature.appearance_seed, 1) * 0.05F;
-    const auto shoulder_span = 0.18F * scale;
-    const auto hip_span = 0.11F * scale;
+    const auto body_bob = motion * 0.012F * std::sin(creature.animation_time * 8.0F + phase);
+    const auto head_pitch = 0.012F + gaze * 0.045F;
+    const auto head_yaw = std::sin(creature.animation_time * 1.2F + phase) * 0.025F + gaze * 0.070F;
+    const auto arm_swing = stride * (0.10F + motion * 0.08F);
+    const auto folded_sway = stride * motion * 0.035F;
+    const auto scale = 0.98F + seed_detail_signed(creature.appearance_seed, 1) * 0.035F;
+    const auto hip_span = 0.108F * scale;
     const auto torso_half = glm::vec3 {
-        (0.13F + seed_detail_unit(creature.appearance_seed, 2) * 0.01F) * scale,
-        (0.32F + seed_detail_unit(creature.appearance_seed, 3) * 0.03F) * scale,
-        (0.09F + seed_detail_unit(creature.appearance_seed, 4) * 0.01F) * scale,
+        (0.155F + seed_detail_unit(creature.appearance_seed, 2) * 0.010F) * scale,
+        (0.365F + seed_detail_unit(creature.appearance_seed, 3) * 0.025F) * scale,
+        (0.112F + seed_detail_unit(creature.appearance_seed, 4) * 0.012F) * scale,
     };
     const auto head_half = glm::vec3 {
-        (0.14F + seed_detail_unit(creature.appearance_seed, 5) * 0.01F) * scale,
-        (0.16F + seed_detail_unit(creature.appearance_seed, 6) * 0.01F) * scale,
-        (0.14F + seed_detail_unit(creature.appearance_seed, 7) * 0.01F) * scale,
+        (0.180F + seed_detail_unit(creature.appearance_seed, 5) * 0.012F) * scale,
+        (0.200F + seed_detail_unit(creature.appearance_seed, 6) * 0.012F) * scale,
+        (0.180F + seed_detail_unit(creature.appearance_seed, 7) * 0.012F) * scale,
     };
-    const auto upper_arm_half = glm::vec3 {0.050F * scale, 0.20F * scale, 0.050F * scale};
-    const auto lower_arm_half = glm::vec3 {0.042F * scale, 0.18F * scale, 0.042F * scale};
-    const auto upper_leg_half = glm::vec3 {0.055F * scale, 0.22F * scale, 0.055F * scale};
-    const auto lower_leg_half = glm::vec3 {0.050F * scale, 0.20F * scale, 0.050F * scale};
-    const auto apron_half = glm::vec3 {torso_half.x * 0.86F, torso_half.y * 0.78F, torso_half.z * 0.14F};
-    const auto hair_half = glm::vec3 {head_half.x * 1.02F, head_half.y * 0.26F, head_half.z * 1.02F};
-    const auto nose_half = glm::vec3 {0.050F * scale, 0.070F * scale, 0.034F * scale};
+    const auto neck_half = glm::vec3 {0.070F * scale, 0.066F * scale, 0.070F * scale};
+    const auto robe_half = glm::vec3 {torso_half.x * 1.06F, 0.292F * scale, torso_half.z * 1.16F};
+    const auto front_apron_half = glm::vec3 {0.028F * scale, torso_half.y * 0.88F, torso_half.z * 0.86F};
+    const auto belt_half = glm::vec3 {torso_half.x * 1.09F, 0.026F * scale, torso_half.z * 1.20F};
+    const auto hem_half = glm::vec3 {robe_half.x * 1.02F, 0.026F * scale, robe_half.z * 1.04F};
+    const auto hair_half = glm::vec3 {head_half.x * 1.04F, 0.055F * scale, head_half.z * 1.04F};
+    const auto brow_half = glm::vec3 {0.014F * scale, 0.022F * scale, head_half.z * 0.72F};
+    const auto nose_half = glm::vec3 {0.070F * scale, 0.075F * scale, 0.046F * scale};
+    const auto upper_arm_half = glm::vec3 {0.058F * scale, 0.225F * scale, 0.058F * scale};
+    const auto folded_arm_half = glm::vec3 {0.050F * scale, 0.055F * scale, 0.210F * scale};
+    const auto hand_half = glm::vec3 {0.038F * scale, 0.052F * scale, 0.050F * scale};
+    const auto upper_leg_half_xz = glm::vec2 {0.061F * scale, 0.058F * scale};
+    const auto lower_leg_half_xz = glm::vec2 {0.056F * scale, 0.054F * scale};
+    const auto foot_half = glm::vec3 {0.086F * scale, 0.048F * scale, 0.060F * scale};
+    const auto shoulder_span = torso_half.z + upper_arm_half.z * 0.78F;
 
     append_box(mesh, root, glm::vec3 {0.0F, 1.12F + breath + body_bob, 0.0F},
                torso_half, glm::vec3 {0.01F, 0.0F, 0.02F}, CreatureAtlasTile::VillagerCloth,
                state.morph, tension, kMaterialHide, 0.14F, 0.0F);
-    append_box(mesh, root, glm::vec3 {0.0F, 1.02F + breath + body_bob, torso_half.z + apron_half.z * 0.72F},
-               apron_half, glm::vec3 {0.02F, 0.0F, 0.0F}, CreatureAtlasTile::VillagerApron,
+    append_box(mesh, root, glm::vec3 {-0.02F, 0.70F + breath + body_bob, 0.0F},
+               robe_half, glm::vec3 {0.0F, 0.0F, 0.0F}, CreatureAtlasTile::VillagerCloth,
+               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+    append_box(mesh, root, glm::vec3 {torso_half.x + front_apron_half.x * 0.80F, 1.08F + breath + body_bob, 0.0F},
+               front_apron_half, glm::vec3 {0.0F, 0.0F, 0.0F}, CreatureAtlasTile::VillagerApron,
                state.morph, tension, kMaterialTransitionHide, 0.06F, 0.0F);
-    append_box(mesh, root, glm::vec3 {0.0F, 1.76F + breath * 0.4F + body_bob, 0.0F},
+    append_box(mesh, root, glm::vec3 {0.0F, 0.98F + breath + body_bob, 0.0F},
+               belt_half, glm::vec3 {0.0F, 0.0F, 0.0F}, CreatureAtlasTile::VillagerApron,
+               state.morph, tension, kMaterialTransitionHide, 0.08F, 0.0F);
+    append_box(mesh, root, glm::vec3 {-0.02F, 0.405F + body_bob, 0.0F},
+               hem_half, glm::vec3 {0.0F, 0.0F, 0.0F}, CreatureAtlasTile::VillagerApron,
+               state.morph, tension, kMaterialTransitionHide, 0.06F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.03F * scale, 1.515F + breath * 0.28F + body_bob, 0.0F},
+               neck_half, glm::vec3 {0.0F, head_yaw * 0.3F, 0.0F}, CreatureAtlasTile::VillagerSkin,
+               state.morph, tension, kMaterialSkin, 0.08F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.05F * scale, 1.72F + breath * 0.35F + body_bob, 0.0F},
                head_half, glm::vec3 {head_pitch, head_yaw, 0.0F}, CreatureAtlasTile::VillagerSkin,
                state.morph, tension, kMaterialSkin, 0.12F, 0.0F);
-    append_box(mesh, root, glm::vec3 {0.0F, 1.94F + body_bob, 0.0F},
-               hair_half, glm::vec3 {head_pitch * 0.3F, head_yaw, 0.0F}, CreatureAtlasTile::VillagerHair,
+    append_box(mesh, root, glm::vec3 {0.05F * scale, 1.95F + body_bob, 0.0F},
+               hair_half, glm::vec3 {head_pitch * 0.18F, head_yaw, 0.0F}, CreatureAtlasTile::VillagerHair,
                state.morph, tension, kMaterialKeratin, 0.08F, 0.0F);
-    append_box(mesh, root, glm::vec3 {0.17F * scale, 1.72F + body_bob, 0.0F},
+    append_box(mesh, root, glm::vec3 {0.05F * scale + head_half.x + brow_half.x * 0.95F, 1.82F + body_bob, 0.0F},
+               brow_half, glm::vec3 {head_pitch * 0.18F, head_yaw, 0.0F}, CreatureAtlasTile::VillagerHair,
+               state.morph, tension, kMaterialKeratin, 0.10F, 0.0F);
+    append_box(mesh, root, glm::vec3 {0.05F * scale + head_half.x + nose_half.x * 0.68F, 1.68F + body_bob, 0.0F},
                nose_half, glm::vec3 {head_pitch * 0.7F, head_yaw, 0.0F}, CreatureAtlasTile::VillagerSkin,
                state.morph, tension, kMaterialSkin, 0.04F, 0.0F);
-    append_pair(mesh, root, glm::vec3 {0.13F * scale, 1.80F + body_bob, 0.0F}, 0.07F * scale,
-                glm::vec3 {0.014F * scale, 0.030F * scale, 0.012F * scale},
+    append_pair(mesh, root, glm::vec3 {0.05F * scale + head_half.x + 0.016F * scale, 1.77F + body_bob, 0.0F}, 0.082F * scale,
+                glm::vec3 {0.016F * scale, 0.032F * scale, 0.013F * scale},
                 glm::vec3 {head_pitch * 0.3F, head_yaw, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.01F},
                 CreatureAtlasTile::VillagerEye, state.morph, tension, kMaterialSkin, 0.88F, 0.0F);
 
-    append_pair(mesh, root, glm::vec3 {0.02F, 1.14F + body_bob, 0.0F}, shoulder_span,
+    append_pair(mesh, root, glm::vec3 {0.0F, 1.17F + body_bob, 0.0F}, shoulder_span,
                 upper_arm_half,
-                glm::vec3 {0.0F, 0.0F, -0.10F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.02F},
+                glm::vec3 {0.0F, 0.0F, -0.05F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.025F},
                 CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.12F, 0.0F);
-    append_pair(mesh, root, glm::vec3 {0.06F, 0.70F + body_bob, 0.0F}, shoulder_span,
-                lower_arm_half,
-                glm::vec3 {0.02F, 0.0F, -0.16F + arm_swing * 0.78F}, glm::vec3 {0.0F, 0.0F, 0.02F},
+    append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.19F + body_bob, 0.055F * scale + folded_sway},
+               folded_arm_half, glm::vec3 {0.0F, 0.0F, 0.12F}, CreatureAtlasTile::VillagerCloth,
+               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+    append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.10F + body_bob, -0.055F * scale - folded_sway},
+               folded_arm_half, glm::vec3 {0.0F, 0.0F, -0.12F}, CreatureAtlasTile::VillagerCloth,
+               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+    append_pair(mesh, root, glm::vec3 {torso_half.x + 0.105F * scale, 1.14F + body_bob, 0.0F}, 0.115F * scale,
+                hand_half,
+                glm::vec3 {0.0F, 0.0F, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.04F},
                 CreatureAtlasTile::VillagerSkin, state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
-    append_pair(mesh, root, glm::vec3 {-0.01F, 0.68F + body_bob, 0.0F}, hip_span,
-                upper_leg_half,
-                glm::vec3 {0.0F, 0.0F, leg_swing}, glm::vec3 {0.0F, 0.0F, -0.02F},
-                CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.10F, 0.0F);
-    append_pair(mesh, root, glm::vec3 {0.08F, 0.20F + body_bob, 0.0F}, hip_span,
-                lower_leg_half,
-                glm::vec3 {0.04F, 0.0F, leg_swing * 0.84F}, glm::vec3 {0.0F, 0.0F, -0.01F},
-                CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.10F, 0.0F);
+
+    const auto upper_leg_length = 0.280F * scale;
+    const auto lower_leg_length = 0.300F * scale;
+    const auto joint_overlap = 0.020F * scale;
+    for (const auto side : kSides) {
+        const auto leg_phase = stride * side;
+        const auto thigh_angle = leg_phase * (0.11F + motion * 0.13F);
+        const auto knee_bend = (0.030F + motion * 0.090F) * (0.62F + 0.38F * smoothstep01((leg_phase + 1.0F) * 0.5F));
+        const auto shin_angle = thigh_angle * 0.40F - knee_bend;
+        const glm::vec2 hip {-0.025F * scale, 0.642F * scale + body_bob};
+        const auto knee = hip + glm::vec2 {std::sin(thigh_angle) * upper_leg_length, -std::cos(thigh_angle) * upper_leg_length};
+        const auto ankle = knee + glm::vec2 {std::sin(shin_angle) * lower_leg_length, -std::cos(shin_angle) * lower_leg_length};
+        const auto leg_z = side * hip_span;
+
+        append_limb_segment(mesh,
+                            root,
+                            hip,
+                            knee,
+                            leg_z,
+                            upper_leg_half_xz.x,
+                            upper_leg_half_xz.y,
+                            joint_overlap,
+                            CreatureAtlasTile::VillagerCloth,
+                            state.morph,
+                            tension,
+                            kMaterialHide,
+                            0.10F,
+                            0.0F);
+        append_limb_segment(mesh,
+                            root,
+                            knee,
+                            ankle,
+                            leg_z,
+                            lower_leg_half_xz.x,
+                            lower_leg_half_xz.y,
+                            joint_overlap,
+                            CreatureAtlasTile::VillagerSkin,
+                            state.morph,
+                            tension,
+                            kMaterialSkin,
+                            0.08F,
+                            0.0F);
+        append_box(mesh,
+                   root,
+                   glm::vec3 {ankle.x + (0.040F + motion * 0.020F) * scale, foot_half.y * 0.95F, leg_z},
+                   foot_half,
+                   glm::vec3 {0.0F, 0.0F, thigh_angle * 0.18F},
+                   CreatureAtlasTile::VillagerHair,
+                   state.morph,
+                   tension,
+                   kMaterialKeratin,
+                   0.08F,
+                   0.0F);
+    }
 }
 
 auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std::array<std::uint8_t, 4> {
@@ -1335,9 +1589,10 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
     }
     case CreatureAtlasTile::VillagerCloth: {
         const auto weave = 0.5F + 0.5F * std::sin(nx * 12.0F + ny * 7.0F + grain * 5.0F);
-        return make_rgba(76.0F + weave * 26.0F,
-                         112.0F + soft_grain * 20.0F,
-                         148.0F + weave * 34.0F + grain * 10.0F,
+        const auto fold = line_mask(nx + ny * 0.22F, 0.54F, 0.055F) + line_mask(nx - ny * 0.18F, 0.28F, 0.045F);
+        return make_rgba(218.0F + weave * 18.0F - fold * 18.0F,
+                         204.0F + soft_grain * 16.0F - fold * 12.0F,
+                         172.0F + weave * 12.0F + grain * 6.0F - fold * 8.0F,
                          0.0F);
     }
     case CreatureAtlasTile::VillagerSkin: {
@@ -1355,10 +1610,12 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
                          0.0F);
     }
     case CreatureAtlasTile::VillagerApron: {
-        const auto seam = line_mask(nx, 0.50F, 0.04F) * line_mask(ny, 0.52F, 0.32F);
-        return make_rgba(188.0F + grain * 12.0F - seam * 18.0F,
-                         176.0F + soft_grain * 10.0F - seam * 14.0F,
-                         146.0F + grain * 10.0F - seam * 10.0F,
+        const auto border = edge < 0.12F ? 1.0F : 0.0F;
+        const auto stripe = line_mask(nx, 0.50F, 0.04F) * line_mask(ny, 0.52F, 0.36F);
+        const auto woven = 0.5F + 0.5F * std::sin((nx * 9.0F - ny * 7.0F) + grain * 5.0F);
+        return make_rgba(172.0F + grain * 22.0F + woven * 16.0F - stripe * 28.0F - border * 20.0F,
+                         94.0F + soft_grain * 16.0F + woven * 8.0F - stripe * 16.0F - border * 10.0F,
+                         46.0F + grain * 8.0F + woven * 4.0F - stripe * 8.0F,
                          0.0F);
     }
     case CreatureAtlasTile::VillagerEye: {

@@ -259,6 +259,7 @@ private:
     bool inventory_visible_ = false;
     bool pending_toggle_fly_ = false;
     bool pending_break_block_ = false;
+    bool pending_primary_attack_ = false;
     bool pending_place_block_ = false;
     float pending_look_x_ = 0.0F;
     float pending_look_y_ = 0.0F;

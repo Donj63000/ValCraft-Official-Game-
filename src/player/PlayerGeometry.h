@@ -2,6 +2,7 @@
 
 #include "creatures/CreatureGeometry.h"
 #include "gameplay/PlayerController.h"
+#include "world/Block.h"
 
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
@@ -12,9 +13,9 @@
 
 namespace valcraft {
 
-constexpr int kPlayerAtlasSize = 64;
+constexpr int kPlayerAtlasSize = 128;
 constexpr int kPlayerAtlasTileSize = 16;
-constexpr float kPlayerAtlasTilesPerAxis = 4.0F;
+constexpr float kPlayerAtlasTilesPerAxis = 8.0F;
 
 enum class PlayerAtlasTile : std::uint8_t {
     Skin = 0,
@@ -33,7 +34,12 @@ enum class PlayerAtlasTile : std::uint8_t {
     Sleeve = 13,
     Belt = 14,
     Face = 15,
-    Count = 16,
+    SwordBlade = 16,
+    SwordEdge = 17,
+    SwordGuard = 18,
+    SwordGrip = 19,
+    SwordPommel = 20,
+    Count = 21,
 };
 
 enum class PlayerMeshView : std::uint8_t {
@@ -74,9 +80,11 @@ struct PlayerViewModelParts {
 [[nodiscard]] auto player_atlas_tile_coordinates(PlayerAtlasTile tile) noexcept -> std::array<int, 2>;
 [[nodiscard]] auto build_player_atlas_pixels() -> std::vector<std::uint8_t>;
 [[nodiscard]] auto build_player_world_avatar_parts(const PlayerController& player) -> std::vector<CreaturePartInstance>;
-[[nodiscard]] auto build_player_viewmodel_parts(const PlayerController& player) -> PlayerViewModelParts;
+[[nodiscard]] auto build_player_viewmodel_parts(const PlayerController& player,
+                                                BlockId held_item = to_block_id(BlockType::Air)) -> PlayerViewModelParts;
 [[nodiscard]] auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData;
-[[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player) -> PlayerViewModelMesh;
+[[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player,
+                                               BlockId held_item = to_block_id(BlockType::Air)) -> PlayerViewModelMesh;
 [[nodiscard]] auto build_player_mesh(const PlayerController& player,
                                      PlayerMeshView view = PlayerMeshView::FirstPerson) -> CreatureMeshData;
 

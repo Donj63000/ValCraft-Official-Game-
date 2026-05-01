@@ -12,6 +12,10 @@ namespace valcraft {
 constexpr std::size_t kHotbarSlotCount = 9;
 constexpr std::uint8_t kMaxItemStackCount = 64;
 
+inline constexpr auto max_item_stack_count(BlockId block_id) noexcept -> std::uint8_t {
+    return is_inventory_only_item(block_id) ? static_cast<std::uint8_t>(1U) : kMaxItemStackCount;
+}
+
 struct HotbarSlot {
     BlockId block_id = to_block_id(BlockType::Air);
     std::uint8_t count = 0;
@@ -35,7 +39,8 @@ inline constexpr auto make_item_stack(BlockId block_id, std::uint8_t count) noex
     if (block_id == to_block_id(BlockType::Air) || count == 0) {
         return {};
     }
-    return {block_id, static_cast<std::uint8_t>(count > kMaxItemStackCount ? kMaxItemStackCount : count)};
+    const auto max_count = max_item_stack_count(block_id);
+    return {block_id, static_cast<std::uint8_t>(count > max_count ? max_count : count)};
 }
 
 inline constexpr auto empty_item_stack() noexcept -> HotbarSlot {
@@ -52,8 +57,9 @@ inline constexpr void normalize_item_stack(HotbarSlot& slot) noexcept {
         return;
     }
     slot.block_id = block_item_id(slot.block_id);
-    if (slot.count > kMaxItemStackCount) {
-        slot.count = kMaxItemStackCount;
+    const auto max_count = max_item_stack_count(slot.block_id);
+    if (slot.count > max_count) {
+        slot.count = max_count;
     }
 }
 
@@ -75,9 +81,12 @@ inline auto make_default_hotbar_state() noexcept -> HotbarState {
 }
 
 inline constexpr auto selected_hotbar_block(const HotbarState& state) noexcept -> BlockId {
-    return hotbar_slot_has_item(state.selected_slot())
-               ? block_item_id(state.selected_slot().block_id)
-               : to_block_id(BlockType::Air);
+    if (!hotbar_slot_has_item(state.selected_slot())) {
+        return to_block_id(BlockType::Air);
+    }
+
+    const auto selected_item = block_item_id(state.selected_slot().block_id);
+    return is_placeable_item(selected_item) ? selected_item : to_block_id(BlockType::Air);
 }
 
 inline constexpr auto selected_hotbar_emits_local_light(const HotbarState& state) noexcept -> bool {

@@ -1,5 +1,6 @@
 #include "render/ShadowCulling.h"
 #include "render/ItemDropGeometry.h"
+#include "render/SceneSamplerBindings.h"
 #include "render/SkyShaderSource.h"
 #include "world/BlockVisuals.h"
 
@@ -90,6 +91,24 @@ TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     CHECK(shader_source.find("float noise3(") == std::string_view::npos);
     CHECK(shader_source.find("float value_noise3(") != std::string_view::npos);
     CHECK(shader_source.find("value_noise3(p)") != std::string_view::npos);
+    CHECK(shader_source.find("u_overcast_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("u_precipitation_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("u_lightning_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("volumetric_cloud_minimum") != std::string_view::npos);
+    CHECK(shader_source.find("max(cloud_factor, overcast_factor) > volumetric_cloud_minimum") != std::string_view::npos);
+}
+
+TEST_CASE("scene sampler bindings keep neutral fallback textures outside refraction passes") {
+    constexpr std::uint32_t kFallbackColor = 11U;
+    constexpr std::uint32_t kFallbackDepth = 12U;
+    constexpr std::uint32_t kSceneColor = 21U;
+    constexpr std::uint32_t kSceneDepth = 22U;
+    const SceneSamplerBindings fallback_bindings {kFallbackColor, kFallbackDepth};
+    const SceneSamplerBindings scene_bindings {kSceneColor, kSceneDepth};
+
+    CHECK(select_scene_sampler_bindings(false, kFallbackColor, kFallbackDepth, kSceneColor, kSceneDepth) == fallback_bindings);
+    CHECK(select_scene_sampler_bindings(true, kFallbackColor, kFallbackDepth, kSceneColor, kSceneDepth) == scene_bindings);
+    CHECK(select_scene_sampler_bindings(true, kFallbackColor, kFallbackDepth, kSceneColor, 0U) == fallback_bindings);
 }
 
 TEST_CASE("camera culling can reject a chunk that still belongs in the shadow pass") {
@@ -268,6 +287,64 @@ TEST_CASE("glass block exposes a readable window tile for village construction")
     CHECK(transparent_pane[3] == 0);
     CHECK(frame_pixel[0] > frame_pixel[2]);
     CHECK(pane_reflection_pixel[2] > pane_reflection_pixel[0]);
+}
+
+TEST_CASE("equipment items stay inventory-only and expose readable antique icons") {
+    struct GearVisualCase {
+        BlockType type;
+        BlockAtlasTile tile;
+        std::array<int, 2> sample;
+        BlockVisualMaterial material;
+    };
+
+    const std::array<GearVisualCase, 6> gear_items {{
+        {BlockType::Pastron, {2, 4}, {5, 7}, BlockVisualMaterial::Rock},
+        {BlockType::RoundShield, {3, 4}, {7, 7}, BlockVisualMaterial::Rock},
+        {BlockType::Sword, {4, 4}, {8, 7}, BlockVisualMaterial::Rock},
+        {BlockType::Spear, {5, 4}, {8, 8}, BlockVisualMaterial::Rock},
+        {BlockType::Shoes, {6, 4}, {4, 11}, BlockVisualMaterial::Wood},
+        {BlockType::Pants, {7, 4}, {5, 8}, BlockVisualMaterial::Wood},
+    }};
+    const auto atlas_pixels = build_block_atlas_pixels();
+    REQUIRE(atlas_pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    for (const auto& gear : gear_items) {
+        const auto block_id = to_block_id(gear.type);
+        const auto properties = block_properties(block_id);
+
+        CHECK(is_inventory_only_item(block_id));
+        CHECK_FALSE(is_placeable_item(block_id));
+        CHECK_FALSE(has_block_mesh(block_id));
+        CHECK_FALSE(is_block_breakable(block_id));
+        CHECK_FALSE(properties.collidable);
+        CHECK(block_hotbar_tile(block_id) == gear.tile);
+        CHECK(block_visual_material(block_id) == gear.material);
+
+        const auto icon_pixel =
+            sample_block_atlas_pixel(atlas_pixels, gear.tile.x, gear.tile.y, gear.sample[0], gear.sample[1]);
+        CHECK(icon_pixel[3] == 255);
+    }
+}
+
+TEST_CASE("block atlas supports the antique Greek village material palette") {
+    const auto atlas_pixels = build_block_atlas_pixels();
+    REQUIRE(atlas_pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+
+    const auto stone_tile = block_atlas_tile(to_block_id(BlockType::Stone), BlockVisualFace::PositiveX);
+    const auto sand_tile = block_atlas_tile(to_block_id(BlockType::Sand), BlockVisualFace::PositiveX);
+    const auto roof_tile = block_atlas_tile(to_block_id(BlockType::Planks), BlockVisualFace::PositiveX);
+    const auto stone_center = sample_block_atlas_pixel(atlas_pixels, stone_tile.x, stone_tile.y, 8, 8);
+    const auto sand_center = sample_block_atlas_pixel(atlas_pixels, sand_tile.x, sand_tile.y, 8, 8);
+    const auto roof_center = sample_block_atlas_pixel(atlas_pixels, roof_tile.x, roof_tile.y, 8, 10);
+    const auto roof_seam = sample_block_atlas_pixel(atlas_pixels, roof_tile.x, roof_tile.y, 8, 4);
+
+    CHECK(stone_center[0] > stone_center[2] + 20);
+    CHECK(stone_center[1] > stone_center[2] + 12);
+    CHECK(sand_center[0] > sand_center[2] + 40);
+    CHECK(sand_center[1] > sand_center[2] + 24);
+    CHECK(roof_center[0] > roof_center[1] + 45);
+    CHECK(roof_center[1] > roof_center[2] + 24);
+    CHECK(roof_seam[0] < roof_center[0]);
 }
 
 } // namespace valcraft

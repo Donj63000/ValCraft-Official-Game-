@@ -133,6 +133,16 @@ auto WorldGenerator::biome_at(int world_x, int world_z) const noexcept -> BiomeT
     return sample_column(world_x, world_z).biome;
 }
 
+auto WorldGenerator::sample_surface(int world_x, int world_z) const noexcept -> TerrainSurfaceSample {
+    const auto column = sample_column(world_x, world_z);
+    return {
+        column.biome,
+        column.surface_height,
+        column.water_level,
+        column.surface_block,
+    };
+}
+
 auto WorldGenerator::sample_block(int world_x, int y, int world_z) const noexcept -> BlockId {
     if (!is_world_y_valid(y)) {
         return to_block_id(BlockType::Air);

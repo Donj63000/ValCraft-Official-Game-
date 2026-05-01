@@ -114,6 +114,7 @@ public:
     [[nodiscard]] auto mesh_for(const ChunkCoord& coord) const -> const ChunkMeshData*;
     [[nodiscard]] auto mesh_revision(const ChunkCoord& coord) const -> std::uint64_t;
     [[nodiscard]] auto chunk_records() const noexcept -> const std::unordered_map<ChunkCoord, ChunkRecord, ChunkCoordHash>&;
+    void enqueue_loaded_mesh_uploads();
     [[nodiscard]] auto consume_pending_gpu_uploads(std::size_t max_count) -> std::vector<ChunkCoord>;
     [[nodiscard]] auto consume_pending_gpu_unloads(std::size_t max_count) -> std::vector<ChunkCoord>;
 

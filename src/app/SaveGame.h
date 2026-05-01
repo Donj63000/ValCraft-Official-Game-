@@ -25,6 +25,7 @@ struct SaveSlotMetadata {
     std::uint64_t saved_at_unix_seconds = 0;
     int seed = 1337;
     float time_of_day = 8.0F;
+    float weather_time_seconds = 0.0F;
     std::uint32_t modified_chunk_count = 0;
     bool has_starting_village = false;
 

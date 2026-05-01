@@ -22,6 +22,16 @@ struct CreatureAuditStats {
     std::size_t active_creatures = 0;
 };
 
+struct CreatureDamageResult {
+    bool hit = false;
+    bool killed = false;
+    CreatureSpecies species = CreatureSpecies::Pig;
+    glm::vec3 position {0.0F};
+    float damage = 0.0F;
+    float remaining_health = 0.0F;
+    float distance = 0.0F;
+};
+
 struct ResidentProfile {
     CreatureSpawnAnchor anchor {};
     CreatureResidentRole role = CreatureResidentRole::Artisan;
@@ -50,6 +60,8 @@ public:
     [[nodiscard]] auto render_instances() const noexcept -> std::span<const CreatureRenderInstance>;
     [[nodiscard]] auto recent_attacks() const noexcept -> std::span<const CreatureAttackEvent>;
     [[nodiscard]] auto consume_audit_stats() noexcept -> CreatureAuditStats;
+    auto try_damage_from_player(const glm::vec3& origin, const glm::vec3& direction, float max_distance, float damage)
+        -> CreatureDamageResult;
     void set_settlement_residents(std::vector<CreatureSpawnAnchor> residents);
     void load_creatures(const std::vector<CreatureInstance>& creatures, const EnvironmentState& environment);
     void clear() noexcept;
@@ -73,12 +85,15 @@ private:
     [[nodiscard]] auto find_resident_creature(const CreatureSpawnAnchor& anchor) const -> const CreatureInstance*;
     [[nodiscard]] auto find_resident_profile(const CreatureSpawnAnchor& anchor) -> ResidentProfile*;
     [[nodiscard]] auto find_resident_profile(const CreatureSpawnAnchor& anchor) const -> const ResidentProfile*;
+    [[nodiscard]] auto is_session_dead_resident(const CreatureSpawnAnchor& anchor) const -> bool;
+    void remember_session_dead_resident(const CreatureSpawnAnchor& anchor);
 
     std::vector<CreatureInstance> creatures_ {};
     std::vector<CreatureRenderInstance> render_instances_ {};
     std::vector<CreatureAttackEvent> attacks_ {};
     std::vector<CreatureSpawnAnchor> settlement_residents_ {};
     std::vector<ResidentProfile> resident_profiles_ {};
+    std::vector<CreatureSpawnAnchor> session_dead_residents_ {};
     glm::vec3 settlement_center_ {0.0F};
     CreatureAuditStats audit_stats_ {};
 };

@@ -1,6 +1,7 @@
 #include "app/GameBranding.h"
 #include "render/Renderer.h"
 #include "render/ItemDropGeometry.h"
+#include "render/SceneSamplerBindings.h"
 #include "render/ShadowCulling.h"
 #include "render/SkyShaderSource.h"
 #include "creatures/CreatureGeometry.h"
@@ -685,6 +686,24 @@ auto ui_material_accent(BlockId block_id) -> HudColor {
     if (block_id == to_block_id(BlockType::Air)) {
         return {0.56F, 0.60F, 0.66F, 1.0F};
     }
+    if (is_weapon_item(block_id)) {
+        return {0.82F, 0.80F, 0.74F, 1.0F};
+    }
+    if (is_inventory_only_item(block_id)) {
+        switch (static_cast<BlockType>(block_item_id(block_id))) {
+        case BlockType::Pastron:
+        case BlockType::RoundShield:
+            return {0.86F, 0.60F, 0.28F, 1.0F};
+        case BlockType::Shoes:
+        case BlockType::Pants:
+            return {0.50F, 0.62F, 0.78F, 1.0F};
+        case BlockType::Sword:
+        case BlockType::Spear:
+        case BlockType::Air:
+        default:
+            return {0.82F, 0.80F, 0.74F, 1.0F};
+        }
+    }
 
     switch (block_visual_material(block_id)) {
     case BlockVisualMaterial::Terrain:
@@ -715,6 +734,12 @@ auto ui_material_accent(BlockId block_id) -> HudColor {
 auto item_material_label(BlockId block_id) -> std::string_view {
     if (block_id == to_block_id(BlockType::Air)) {
         return "VIDE";
+    }
+    if (is_weapon_item(block_id)) {
+        return "ARME";
+    }
+    if (is_inventory_only_item(block_id)) {
+        return "EQUIPEMENT";
     }
 
     switch (block_visual_material(block_id)) {
@@ -747,6 +772,8 @@ auto inventory_slot_group_label(InventorySlotGroup group) -> std::string_view {
     switch (group) {
     case InventorySlotGroup::Hotbar:
         return "BARRE RAPIDE";
+    case InventorySlotGroup::Equipment:
+        return "EQUIPEMENT";
     case InventorySlotGroup::Storage:
     default:
         return "SAC";
@@ -1374,6 +1401,20 @@ auto resolve_inventory_focus_item(const InventoryMenuState& inventory, const Hot
         focus.group = InventorySlotGroup::Hotbar;
     }
     return focus;
+}
+
+auto resolve_viewmodel_held_item(const InventoryMenuState& inventory, const HotbarState& hotbar) noexcept -> BlockId {
+    const auto& equipped_weapon = inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Weapon)];
+    if (hotbar_slot_has_item(equipped_weapon) && is_weapon_item(equipped_weapon.block_id)) {
+        return block_item_id(equipped_weapon.block_id);
+    }
+
+    const auto& selected_slot = hotbar.selected_slot();
+    if (hotbar_slot_has_item(selected_slot) && is_weapon_item(selected_slot.block_id)) {
+        return block_item_id(selected_slot.block_id);
+    }
+
+    return to_block_id(BlockType::Air);
 }
 
 void append_stack_count(std::vector<HudVertex>& vertices,
@@ -2037,6 +2078,7 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
     create_creature_atlas_texture();
     create_player_atlas_texture();
     create_shadow_map();
+    create_scene_sampler_fallback_textures();
     create_creature_geometry();
     create_item_drop_geometry();
     create_hud_geometry();
@@ -2089,6 +2131,12 @@ void Renderer::shutdown() {
         }
         if (shadow_framebuffer_ != 0) {
             glDeleteFramebuffers(1, &shadow_framebuffer_);
+        }
+        if (scene_fallback_depth_texture_ != 0) {
+            glDeleteTextures(1, &scene_fallback_depth_texture_);
+        }
+        if (scene_fallback_color_texture_ != 0) {
+            glDeleteTextures(1, &scene_fallback_color_texture_);
         }
         if (viewmodel_instance_vbo_ != 0) {
             glDeleteBuffers(1, &viewmodel_instance_vbo_);
@@ -2170,6 +2218,8 @@ void Renderer::shutdown() {
     player_atlas_texture_ = 0;
     shadow_map_ = 0;
     shadow_framebuffer_ = 0;
+    scene_fallback_color_texture_ = 0;
+    scene_fallback_depth_texture_ = 0;
     water_scene_framebuffer_ = 0;
     water_scene_color_texture_ = 0;
     water_scene_depth_texture_ = 0;
@@ -2425,20 +2475,32 @@ void Renderer::render_frame(World& world,
     glUniform1f(world_uniforms_.wind_strength, environment.wind_strength);
     glUniform1f(world_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
     glUniform1f(world_uniforms_.height_fog_density, environment.height_fog_density);
+    glUniform1f(world_uniforms_.precipitation_intensity, environment.precipitation_intensity);
+    glUniform1f(world_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(world_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1i(world_uniforms_.atlas, 0);
     glUniform1i(world_uniforms_.shadow_map, 1);
     glUniform1i(world_uniforms_.scene_color, 2);
     glUniform1i(world_uniforms_.scene_depth, 3);
     glUniform1i(world_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
 
+    // Je force des textures neutres hors passe de refraction pour que les
+    // samplers scene/depth ne pointent jamais vers des ressources sans lien.
+    const auto opaque_scene_bindings = select_scene_sampler_bindings(
+        false,
+        scene_fallback_color_texture_,
+        scene_fallback_depth_texture_,
+        scene_color_texture_,
+        scene_depth_texture_);
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glBindTexture(GL_TEXTURE_2D, opaque_scene_bindings.color_texture);
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+    glBindTexture(GL_TEXTURE_2D, opaque_scene_bindings.depth_texture);
 
     for (const auto& visible_chunk : visible_chunks) {
         if (visible_chunk.mesh->opaque_index_count == 0) {
@@ -2487,10 +2549,16 @@ void Renderer::render_frame(World& world,
         glBindTexture(GL_TEXTURE_2D, atlas_texture_);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, shadow_map_);
+        const auto water_scene_bindings = select_scene_sampler_bindings(
+            true,
+            scene_fallback_color_texture_,
+            scene_fallback_depth_texture_,
+            water_scene_color_texture_,
+            water_scene_depth_texture_);
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, water_scene_color_texture_);
+        glBindTexture(GL_TEXTURE_2D, water_scene_bindings.color_texture);
         glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_2D, water_scene_depth_texture_);
+        glBindTexture(GL_TEXTURE_2D, water_scene_bindings.depth_texture);
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
         glDisable(GL_CULL_FACE);
@@ -2515,7 +2583,13 @@ void Renderer::render_frame(World& world,
     draw_block_break_overlay(player);
 
     if (!menu_preview_visible) {
-        draw_player_viewmodel(player, viewmodel_projection * player.view_matrix(), light_view_projection, eye, environment);
+        draw_player_viewmodel(
+            player,
+            resolve_viewmodel_held_item(inventory_menu, hotbar),
+            viewmodel_projection * player.view_matrix(),
+            light_view_projection,
+            eye,
+            environment);
     }
 
     if (menu_preview_visible) {
@@ -2523,7 +2597,7 @@ void Renderer::render_frame(World& world,
         run_menu_background_pass(render_width, render_height);
     } else if (use_post_process) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        run_post_process(environment, width, render_height);
+        run_post_process(environment, render_width, render_height);
     } else if (has_visible_water) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_framebuffer_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -3190,46 +3264,13 @@ vec4 block_uv_rect(uint block_id, uint face_index) {
     case 4u:
         return atlas_uv_rect(4, 0);
     case 5u:
-        return atlas_uv_rect(5, 0);
-    case 6u:
-        return atlas_uv_rect(6, 0);
-    case 7u:
-        return atlas_uv_rect(7, 0);
-    case 8u:
         if (top_face || bottom_face) {
             return atlas_uv_rect(1, 1);
         }
         return atlas_uv_rect(0, 1);
-    case 9u:
-        return atlas_uv_rect(2, 1);
-    case 10u:
+    case 6u:
         return atlas_uv_rect(3, 1);
-    case 11u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(5, 1);
-        }
-        return atlas_uv_rect(4, 1);
-    case 12u:
-        return atlas_uv_rect(6, 1);
-    case 13u:
-        if (top_face) {
-            return atlas_uv_rect(0, 2);
-        }
-        if (bottom_face) {
-            return atlas_uv_rect(2, 0);
-        }
-        return atlas_uv_rect(1, 2);
-    case 14u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(6, 2);
-        }
-        return atlas_uv_rect(5, 2);
-    case 15u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(5, 3);
-        }
-        return atlas_uv_rect(7, 2);
-    case 16u:
+    case 7u:
         if (top_face) {
             return atlas_uv_rect(7, 3);
         }
@@ -3237,14 +3278,72 @@ vec4 block_uv_rect(uint block_id, uint face_index) {
             return atlas_uv_rect(0, 4);
         }
         return atlas_uv_rect(6, 3);
-    case 17u:
+    case 8u:
+        return atlas_uv_rect(5, 0);
+    case 9u:
+        return atlas_uv_rect(2, 1);
+    case 10u:
+        return atlas_uv_rect(6, 0);
+    case 11u:
+        return atlas_uv_rect(7, 0);
+    case 12u:
+        if (top_face) {
+            return atlas_uv_rect(0, 2);
+        }
+        if (bottom_face) {
+            return atlas_uv_rect(2, 0);
+        }
+        return atlas_uv_rect(1, 2);
+    case 13u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(5, 1);
+        }
+        return atlas_uv_rect(4, 1);
+    case 14u:
+        return atlas_uv_rect(6, 1);
+    case 15u:
         return atlas_uv_rect(1, 3);
-    case 18u:
+    case 16u:
         return atlas_uv_rect(2, 3);
-    case 19u:
+    case 17u:
         return atlas_uv_rect(3, 3);
-    case 20u:
+    case 18u:
         return atlas_uv_rect(4, 3);
+    case 19u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(6, 2);
+        }
+        return atlas_uv_rect(5, 2);
+    case 20u:
+        if (top_face || bottom_face) {
+            return atlas_uv_rect(5, 3);
+        }
+        return atlas_uv_rect(7, 2);
+    case 21u:
+    case 22u:
+    case 23u:
+    case 24u:
+        if (top_face) {
+            return atlas_uv_rect(7, 3);
+        }
+        if (bottom_face) {
+            return atlas_uv_rect(0, 4);
+        }
+        return atlas_uv_rect(6, 3);
+    case 25u:
+        return atlas_uv_rect(1, 4);
+    case 26u:
+        return atlas_uv_rect(2, 4);
+    case 27u:
+        return atlas_uv_rect(3, 4);
+    case 28u:
+        return atlas_uv_rect(4, 4);
+    case 29u:
+        return atlas_uv_rect(5, 4);
+    case 30u:
+        return atlas_uv_rect(6, 4);
+    case 31u:
+        return atlas_uv_rect(7, 4);
     default:
         return atlas_uv_rect(0, 0);
     }
@@ -3328,12 +3427,20 @@ uniform float u_cloud_intensity;
 uniform float u_cloud_shadow_strength;
 uniform float u_atmospheric_scatter_strength;
 uniform float u_height_fog_density;
+uniform float u_precipitation_intensity;
+uniform float u_storm_intensity;
+uniform float u_lightning_intensity;
 uniform int u_shadows_enabled;
 
 out vec4 frag_color;
 
 float material_mask(float material, float expected) {
     return 1.0 - step(0.25, abs(material - expected));
+}
+
+float shadow_visibility_at(vec2 uv, float receiver_depth, float bias) {
+    float sampled_depth = texture(u_shadow_map, uv).r;
+    return (receiver_depth - bias) <= sampled_depth ? 1.0 : 0.0;
 }
 
 float sample_shadow(vec3 normal) {
@@ -3350,14 +3457,13 @@ float sample_shadow(vec3 normal) {
     vec2 texel_size = 1.0 / vec2(textureSize(u_shadow_map, 0));
     float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
     float bias = max(0.00065 * (1.0 - ndotl), 0.00012);
-    float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            float sampled_depth = texture(u_shadow_map, projected.xy + vec2(x, y) * texel_size).r;
-            visibility += (projected.z - bias) <= sampled_depth ? 1.0 : 0.0;
-        }
-    }
-    return visibility / 9.0;
+    // Je garde un PCF en croix pour lisser les ombres sans payer neuf lectures texture par fragment.
+    float visibility = shadow_visibility_at(projected.xy, projected.z, bias) * 0.36;
+    visibility += shadow_visibility_at(projected.xy + vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
+    visibility += shadow_visibility_at(projected.xy + vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
+    return visibility;
 }
 
 float hash12(vec2 p) {
@@ -3578,12 +3684,20 @@ void main() {
         output_alpha = 1.0;
     }
 
+    float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) * sky_light * (1.0 - water_mask);
+    wetness *= 0.45 + 0.55 * smoothstep(-0.10, 1.0, normal.y);
+    lit_color = mix(lit_color, lit_color * vec3(0.72, 0.78, 0.86), wetness * (0.16 + 0.14 * clamp(u_storm_intensity, 0.0, 1.0)));
+
+    float lightning_surface = clamp(u_lightning_intensity, 0.0, 1.0) * sky_light * (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
+    lit_color += albedo * vec3(0.62, 0.72, 1.00) * lightning_surface * (0.24 + 0.22 * clamp(u_storm_intensity, 0.0, 1.0));
+
     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
 
     vec3 view_ray = normalize(v_world_position - u_camera_position);
-    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.00005);
+    float weather_fog = 1.0 + clamp(u_precipitation_intensity, 0.0, 1.0) * 0.42 + clamp(u_storm_intensity, 0.0, 1.0) * 0.38;
+    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.000008 * weather_fog);
     float height_haze = 1.0 - exp(-max(30.0 - v_world_position.y, 0.0) * u_height_fog_density);
-    height_haze *= clamp(v_distance / 120.0, 0.0, 1.0) * (0.35 + 0.35 * (1.0 - daylight));
+    height_haze *= clamp(v_distance / 140.0, 0.0, 1.0) * (0.10 + 0.18 * (1.0 - daylight));
     float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
     float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
     float horizon = 1.0 - clamp(abs(view_ray.y), 0.0, 1.0);
@@ -3692,10 +3806,18 @@ uniform float u_cloud_intensity;
 uniform float u_cloud_shadow_strength;
 uniform float u_atmospheric_scatter_strength;
 uniform float u_height_fog_density;
+uniform float u_precipitation_intensity;
+uniform float u_storm_intensity;
+uniform float u_lightning_intensity;
 uniform int u_shadows_enabled;
 uniform float u_player_light_strength;
 
 out vec4 frag_color;
+
+float shadow_visibility_at(vec2 uv, float receiver_depth, float bias) {
+    float sampled_depth = texture(u_shadow_map, uv).r;
+    return (receiver_depth - bias) <= sampled_depth ? 1.0 : 0.0;
+}
 
 float sample_shadow(vec3 normal) {
     if (u_sun_visibility < 0.5 || u_shadows_enabled == 0) {
@@ -3711,14 +3833,13 @@ float sample_shadow(vec3 normal) {
     vec2 texel_size = 1.0 / vec2(textureSize(u_shadow_map, 0));
     float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
     float bias = max(0.00065 * (1.0 - ndotl), 0.00012);
-    float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            float sampled_depth = texture(u_shadow_map, projected.xy + vec2(x, y) * texel_size).r;
-            visibility += (projected.z - bias) <= sampled_depth ? 1.0 : 0.0;
-        }
-    }
-    return visibility / 9.0;
+    // Je garde un PCF en croix pour lisser les ombres sans payer neuf lectures texture par fragment.
+    float visibility = shadow_visibility_at(projected.xy, projected.z, bias) * 0.36;
+    visibility += shadow_visibility_at(projected.xy + vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
+    visibility += shadow_visibility_at(projected.xy + vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
+    return visibility;
 }
 
 float hash12(vec2 p) {
@@ -3807,10 +3928,15 @@ void main() {
     lit_color *= cavity_occlusion;
     lit_color += rim_light + specular_color;
     lit_color += u_night_tint_color * (0.09 + 0.08 * v_nightmare_factor) * (1.0 - sky_mix);
+    float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) * (0.40 + 0.60 * smoothstep(-0.10, 1.0, normal.y));
+    lit_color = mix(lit_color, lit_color * vec3(0.74, 0.80, 0.88), wetness * (0.12 + 0.12 * clamp(u_storm_intensity, 0.0, 1.0)));
+    float lightning_surface = clamp(u_lightning_intensity, 0.0, 1.0) * (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
+    lit_color += albedo * vec3(0.62, 0.72, 1.00) * lightning_surface * (0.18 + 0.22 * clamp(u_storm_intensity, 0.0, 1.0));
     vec3 view_ray = normalize(v_world_position - u_camera_position);
-    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.00006);
+    float weather_fog = 1.0 + clamp(u_precipitation_intensity, 0.0, 1.0) * 0.38 + clamp(u_storm_intensity, 0.0, 1.0) * 0.34;
+    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.000009 * weather_fog);
     float height_haze = 1.0 - exp(-max(28.0 - v_world_position.y, 0.0) * u_height_fog_density);
-    height_haze *= clamp(v_distance / 110.0, 0.0, 1.0) * (0.24 + 0.18 * (1.0 - sky_mix));
+    height_haze *= clamp(v_distance / 130.0, 0.0, 1.0) * (0.08 + 0.12 * (1.0 - sky_mix));
     float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
     float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
     float horizon = 1.0 - clamp(abs(view_ray.y), 0.0, 1.0);
@@ -3988,6 +4114,10 @@ uniform vec3 u_night_tint_color;
 uniform float u_glow_strength;
 uniform float u_sharpen_strength;
 uniform float u_edge_strength;
+uniform float u_precipitation_intensity;
+uniform float u_storm_intensity;
+uniform float u_lightning_intensity;
+uniform float u_weather_time;
 
 out vec4 frag_color;
 
@@ -4007,22 +4137,62 @@ float linearize_depth(float depth_sample) {
     return (2.0 * near_plane * far_plane) / max(far_plane + near_plane - z * (far_plane - near_plane), 0.0001);
 }
 
+bool depth_sample_is_usable(float depth_sample) {
+    return depth_sample > 0.00001 && depth_sample < 0.9999;
+}
+
+float hash12(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float rain_streak_layer(vec2 uv, vec2 scale, float speed, float slant) {
+    vec2 p = uv * scale;
+    p.x += p.y * slant;
+    p.y += u_weather_time * speed;
+    vec2 cell = floor(p);
+    vec2 local = fract(p);
+    float center = hash12(cell + vec2(17.0, 3.0));
+    float spawn = step(0.73 - clamp(u_precipitation_intensity, 0.0, 1.0) * 0.28, hash12(cell));
+    float line = 1.0 - smoothstep(0.010, 0.060, abs(local.x - center));
+    float tail = smoothstep(0.04, 0.18, local.y) * (1.0 - smoothstep(0.68, 1.0, local.y));
+    return spawn * line * tail * (0.55 + 0.45 * hash12(cell + vec2(5.0, 29.0)));
+}
+
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(u_scene_texture, 0));
     vec3 scene = texture(u_scene_texture, v_uv).rgb;
+    float depth_edge = 0.0;
+    float geometry_mask = 0.0;
 
-    float center_depth = linearize_depth(texture(u_scene_depth, v_uv).r);
-    float left_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(-texel.x, 0.0)).r);
-    float right_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(texel.x, 0.0)).r);
-    float down_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(0.0, -texel.y)).r);
-    float up_depth = linearize_depth(texture(u_scene_depth, v_uv + vec2(0.0, texel.y)).r);
+    float center_depth_sample = texture(u_scene_depth, v_uv).r;
+    if (depth_sample_is_usable(center_depth_sample)) {
+        float center_depth = linearize_depth(center_depth_sample);
+        float left_depth_sample = texture(u_scene_depth, v_uv + vec2(-texel.x, 0.0)).r;
+        float right_depth_sample = texture(u_scene_depth, v_uv + vec2(texel.x, 0.0)).r;
+        float down_depth_sample = texture(u_scene_depth, v_uv + vec2(0.0, -texel.y)).r;
+        float up_depth_sample = texture(u_scene_depth, v_uv + vec2(0.0, texel.y)).r;
 
-    float depth_edge = abs(left_depth - center_depth) + abs(right_depth - center_depth) +
-                       abs(down_depth - center_depth) + abs(up_depth - center_depth);
-    depth_edge /= max(center_depth * 0.75, 1.0);
-    depth_edge = smoothstep(0.002, 0.035, depth_edge);
+        float left_weight = depth_sample_is_usable(left_depth_sample) ? 1.0 : 0.0;
+        float right_weight = depth_sample_is_usable(right_depth_sample) ? 1.0 : 0.0;
+        float down_weight = depth_sample_is_usable(down_depth_sample) ? 1.0 : 0.0;
+        float up_weight = depth_sample_is_usable(up_depth_sample) ? 1.0 : 0.0;
+        float neighbor_count = left_weight + right_weight + down_weight + up_weight;
 
-    float geometry_mask = 1.0 - smoothstep(120.0, 280.0, center_depth);
+        if (neighbor_count > 0.0) {
+            float left_depth = linearize_depth(left_depth_sample);
+            float right_depth = linearize_depth(right_depth_sample);
+            float down_depth = linearize_depth(down_depth_sample);
+            float up_depth = linearize_depth(up_depth_sample);
+
+            depth_edge = abs(left_depth - center_depth) * left_weight +
+                         abs(right_depth - center_depth) * right_weight +
+                         abs(down_depth - center_depth) * down_weight +
+                         abs(up_depth - center_depth) * up_weight;
+            depth_edge = (depth_edge / neighbor_count) / max(center_depth * 0.75, 1.0);
+            depth_edge = smoothstep(0.002, 0.035, depth_edge);
+            geometry_mask = 1.0 - smoothstep(120.0, 280.0, center_depth);
+        }
+    }
     scene *= 1.0 - depth_edge * u_edge_strength * geometry_mask;
 
     vec3 blur = scene * 0.50;
@@ -4040,6 +4210,17 @@ void main() {
     color = vec3(1.0) - exp(-color * max(u_exposure, 0.001));
     color = apply_saturation(color, u_saturation_boost);
     color = (color - 0.5) * u_contrast + 0.5;
+
+    float rain = clamp(u_precipitation_intensity, 0.0, 1.0);
+    if (rain > 0.001) {
+        float storm = clamp(u_storm_intensity, 0.0, 1.0);
+        float streaks = rain_streak_layer(v_uv, vec2(36.0, 64.0), 0.92 + storm * 0.54, -0.42 - storm * 0.18);
+        streaks += rain_streak_layer(v_uv + vec2(0.017, 0.0), vec2(58.0, 92.0), 1.26 + storm * 0.72, -0.50 - storm * 0.18) * 0.62;
+        color = mix(color, color * vec3(0.88, 0.93, 1.03), rain * (0.07 + storm * 0.08));
+        color += vec3(0.50, 0.62, 0.82) * streaks * rain * (0.10 + storm * 0.22);
+    }
+    color += vec3(0.62, 0.72, 1.00) * clamp(u_lightning_intensity, 0.0, 1.0) * (0.08 + clamp(u_storm_intensity, 0.0, 1.0) * 0.12);
+
     float vignette = smoothstep(0.92, 0.22, distance(v_uv, vec2(0.5)));
     color *= mix(1.0 - u_vignette_strength, 1.0, vignette);
     color = mix(color, color + u_night_tint_color * 0.28, clamp(length(u_night_tint_color) * 2.0, 0.0, 1.0));
@@ -4123,6 +4304,9 @@ void main() {
     world_uniforms_.wind_strength = glGetUniformLocation(world_program_, "u_wind_strength");
     world_uniforms_.atmospheric_scatter_strength = glGetUniformLocation(world_program_, "u_atmospheric_scatter_strength");
     world_uniforms_.height_fog_density = glGetUniformLocation(world_program_, "u_height_fog_density");
+    world_uniforms_.precipitation_intensity = glGetUniformLocation(world_program_, "u_precipitation_intensity");
+    world_uniforms_.storm_intensity = glGetUniformLocation(world_program_, "u_storm_intensity");
+    world_uniforms_.lightning_intensity = glGetUniformLocation(world_program_, "u_lightning_intensity");
     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
     world_uniforms_.scene_color = glGetUniformLocation(world_program_, "u_scene_color");
@@ -4148,6 +4332,9 @@ void main() {
     item_drop_uniforms_.wind_strength = glGetUniformLocation(item_drop_program_, "u_wind_strength");
     item_drop_uniforms_.atmospheric_scatter_strength = glGetUniformLocation(item_drop_program_, "u_atmospheric_scatter_strength");
     item_drop_uniforms_.height_fog_density = glGetUniformLocation(item_drop_program_, "u_height_fog_density");
+    item_drop_uniforms_.precipitation_intensity = glGetUniformLocation(item_drop_program_, "u_precipitation_intensity");
+    item_drop_uniforms_.storm_intensity = glGetUniformLocation(item_drop_program_, "u_storm_intensity");
+    item_drop_uniforms_.lightning_intensity = glGetUniformLocation(item_drop_program_, "u_lightning_intensity");
     item_drop_uniforms_.atlas = glGetUniformLocation(item_drop_program_, "u_atlas");
     item_drop_uniforms_.shadow_map = glGetUniformLocation(item_drop_program_, "u_shadow_map");
     item_drop_uniforms_.scene_color = glGetUniformLocation(item_drop_program_, "u_scene_color");
@@ -4171,6 +4358,9 @@ void main() {
     creature_uniforms_.cloud_shadow_strength = glGetUniformLocation(creature_program_, "u_cloud_shadow_strength");
     creature_uniforms_.atmospheric_scatter_strength = glGetUniformLocation(creature_program_, "u_atmospheric_scatter_strength");
     creature_uniforms_.height_fog_density = glGetUniformLocation(creature_program_, "u_height_fog_density");
+    creature_uniforms_.precipitation_intensity = glGetUniformLocation(creature_program_, "u_precipitation_intensity");
+    creature_uniforms_.storm_intensity = glGetUniformLocation(creature_program_, "u_storm_intensity");
+    creature_uniforms_.lightning_intensity = glGetUniformLocation(creature_program_, "u_lightning_intensity");
     creature_uniforms_.atlas = glGetUniformLocation(creature_program_, "u_atlas");
     creature_uniforms_.shadow_map = glGetUniformLocation(creature_program_, "u_shadow_map");
     creature_uniforms_.shadows_enabled = glGetUniformLocation(creature_program_, "u_shadows_enabled");
@@ -4193,6 +4383,11 @@ void main() {
     sky_uniforms_.moon_disk_color = glGetUniformLocation(sky_program_, "u_moon_disk_color");
     sky_uniforms_.star_intensity = glGetUniformLocation(sky_program_, "u_star_intensity");
     sky_uniforms_.cloud_intensity = glGetUniformLocation(sky_program_, "u_cloud_intensity");
+    sky_uniforms_.overcast_intensity = glGetUniformLocation(sky_program_, "u_overcast_intensity");
+    sky_uniforms_.precipitation_intensity = glGetUniformLocation(sky_program_, "u_precipitation_intensity");
+    sky_uniforms_.storm_intensity = glGetUniformLocation(sky_program_, "u_storm_intensity");
+    sky_uniforms_.lightning_intensity = glGetUniformLocation(sky_program_, "u_lightning_intensity");
+    sky_uniforms_.weather_time = glGetUniformLocation(sky_program_, "u_weather_time");
     sky_uniforms_.accent_atlas = glGetUniformLocation(sky_program_, "u_accent_atlas");
     glow_extract_uniforms_.scene_texture = glGetUniformLocation(glow_extract_program_, "u_scene_texture");
     glow_extract_uniforms_.threshold = glGetUniformLocation(glow_extract_program_, "u_threshold");
@@ -4209,6 +4404,10 @@ void main() {
     post_process_uniforms_.glow_strength = glGetUniformLocation(post_process_program_, "u_glow_strength");
     post_process_uniforms_.sharpen_strength = glGetUniformLocation(post_process_program_, "u_sharpen_strength");
     post_process_uniforms_.edge_strength = glGetUniformLocation(post_process_program_, "u_edge_strength");
+    post_process_uniforms_.precipitation_intensity = glGetUniformLocation(post_process_program_, "u_precipitation_intensity");
+    post_process_uniforms_.storm_intensity = glGetUniformLocation(post_process_program_, "u_storm_intensity");
+    post_process_uniforms_.lightning_intensity = glGetUniformLocation(post_process_program_, "u_lightning_intensity");
+    post_process_uniforms_.weather_time = glGetUniformLocation(post_process_program_, "u_weather_time");
     menu_background_uniforms_.scene_texture = glGetUniformLocation(menu_background_program_, "u_scene_texture");
     menu_background_uniforms_.blur_texture = glGetUniformLocation(menu_background_program_, "u_blur_texture");
     menu_background_uniforms_.blur_mix = glGetUniformLocation(menu_background_program_, "u_blur_mix");
@@ -4327,6 +4526,26 @@ void Renderer::create_shadow_map() {
         throw std::runtime_error("Shadow framebuffer is incomplete");
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Renderer::create_scene_sampler_fallback_textures() {
+    glGenTextures(1, &scene_fallback_color_texture_);
+    glBindTexture(GL_TEXTURE_2D, scene_fallback_color_texture_);
+    const std::array<std::uint8_t, 4> fallback_color {{0U, 0U, 0U, 255U}};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, fallback_color.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenTextures(1, &scene_fallback_depth_texture_);
+    glBindTexture(GL_TEXTURE_2D, scene_fallback_depth_texture_);
+    const float fallback_depth = 1.0F;
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &fallback_depth);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
 void Renderer::create_creature_geometry() {
@@ -4656,6 +4875,11 @@ void Renderer::draw_sky(const PlayerController& player, const EnvironmentState& 
     glUniform3fv(sky_uniforms_.moon_disk_color, 1, glm::value_ptr(environment.moon_disk_color));
     glUniform1f(sky_uniforms_.star_intensity, environment.star_intensity);
     glUniform1f(sky_uniforms_.cloud_intensity, environment.cloud_intensity);
+    glUniform1f(sky_uniforms_.overcast_intensity, environment.overcast_intensity);
+    glUniform1f(sky_uniforms_.precipitation_intensity, environment.precipitation_intensity);
+    glUniform1f(sky_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(sky_uniforms_.lightning_intensity, environment.lightning_intensity);
+    glUniform1f(sky_uniforms_.weather_time, environment.weather_time_seconds);
     glUniform1i(sky_uniforms_.accent_atlas, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, accent_texture_);
@@ -4716,6 +4940,10 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glUniform1f(post_process_uniforms_.glow_strength, environment.glow_strength);
     glUniform1f(post_process_uniforms_.sharpen_strength, environment.post_sharpen_strength);
     glUniform1f(post_process_uniforms_.edge_strength, environment.post_edge_strength);
+    glUniform1f(post_process_uniforms_.precipitation_intensity, environment.precipitation_intensity);
+    glUniform1f(post_process_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(post_process_uniforms_.lightning_intensity, environment.lightning_intensity);
+    glUniform1f(post_process_uniforms_.weather_time, environment.weather_time_seconds);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glActiveTexture(GL_TEXTURE1);
@@ -4826,19 +5054,29 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
     glUniform1f(item_drop_uniforms_.wind_strength, environment.wind_strength);
     glUniform1f(item_drop_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
     glUniform1f(item_drop_uniforms_.height_fog_density, environment.height_fog_density);
+    glUniform1f(item_drop_uniforms_.precipitation_intensity, environment.precipitation_intensity);
+    glUniform1f(item_drop_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(item_drop_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1i(item_drop_uniforms_.atlas, 0);
     glUniform1i(item_drop_uniforms_.shadow_map, 1);
     glUniform1i(item_drop_uniforms_.scene_color, 2);
     glUniform1i(item_drop_uniforms_.scene_depth, 3);
     glUniform1i(item_drop_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
+
+    const auto scene_bindings = select_scene_sampler_bindings(
+        false,
+        scene_fallback_color_texture_,
+        scene_fallback_depth_texture_,
+        scene_color_texture_,
+        scene_depth_texture_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glBindTexture(GL_TEXTURE_2D, scene_bindings.color_texture);
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+    glBindTexture(GL_TEXTURE_2D, scene_bindings.depth_texture);
 
     glDrawElementsInstanced(
         GL_TRIANGLES,
@@ -4948,6 +5186,9 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUniform1f(creature_uniforms_.cloud_shadow_strength, environment.cloud_shadow_strength);
     glUniform1f(creature_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
     glUniform1f(creature_uniforms_.height_fog_density, environment.height_fog_density);
+    glUniform1f(creature_uniforms_.precipitation_intensity, environment.precipitation_intensity);
+    glUniform1f(creature_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(creature_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1i(creature_uniforms_.atlas, 0);
     glUniform1i(creature_uniforms_.shadow_map, 1);
     glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
@@ -4967,15 +5208,16 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
 }
 
 void Renderer::draw_player_viewmodel(const PlayerController& player,
-                                  const glm::mat4& view_projection,
-                                  const glm::mat4& light_view_projection,
-                                  const glm::vec3& camera_position,
-                                  const EnvironmentState& environment) {
+                                     BlockId held_item,
+                                     const glm::mat4& view_projection,
+                                     const glm::mat4& light_view_projection,
+                                     const glm::vec3& camera_position,
+                                     const EnvironmentState& environment) {
     if (player.is_dead() || creature_program_ == 0 || viewmodel_vao_ == 0 || viewmodel_instance_vbo_ == 0 || creature_ebo_ == 0 || player_atlas_texture_ == 0) {
         return;
     }
 
-    const auto viewmodel = build_player_viewmodel_parts(player);
+    const auto viewmodel = build_player_viewmodel_parts(player, held_item);
     if (viewmodel.empty()) {
         return;
     }
@@ -5017,6 +5259,9 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glUniform1f(creature_uniforms_.cloud_shadow_strength, environment.cloud_shadow_strength);
     glUniform1f(creature_uniforms_.atmospheric_scatter_strength, environment.atmospheric_scatter_strength);
     glUniform1f(creature_uniforms_.height_fog_density, environment.height_fog_density);
+    glUniform1f(creature_uniforms_.precipitation_intensity, environment.precipitation_intensity);
+    glUniform1f(creature_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(creature_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1i(creature_uniforms_.atlas, 0);
     glUniform1i(creature_uniforms_.shadow_map, 1);
     glUniform1i(creature_uniforms_.shadows_enabled, 0);
@@ -5613,6 +5858,13 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
             {0.90F, 0.92F, 0.96F, 0.98F},
             true);
         draw_text(
+            layout.equipment_label_x,
+            layout.equipment_label_y,
+            label_pixel_size,
+            "EQUIPEMENT",
+            {0.90F, 0.92F, 0.96F, 0.96F},
+            true);
+        draw_text(
             layout.storage_label_x,
             layout.storage_label_y,
             label_pixel_size,
@@ -5728,7 +5980,7 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
                 focus_item.slot.count);
         }
 
-        auto detail_name = focus_item.has_item ? std::string(inventory_item_label(focus_item.slot.block_id)) : std::string("SURVOLE UN BLOC");
+        auto detail_name = focus_item.has_item ? std::string(inventory_item_label(focus_item.slot.block_id)) : std::string("SURVOLE UN OBJET");
         auto detail_name_pixel_size = std::clamp(label_pixel_size + (layout.compact_detail ? 0.0F : 1.0F), 2.0F, 4.0F);
         while (detail_name_pixel_size > 2.0F &&
                measure_pixel_text(detail_name, detail_name_pixel_size) > layout.detail_panel_width - detail_padding * 2.0F) {
@@ -5757,10 +6009,21 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
         if (focus_item.has_item) {
             std::string pile_line = "PILE ";
             pile_line += std::to_string(static_cast<int>(focus_item.slot.count));
-            pile_line += " SUR 64";
+            pile_line += " SUR ";
+            pile_line += std::to_string(static_cast<int>(max_item_stack_count(focus_item.slot.block_id)));
 
             std::string material_line = "MATIERE ";
             material_line += item_material_label(focus_item.slot.block_id);
+            if (const auto stats = weapon_stats(focus_item.slot.block_id); stats.has_value()) {
+                material_line = "DEGATS ";
+                material_line += std::to_string(static_cast<int>(std::round(stats->damage)));
+                material_line += "  PORTEE ";
+                material_line += std::to_string(static_cast<int>(std::round(stats->range)));
+            } else if (const auto resistance = armor_resistance_percent(focus_item.slot.block_id); resistance > 0.0F) {
+                material_line = "RESISTANCE +";
+                material_line += std::to_string(static_cast<int>(std::round(resistance)));
+                material_line += "%";
+            }
 
             std::string source_line = "SOURCE ";
             if (focus_item.from_carried_slot) {

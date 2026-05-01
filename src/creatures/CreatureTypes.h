@@ -20,6 +20,20 @@ enum class CreatureSpecies : std::uint8_t {
     Villager = 3,
 };
 
+inline constexpr auto creature_max_health(CreatureSpecies species) noexcept -> float {
+    switch (species) {
+    case CreatureSpecies::Pig:
+        return 8.0F;
+    case CreatureSpecies::Cow:
+        return 12.0F;
+    case CreatureSpecies::Villager:
+        return 14.0F;
+    case CreatureSpecies::Sheep:
+    default:
+        return 8.0F;
+    }
+}
+
 enum class CreatureResidentRole : std::uint8_t {
     Gardener = 0,
     Merchant = 1,
@@ -89,6 +103,7 @@ struct CreatureInstance {
     float gaze_weight = 0.0F;
     float attack_cooldown = 0.0F;
     float attack_amount = 0.0F;
+    float health = creature_max_health(CreatureSpecies::Pig);
     std::uint8_t resident_target_index = 0;
 };
 

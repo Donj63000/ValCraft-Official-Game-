@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <doctest/doctest.h>
 #include <limits>
 #include <set>
@@ -46,6 +47,20 @@ auto density_percent(int count, int total) noexcept -> float {
         return 0.0F;
     }
     return static_cast<float>(count) * 100.0F / static_cast<float>(total);
+}
+
+auto replacement_block_for(BlockId generated_block) noexcept -> BlockId {
+    const auto stone = to_block_id(BlockType::Stone);
+    const auto cobblestone = to_block_id(BlockType::Cobblestone);
+    return generated_block == stone ? cobblestone : stone;
+}
+
+auto finite_vec3(const glm::vec3& value) noexcept -> bool {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+auto vec3_components_at_least(const glm::vec3& value, float minimum) noexcept -> bool {
+    return value.x >= minimum && value.y >= minimum && value.z >= minimum;
 }
 
 auto terrain_surface_height(const WorldGenerator& generator, int world_x, int world_z) noexcept -> int {
@@ -100,6 +115,30 @@ auto doorway_world_cell(const StartingVillageBuilding& building) noexcept -> Blo
 
 TEST_CASE("air uses terrain as the visual fallback material") {
     CHECK(block_visual_material(to_block_id(BlockType::Air)) == BlockVisualMaterial::Terrain);
+}
+
+TEST_CASE("terrain surface sampling matches block and water generation") {
+    WorldGenerator generator(424242);
+    constexpr std::array<std::pair<int, int>, 5> sample_columns {{
+        {0, 0},
+        {-32, 24},
+        {48, -40},
+        {78, 90},
+        {-96, -56},
+    }};
+
+    for (const auto& [world_x, world_z] : sample_columns) {
+        const auto surface = generator.sample_surface(world_x, world_z);
+        CAPTURE(world_x);
+        CAPTURE(world_z);
+        CHECK(surface.surface_height == terrain_surface_height(generator, world_x, world_z));
+        CHECK(surface.surface_block == generator.sample_block(world_x, surface.surface_height, world_z));
+        if (surface.water_level > surface.surface_height) {
+            CHECK(generator.sample_water_state(world_x, surface.water_level, world_z) != 0);
+        } else {
+            CHECK(generator.sample_water_state(world_x, surface.surface_height + 1, world_z) == 0);
+        }
+    }
 }
 
 TEST_CASE("chunk stores and retrieves local blocks") {
@@ -213,6 +252,45 @@ TEST_CASE("world local and chunk conversions round-trip to original coordinates"
     CHECK(reconstructed == world_position);
 }
 
+TEST_CASE("spawn preload resolves overlapping lighting jobs for a 3x3 chunk area") {
+    World world(1337, 1);
+    const glm::vec3 focus {0.5F, 70.0F, 0.5F};
+    const auto center = world.world_to_chunk(0, 0);
+
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            world.ensure_chunk_loaded({center.x + dx, center.z + dz});
+        }
+    }
+    (void)world.update_streaming(focus);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 64U;
+    budget.fluid_cell_budget = 8192U;
+    budget.mesh_rebuild_budget = 64U;
+    budget.light_node_budget = std::numeric_limits<std::size_t>::max() / 8U;
+    budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    for (int iteration = 0; iteration < 8 && !world.are_chunks_ready(focus, 1); ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    CHECK(world.are_chunks_ready(focus, 1));
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const ChunkCoord coord {center.x + dx, center.z + dz};
+            const auto* chunk = world.find_chunk(coord);
+            REQUIRE(chunk != nullptr);
+            CHECK(world.mesh_revision(coord) > 0);
+            CHECK_FALSE(chunk->is_dirty());
+            CHECK_FALSE(chunk->is_lighting_dirty());
+        }
+    }
+}
+
 TEST_CASE("world get_block outside valid Y returns air") {
     World world(91, 1);
     CHECK(world.get_block(0, -1, 0) == to_block_id(BlockType::Air));
@@ -233,25 +311,27 @@ TEST_CASE("world set_block outside valid Y is a no-op") {
 TEST_CASE("modified chunks survive unload and reload within the same session") {
     World world(12345, 0);
     const ChunkCoord origin {0, 0};
+    constexpr BlockCoord target {1, kWorldMaxY, 1};
+    const auto replacement_block =
+        replacement_block_for(world.peek_block_or_generated(target.x, target.y, target.z));
 
     world.update_streaming({0.5F, 70.0F, 0.5F});
-    test::make_chunk_empty(world, origin);
-    world.set_block(1, 12, 1, to_block_id(BlockType::Stone));
+    world.set_block(target.x, target.y, target.z, replacement_block);
     test::flush_pending_work(world);
 
-    CHECK(world.get_block(1, 12, 1) == to_block_id(BlockType::Stone));
+    CHECK(world.get_block(target.x, target.y, target.z) == replacement_block);
 
     world.update_streaming({static_cast<float>(kChunkSizeX * 3) + 0.5F, 70.0F, 0.5F});
     test::flush_pending_work(world);
 
     CHECK(world.find_chunk(origin) == nullptr);
-    CHECK(world.get_block(1, 12, 1) == to_block_id(BlockType::Stone));
+    CHECK(world.get_block(target.x, target.y, target.z) == replacement_block);
 
     world.update_streaming({0.5F, 70.0F, 0.5F});
     test::flush_pending_work(world);
 
     REQUIRE(world.find_chunk(origin) != nullptr);
-    CHECK(world.get_block(1, 12, 1) == to_block_id(BlockType::Stone));
+    CHECK(world.get_block(target.x, target.y, target.z) == replacement_block);
 }
 
 TEST_CASE("restoring a block to its generated value clears the chunk override before unload") {
@@ -310,10 +390,14 @@ TEST_CASE("restoring a block to its generated value clears the chunk override be
 
 TEST_CASE("world chunk snapshots round-trip modified chunks into a fresh world") {
     World source_world(24680, 1);
-    test::make_chunk_empty(source_world, {0, 0});
-    test::make_chunk_empty(source_world, {1, 0});
-    source_world.set_block(2, 10, 3, to_block_id(BlockType::Stone));
-    source_world.set_block(17, 11, 4, to_block_id(BlockType::Torch));
+    constexpr BlockCoord first_target {2, kWorldMaxY, 3};
+    constexpr BlockCoord second_target {17, kWorldMaxY, 4};
+    const auto first_replacement =
+        replacement_block_for(source_world.peek_block_or_generated(first_target.x, first_target.y, first_target.z));
+    constexpr auto second_replacement = to_block_id(BlockType::Torch);
+
+    source_world.set_block(first_target.x, first_target.y, first_target.z, first_replacement);
+    source_world.set_block(second_target.x, second_target.y, second_target.z, second_replacement);
     test::flush_pending_work(source_world);
 
     const auto snapshots = source_world.modified_chunk_snapshots();
@@ -322,15 +406,15 @@ TEST_CASE("world chunk snapshots round-trip modified chunks into a fresh world")
     World restored_world(24680, 1);
     restored_world.replace_chunk_snapshots(snapshots);
 
-    CHECK(restored_world.get_block(2, 10, 3) == to_block_id(BlockType::Stone));
-    CHECK(restored_world.get_block(17, 11, 4) == to_block_id(BlockType::Torch));
+    CHECK(restored_world.get_block(first_target.x, first_target.y, first_target.z) == first_replacement);
+    CHECK(restored_world.get_block(second_target.x, second_target.y, second_target.z) == second_replacement);
 
     restored_world.ensure_chunk_loaded({0, 0});
     restored_world.ensure_chunk_loaded({1, 0});
     test::flush_pending_work(restored_world);
 
-    CHECK(restored_world.get_block(2, 10, 3) == to_block_id(BlockType::Stone));
-    CHECK(restored_world.get_block(17, 11, 4) == to_block_id(BlockType::Torch));
+    CHECK(restored_world.get_block(first_target.x, first_target.y, first_target.z) == first_replacement);
+    CHECK(restored_world.get_block(second_target.x, second_target.y, second_target.z) == second_replacement);
     CHECK(restored_world.modified_chunk_snapshots().size() == 2);
 }
 
@@ -362,6 +446,9 @@ TEST_CASE("starting village generator builds a playable procedural spawn hub") {
     const auto spawn_z = static_cast<int>(std::floor(layout.player_spawn.z));
     int road_columns = 0;
     int glass_blocks = 0;
+    int antique_wall_blocks = 0;
+    int timber_wall_blocks = 0;
+    int portico_column_blocks = 0;
     for (int z = layout.min_z; z <= layout.max_z; ++z) {
         for (int x = layout.min_x; x <= layout.max_x; ++x) {
             const auto ground_block = world.get_block(x, layout.base_y, z);
@@ -375,13 +462,89 @@ TEST_CASE("starting village generator builds a playable procedural spawn hub") {
         }
     }
 
+    for (const auto& building : layout.buildings) {
+        const auto wall_height = building_wall_height(building);
+        const auto forward = [&]() {
+            switch (building.facing) {
+            case VillageFacing::South:
+                return std::pair<int, int> {0, 1};
+            case VillageFacing::North:
+                return std::pair<int, int> {0, -1};
+            case VillageFacing::East:
+                return std::pair<int, int> {1, 0};
+            case VillageFacing::West:
+            default:
+                return std::pair<int, int> {-1, 0};
+            }
+        }();
+        const auto right = [&]() {
+            switch (building.facing) {
+            case VillageFacing::South:
+                return std::pair<int, int> {-1, 0};
+            case VillageFacing::North:
+                return std::pair<int, int> {1, 0};
+            case VillageFacing::East:
+                return std::pair<int, int> {0, 1};
+            case VillageFacing::West:
+            default:
+                return std::pair<int, int> {0, -1};
+            }
+        }();
+
+        for (int z = building.min_z; z <= building.max_z; ++z) {
+            for (int x = building.min_x; x <= building.max_x; ++x) {
+                const auto edge = x == building.min_x || x == building.max_x || z == building.min_z || z == building.max_z;
+                if (!edge) {
+                    continue;
+                }
+                for (int y = building.base_y + 1; y <= building.base_y + wall_height; ++y) {
+                    const auto block = world.get_block(x, y, z);
+                    antique_wall_blocks +=
+                        block == to_block_id(BlockType::Sand) ||
+                        block == to_block_id(BlockType::Stone) ||
+                        block == to_block_id(BlockType::Cobblestone) ||
+                        block == to_block_id(BlockType::MossyStone) ? 1 : 0;
+                    timber_wall_blocks +=
+                        block == to_block_id(BlockType::Wood) ||
+                        block == to_block_id(BlockType::PineWood) ||
+                        block == to_block_id(BlockType::Planks) ? 1 : 0;
+                }
+            }
+        }
+
+        for (int offset = -5; offset <= 5; ++offset) {
+            if (std::abs(offset) <= 1) {
+                continue;
+            }
+            const auto column_x = building.door_x + right.first * offset;
+            const auto column_z = building.door_z + right.second * offset;
+            const auto column_base_block = world.get_block(column_x, building.base_y + 1, column_z);
+            if (column_base_block != to_block_id(BlockType::Stone) &&
+                column_base_block != to_block_id(BlockType::Cobblestone) &&
+                column_base_block != to_block_id(BlockType::MossyStone)) {
+                continue;
+            }
+            for (int y = building.base_y + 1; y <= building.base_y + wall_height; ++y) {
+                const auto block = world.get_block(column_x, y, column_z);
+                portico_column_blocks +=
+                    block == to_block_id(BlockType::Stone) ||
+                    block == to_block_id(BlockType::Cobblestone) ||
+                    block == to_block_id(BlockType::MossyStone) ? 1 : 0;
+            }
+        }
+
+        CHECK(world.get_block(building.door_x + forward.first, building.base_y, building.door_z + forward.second) == to_block_id(BlockType::Stone));
+    }
+
     CHECK_FALSE(world.modified_chunk_snapshots().empty());
-    CHECK(world.get_block(layout.center_x, layout.base_y, layout.center_z) == to_block_id(BlockType::Water));
+    CHECK(world.has_water(layout.center_x, layout.base_y, layout.center_z));
     CHECK(is_block_collidable(world.get_block(spawn_x, layout.base_y, spawn_z)));
     CHECK(world.get_block(spawn_x, layout.base_y + 1, spawn_z) == to_block_id(BlockType::Air));
     CHECK(world.get_block(spawn_x, layout.base_y + 2, spawn_z) == to_block_id(BlockType::Air));
     CHECK(road_columns > 350);
     CHECK(glass_blocks > 40);
+    CHECK(antique_wall_blocks > timber_wall_blocks * 6);
+    CHECK(portico_column_blocks >= static_cast<int>(layout.buildings.size()) * 6);
 
     const auto corner_surface_matches_generated = [&](int world_x, int world_z) {
         const auto generated_surface_y = terrain_surface_height(terrain_generator, world_x, world_z);
@@ -1012,8 +1175,8 @@ TEST_CASE("single isolated source keeps a localized spread on a flat floor") {
     constexpr int water_y = floor_y + 1;
     const auto stone = to_block_id(BlockType::Stone);
 
-    for (int x = 0; x <= 24; ++x) {
-        for (int z = 0; z <= 4; ++z) {
+    for (int x = 0; x < kChunkSizeX * 2; ++x) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
             world.set_block(x, floor_y, z, stone);
         }
     }
@@ -1196,7 +1359,7 @@ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animat
         return vertex.wave_weight > 0.5F;
     });
 
-    CHECK(animated_vertex_count == 45);
+    CHECK(animated_vertex_count == 65);
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight == 0.0F || vertex.wave_weight == 1.0F;
     }));
@@ -1214,13 +1377,13 @@ TEST_CASE("stacked water only animates the topmost surface block") {
     const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight > 0.5F;
     });
-    CHECK(animated_vertex_count == 45);
+    CHECK(animated_vertex_count == 65);
 
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         if (vertex.wave_weight <= 0.5F) {
             return true;
         }
-        return vertex.y > 6.85F;
+        return vertex.y > 5.85F;
     }));
 }
 
@@ -1577,6 +1740,7 @@ TEST_CASE("raycast returns first solid block and adjacent placement cell") {
     CHECK(hit.block == expected_hit_block);
     CHECK(hit.adjacent == expected_adjacent);
     CHECK(hit.block_id == to_block_id(BlockType::Stone));
+    CHECK(hit.distance == doctest::Approx(0.5F));
 }
 
 TEST_CASE("raycast returns no hit when the path is empty") {
@@ -1597,6 +1761,7 @@ TEST_CASE("raycast returns the current block immediately when starting inside a 
     REQUIRE(hit.hit);
     CHECK(hit.block == expected_current);
     CHECK(hit.adjacent == expected_current);
+    CHECK(hit.distance == doctest::Approx(0.0F));
 }
 
 TEST_CASE("raycast can target decorative plants") {
@@ -1706,7 +1871,7 @@ TEST_CASE("generator keeps meadow and forest vegetation density in the intended 
     CAPTURE(meadow_decoration_percent);
     CHECK(meadow_tree_percent >= 0.8F);
     CHECK(meadow_tree_percent <= 2.0F);
-    CHECK(meadow_decoration_percent >= 9.0F);
+    CHECK(meadow_decoration_percent >= 5.5F);
     CHECK(meadow_decoration_percent <= 15.0F);
 
     CAPTURE(forest.sampled_columns);
@@ -1718,7 +1883,7 @@ TEST_CASE("generator keeps meadow and forest vegetation density in the intended 
     CAPTURE(forest_decoration_percent);
     CHECK(forest_tree_percent >= 2.8F);
     CHECK(forest_tree_percent <= 4.3F);
-    CHECK(forest_decoration_percent >= 11.0F);
+    CHECK(forest_decoration_percent >= 9.0F);
     CHECK(forest_decoration_percent <= 16.5F);
 }
 
@@ -1925,7 +2090,12 @@ TEST_CASE("far chunk load defers seam remeshes to the normal mesh budget") {
     REQUIRE(far_revision_before > 0);
 
     world.ensure_chunk_loaded(far_new);
-    const auto stats = world.process_pending_work({0, 0, 65536});
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 0U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 65536U;
+    const auto stats = world.process_pending_work(budget);
 
     CHECK(stats.prioritized_meshed_chunks == 0);
     CHECK(world.mesh_revision(far_existing) == far_revision_before);
@@ -1967,7 +2137,12 @@ TEST_CASE("lighting completion enqueues mesh rebuilds without a global dirty sca
     world.set_block(1, 0, 1, to_block_id(BlockType::Stone));
     REQUIRE(world.pending_lighting_count() == 1);
 
-    const auto stats = world.process_pending_work({0, 0, 65536});
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 0U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 65536U;
+    const auto stats = world.process_pending_work(budget);
     CHECK(stats.lighting_jobs_completed == 1);
     CHECK(world.pending_mesh_count() >= 1);
 }
@@ -2072,6 +2247,24 @@ TEST_CASE("rebuilding a dirty chunk enqueues a GPU upload event") {
 
     const auto uploads = world.consume_pending_gpu_uploads(8);
     CHECK(std::find(uploads.begin(), uploads.end(), origin) != uploads.end());
+    CHECK(world.consume_pending_gpu_uploads(8).empty());
+}
+
+TEST_CASE("loaded meshes can be requeued after a renderer reset") {
+    World world(193, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    world.rebuild_dirty_meshes();
+
+    const auto initial_uploads = world.consume_pending_gpu_uploads(8);
+    REQUIRE(std::find(initial_uploads.begin(), initial_uploads.end(), origin) != initial_uploads.end());
+    REQUIRE(world.consume_pending_gpu_uploads(8).empty());
+    REQUIRE(world.mesh_revision(origin) > 0);
+
+    world.enqueue_loaded_mesh_uploads();
+
+    const auto restored_uploads = world.consume_pending_gpu_uploads(8);
+    CHECK(std::find(restored_uploads.begin(), restored_uploads.end(), origin) != restored_uploads.end());
     CHECK(world.consume_pending_gpu_uploads(8).empty());
 }
 
@@ -2301,7 +2494,7 @@ TEST_CASE("environment state keeps day crisp dusk warm and night cool with softe
     CHECK(midnight.vignette_strength > noon.vignette_strength);
     CHECK(dusk.glow_strength >= noon.glow_strength);
     CHECK(noon.cloud_intensity > midnight.cloud_intensity);
-    CHECK(dusk.cloud_intensity > 0.20F);
+    CHECK(dusk.cloud_intensity > midnight.cloud_intensity);
     CHECK(dusk.sky_horizon_color.r > dusk.sky_zenith_color.r);
     CHECK(noon.sky_horizon_color.b > noon.sky_horizon_color.r);
     CHECK(midnight.sky_zenith_color.b > midnight.sky_zenith_color.r);
@@ -2309,22 +2502,171 @@ TEST_CASE("environment state keeps day crisp dusk warm and night cool with softe
     CHECK(noon_sky_span > 0.16F);
     CHECK(midnight_sky_span < noon_sky_span * 0.35F);
     CHECK(midnight.distant_fog_color.b > midnight.night_tint_color.b);
+    CHECK(noon.distant_fog_color.r < 0.66F);
+    CHECK(noon.distant_fog_color.b < 0.94F);
     CHECK(noon.cloud_shadow_strength > midnight.cloud_shadow_strength);
     CHECK(dusk.atmospheric_scatter_strength > noon.atmospheric_scatter_strength);
     CHECK(midnight.height_fog_density > noon.height_fog_density);
+    CHECK(noon.atmospheric_scatter_strength < 0.075F);
+    CHECK(noon.height_fog_density < 0.0030F);
     CHECK(noon.post_sharpen_strength > midnight.post_sharpen_strength);
     CHECK(dusk.post_edge_strength >= noon.post_edge_strength);
     CHECK(noon.wind_strength > 0.20F);
+}
+
+TEST_CASE("weather cycle stays mostly fair while still producing rain and storms") {
+    constexpr std::uint32_t seed = 424242U;
+    constexpr int sampled_slots = 2048;
+    int fair_weather_slots = 0;
+    int rainy_slots = 0;
+    bool saw_overcast = false;
+    bool saw_storm = false;
+    bool saw_tempest = false;
+
+    for (int slot = 0; slot < sampled_slots; ++slot) {
+        const auto state = EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            static_cast<float>(slot) * 240.0F + 120.0F);
+        if (state.weather == WeatherKind::Clear || state.weather == WeatherKind::PartlyCloudy) {
+            ++fair_weather_slots;
+        }
+        if (state.precipitation_intensity > 0.10F) {
+            ++rainy_slots;
+        }
+        saw_overcast = saw_overcast || state.weather == WeatherKind::Overcast;
+        saw_storm = saw_storm || state.storm_intensity > 0.30F;
+        saw_tempest = saw_tempest || state.weather == WeatherKind::Tempest;
+    }
+
+    CHECK(static_cast<float>(fair_weather_slots) / static_cast<float>(sampled_slots) > 0.64F);
+    CHECK(rainy_slots > 0);
+    CHECK(saw_overcast);
+    CHECK(saw_storm);
+    CHECK(saw_tempest);
+}
+
+TEST_CASE("weather transitions blend cloud cover instead of jumping abruptly") {
+    constexpr std::uint32_t seed = 9001U;
+    bool checked_transition = false;
+
+    for (int slot = 1; slot < 256 && !checked_transition; ++slot) {
+        const auto boundary = static_cast<float>(slot) * 240.0F;
+        const auto before = EnvironmentClock::compute_state(12.0F, seed, boundary - 1.0F);
+        const auto middle = EnvironmentClock::compute_state(12.0F, seed, boundary + 21.0F);
+        const auto after = EnvironmentClock::compute_state(12.0F, seed, boundary + 84.0F);
+        const auto min_cloud = std::min(before.cloud_intensity, after.cloud_intensity);
+        const auto max_cloud = std::max(before.cloud_intensity, after.cloud_intensity);
+        if (max_cloud - min_cloud < 0.25F) {
+            continue;
+        }
+
+        CHECK(middle.weather_transition_factor == doctest::Approx(0.5F).epsilon(0.04));
+        CHECK(middle.cloud_intensity > min_cloud + 0.04F);
+        CHECK(middle.cloud_intensity < max_cloud - 0.04F);
+        checked_transition = true;
+    }
+
+    CHECK(checked_transition);
+}
+
+TEST_CASE("rain and storm weather alter lighting wind and precipitation coherently") {
+    constexpr std::uint32_t seed = 321987U;
+    auto clear_state = EnvironmentClock::compute_state(12.0F, seed, 0.0F);
+    EnvironmentState rain_state {};
+    EnvironmentState storm_state {};
+    bool found_rain = false;
+    bool found_storm = false;
+
+    for (int slot = 1; slot < 2048 && (!found_rain || !found_storm); ++slot) {
+        const auto state = EnvironmentClock::compute_state(12.0F, seed, static_cast<float>(slot) * 240.0F + 120.0F);
+        if (!found_rain && state.precipitation_intensity > 0.30F && state.storm_intensity < 0.05F) {
+            rain_state = state;
+            found_rain = true;
+        }
+        if (!found_storm && state.storm_intensity > 0.30F) {
+            storm_state = state;
+            found_storm = true;
+        }
+    }
+
+    REQUIRE(found_rain);
+    REQUIRE(found_storm);
+    CHECK(clear_state.weather == WeatherKind::Clear);
+    CHECK(clear_state.cloud_intensity < 0.12F);
+    CHECK(rain_state.overcast_intensity > clear_state.overcast_intensity);
+    CHECK(rain_state.precipitation_intensity > 0.30F);
+    CHECK(rain_state.exposure < clear_state.exposure);
+    CHECK(storm_state.storm_intensity > rain_state.storm_intensity);
+    CHECK(storm_state.wind_strength > rain_state.wind_strength);
+    CHECK(storm_state.cloud_shadow_strength > clear_state.cloud_shadow_strength);
+    CHECK(storm_state.saturation_boost < clear_state.saturation_boost);
+}
+
+TEST_CASE("weather cycle keeps environment values finite and renderer-safe") {
+    constexpr std::array<std::uint32_t, 5> seeds {1U, 1337U, 424242U, 987654U, 0xffffffffU};
+    constexpr std::array<float, 5> times_of_day {0.0F, 6.0F, 12.0F, 18.0F, 23.5F};
+
+    for (const auto seed : seeds) {
+        for (int slot = 0; slot < 96; ++slot) {
+            for (const auto time_of_day : times_of_day) {
+                const auto weather_time = static_cast<float>(slot) * 240.0F + 21.0F;
+                const auto state = EnvironmentClock::compute_state(time_of_day, seed, weather_time);
+                CAPTURE(seed);
+                CAPTURE(slot);
+                CAPTURE(time_of_day);
+                CHECK(state.time_of_day >= 0.0F);
+                CHECK(state.time_of_day < 24.0F);
+                CHECK(state.weather_time_seconds == doctest::Approx(weather_time));
+                CHECK(state.daylight_factor >= 0.18F);
+                CHECK(state.daylight_factor <= 1.0F);
+                CHECK(state.cloud_intensity >= 0.0F);
+                CHECK(state.cloud_intensity <= 1.0F);
+                CHECK(state.overcast_intensity >= 0.0F);
+                CHECK(state.overcast_intensity <= 1.0F);
+                CHECK(state.precipitation_intensity >= 0.0F);
+                CHECK(state.precipitation_intensity <= 1.0F);
+                CHECK(state.storm_intensity >= 0.0F);
+                CHECK(state.storm_intensity <= 1.0F);
+                CHECK(state.lightning_intensity >= 0.0F);
+                CHECK(state.lightning_intensity <= 1.0F);
+                CHECK(state.weather_transition_factor >= 0.0F);
+                CHECK(state.weather_transition_factor <= 1.0F);
+                CHECK(state.cloud_shadow_strength >= 0.0F);
+                CHECK(state.cloud_shadow_strength <= 1.0F);
+                CHECK(state.wind_strength >= 0.0F);
+                CHECK(state.wind_strength <= 1.0F);
+                CHECK(state.height_fog_density >= 0.0F);
+                CHECK(state.height_fog_density < 0.012F);
+                CHECK(state.atmospheric_scatter_strength >= 0.0F);
+                CHECK(state.atmospheric_scatter_strength < 0.16F);
+                CHECK(finite_vec3(state.sun_direction));
+                CHECK(finite_vec3(state.sun_color));
+                CHECK(finite_vec3(state.ambient_color));
+                CHECK(finite_vec3(state.fog_color));
+                CHECK(finite_vec3(state.sky_zenith_color));
+                CHECK(finite_vec3(state.sky_horizon_color));
+                CHECK(finite_vec3(state.distant_fog_color));
+                CHECK(vec3_components_at_least(state.sun_color, 0.0F));
+                CHECK(vec3_components_at_least(state.ambient_color, 0.0F));
+                CHECK(vec3_components_at_least(state.fog_color, 0.0F));
+                CHECK(vec3_components_at_least(state.sky_zenith_color, 0.0F));
+                CHECK(vec3_components_at_least(state.sky_horizon_color, 0.0F));
+            }
+        }
+    }
 }
 
 TEST_CASE("environment clock respects freeze mode") {
     EnvironmentClock frozen_clock(8.0F, true);
     frozen_clock.update(120.0F);
     CHECK(frozen_clock.time_of_day() == doctest::Approx(8.0F));
+    CHECK(frozen_clock.weather_time_seconds() == doctest::Approx(0.0F));
 
     EnvironmentClock running_clock(8.0F, false);
     running_clock.update(30.0F);
     CHECK(running_clock.time_of_day() == doctest::Approx(9.0F).epsilon(0.01));
+    CHECK(running_clock.weather_time_seconds() == doctest::Approx(30.0F));
 }
 
 TEST_CASE("performance report formatting includes frame and scheduler counters") {

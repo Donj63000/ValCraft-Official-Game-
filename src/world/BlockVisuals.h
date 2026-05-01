@@ -154,6 +154,18 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {4, 3};
     case BlockType::Glass:
         return {1, 4};
+    case BlockType::Pastron:
+        return {2, 4};
+    case BlockType::RoundShield:
+        return {3, 4};
+    case BlockType::Sword:
+        return {4, 4};
+    case BlockType::Spear:
+        return {5, 4};
+    case BlockType::Shoes:
+        return {6, 4};
+    case BlockType::Pants:
+        return {7, 4};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -175,6 +187,18 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {0, 3};
     case BlockType::Glass:
         return {1, 4};
+    case BlockType::Pastron:
+        return {2, 4};
+    case BlockType::RoundShield:
+        return {3, 4};
+    case BlockType::Sword:
+        return {4, 4};
+    case BlockType::Spear:
+        return {5, 4};
+    case BlockType::Shoes:
+        return {6, 4};
+    case BlockType::Pants:
+        return {7, 4};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }
@@ -220,6 +244,14 @@ enum class BlockVisualMaterial : std::uint8_t {
         return BlockVisualMaterial::Snow;
     case BlockType::Glass:
         return BlockVisualMaterial::Glass;
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+        return BlockVisualMaterial::Rock;
+    case BlockType::Shoes:
+    case BlockType::Pants:
+        return BlockVisualMaterial::Wood;
     case BlockType::Air:
     default:
         return BlockVisualMaterial::Terrain;

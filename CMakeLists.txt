@@ -249,6 +249,7 @@ add_executable(valcraft_tests
     tests/AudioTests.cpp
     tests/CreatureTests.cpp
     tests/RenderTests.cpp
+    tests/WorldSchedulingTests.cpp
     tests/WorldTests.cpp
     tests/PlayerTests.cpp
 )

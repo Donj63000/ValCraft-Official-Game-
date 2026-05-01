@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/Equipment.h"
 #include "app/Hotbar.h"
 #include "world/BlockVisuals.h"
 
@@ -17,11 +18,12 @@ namespace valcraft {
 constexpr std::size_t kInventoryColumns = 9;
 constexpr std::size_t kInventoryRows = 3;
 constexpr std::size_t kInventoryStorageSlotCount = kInventoryColumns * kInventoryRows;
-constexpr std::size_t kInventoryVisibleSlotCount = kInventoryStorageSlotCount + kHotbarSlotCount;
+constexpr std::size_t kInventoryVisibleSlotCount = kInventoryStorageSlotCount + kHotbarSlotCount + kEquipmentSlotCount;
 
 enum class InventorySlotGroup : std::uint8_t {
     Storage = 0,
     Hotbar = 1,
+    Equipment = 2,
 };
 
 struct InventorySlotRef {
@@ -36,6 +38,7 @@ struct InventoryMenuState {
     float cursor_x = 0.0F;
     float cursor_y = 0.0F;
     std::array<HotbarSlot, kInventoryStorageSlotCount> storage_slots {};
+    std::array<HotbarSlot, kEquipmentSlotCount> equipment_slots {};
     HotbarSlot carried_slot {};
     bool carrying_item = false;
     std::optional<InventorySlotRef> hovered_slot {};
@@ -52,6 +55,7 @@ struct InventorySlotLayout {
     float size = 0.0F;
     bool hovered = false;
     bool is_hotbar = false;
+    bool is_equipment = false;
     bool is_selected_hotbar = false;
     bool has_icon = false;
 };
@@ -118,6 +122,8 @@ struct InventoryMenuLayout {
     float storage_label_y = 0.0F;
     float hotbar_label_x = 0.0F;
     float hotbar_label_y = 0.0F;
+    float equipment_label_x = 0.0F;
+    float equipment_label_y = 0.0F;
     float detail_label_x = 0.0F;
     float detail_label_y = 0.0F;
     float footer_center_x = 0.0F;
@@ -144,7 +150,7 @@ inline constexpr auto inventory_slot_has_item(const HotbarSlot& slot) noexcept -
 inline constexpr auto inventory_can_merge(const HotbarSlot& slot, BlockId block_id) noexcept -> bool {
     return inventory_slot_has_item(slot) &&
            block_item_id(slot.block_id) == block_item_id(block_id) &&
-           slot.count < kMaxItemStackCount;
+           slot.count < max_item_stack_count(block_id);
 }
 
 inline constexpr auto inventory_same_item(const HotbarSlot& lhs, const HotbarSlot& rhs) noexcept -> bool {
@@ -196,6 +202,20 @@ inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::st
         return "CACTUS";
     case BlockType::Water:
         return "EAU";
+    case BlockType::Glass:
+        return "VERRE";
+    case BlockType::Pastron:
+        return "PASTRON";
+    case BlockType::RoundShield:
+        return "BOUCLIER ROND";
+    case BlockType::Sword:
+        return "EPEE";
+    case BlockType::Spear:
+        return "LANCE";
+    case BlockType::Shoes:
+        return "CHAUSSURES";
+    case BlockType::Pants:
+        return "PANTALON";
     case BlockType::Air:
     default:
         return "";
@@ -217,6 +237,17 @@ inline constexpr void normalize_inventory_hotbar_slot(HotbarState& hotbar, std::
     normalize_item_stack(hotbar.slots[index]);
 }
 
+inline constexpr void normalize_inventory_equipment_slot(InventoryMenuState& inventory, std::size_t index) noexcept {
+    if (index >= kEquipmentSlotCount) {
+        return;
+    }
+    auto& slot = inventory.equipment_slots[index];
+    normalize_item_stack(slot);
+    if (inventory_slot_has_item(slot) && !equipment_ref_accepts_item(index, slot.block_id)) {
+        slot = inventory_empty_slot();
+    }
+}
+
 inline constexpr void normalize_inventory_state(InventoryMenuState& inventory, HotbarState& hotbar) noexcept {
     for (auto& slot : inventory.storage_slots) {
         normalize_inventory_storage_slot(slot);
@@ -224,9 +255,21 @@ inline constexpr void normalize_inventory_state(InventoryMenuState& inventory, H
     for (std::size_t index = 0; index < kHotbarSlotCount; ++index) {
         normalize_inventory_hotbar_slot(hotbar, index);
     }
+    for (std::size_t index = 0; index < kEquipmentSlotCount; ++index) {
+        normalize_inventory_equipment_slot(inventory, index);
+    }
 
     normalize_item_stack(inventory.carried_slot);
     inventory.carrying_item = inventory_slot_has_item(inventory.carried_slot);
+}
+
+inline constexpr auto inventory_equipment_resistance_percent(const InventoryMenuState& inventory) noexcept -> float {
+    return equipped_resistance_percent(inventory.equipment_slots);
+}
+
+inline constexpr auto inventory_active_weapon_stats(const InventoryMenuState& inventory,
+                                                    const HotbarState& hotbar) noexcept -> std::optional<WeaponStats> {
+    return equipped_weapon_stats(inventory.equipment_slots, hotbar);
 }
 
 inline constexpr auto inventory_slot_ptr(InventoryMenuState& inventory,
@@ -241,6 +284,11 @@ inline constexpr auto inventory_slot_ptr(InventoryMenuState& inventory,
     case InventorySlotGroup::Hotbar:
         if (ref.index < hotbar.slots.size()) {
             return &hotbar.slots[ref.index];
+        }
+        return nullptr;
+    case InventorySlotGroup::Equipment:
+        if (ref.index < inventory.equipment_slots.size()) {
+            return &inventory.equipment_slots[ref.index];
         }
         return nullptr;
     default:
@@ -262,9 +310,24 @@ inline constexpr auto inventory_slot_ptr(const InventoryMenuState& inventory,
             return &hotbar.slots[ref.index];
         }
         return nullptr;
+    case InventorySlotGroup::Equipment:
+        if (ref.index < inventory.equipment_slots.size()) {
+            return &inventory.equipment_slots[ref.index];
+        }
+        return nullptr;
     default:
         return nullptr;
     }
+}
+
+inline constexpr auto inventory_ref_accepts_stack(InventorySlotRef ref, const HotbarSlot& stack) noexcept -> bool {
+    if (!inventory_slot_has_item(stack)) {
+        return true;
+    }
+    if (ref.group != InventorySlotGroup::Equipment) {
+        return true;
+    }
+    return equipment_ref_accepts_item(ref.index, stack.block_id);
 }
 
 inline constexpr auto inventory_take_from_slot(HotbarSlot& slot, std::uint8_t count) noexcept -> HotbarSlot {
@@ -301,18 +364,19 @@ inline constexpr void inventory_merge_into_slot(HotbarSlot& target, HotbarSlot& 
     }
 
     if (!inventory_slot_has_item(target)) {
-        const auto moved = static_cast<std::uint8_t>(std::min<std::uint8_t>(source.count, kMaxItemStackCount));
+        const auto moved = static_cast<std::uint8_t>(std::min<std::uint8_t>(source.count, max_item_stack_count(source.block_id)));
         target = {source.block_id, moved};
         source.count = static_cast<std::uint8_t>(source.count - moved);
         normalize_item_stack(source);
         return;
     }
 
-    if (target.block_id != source.block_id || target.count >= kMaxItemStackCount) {
+    const auto max_count = max_item_stack_count(target.block_id);
+    if (target.block_id != source.block_id || target.count >= max_count) {
         return;
     }
 
-    const auto space_left = static_cast<std::uint8_t>(kMaxItemStackCount - target.count);
+    const auto space_left = static_cast<std::uint8_t>(max_count - target.count);
     const auto moved = static_cast<std::uint8_t>(std::min<std::uint8_t>(space_left, source.count));
     target.count = static_cast<std::uint8_t>(target.count + moved);
     source.count = static_cast<std::uint8_t>(source.count - moved);
@@ -379,11 +443,17 @@ inline constexpr void inventory_primary_click(InventoryMenuState& inventory,
         inventory.carried_slot = *slot;
         *slot = inventory_empty_slot();
     } else if (!inventory_slot_has_item(*slot)) {
+        if (!inventory_ref_accepts_stack(ref, inventory.carried_slot)) {
+            return;
+        }
         *slot = inventory.carried_slot;
         inventory.carried_slot = inventory_empty_slot();
     } else if (inventory_same_item(*slot, inventory.carried_slot)) {
         inventory_merge_into_slot(*slot, inventory.carried_slot);
     } else {
+        if (!inventory_ref_accepts_stack(ref, inventory.carried_slot)) {
+            return;
+        }
         std::swap(inventory.carried_slot, *slot);
     }
 
@@ -413,8 +483,11 @@ inline constexpr void inventory_secondary_click(InventoryMenuState& inventory,
         const auto pickup_count = static_cast<std::uint8_t>((slot->count + 1U) / 2U);
         inventory.carried_slot = inventory_take_from_slot(*slot, pickup_count);
     } else if (!inventory_slot_has_item(*slot)) {
+        if (!inventory_ref_accepts_stack(ref, inventory.carried_slot)) {
+            return;
+        }
         *slot = inventory_take_from_slot(inventory.carried_slot, 1);
-    } else if (inventory_same_item(*slot, inventory.carried_slot) && slot->count < kMaxItemStackCount) {
+    } else if (inventory_same_item(*slot, inventory.carried_slot) && slot->count < max_item_stack_count(slot->block_id)) {
         ++slot->count;
         inventory.carried_slot.count = static_cast<std::uint8_t>(inventory.carried_slot.count - 1U);
     }
@@ -439,13 +512,18 @@ inline constexpr void inventory_swap_with_hotbar(InventoryMenuState& inventory,
     }
 
     normalize_inventory_state(inventory, hotbar);
+    if (ref.group == InventorySlotGroup::Equipment &&
+        inventory_slot_has_item(hotbar.slots[hotbar_index]) &&
+        !inventory_ref_accepts_stack(ref, hotbar.slots[hotbar_index])) {
+        return;
+    }
     std::swap(*slot, hotbar.slots[hotbar_index]);
     normalize_inventory_state(inventory, hotbar);
 }
 
 inline auto make_default_inventory_menu_state() noexcept -> InventoryMenuState {
     InventoryMenuState state {};
-    const std::array<HotbarSlot, 18> starter_stacks {{
+    const std::array<HotbarSlot, 24> starter_stacks {{
         inventory_make_slot(to_block_id(BlockType::Wood), 16),
         inventory_make_slot(to_block_id(BlockType::Leaves), 16),
         inventory_make_slot(to_block_id(BlockType::Gravel), 32),
@@ -464,6 +542,12 @@ inline auto make_default_inventory_menu_state() noexcept -> InventoryMenuState {
         inventory_make_slot(to_block_id(BlockType::Planks), 32),
         inventory_make_slot(to_block_id(BlockType::Sand), 32),
         inventory_make_slot(to_block_id(BlockType::Stone), 32),
+        inventory_make_slot(to_block_id(BlockType::Pastron), 1),
+        inventory_make_slot(to_block_id(BlockType::RoundShield), 1),
+        inventory_make_slot(to_block_id(BlockType::Sword), 1),
+        inventory_make_slot(to_block_id(BlockType::Spear), 1),
+        inventory_make_slot(to_block_id(BlockType::Shoes), 1),
+        inventory_make_slot(to_block_id(BlockType::Pants), 1),
     }};
 
     for (std::size_t index = 0; index < starter_stacks.size(); ++index) {
@@ -472,6 +556,7 @@ inline auto make_default_inventory_menu_state() noexcept -> InventoryMenuState {
     for (std::size_t index = starter_stacks.size(); index < state.storage_slots.size(); ++index) {
         state.storage_slots[index] = inventory_empty_slot();
     }
+    state.equipment_slots.fill(inventory_empty_slot());
     state.carried_slot = inventory_empty_slot();
     return state;
 }
@@ -621,6 +706,18 @@ inline auto build_inventory_menu_layout(int viewport_width,
     const auto preview_inner_padding = std::max(12.0F, slot_size * 0.28F);
     const auto preview_inner_height = std::max(0.0F, preview_panel_height - preview_inner_padding * 2.0F);
     const auto preview_inner_y = preview_panel_y + preview_inner_padding;
+    const auto equipment_slot_size = std::clamp(slot_size * 0.72F, 24.0F, 36.0F);
+    const auto equipment_gap = std::max(4.0F, equipment_slot_size * 0.18F);
+    const auto equipment_columns = 3U;
+    const auto equipment_grid_width =
+        static_cast<float>(equipment_columns) * equipment_slot_size +
+        static_cast<float>(equipment_columns - 1U) * equipment_gap;
+    const auto equipment_grid_height = equipment_slot_size * 2.0F + equipment_gap;
+    const auto equipment_grid_x = preview_panel_x + (preview_panel_width - equipment_grid_width) * 0.5F;
+    const auto equipment_grid_y =
+        preview_panel_y + preview_panel_height - equipment_grid_height - std::max(26.0F, slot_size * 0.70F);
+    const auto equipment_reserved_height =
+        equipment_grid_height + section_label_height + std::max(34.0F, slot_size * 0.92F);
 
     InventoryMenuLayout layout {};
     layout.panel_x = panel_x;
@@ -665,7 +762,10 @@ inline auto build_inventory_menu_layout(int viewport_width,
     layout.preview_width = preview_panel_width;
     layout.preview_height = preview_panel_height;
     layout.preview_center_x = preview_panel_x + preview_panel_width * 0.5F;
-    layout.preview_base_y = preview_inner_y + preview_inner_height - std::max(18.0F, slot_size * 0.52F);
+    layout.preview_base_y =
+        preview_inner_y +
+        std::max(0.0F, preview_inner_height - equipment_reserved_height) -
+        std::max(10.0F, slot_size * 0.22F);
     layout.silhouette_scale = std::clamp(preview_panel_width * 0.078F, 9.0F, 15.0F);
     layout.grid_x = grid_x;
     layout.grid_y = grid_y;
@@ -675,6 +775,8 @@ inline auto build_inventory_menu_layout(int viewport_width,
     layout.storage_label_y = storage_panel_y + 10.0F;
     layout.hotbar_label_x = hotbar_panel_x + section_padding;
     layout.hotbar_label_y = hotbar_panel_y + 10.0F;
+    layout.equipment_label_x = preview_panel_x + preview_panel_width * 0.5F;
+    layout.equipment_label_y = equipment_grid_y - section_label_height - 4.0F;
     layout.detail_label_x = detail_panel_x + std::max(10.0F, slot_size * 0.22F);
     layout.detail_label_y = detail_panel_y + 10.0F;
     layout.footer_center_x = panel_x + panel_width * 0.5F;
@@ -727,6 +829,26 @@ inline auto build_inventory_menu_layout(int viewport_width,
         keycap.height = keycap_height;
         keycap.number = static_cast<std::uint8_t>(column + 1U);
         keycap.selected = slot.is_selected_hotbar;
+    }
+
+    for (std::size_t index = 0; index < kEquipmentSlotCount; ++index) {
+        const auto layout_index = kInventoryStorageSlotCount + kHotbarSlotCount + index;
+        const auto row = index / equipment_columns;
+        const auto column = index % equipment_columns;
+        auto& slot = layout.slots[layout_index];
+        slot.ref = {InventorySlotGroup::Equipment, index};
+        slot.slot = inventory.equipment_slots[index];
+        slot.icon_tile = inventory_slot_icon_tile(slot.slot.block_id);
+        slot.x = equipment_grid_x + static_cast<float>(column) * (equipment_slot_size + equipment_gap);
+        slot.y = equipment_grid_y + static_cast<float>(row) * (equipment_slot_size + equipment_gap);
+        slot.size = equipment_slot_size;
+        slot.hovered =
+            inventory.cursor_x >= slot.x &&
+            inventory.cursor_x <= slot.x + slot.size &&
+            inventory.cursor_y >= slot.y &&
+            inventory.cursor_y <= slot.y + slot.size;
+        slot.is_equipment = true;
+        slot.has_icon = inventory_slot_has_item(slot.slot);
     }
 
     return layout;
