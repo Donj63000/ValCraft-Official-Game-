@@ -1044,7 +1044,7 @@ TEST_CASE("player first person viewmodel adds a sword model when the held item i
     REQUIRE_FALSE(empty_parts.empty());
     REQUIRE_FALSE(sword_parts.empty());
     CHECK(stone_parts.parts.size() == empty_parts.parts.size());
-    CHECK(sword_parts.parts.size() == empty_parts.parts.size() + 5U);
+    CHECK(sword_parts.parts.size() == empty_parts.parts.size() + 14U);
     CHECK(sword_mesh.mesh.part_count == sword_parts.parts.size());
     CHECK(sword_mesh.mesh.vertices.size() == sword_parts.parts.size() * 24U);
     CHECK(sword_mesh.mesh.indices.size() == sword_parts.parts.size() * 36U);

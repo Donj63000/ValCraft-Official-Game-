@@ -7,12 +7,13 @@
 #endif
 
 #include <iostream>
+#include <memory>
 
 namespace {
 
 auto run_valcraft(const valcraft::GameOptions& options) -> int {
-    valcraft::Game game(options);
-    return game.run();
+    auto game = std::make_unique<valcraft::Game>(options);
+    return game->run();
 }
 
 } // namespace

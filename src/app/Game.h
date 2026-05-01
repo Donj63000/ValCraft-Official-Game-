@@ -34,7 +34,7 @@ namespace valcraft {
 
 class Game {
 public:
-    explicit Game(GameOptions options = {});
+    explicit Game(const GameOptions& options = {});
     ~Game();
 
     auto run() -> int;

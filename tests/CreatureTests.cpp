@@ -835,7 +835,7 @@ TEST_CASE("player weapon ray damages and kills targeted creatures") {
     CHECK_FALSE(hit.killed);
     CHECK(hit.species == CreatureSpecies::Villager);
     CHECK(hit.remaining_health == doctest::Approx(creature_max_health(CreatureSpecies::Villager) - 5.0F));
-    CHECK(hit.distance == doctest::Approx(2.5F));
+    CHECK(hit.distance == doctest::Approx(2.02F).epsilon(0.02F));
     REQUIRE(system.active_creatures().size() == 1);
     CHECK(system.active_creatures().front().health == doctest::Approx(hit.remaining_health));
     CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Flee);
@@ -902,6 +902,13 @@ TEST_CASE("killed settlement residents do not respawn during the current session
     CHECK(system.active_creatures().empty());
 
     for (int frame = 0; frame < 8; ++frame) {
+        system.update(1.0F / 60.0F, world, anchor.spawn_position, environment, cycle);
+    }
+    CHECK(system.active_creatures().empty());
+    REQUIRE(system.render_instances().size() == 1);
+    CHECK(system.render_instances().front().death_amount > 0.0F);
+
+    for (int frame = 0; frame < 80; ++frame) {
         system.update(1.0F / 60.0F, world, anchor.spawn_position, environment, cycle);
     }
     CHECK(system.active_creatures().empty());

@@ -103,7 +103,9 @@ struct CreatureInstance {
     float gaze_weight = 0.0F;
     float attack_cooldown = 0.0F;
     float attack_amount = 0.0F;
+    float hurt_timer = 0.0F;
     float health = creature_max_health(CreatureSpecies::Pig);
+    glm::vec3 hit_direction {0.0F, 0.0F, 1.0F};
     std::uint8_t resident_target_index = 0;
 };
 
@@ -121,6 +123,9 @@ struct CreatureRenderInstance {
     float motion_amount = 0.0F;
     float gaze_weight = 0.0F;
     float attack_amount = 0.0F;
+    float hurt_amount = 0.0F;
+    float death_amount = 0.0F;
+    glm::vec3 hit_direction {0.0F, 0.0F, 1.0F};
 };
 
 struct CreatureAttackEvent {

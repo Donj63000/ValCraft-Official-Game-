@@ -137,11 +137,11 @@ void apply_window_icon(SDL_Window* window) noexcept {
 
 } // namespace
 
-Game::Game(GameOptions options)
+Game::Game(const GameOptions& options)
     : environment_(options.initial_time_of_day, options.freeze_time || options.smoke_test, 1337U),
       renderer_(),
       world_(1337, options.performance.stream_radius),
-      options_(std::move(options)) {
+      options_(options) {
     runtime_shadows_enabled_ = options_.performance.shadows_enabled;
     runtime_post_process_enabled_ = options_.performance.post_process_enabled;
     if (should_capture_performance()) {
@@ -1076,6 +1076,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             pending_primary_attack_ = false;
             if (const auto weapon = inventory_active_weapon_stats(inventory_menu_, hotbar_); weapon.has_value()) {
                 player_.trigger_primary_action();
+                music_.play_sfx(GameSfxKind::SwordSwing, 0.72F);
                 player_.cancel_block_breaking();
                 pending_break_block_ = false;
 
@@ -1091,6 +1092,8 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     weapon_range,
                     weapon->damage);
                 if (hit_result.hit) {
+                    music_.play_sfx(hit_result.killed ? GameSfxKind::CreatureDeath : GameSfxKind::CreatureHit,
+                                    hit_result.killed ? 0.88F : 0.72F);
                     record_audit_event(
                         AuditEventCategory::Creatures,
                         hit_result.killed ? "creature_killed" : "creature_damaged",
@@ -1201,6 +1204,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         }
 
         if (!creatures_.recent_attacks().empty()) {
+            music_.play_sfx(GameSfxKind::CreatureAttack, 0.55F);
             record_audit_event(
                 AuditEventCategory::Creatures,
                 "creature_attack",

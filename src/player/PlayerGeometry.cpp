@@ -77,6 +77,7 @@ struct PlayerViewModelRigState {
     float bob_vertical = 0.0F;
     float bob_depth = 0.0F;
     float bob_roll = 0.0F;
+    bool weapon_pose = false;
 };
 
 auto make_face_definition(std::array<glm::vec3, 4> corners, const glm::vec3& normal) -> FaceDefinition {
@@ -432,42 +433,52 @@ auto sample_player_tile(PlayerAtlasTile tile, int x, int y) noexcept -> std::arr
                          0.0F);
     }
     case PlayerAtlasTile::SwordBlade: {
-        const auto center_glint = line_mask(nx, 0.50F + std::sin(ny * 10.0F) * 0.025F, 0.16F);
-        const auto edge = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.18F);
-        return make_rgba(154.0F + center_glint * 58.0F + edge * 22.0F + grain * 10.0F,
-                         166.0F + center_glint * 62.0F + edge * 20.0F + soft_grain * 8.0F,
-                         178.0F + center_glint * 66.0F + edge * 18.0F + grain * 8.0F,
+        const auto fuller = line_mask(nx, 0.50F + std::sin(ny * 7.0F) * 0.018F, 0.10F);
+        const auto longitudinal = 1.0F - smoothstep01(std::abs(ny - 0.46F) / 0.58F);
+        const auto bevel = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.22F);
+        const auto cold_glint = line_mask(nx, 0.32F + std::sin(ny * 12.0F) * 0.026F, 0.045F) * 0.75F;
+        return make_rgba(148.0F + fuller * 34.0F + longitudinal * 30.0F + bevel * 18.0F + cold_glint * 44.0F + grain * 8.0F,
+                         162.0F + fuller * 42.0F + longitudinal * 34.0F + bevel * 20.0F + cold_glint * 48.0F + soft_grain * 8.0F,
+                         180.0F + fuller * 52.0F + longitudinal * 40.0F + bevel * 24.0F + cold_glint * 56.0F + grain * 7.0F,
                          0.0F);
     }
     case PlayerAtlasTile::SwordEdge: {
-        const auto sharp_line = std::max(line_mask(nx, 0.20F, 0.08F), line_mask(nx, 0.80F, 0.08F));
-        return make_rgba(204.0F + sharp_line * 38.0F + grain * 8.0F,
-                         214.0F + sharp_line * 34.0F + soft_grain * 8.0F,
-                         222.0F + sharp_line * 30.0F + grain * 6.0F,
+        const auto bevel_line = std::max(line_mask(nx, 0.18F, 0.075F), line_mask(nx, 0.82F, 0.075F));
+        const auto sharpened_tip = smooth_range(0.58F, 0.98F, ny);
+        const auto shine = bevel_line * (0.70F + sharpened_tip * 0.35F);
+        return make_rgba(208.0F + shine * 42.0F + grain * 7.0F,
+                         220.0F + shine * 36.0F + soft_grain * 7.0F,
+                         230.0F + shine * 30.0F + grain * 6.0F,
                          0.0F);
     }
     case PlayerAtlasTile::SwordGuard: {
-        const auto highlight = line_mask(ny, 0.35F, 0.22F) + edge_distance(nx, ny) * 0.45F;
-        return make_rgba(158.0F + highlight * 50.0F + grain * 10.0F,
-                         124.0F + highlight * 42.0F + soft_grain * 8.0F,
-                         54.0F + highlight * 22.0F + grain * 6.0F,
+        const auto bevel = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.20F);
+        const auto crest = line_mask(ny, 0.42F, 0.18F);
+        const auto warm_metal = crest * 0.74F + bevel * 0.30F;
+        return make_rgba(152.0F + warm_metal * 78.0F + grain * 9.0F,
+                         112.0F + warm_metal * 58.0F + soft_grain * 8.0F,
+                         44.0F + warm_metal * 30.0F + grain * 5.0F,
                          0.0F);
     }
     case PlayerAtlasTile::SwordGrip: {
-        const auto wrap = std::max(line_mask(glm::fract((ny + nx * 0.22F) * 4.0F), 0.5F, 0.18F),
-                                   line_mask(glm::fract((ny - nx * 0.22F) * 4.0F), 0.5F, 0.12F));
-        return make_rgba(78.0F + wrap * 42.0F + grain * 10.0F,
-                         48.0F + wrap * 26.0F + soft_grain * 8.0F,
-                         30.0F + wrap * 14.0F + grain * 6.0F,
+        const auto wrap_a = line_mask(glm::fract((ny + nx * 0.30F) * 5.0F), 0.50F, 0.15F);
+        const auto wrap_b = line_mask(glm::fract((ny - nx * 0.22F) * 5.0F), 0.50F, 0.08F);
+        const auto leather_edge = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.18F);
+        const auto wrap = std::max(wrap_a, wrap_b);
+        return make_rgba(58.0F + wrap * 55.0F - leather_edge * 12.0F + grain * 10.0F,
+                         36.0F + wrap * 34.0F - leather_edge * 8.0F + soft_grain * 8.0F,
+                         24.0F + wrap * 20.0F - leather_edge * 5.0F + grain * 6.0F,
                          0.0F);
     }
     case PlayerAtlasTile::SwordPommel: {
-        const auto shine = radial_falloff(nx, ny, 0.42F, 0.36F, 0.46F);
-        return make_rgba(112.0F + shine * 58.0F + grain * 8.0F,
-                         116.0F + shine * 52.0F + soft_grain * 8.0F,
-                         120.0F + shine * 44.0F + grain * 6.0F,
+        const auto shine = radial_falloff(nx, ny, 0.40F, 0.34F, 0.48F);
+        const auto rim = 1.0F - smoothstep01(edge_distance(nx, ny) / 0.20F);
+        return make_rgba(120.0F + shine * 80.0F + rim * 18.0F + grain * 8.0F,
+                         124.0F + shine * 72.0F + rim * 16.0F + soft_grain * 8.0F,
+                         126.0F + shine * 56.0F + rim * 14.0F + grain * 6.0F,
                          0.0F);
     }
+
     case PlayerAtlasTile::Count:
         break;
     }
@@ -505,8 +516,10 @@ auto build_world_avatar_pose(const PlayerController& player) -> PlayerWorldAvata
     return pose;
 }
 
-auto build_viewmodel_rig_state(const PlayerController& player) -> PlayerViewModelRigState {
+auto build_viewmodel_rig_state(const PlayerController& player, BlockId held_item) -> PlayerViewModelRigState {
     const auto& state = player.state();
+    const auto held_item_id = block_item_id(held_item);
+    const auto weapon_pose = held_item_id == to_block_id(BlockType::Sword);
     const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
     const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
     const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
@@ -515,8 +528,11 @@ auto build_viewmodel_rig_state(const PlayerController& player) -> PlayerViewMode
     const auto breathing_offset = std::sin(state.animation_time * 1.75F) * 0.014F;
     const auto airborne_amount = (!state.on_ground && !state.swimming && !state.fly_mode) ? smoothstep01(state.airborne_time / 0.15F) : 0.0F;
     const auto landing_amount = state.landing_impact * state.landing_impact;
-    const auto mine_arc_value = action_arc(state.primary_action_active, state.primary_action_progress);
-    const auto mine_pull_value = action_pull(state.primary_action_active, state.primary_action_progress);
+    const auto primary_progress = saturate(state.primary_action_progress);
+    const auto weapon_peak = state.primary_action_active && weapon_pose ? std::sin(primary_progress * kPi) : 0.0F;
+    const auto weapon_snap = weapon_pose ? smooth_range(0.02F, 0.36F, primary_progress) * (1.0F - smooth_range(0.62F, 1.0F, primary_progress)) : 0.0F;
+    const auto mine_arc_value = weapon_pose ? weapon_peak * 1.08F + weapon_snap * 0.34F : action_arc(state.primary_action_active, state.primary_action_progress);
+    const auto mine_pull_value = weapon_pose ? weapon_peak * 0.54F + weapon_snap * 0.16F : action_pull(state.primary_action_active, state.primary_action_progress);
     const auto place_arc_value = action_arc(state.secondary_action_active, state.secondary_action_progress);
     const auto place_pull_value = action_pull(state.secondary_action_active, state.secondary_action_progress);
 
@@ -540,10 +556,13 @@ auto build_viewmodel_rig_state(const PlayerController& player) -> PlayerViewMode
     rig.bob_vertical = stride_cos * walk_amount * 0.012F - landing_amount * 0.050F;
     rig.bob_depth = std::abs(stride_cos) * walk_amount * 0.014F + airborne_amount * 0.012F;
     rig.bob_roll = stride * walk_amount * 0.050F;
+    rig.weapon_pose = weapon_pose;
     rig.anchor = player.eye_position()
-               + rig.camera.right * (0.66F + rig.bob_side + place_pull_value * 0.024F)
-               + rig.camera.up * (-0.31F + rig.breathing_offset * 0.40F + rig.bob_vertical - hurt_amount * 0.040F)
-               + rig.camera.forward * (0.46F + rig.bob_depth + mine_pull_value * 0.042F - place_arc_value * 0.022F);
+               + rig.camera.right * (0.66F + rig.bob_side + place_pull_value * 0.024F + (weapon_pose ? 0.045F : 0.0F))
+               + rig.camera.up * (-0.31F + rig.breathing_offset * 0.40F + rig.bob_vertical - hurt_amount * 0.040F -
+                                  (weapon_pose ? 0.035F + weapon_peak * 0.035F : 0.0F))
+               + rig.camera.forward * (0.46F + rig.bob_depth + mine_pull_value * 0.042F - place_arc_value * 0.022F +
+                                       (weapon_pose ? 0.060F - weapon_peak * 0.050F : 0.0F));
     return rig;
 }
 
@@ -784,10 +803,14 @@ void append_viewmodel_arm(PlayerViewModelParts& output, const PlayerController& 
     const auto sway_yaw = rig.look_sway_yaw * 0.20F;
     const auto sway_pitch = rig.look_sway_pitch * 0.16F;
     const auto sway_roll = -rig.look_sway_yaw * 0.12F + rig.look_sway_pitch * 0.05F;
-    const auto shoulder_pitch_base = 0.20F + sway_pitch + rig.airborne_amount * 0.08F - rig.landing_amount * 0.08F;
-    const auto shoulder_yaw_base = -0.18F + sway_yaw - rig.place_arc * 0.18F + rig.mine_arc * 0.10F;
-    const auto shoulder_roll_base = -1.12F - rig.mine_arc * 0.82F - rig.mine_pull * 0.12F - rig.place_arc * 0.34F -
-                                    rig.hurt_amount * 0.14F - rig.bob_roll - sway_roll;
+    const auto weapon_idle = rig.weapon_pose ? 1.0F : 0.0F;
+    const auto weapon_swing = rig.weapon_pose ? saturate(std::max(rig.mine_arc, rig.mine_pull)) : 0.0F;
+
+    const auto shoulder_pitch_base =
+        0.20F + sway_pitch + rig.airborne_amount * 0.08F - rig.landing_amount * 0.08F + weapon_idle * 0.08F - weapon_swing * 0.16F;
+    const auto shoulder_yaw_base = -0.18F + sway_yaw - rig.place_arc * 0.18F + rig.mine_arc * 0.10F + weapon_idle * 0.12F - weapon_swing * 0.26F;
+    const auto shoulder_roll_base = -1.12F - rig.mine_arc * 0.70F - rig.mine_pull * 0.10F - rig.place_arc * 0.34F -
+                                    rig.hurt_amount * 0.14F - rig.bob_roll - sway_roll - weapon_idle * 0.18F - weapon_swing * 0.50F;
 
     auto shoulder_rotation = glm::vec3 {
         shoulder_pitch_base,
@@ -795,14 +818,15 @@ void append_viewmodel_arm(PlayerViewModelParts& output, const PlayerController& 
         shoulder_roll_base,
     };
     auto elbow_rotation = glm::vec3 {
-        0.10F + rig.mine_arc * 0.56F + rig.place_arc * 0.24F,
-        -0.02F + sway_yaw * 0.60F - rig.place_pull * 0.10F,
-        -0.34F - rig.mine_arc * 1.18F - rig.mine_pull * 0.18F - rig.place_arc * 0.42F - rig.hurt_amount * 0.08F,
+        0.10F + rig.mine_arc * 0.48F + rig.place_arc * 0.24F + weapon_idle * 0.14F + weapon_swing * 0.20F,
+        -0.02F + sway_yaw * 0.60F - rig.place_pull * 0.10F + weapon_idle * 0.08F - weapon_swing * 0.30F,
+        -0.34F - rig.mine_arc * 0.92F - rig.mine_pull * 0.16F - rig.place_arc * 0.42F - rig.hurt_amount * 0.08F - weapon_idle * 0.22F -
+            weapon_swing * 0.55F,
     };
     auto wrist_rotation = glm::vec3 {
-        -0.02F + rig.mine_arc * 0.18F + rig.place_arc * 0.06F,
-        0.08F + sway_yaw * 0.38F + rig.place_pull * 0.08F,
-        -0.08F - rig.mine_arc * 0.34F - rig.place_arc * 0.14F + rig.bob_roll * 0.28F,
+        -0.02F + rig.mine_arc * 0.12F + rig.place_arc * 0.06F + weapon_idle * 0.16F - weapon_swing * 0.24F,
+        0.08F + sway_yaw * 0.38F + rig.place_pull * 0.08F + weapon_idle * 0.12F - weapon_swing * 0.10F,
+        -0.08F - rig.mine_arc * 0.22F - rig.place_arc * 0.14F + rig.bob_roll * 0.28F - weapon_idle * 0.34F - weapon_swing * 0.72F,
     };
 
     if (rig.swim_amount > 0.0F) {
@@ -823,8 +847,10 @@ void append_viewmodel_arm(PlayerViewModelParts& output, const PlayerController& 
     const auto wrist_root = make_frame_transform(elbow_root, glm::vec3 {0.02F, -0.24F, 0.0F}, wrist_rotation);
     const auto item_socket = make_frame_transform(
         wrist_root,
-        glm::vec3 {0.17F, -0.15F, 0.0F},
-        glm::vec3 {0.18F + rig.place_pull * 0.08F, -0.08F + rig.mine_pull * 0.04F, -0.26F - rig.mine_arc * 0.12F});
+        glm::vec3 {0.17F + weapon_idle * 0.030F, -0.15F + weapon_idle * 0.015F, -weapon_idle * 0.012F},
+        glm::vec3 {0.18F + rig.place_pull * 0.08F + weapon_idle * 0.18F - weapon_swing * 0.08F,
+                   -0.08F + rig.mine_pull * 0.04F + weapon_idle * 0.06F + weapon_swing * 0.14F,
+                   -0.26F - rig.mine_arc * 0.12F - weapon_idle * 0.52F - weapon_swing * 0.38F});
 
     append_box(mesh,
                shoulder_root,
@@ -881,24 +907,27 @@ void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item)
     }
 
     auto& mesh = output.parts;
+    const auto slash = saturate(output.pose.action_swing);
     const auto sword_root = make_frame_transform(
         output.pose.item_socket_transform,
-        glm::vec3 {0.02F, 0.02F, -0.01F},
-        glm::vec3 {0.08F, 0.16F, -0.54F});
+        glm::vec3 {0.026F + slash * 0.010F, 0.012F - slash * 0.020F, -0.018F - slash * 0.025F},
+        glm::vec3 {0.10F + slash * 0.22F, 0.18F + slash * 0.08F, -0.66F - slash * 0.34F});
+
     const auto blade_tiles = make_box_tiles(PlayerAtlasTile::SwordBlade,
                                             PlayerAtlasTile::SwordBlade,
                                             PlayerAtlasTile::SwordEdge,
                                             PlayerAtlasTile::SwordEdge,
                                             PlayerAtlasTile::SwordEdge,
                                             PlayerAtlasTile::SwordEdge);
+    const auto edge_tiles = uniform_tiles(PlayerAtlasTile::SwordEdge);
     const auto guard_tiles = uniform_tiles(PlayerAtlasTile::SwordGuard);
     const auto grip_tiles = uniform_tiles(PlayerAtlasTile::SwordGrip);
     const auto pommel_tiles = uniform_tiles(PlayerAtlasTile::SwordPommel);
 
     append_box(mesh,
                sword_root,
-               glm::vec3 {0.0F, 0.42F, 0.0F},
-               glm::vec3 {0.030F, 0.43F, 0.014F},
+               glm::vec3 {0.0F, 0.46F, 0.0F},
+               glm::vec3 {0.026F, 0.43F, 0.012F},
                glm::vec3 {0.0F},
                blade_tiles,
                kMaterialMetal,
@@ -906,8 +935,26 @@ void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item)
                0.0F);
     append_box(mesh,
                sword_root,
-               glm::vec3 {0.0F, 0.87F, 0.0F},
-               glm::vec3 {0.022F, 0.055F, 0.012F},
+               glm::vec3 {-0.036F, 0.47F, 0.0F},
+               glm::vec3 {0.008F, 0.43F, 0.016F},
+               glm::vec3 {0.0F},
+               edge_tiles,
+               kMaterialMetal,
+               0.05F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.036F, 0.47F, 0.0F},
+               glm::vec3 {0.008F, 0.43F, 0.016F},
+               glm::vec3 {0.0F},
+               edge_tiles,
+               kMaterialMetal,
+               0.05F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, 0.48F, 0.014F},
+               glm::vec3 {0.010F, 0.38F, 0.006F},
                glm::vec3 {0.0F},
                blade_tiles,
                kMaterialMetal,
@@ -915,8 +962,18 @@ void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item)
                0.0F);
     append_box(mesh,
                sword_root,
-               glm::vec3 {0.0F, -0.045F, 0.0F},
-               glm::vec3 {0.17F, 0.032F, 0.030F},
+               glm::vec3 {0.0F, 0.91F, 0.0F},
+               glm::vec3 {0.020F, 0.070F, 0.012F},
+               glm::vec3 {0.0F},
+               blade_tiles,
+               kMaterialMetal,
+               0.04F,
+               0.0F);
+
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.055F, 0.0F},
+               glm::vec3 {0.074F, 0.035F, 0.032F},
                glm::vec3 {0.0F},
                guard_tiles,
                kMaterialMetal,
@@ -924,8 +981,27 @@ void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item)
                0.0F);
     append_box(mesh,
                sword_root,
-               glm::vec3 {0.0F, -0.20F, 0.0F},
-               glm::vec3 {0.040F, 0.13F, 0.036F},
+               glm::vec3 {-0.148F, -0.058F, 0.0F},
+               glm::vec3 {0.088F, 0.026F, 0.028F},
+               glm::vec3 {0.0F, 0.0F, -0.10F},
+               guard_tiles,
+               kMaterialMetal,
+               0.12F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.148F, -0.058F, 0.0F},
+               glm::vec3 {0.088F, 0.026F, 0.028F},
+               glm::vec3 {0.0F, 0.0F, 0.10F},
+               guard_tiles,
+               kMaterialMetal,
+               0.12F,
+               0.0F);
+
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.205F, 0.0F},
+               glm::vec3 {0.043F, 0.135F, 0.036F},
                glm::vec3 {0.0F},
                grip_tiles,
                kMaterialLeather,
@@ -933,12 +1009,49 @@ void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item)
                0.0F);
     append_box(mesh,
                sword_root,
-               glm::vec3 {0.0F, -0.35F, 0.0F},
-               glm::vec3 {0.055F, 0.042F, 0.042F},
+               glm::vec3 {0.0F, -0.105F, 0.0F},
+               glm::vec3 {0.047F, 0.012F, 0.039F},
+               glm::vec3 {0.0F},
+               pommel_tiles,
+               kMaterialMetal,
+               0.12F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.205F, 0.0F},
+               glm::vec3 {0.047F, 0.012F, 0.039F},
+               glm::vec3 {0.0F},
+               pommel_tiles,
+               kMaterialMetal,
+               0.12F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.305F, 0.0F},
+               glm::vec3 {0.047F, 0.012F, 0.039F},
+               glm::vec3 {0.0F},
+               pommel_tiles,
+               kMaterialMetal,
+               0.12F,
+               0.0F);
+
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.365F, 0.0F},
+               glm::vec3 {0.060F, 0.044F, 0.044F},
                glm::vec3 {0.0F},
                pommel_tiles,
                kMaterialMetal,
                0.14F,
+               0.0F);
+    append_box(mesh,
+               sword_root,
+               glm::vec3 {0.0F, -0.410F, 0.0F},
+               glm::vec3 {0.036F, 0.018F, 0.036F},
+               glm::vec3 {0.0F},
+               guard_tiles,
+               kMaterialMetal,
+               0.12F,
                0.0F);
 }
 
@@ -970,8 +1083,8 @@ auto build_player_world_avatar_parts(const PlayerController& player) -> std::vec
 
 auto build_player_viewmodel_parts(const PlayerController& player, BlockId held_item) -> PlayerViewModelParts {
     PlayerViewModelParts output {};
-    output.parts.reserve(9U);
-    append_viewmodel_arm(output, player, build_viewmodel_rig_state(player));
+    output.parts.reserve(18U);
+    append_viewmodel_arm(output, player, build_viewmodel_rig_state(player, held_item));
     append_viewmodel_held_item(output, held_item);
     return output;
 }

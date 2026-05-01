@@ -74,6 +74,8 @@ private:
                          const glm::vec3& player_position,
                          const EnvironmentState& environment,
                          const CreatureCycleState& cycle);
+    void update_death_visuals(float dt) noexcept;
+    void update_spawn_suppressions(float dt) noexcept;
     void rebuild_render_instances(const EnvironmentState& environment);
 
     [[nodiscard]] auto compute_spawn_anchor(const World& world, const ChunkCoord& coord) const
@@ -86,11 +88,40 @@ private:
     [[nodiscard]] auto find_resident_profile(const CreatureSpawnAnchor& anchor) -> ResidentProfile*;
     [[nodiscard]] auto find_resident_profile(const CreatureSpawnAnchor& anchor) const -> const ResidentProfile*;
     [[nodiscard]] auto is_session_dead_resident(const CreatureSpawnAnchor& anchor) const -> bool;
+    [[nodiscard]] auto is_spawn_suppressed(const CreatureSpawnAnchor& anchor) const -> bool;
     void remember_session_dead_resident(const CreatureSpawnAnchor& anchor);
+    void suppress_spawn_after_death(const CreatureSpawnAnchor& anchor);
+    void spawn_death_visual(const CreatureInstance& creature, const glm::vec3& hit_direction);
+
+    struct CreatureDeathVisual {
+        CreatureSpawnAnchor anchor {};
+        glm::vec3 position {0.0F};
+        float yaw_radians = 0.0F;
+        float animation_time = 0.0F;
+        float morph_factor = 0.0F;
+        float daylight_factor = 1.0F;
+        float tension = 0.0F;
+        std::uint32_t appearance_seed = 0;
+        CreatureBehaviorState behavior_state = CreatureBehaviorState::Idle;
+        CreaturePhase phase = CreaturePhase::Day;
+        float motion_amount = 0.0F;
+        float gaze_weight = 0.0F;
+        float attack_amount = 0.0F;
+        float age_seconds = 0.0F;
+        float duration_seconds = 1.15F;
+        glm::vec3 hit_direction {0.0F, 0.0F, 1.0F};
+    };
+
+    struct SpawnSuppression {
+        CreatureSpawnAnchor anchor {};
+        float remaining_seconds = 0.0F;
+    };
 
     std::vector<CreatureInstance> creatures_ {};
     std::vector<CreatureRenderInstance> render_instances_ {};
     std::vector<CreatureAttackEvent> attacks_ {};
+    std::vector<CreatureDeathVisual> death_visuals_ {};
+    std::vector<SpawnSuppression> spawn_suppressions_ {};
     std::vector<CreatureSpawnAnchor> settlement_residents_ {};
     std::vector<ResidentProfile> resident_profiles_ {};
     std::vector<CreatureSpawnAnchor> session_dead_residents_ {};

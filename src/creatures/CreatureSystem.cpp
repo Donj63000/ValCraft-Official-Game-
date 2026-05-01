@@ -33,6 +33,9 @@ constexpr float kResidentGreetingDistance = 5.0F;
 constexpr float kResidentPersonalSpace = 1.65F;
 constexpr float kResidentHomeSnapThreshold = 1.75F;
 constexpr float kCreatureBodyRadius = 0.30F;
+constexpr float kCreatureHurtDuration = 0.34F;
+constexpr float kCreatureDeathVisualDuration = 1.18F;
+constexpr float kCreatureSpawnSuppressionDuration = 14.0F;
 
 struct SpeciesTuning {
     float day_speed = 1.0F;
@@ -55,6 +58,11 @@ struct SteeringMoveResult {
     float heading = 0.0F;
 };
 
+struct CreatureHitbox {
+    float radius = 0.45F;
+    float height = 1.0F;
+};
+
 enum class ResidentRoutinePhase : std::uint8_t {
     Home = 0,
     Morning = 1,
@@ -70,7 +78,14 @@ auto is_spawn_column_clear(const World& world, int world_x, int ground_y, int wo
 auto is_creature_airspace_clear(const World& world, int world_x, int ground_y, int world_z) -> bool;
 auto creature_body_blocker_count_at(const World& world, float center_x, int ground_y, float center_z) -> int;
 auto tuning_for(CreatureSpecies species) noexcept -> SpeciesTuning;
+auto hitbox_for(CreatureSpecies species) noexcept -> CreatureHitbox;
 void ensure_creature_health(CreatureInstance& creature) noexcept;
+auto horizontal_direction_or_fallback(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3;
+auto ray_intersects_aabb(const glm::vec3& origin,
+                         const glm::vec3& direction,
+                         const glm::vec3& min_corner,
+                         const glm::vec3& max_corner,
+                         float max_distance) noexcept -> std::optional<float>;
 auto horizontal_distance_squared(const glm::vec3& lhs, const glm::vec3& rhs) noexcept -> float;
 auto smoothing_factor(float dt, float response_rate) noexcept -> float;
 auto try_move_grounded(CreatureInstance& creature,
@@ -795,11 +810,81 @@ auto tuning_for(CreatureSpecies species) noexcept -> SpeciesTuning {
     }
 }
 
+auto hitbox_for(CreatureSpecies species) noexcept -> CreatureHitbox {
+    switch (species) {
+    case CreatureSpecies::Cow:
+        return {0.58F, 1.30F};
+    case CreatureSpecies::Villager:
+        return {0.48F, 1.84F};
+    case CreatureSpecies::Sheep:
+        return {0.50F, 1.02F};
+    case CreatureSpecies::Pig:
+    default:
+        return {0.46F, 0.88F};
+    }
+}
+
 void ensure_creature_health(CreatureInstance& creature) noexcept {
     const auto max_health = creature_max_health(creature.anchor.species);
-    if (!std::isfinite(creature.health) || creature.health <= 0.0F || creature.health > max_health) {
+    if (!std::isfinite(creature.health)) {
         creature.health = max_health;
+        return;
     }
+
+    creature.health = std::clamp(creature.health, 0.0F, max_health);
+}
+
+auto horizontal_direction_or_fallback(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    const auto horizontal = glm::vec3 {value.x, 0.0F, value.z};
+    if (glm::dot(horizontal, horizontal) > 1.0e-6F) {
+        return glm::normalize(horizontal);
+    }
+
+    const auto fallback_horizontal = glm::vec3 {fallback.x, 0.0F, fallback.z};
+    if (glm::dot(fallback_horizontal, fallback_horizontal) > 1.0e-6F) {
+        return glm::normalize(fallback_horizontal);
+    }
+
+    return {0.0F, 0.0F, 1.0F};
+}
+
+auto ray_intersects_aabb(const glm::vec3& origin,
+                         const glm::vec3& direction,
+                         const glm::vec3& min_corner,
+                         const glm::vec3& max_corner,
+                         float max_distance) noexcept -> std::optional<float> {
+    auto t_min = 0.0F;
+    auto t_max = max_distance;
+
+    for (int axis = 0; axis < 3; ++axis) {
+        const auto ray_component = direction[axis];
+        const auto origin_component = origin[axis];
+
+        if (std::abs(ray_component) <= 1.0e-6F) {
+            if (origin_component < min_corner[axis] || origin_component > max_corner[axis]) {
+                return std::nullopt;
+            }
+            continue;
+        }
+
+        const auto inv_direction = 1.0F / ray_component;
+        auto t1 = (min_corner[axis] - origin_component) * inv_direction;
+        auto t2 = (max_corner[axis] - origin_component) * inv_direction;
+        if (t1 > t2) {
+            std::swap(t1, t2);
+        }
+
+        t_min = std::max(t_min, t1);
+        t_max = std::min(t_max, t2);
+        if (t_min > t_max) {
+            return std::nullopt;
+        }
+    }
+
+    if (t_min < 0.0F || t_min > max_distance) {
+        return std::nullopt;
+    }
+    return t_min;
 }
 
 auto is_resident_species(CreatureSpecies species) noexcept -> bool {
@@ -820,7 +905,10 @@ auto make_spawned_creature(const CreatureSpawnAnchor& anchor,
     creature.behavior_seed = hash_coords(anchor.ground_block.x * 3, anchor.ground_block.z * 7, seed ^ 0xA53C9E1BU);
     creature.appearance_seed = hash_coords(anchor.ground_block.x * 11, anchor.ground_block.z * 5, seed ^ 0x6C8E9CF5U);
     creature.attack_amount = 0.0F;
+    creature.hurt_timer = 0.0F;
     creature.health = creature_max_health(anchor.species);
+    const auto initial_hit_direction = direction_from_yaw(creature.yaw_radians);
+    creature.hit_direction = {initial_hit_direction.x, 0.0F, initial_hit_direction.y};
 
     if (is_resident_species(anchor.species)) {
         creature.phase = CreaturePhase::Day;
@@ -1153,12 +1241,16 @@ void CreatureSystem::update(float dt,
                             const CreatureCycleState& cycle) {
     audit_stats_ = {};
     attacks_.clear();
+
+    const auto clamped_dt = std::max(dt, 0.0F);
+    update_spawn_suppressions(clamped_dt);
     sync_active_creatures(world, player_position, cycle);
 
     for (auto& creature : creatures_) {
-        update_creature(creature, dt, world, player_position, environment, cycle);
+        update_creature(creature, clamped_dt, world, player_position, environment, cycle);
     }
 
+    update_death_visuals(clamped_dt);
     rebuild_render_instances(environment);
     audit_stats_.attacks = attacks_.size();
     audit_stats_.active_creatures = creatures_.size();
@@ -1197,30 +1289,27 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
 
     const auto ray_direction = glm::normalize(direction);
     const auto clamped_distance = std::max(max_distance, 0.0F);
-    constexpr auto kHitRadius = 0.62F;
-    constexpr auto kHitSampleHeight = 0.75F;
 
     auto best_index = creatures_.size();
     auto best_distance = std::numeric_limits<float>::max();
     for (std::size_t index = 0; index < creatures_.size(); ++index) {
         auto& creature = creatures_[index];
         ensure_creature_health(creature);
-
-        const auto target = creature.position + glm::vec3 {0.0F, kHitSampleHeight, 0.0F};
-        const auto to_target = target - origin;
-        const auto projected_distance = glm::dot(to_target, ray_direction);
-        if (projected_distance < 0.0F || projected_distance > clamped_distance || projected_distance >= best_distance) {
+        if (creature.health <= 0.0F) {
             continue;
         }
 
-        const auto closest_point = origin + ray_direction * projected_distance;
-        const auto miss_vector = target - closest_point;
-        if (glm::dot(miss_vector, miss_vector) > kHitRadius * kHitRadius) {
+        const auto hitbox = hitbox_for(creature.anchor.species);
+        const auto min_corner = creature.position + glm::vec3 {-hitbox.radius, 0.05F, -hitbox.radius};
+        const auto max_corner = creature.position + glm::vec3 { hitbox.radius, hitbox.height, hitbox.radius};
+
+        const auto hit_distance = ray_intersects_aabb(origin, ray_direction, min_corner, max_corner, clamped_distance);
+        if (!hit_distance.has_value() || *hit_distance >= best_distance) {
             continue;
         }
 
         best_index = index;
-        best_distance = projected_distance;
+        best_distance = *hit_distance;
     }
 
     if (best_index >= creatures_.size()) {
@@ -1228,22 +1317,30 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
     }
 
     auto& creature = creatures_[best_index];
-    creature.health = std::max(0.0F, creature.health - damage);
+    const auto applied_damage = std::min(std::max(damage, 0.0F), creature.health);
+    const auto impact_direction = horizontal_direction_or_fallback(
+        creature.position - origin,
+        -ray_direction);
+    creature.health = std::max(0.0F, creature.health - applied_damage);
     creature.nervous_intensity = 1.0F;
-    creature.attack_amount = std::max(creature.attack_amount, 0.72F);
+    creature.attack_amount = std::max(creature.attack_amount, 0.82F);
+    creature.hurt_timer = kCreatureHurtDuration;
+    creature.hit_direction = impact_direction;
     creature.behavior_state = CreatureBehaviorState::Flee;
-    creature.behavior_timer = std::max(creature.behavior_timer, 0.45F);
+    creature.behavior_timer = std::max(creature.behavior_timer, 0.56F);
 
     CreatureDamageResult result {};
     result.hit = true;
     result.killed = creature.health <= 0.0F;
     result.species = creature.anchor.species;
     result.position = creature.position;
-    result.damage = damage;
+    result.damage = applied_damage;
     result.remaining_health = creature.health;
     result.distance = best_distance;
 
     if (result.killed) {
+        spawn_death_visual(creature, impact_direction);
+        suppress_spawn_after_death(creature.anchor);
         if (is_resident_species(creature.anchor.species)) {
             remember_session_dead_resident(creature.anchor);
         }
@@ -1260,6 +1357,7 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
 
 void CreatureSystem::set_settlement_residents(std::vector<CreatureSpawnAnchor> residents) {
     session_dead_residents_.clear();
+    spawn_suppressions_.clear();
     settlement_residents_ = std::move(residents);
     settlement_residents_.erase(
         std::remove_if(settlement_residents_.begin(), settlement_residents_.end(), [](const CreatureSpawnAnchor& anchor) {
@@ -1344,6 +1442,8 @@ void CreatureSystem::load_creatures(const std::vector<CreatureInstance>& creatur
         ensure_creature_health(creature);
     }
     attacks_.clear();
+    death_visuals_.clear();
+    spawn_suppressions_.clear();
     rebuild_render_instances(environment);
     audit_stats_ = {};
     audit_stats_.active_creatures = creatures_.size();
@@ -1353,6 +1453,8 @@ void CreatureSystem::clear() noexcept {
     creatures_.clear();
     render_instances_.clear();
     attacks_.clear();
+    death_visuals_.clear();
+    spawn_suppressions_.clear();
     settlement_residents_.clear();
     resident_profiles_.clear();
     session_dead_residents_.clear();
@@ -1425,6 +1527,7 @@ void CreatureSystem::sync_active_creatures(const World& world,
         if (!is_chunk_within_radius(center, profile.anchor.chunk, kCreatureActivationRadiusChunks) ||
             world.find_chunk(profile.anchor.chunk) == nullptr ||
             is_session_dead_resident(profile.anchor) ||
+            is_spawn_suppressed(profile.anchor) ||
             find_resident_creature(profile.anchor) != nullptr) {
             continue;
         }
@@ -1502,7 +1605,7 @@ void CreatureSystem::sync_active_creatures(const World& world,
         }
 
         const auto anchor = compute_spawn_anchor(world, candidate.coord);
-        if (!anchor.has_value()) {
+        if (!anchor.has_value() || is_spawn_suppressed(*anchor)) {
             continue;
         }
 
@@ -1519,6 +1622,14 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                                      const EnvironmentState& environment,
                                      const CreatureCycleState& cycle) {
     ensure_creature_health(creature);
+    creature.hurt_timer = std::max(0.0F, creature.hurt_timer - std::max(dt, 0.0F));
+    if (creature.health <= 0.0F) {
+        creature.motion_amount = 0.0F;
+        creature.gaze_weight = 0.0F;
+        creature.attack_amount = 0.0F;
+        return;
+    }
+
     if (is_resident_species(creature.anchor.species)) {
         if (const auto* profile = find_resident_profile(creature.anchor); profile != nullptr) {
             update_resident_creature(creature, *profile, dt, world, player_position, environment);
@@ -1877,11 +1988,46 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
     }
 }
 
+void CreatureSystem::update_death_visuals(float dt) noexcept {
+    if (death_visuals_.empty()) {
+        return;
+    }
+
+    for (auto& visual : death_visuals_) {
+        visual.age_seconds = std::min(visual.age_seconds + std::max(dt, 0.0F), visual.duration_seconds + 0.1F);
+        visual.animation_time += std::max(dt, 0.0F) * 0.60F;
+    }
+
+    death_visuals_.erase(
+        std::remove_if(death_visuals_.begin(), death_visuals_.end(), [](const CreatureDeathVisual& visual) {
+            return visual.age_seconds >= visual.duration_seconds;
+        }),
+        death_visuals_.end());
+}
+
+void CreatureSystem::update_spawn_suppressions(float dt) noexcept {
+    if (spawn_suppressions_.empty()) {
+        return;
+    }
+
+    const auto clamped_dt = std::max(dt, 0.0F);
+    for (auto& suppression : spawn_suppressions_) {
+        suppression.remaining_seconds -= clamped_dt;
+    }
+
+    spawn_suppressions_.erase(
+        std::remove_if(spawn_suppressions_.begin(), spawn_suppressions_.end(), [](const SpawnSuppression& suppression) {
+            return suppression.remaining_seconds <= 0.0F;
+        }),
+        spawn_suppressions_.end());
+}
+
 void CreatureSystem::rebuild_render_instances(const EnvironmentState& environment) {
     render_instances_.clear();
-    render_instances_.reserve(creatures_.size());
+    render_instances_.reserve(creatures_.size() + death_visuals_.size());
 
     for (const auto& creature : creatures_) {
+        const auto hurt_amount = glm::clamp(creature.hurt_timer / kCreatureHurtDuration, 0.0F, 1.0F);
         render_instances_.push_back({
             creature.anchor.species,
             creature.position,
@@ -1889,13 +2035,44 @@ void CreatureSystem::rebuild_render_instances(const EnvironmentState& environmen
             creature.animation_time,
             creature.morph_factor,
             environment.daylight_factor,
-            glm::clamp(creature.nervous_intensity, 0.0F, 1.0F),
+            glm::clamp(std::max(creature.nervous_intensity, hurt_amount * 0.78F), 0.0F, 1.0F),
             creature.appearance_seed,
             creature.behavior_state,
             creature.phase,
             glm::clamp(creature.motion_amount, 0.0F, 1.0F),
             glm::clamp(creature.gaze_weight, 0.0F, 1.0F),
-            glm::clamp(creature.attack_amount, 0.0F, 1.0F),
+            glm::clamp(std::max(creature.attack_amount, hurt_amount * 0.50F), 0.0F, 1.0F),
+            hurt_amount,
+            0.0F,
+            creature.hit_direction,
+        });
+    }
+
+    for (const auto& visual : death_visuals_) {
+        const auto death_progress = glm::clamp(
+            visual.duration_seconds <= 1.0e-4F ? 1.0F : visual.age_seconds / visual.duration_seconds,
+            0.0F,
+            1.0F);
+        const auto death_amount = death_progress * death_progress * (3.0F - 2.0F * death_progress);
+        const auto hit_amount = glm::clamp(1.0F - death_progress / 0.30F, 0.0F, 1.0F);
+
+        render_instances_.push_back({
+            visual.anchor.species,
+            visual.position,
+            visual.yaw_radians,
+            visual.animation_time,
+            visual.morph_factor,
+            visual.daylight_factor,
+            glm::clamp(std::max(visual.tension, hit_amount * 0.88F), 0.0F, 1.0F),
+            visual.appearance_seed,
+            visual.behavior_state,
+            visual.phase,
+            glm::clamp(visual.motion_amount * (1.0F - death_amount), 0.0F, 1.0F),
+            glm::clamp(visual.gaze_weight * (1.0F - death_amount), 0.0F, 1.0F),
+            glm::clamp(visual.attack_amount * (1.0F - death_amount), 0.0F, 1.0F),
+            hit_amount,
+            death_amount,
+            visual.hit_direction,
         });
     }
 }
@@ -1991,11 +2168,54 @@ auto CreatureSystem::is_session_dead_resident(const CreatureSpawnAnchor& anchor)
     });
 }
 
+auto CreatureSystem::is_spawn_suppressed(const CreatureSpawnAnchor& anchor) const -> bool {
+    return std::any_of(spawn_suppressions_.begin(), spawn_suppressions_.end(), [&](const SpawnSuppression& suppression) {
+        return same_resident_slot(suppression.anchor, anchor);
+    });
+}
+
 void CreatureSystem::remember_session_dead_resident(const CreatureSpawnAnchor& anchor) {
     if (!is_resident_species(anchor.species) || is_session_dead_resident(anchor)) {
         return;
     }
     session_dead_residents_.push_back(anchor);
+}
+
+void CreatureSystem::suppress_spawn_after_death(const CreatureSpawnAnchor& anchor) {
+    if (is_resident_species(anchor.species)) {
+        return;
+    }
+
+    const auto existing = std::find_if(spawn_suppressions_.begin(), spawn_suppressions_.end(), [&](const SpawnSuppression& suppression) {
+        return same_resident_slot(suppression.anchor, anchor);
+    });
+    if (existing != spawn_suppressions_.end()) {
+        existing->remaining_seconds = std::max(existing->remaining_seconds, kCreatureSpawnSuppressionDuration);
+        return;
+    }
+
+    spawn_suppressions_.push_back({anchor, kCreatureSpawnSuppressionDuration});
+}
+
+void CreatureSystem::spawn_death_visual(const CreatureInstance& creature, const glm::vec3& hit_direction) {
+    CreatureDeathVisual visual {};
+    visual.anchor = creature.anchor;
+    visual.position = creature.position;
+    visual.yaw_radians = creature.yaw_radians;
+    visual.animation_time = creature.animation_time;
+    visual.morph_factor = creature.morph_factor;
+    visual.daylight_factor = 1.0F;
+    visual.tension = std::max(creature.nervous_intensity, 0.82F);
+    visual.appearance_seed = creature.appearance_seed;
+    visual.behavior_state = creature.behavior_state;
+    visual.phase = creature.phase;
+    visual.motion_amount = creature.motion_amount;
+    visual.gaze_weight = creature.gaze_weight;
+    visual.attack_amount = creature.attack_amount;
+    visual.age_seconds = 0.0F;
+    visual.duration_seconds = kCreatureDeathVisualDuration;
+    visual.hit_direction = horizontal_direction_or_fallback(hit_direction, creature.hit_direction);
+    death_visuals_.push_back(visual);
 }
 
 } // namespace valcraft

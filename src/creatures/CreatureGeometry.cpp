@@ -90,6 +90,14 @@ auto bell_range(float value, float center, float radius) noexcept -> float {
     return smoothstep01(1.0F - std::abs(value - center) / std::max(radius, 1.0e-4F));
 }
 
+auto safe_horizontal_direction(const glm::vec3& direction) noexcept -> glm::vec3 {
+    const auto horizontal = glm::vec3 {direction.x, 0.0F, direction.z};
+    if (glm::dot(horizontal, horizontal) > 1.0e-6F) {
+        return glm::normalize(horizontal);
+    }
+    return {0.0F, 0.0F, 1.0F};
+}
+
 auto seed_unit(std::uint32_t seed, int bit_shift) noexcept -> float {
     return static_cast<float>((seed >> bit_shift) & 0xFFU) / 255.0F;
 }
@@ -1658,8 +1666,25 @@ auto build_creature_parts(const CreatureRenderInstance& creature) -> std::vector
     std::vector<CreaturePartInstance> mesh {};
     mesh.reserve(96U);
 
-    auto root = glm::translate(glm::mat4(1.0F), creature.position);
-    root = glm::rotate(root, creature.yaw_radians, glm::vec3 {0.0F, 1.0F, 0.0F});
+    const auto hurt_amount = saturate(creature.hurt_amount);
+    const auto death_amount = saturate(creature.death_amount);
+    const auto hit_direction = safe_horizontal_direction(creature.hit_direction);
+    const auto hit_yaw = std::atan2(hit_direction.z, hit_direction.x);
+    const auto stagger = hurt_amount * (1.0F - death_amount);
+    const auto death_sink = death_amount * (0.26F + 0.10F * seed_detail_unit(creature.appearance_seed, 31));
+    const auto death_roll_sign = seed_detail_signed(creature.appearance_seed, 32) >= 0.0F ? 1.0F : -1.0F;
+    const auto death_roll = death_amount * (0.48F + 0.20F * seed_detail_unit(creature.appearance_seed, 33)) * death_roll_sign;
+    const auto death_pitch = death_amount * (1.18F + 0.28F * seed_detail_unit(creature.appearance_seed, 34));
+    const auto impact_bounce = std::sin((1.0F - death_amount) * kPi) * stagger * 0.050F;
+
+    auto root = glm::translate(
+        glm::mat4(1.0F),
+        creature.position + hit_direction * (stagger * 0.085F + death_amount * 0.16F) +
+            glm::vec3 {0.0F, impact_bounce - death_sink, 0.0F});
+    root = glm::rotate(root, glm::mix(creature.yaw_radians, hit_yaw, death_amount * 0.34F), glm::vec3 {0.0F, 1.0F, 0.0F});
+    root = glm::rotate(root, -death_pitch, glm::vec3 {0.0F, 0.0F, 1.0F});
+    root = glm::rotate(root, death_roll + stagger * 0.18F, glm::vec3 {1.0F, 0.0F, 0.0F});
+    root = glm::scale(root, glm::vec3 {1.0F + stagger * 0.025F, 1.0F - death_amount * 0.08F, 1.0F + stagger * 0.020F});
 
     const auto state = build_visual_state(creature);
 
