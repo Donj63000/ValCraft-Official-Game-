@@ -19,8 +19,10 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <sstream>
@@ -59,6 +61,20 @@ TEST_CASE("game option parser accepts smoke perf flags and values") {
     CHECK_FALSE(parsed.options.performance.shadows_enabled);
     CHECK_FALSE(parsed.options.performance.post_process_enabled);
     CHECK(parsed.options.performance.stream_radius == 14);
+}
+
+TEST_CASE("game option parser rejects non finite time and unsafe streaming radius") {
+    const std::vector<std::string_view> nan_time {"--initial-time=nan"};
+    const auto parsed_nan_time = parse_game_options(nan_time);
+    CHECK_FALSE(parsed_nan_time.ok);
+
+    const std::vector<std::string_view> infinite_time {"--initial-time=inf"};
+    const auto parsed_infinite_time = parse_game_options(infinite_time);
+    CHECK_FALSE(parsed_infinite_time.ok);
+
+    const std::vector<std::string_view> oversized_stream_radius {"--stream-radius=2147483647"};
+    const auto parsed_stream_radius = parse_game_options(oversized_stream_radius);
+    CHECK_FALSE(parsed_stream_radius.ok);
 }
 
 TEST_CASE("game option parser accepts perf capture flags outside smoke mode") {
@@ -463,7 +479,21 @@ TEST_CASE("movement input helper reads the physical strafe cluster consistently"
     keys[SDL_SCANCODE_SPACE] = 1;
     input = read_player_movement_input(keys.data());
     CHECK(input.move_forward == doctest::Approx(1.0F));
+    CHECK(input.move_up == doctest::Approx(1.0F));
     CHECK(input.jump);
+
+    keys.fill(0);
+    keys[SDL_SCANCODE_W] = 1;
+    keys[SDL_SCANCODE_LSHIFT] = 1;
+    input = read_player_movement_input(keys.data());
+    CHECK(input.move_forward == doctest::Approx(1.0F));
+    CHECK(input.sprint);
+
+    keys.fill(0);
+    keys[SDL_SCANCODE_LCTRL] = 1;
+    input = read_player_movement_input(keys.data());
+    CHECK(input.move_up == doctest::Approx(-1.0F));
+    CHECK_FALSE(input.sprint);
 }
 
 TEST_CASE("drop action key follows the physical q position to avoid azerty movement conflicts") {
@@ -1336,6 +1366,170 @@ TEST_CASE("save game loader preserves backward compatibility with version 1 file
     CHECK(loaded->creatures.empty());
     CHECK(loaded->item_drops.empty());
     CHECK(loaded->chunk_snapshots.empty());
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save game loader rejects corrupt oversized payload counts before allocation") {
+    const auto unique_suffix =
+        std::to_string(static_cast<long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto save_root = std::filesystem::temp_directory_path() / ("valcraft-save-corrupt-tests-" + unique_suffix);
+    std::filesystem::remove_all(save_root);
+    std::filesystem::create_directories(save_root);
+
+    const auto file_path = save_slot_file_path(save_root, 0);
+    std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+
+    const auto write_bytes = [&](const void* data, std::size_t size) {
+        output.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+    };
+    const auto write_value = [&](const auto& value) {
+        output.write(reinterpret_cast<const char*>(&value), static_cast<std::streamsize>(sizeof(value)));
+    };
+    const auto write_bool = [&](bool value) {
+        const std::uint8_t raw = value ? 1U : 0U;
+        write_value(raw);
+    };
+    const auto write_vec3 = [&](const glm::vec3& value) {
+        write_value(value.x);
+        write_value(value.y);
+        write_value(value.z);
+    };
+    const auto write_hotbar_slot = [&](const HotbarSlot& slot) {
+        write_value(slot.block_id);
+        write_value(slot.count);
+    };
+    const auto write_player_state = [&](const PlayerState& state) {
+        write_vec3(state.position);
+        write_vec3(state.velocity);
+        write_value(state.yaw_degrees);
+        write_value(state.pitch_degrees);
+        write_value(state.body_yaw_degrees);
+        write_value(state.animation_time);
+        write_value(state.step_phase);
+        write_value(state.health);
+        write_value(state.air_seconds);
+        write_value(state.hurt_timer);
+        write_value(state.damage_cooldown);
+        write_value(state.regen_delay);
+        write_value(state.regen_tick_timer);
+        write_value(state.drowning_tick_timer);
+        write_value(state.fall_start_y);
+        write_value(state.primary_action_progress);
+        write_value(state.secondary_action_progress);
+        write_value(state.landing_impact);
+        write_value(state.airborne_time);
+        write_value(state.look_sway_yaw);
+        write_value(state.look_sway_pitch);
+        write_bool(state.on_ground);
+        write_bool(state.fly_mode);
+        write_bool(state.head_underwater);
+        write_bool(state.swimming);
+        write_bool(state.primary_action_active);
+        write_bool(state.secondary_action_active);
+        write_bool(state.dead);
+        const auto death_cause = static_cast<std::underlying_type_t<PlayerDeathCause>>(state.death_cause);
+        write_value(death_cause);
+    };
+
+    const std::array<char, 8> magic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
+    const std::uint32_t version = 5;
+    const std::uint64_t saved_at = 1712185200;
+    const int seed = 24680;
+    const float time_of_day = 12.0F;
+    const std::uint32_t modified_chunk_count = 0;
+    const float weather_time_seconds = 0.0F;
+    const glm::vec3 spawn_position {0.5F, 72.0F, 0.5F};
+    const auto hotbar = make_default_hotbar_state();
+    const auto inventory = make_default_inventory_menu_state();
+    PlayerState player_state {};
+    player_state.position = spawn_position;
+
+    write_bytes(magic.data(), magic.size());
+    write_value(version);
+    write_value(saved_at);
+    write_value(seed);
+    write_value(time_of_day);
+    write_value(modified_chunk_count);
+    write_bool(false);
+    write_value(weather_time_seconds);
+    write_vec3(spawn_position);
+    write_player_state(player_state);
+    for (const auto& slot : hotbar.slots) {
+        write_hotbar_slot(slot);
+    }
+    write_value(static_cast<std::uint32_t>(hotbar.selected_index));
+    for (const auto& slot : inventory.storage_slots) {
+        write_hotbar_slot(slot);
+    }
+    write_hotbar_slot(inventory.carried_slot);
+    write_bool(inventory.carrying_item);
+    for (const auto& slot : inventory.equipment_slots) {
+        write_hotbar_slot(slot);
+    }
+    write_value(std::numeric_limits<std::uint32_t>::max());
+    output.close();
+
+    CHECK_FALSE(load_save_slot(save_root, 0).has_value());
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save game writer rejects snapshots that exceed the loader payload limits") {
+    const auto unique_suffix =
+        std::to_string(static_cast<long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto save_root = std::filesystem::temp_directory_path() / ("valcraft-save-oversized-tests-" + unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.item_drops.resize(129);
+
+    CHECK_THROWS_AS(write_save_slot(save_root, 0, snapshot), std::runtime_error);
+    CHECK_FALSE(std::filesystem::exists(save_slot_file_path(save_root, 0)));
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save game writer keeps an existing slot intact when a replacement is rejected before finalize") {
+    const auto unique_suffix =
+        std::to_string(static_cast<long long>(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto save_root = std::filesystem::temp_directory_path() / ("valcraft-save-atomic-tests-" + unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot original {};
+    original.metadata.saved_at_unix_seconds = 1712185200;
+    original.metadata.seed = 1111;
+    original.metadata.time_of_day = 7.25F;
+    original.metadata.weather_time_seconds = 12.5F;
+    original.spawn_position = {2.5F, 74.0F, -3.5F};
+    original.player_state.position = original.spawn_position;
+    original.hotbar = make_default_hotbar_state();
+    original.inventory = make_default_inventory_menu_state();
+    original.hotbar.selected_index = 2;
+
+    write_save_slot(save_root, 3, original);
+    const auto before = load_save_slot(save_root, 3);
+    REQUIRE(before.has_value());
+    REQUIRE(before->metadata.seed == original.metadata.seed);
+
+    auto rejected_replacement = original;
+    rejected_replacement.metadata.saved_at_unix_seconds = 1812185200;
+    rejected_replacement.metadata.seed = 2222;
+    rejected_replacement.metadata.time_of_day = 19.0F;
+    rejected_replacement.item_drops.resize(129);
+
+    CHECK_THROWS_AS(write_save_slot(save_root, 3, rejected_replacement), std::runtime_error);
+
+    const auto after = load_save_slot(save_root, 3);
+    REQUIRE(after.has_value());
+    CHECK(after->metadata.saved_at_unix_seconds == before->metadata.saved_at_unix_seconds);
+    CHECK(after->metadata.seed == before->metadata.seed);
+    CHECK(after->metadata.time_of_day == doctest::Approx(before->metadata.time_of_day));
+    CHECK(after->spawn_position.x == doctest::Approx(before->spawn_position.x));
+    CHECK(after->spawn_position.y == doctest::Approx(before->spawn_position.y));
+    CHECK(after->spawn_position.z == doctest::Approx(before->spawn_position.z));
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(save_slot_file_path(save_root, 3).string() + ".tmp")));
 
     std::filesystem::remove_all(save_root);
 }

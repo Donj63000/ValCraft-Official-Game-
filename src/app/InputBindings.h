@@ -20,6 +20,7 @@ inline auto read_player_movement_input(const Uint8* keys) noexcept -> PlayerInpu
         (keys[SDL_SCANCODE_SPACE] != 0 ? 1.0F : 0.0F) -
         (((keys[SDL_SCANCODE_LCTRL] != 0) || (keys[SDL_SCANCODE_RCTRL] != 0)) ? 1.0F : 0.0F);
     input.jump = keys[SDL_SCANCODE_SPACE] != 0;
+    input.sprint = (keys[SDL_SCANCODE_LSHIFT] != 0) || (keys[SDL_SCANCODE_RSHIFT] != 0);
     return input;
 }
 

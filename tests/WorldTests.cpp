@@ -141,6 +141,28 @@ TEST_CASE("terrain surface sampling matches block and water generation") {
     }
 }
 
+TEST_CASE("world generator move operations preserve deterministic sampling") {
+    WorldGenerator source(9191);
+    const auto expected_surface = source.sample_surface(12, -34);
+    const auto expected_block = source.sample_block(12, expected_surface.surface_height, -34);
+    const auto expected_water = source.sample_water_state(12, expected_surface.water_level, -34);
+
+    WorldGenerator moved(std::move(source));
+    CHECK(moved.seed() == 9191);
+    CHECK(moved.sample_surface(12, -34).surface_height == expected_surface.surface_height);
+    CHECK(moved.sample_surface(12, -34).surface_block == expected_surface.surface_block);
+    CHECK(moved.sample_block(12, expected_surface.surface_height, -34) == expected_block);
+    CHECK(moved.sample_water_state(12, expected_surface.water_level, -34) == expected_water);
+
+    WorldGenerator assigned(7);
+    assigned = WorldGenerator(9191);
+    CHECK(assigned.seed() == 9191);
+    CHECK(assigned.sample_surface(12, -34).surface_height == expected_surface.surface_height);
+    CHECK(assigned.sample_surface(12, -34).surface_block == expected_surface.surface_block);
+    CHECK(assigned.sample_block(12, expected_surface.surface_height, -34) == expected_block);
+    CHECK(assigned.sample_water_state(12, expected_surface.water_level, -34) == expected_water);
+}
+
 TEST_CASE("chunk stores and retrieves local blocks") {
     Chunk chunk({2, -1});
     chunk.fill(to_block_id(BlockType::Air));
@@ -1575,6 +1597,14 @@ TEST_CASE("update_streaming plans the full radius around the player without imme
     CHECK(world.has_pending_work());
 }
 
+TEST_CASE("world constructor clamps unsafe stream radii") {
+    World negative_radius_world(1337, -4);
+    CHECK(negative_radius_world.stream_radius() == 0);
+
+    World oversized_radius_world(1337, std::numeric_limits<int>::max());
+    CHECK(oversized_radius_world.stream_radius() == kMaxStreamRadius);
+}
+
 TEST_CASE("update_streaming is a no-op while the player stays in the same chunk") {
     World world(55, 1);
 
@@ -2482,6 +2512,7 @@ TEST_CASE("environment curve is brightest at noon and remains readable at midnig
 
 TEST_CASE("environment state keeps day crisp dusk warm and night cool with softer night sky contrast") {
     const auto noon = EnvironmentClock::compute_state(12.0F);
+    const auto dawn = EnvironmentClock::compute_state(5.5F);
     const auto dusk = EnvironmentClock::compute_state(18.5F);
     const auto midnight = EnvironmentClock::compute_state(0.0F);
     const auto noon_sky_span = glm::length(noon.sky_zenith_color - noon.sky_horizon_color);
@@ -2496,6 +2527,14 @@ TEST_CASE("environment state keeps day crisp dusk warm and night cool with softe
     CHECK(noon.cloud_intensity > midnight.cloud_intensity);
     CHECK(dusk.cloud_intensity > midnight.cloud_intensity);
     CHECK(dusk.sky_horizon_color.r > dusk.sky_zenith_color.r);
+    CHECK(dusk.sky_horizon_color.r > dusk.sky_horizon_color.g);
+    CHECK(dusk.sky_horizon_color.g > dusk.sky_horizon_color.b);
+    CHECK(dusk.sky_horizon_color.r > dusk.sky_horizon_color.b + 0.32F);
+    CHECK(dusk.horizon_glow_color.r > 0.65F);
+    CHECK(dusk.sun_disk_color.r > dusk.sun_disk_color.g + 0.20F);
+    CHECK(dawn.sky_horizon_color.r > dawn.sky_horizon_color.g);
+    CHECK(dawn.sky_horizon_color.g > dawn.sky_horizon_color.b);
+    CHECK(dawn.horizon_glow_color.r > 0.65F);
     CHECK(noon.sky_horizon_color.b > noon.sky_horizon_color.r);
     CHECK(midnight.sky_zenith_color.b > midnight.sky_zenith_color.r);
     CHECK(midnight.fog_color.b > midnight.fog_color.r);
@@ -2512,6 +2551,30 @@ TEST_CASE("environment state keeps day crisp dusk warm and night cool with softe
     CHECK(noon.post_sharpen_strength > midnight.post_sharpen_strength);
     CHECK(dusk.post_edge_strength >= noon.post_edge_strength);
     CHECK(noon.wind_strength > 0.20F);
+}
+
+TEST_CASE("storm weather attenuates cinematic twilight colors without removing them") {
+    constexpr std::uint32_t seed = 321987U;
+    const auto clear_dusk = EnvironmentClock::compute_state(18.5F, seed, 0.0F);
+    EnvironmentState storm_dusk {};
+    bool found_storm = false;
+
+    for (int slot = 1; slot < 2048 && !found_storm; ++slot) {
+        const auto state = EnvironmentClock::compute_state(18.5F, seed, static_cast<float>(slot) * 240.0F + 120.0F);
+        if (state.storm_intensity > 0.30F) {
+            storm_dusk = state;
+            found_storm = true;
+        }
+    }
+
+    REQUIRE(found_storm);
+    CHECK(clear_dusk.sky_horizon_color.r > clear_dusk.sky_horizon_color.g);
+    CHECK(storm_dusk.sky_horizon_color.r > storm_dusk.sky_horizon_color.b);
+    CHECK(storm_dusk.overcast_intensity > clear_dusk.overcast_intensity);
+    CHECK((storm_dusk.sky_horizon_color.r - storm_dusk.sky_horizon_color.b) <
+          (clear_dusk.sky_horizon_color.r - clear_dusk.sky_horizon_color.b));
+    CHECK((storm_dusk.horizon_glow_color.r - storm_dusk.horizon_glow_color.b) <
+          (clear_dusk.horizon_glow_color.r - clear_dusk.horizon_glow_color.b));
 }
 
 TEST_CASE("weather cycle stays mostly fair while still producing rain and storms") {
@@ -2605,7 +2668,7 @@ TEST_CASE("rain and storm weather alter lighting wind and precipitation coherent
 
 TEST_CASE("weather cycle keeps environment values finite and renderer-safe") {
     constexpr std::array<std::uint32_t, 5> seeds {1U, 1337U, 424242U, 987654U, 0xffffffffU};
-    constexpr std::array<float, 5> times_of_day {0.0F, 6.0F, 12.0F, 18.0F, 23.5F};
+    constexpr std::array<float, 7> times_of_day {0.0F, 5.5F, 6.0F, 12.0F, 18.0F, 18.5F, 23.5F};
 
     for (const auto seed : seeds) {
         for (int slot = 0; slot < 96; ++slot) {
@@ -2655,6 +2718,19 @@ TEST_CASE("weather cycle keeps environment values finite and renderer-safe") {
             }
         }
     }
+}
+
+TEST_CASE("environment clock sanitizes non finite time inputs") {
+    const auto normalized_nan = EnvironmentClock::normalize_time_of_day(std::numeric_limits<float>::quiet_NaN());
+    CHECK(normalized_nan == doctest::Approx(8.0F));
+
+    EnvironmentClock clock(std::numeric_limits<float>::infinity(), false);
+    CHECK(clock.time_of_day() == doctest::Approx(8.0F));
+
+    const auto state = EnvironmentClock::compute_state(std::numeric_limits<float>::quiet_NaN(), 1337U, 0.0F);
+    CHECK(state.time_of_day == doctest::Approx(8.0F));
+    CHECK(finite_vec3(state.sun_direction));
+    CHECK(finite_vec3(state.sun_color));
 }
 
 TEST_CASE("environment clock respects freeze mode") {

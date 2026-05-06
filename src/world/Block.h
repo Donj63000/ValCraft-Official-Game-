@@ -66,6 +66,7 @@ constexpr int kChunkHeight = 128;
 constexpr int kWorldMinY = 0;
 constexpr int kWorldMaxY = kChunkHeight - 1;
 constexpr int kDefaultStreamRadius = 6;
+constexpr int kMaxStreamRadius = 32;
 constexpr std::uint8_t kBlockBreakStageCount = 8;
 
 struct ChunkCoord {

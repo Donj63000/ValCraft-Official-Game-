@@ -12,6 +12,7 @@ namespace valcraft {
 namespace {
 
 constexpr float kFullDayDurationSeconds = 12.0F * 60.0F;
+constexpr float kDefaultTimeOfDay = 8.0F;
 constexpr float kWeatherSlotDurationSeconds = 240.0F;
 constexpr float kWeatherTransitionSeconds = 42.0F;
 constexpr float kPi = 3.14159265358979323846F;
@@ -313,6 +314,10 @@ auto EnvironmentClock::current_creature_cycle() const noexcept -> CreatureCycleS
 }
 
 auto EnvironmentClock::normalize_time_of_day(float time_of_day) noexcept -> float {
+    if (!std::isfinite(time_of_day)) {
+        return kDefaultTimeOfDay;
+    }
+
     auto wrapped = std::fmod(time_of_day, 24.0F);
     if (wrapped < 0.0F) {
         wrapped += 24.0F;
@@ -341,41 +346,42 @@ auto EnvironmentClock::compute_state(float time_of_day, std::uint32_t weather_se
     const auto horizon_glow = peaked_curve(-0.24F, 0.04F, 0.18F, 0.52F, sun_height);
     const auto night_factor = 1.0F - smooth_curve(-0.24F, 0.05F, sun_height);
     const auto low_sun = 1.0F - smooth_curve(0.18F, 0.74F, std::abs(sun_height));
-    const auto twilight_presence = saturate(twilight + low_sun * 0.18F * (1.0F - daylight));
-    const auto glow_presence = saturate(horizon_glow + low_sun * 0.22F * (1.0F - daylight));
+    const auto twilight_presence = saturate(twilight + low_sun * 0.22F * (1.0F - daylight));
+    const auto glow_presence = saturate(horizon_glow + low_sun * 0.30F * (1.0F - daylight));
+    const auto cinematic_twilight = saturate(glow_presence * 0.78F + twilight_presence * 0.36F);
 
     state.daylight_factor = glm::mix(0.18F, 1.0F, daylight);
 
     const auto day_sun = glm::vec3 {1.00F, 0.96F, 0.88F};
-    const auto twilight_sun = glm::vec3 {1.00F, 0.67F, 0.38F};
+    const auto twilight_sun = glm::vec3 {1.00F, 0.48F, 0.20F};
     const auto night_sun = glm::vec3 {0.18F, 0.22F, 0.34F};
     state.sun_color = blend_cycle_color(night_sun, twilight_sun, day_sun, glow_presence, daylight);
 
     const auto day_ambient = glm::vec3 {0.44F, 0.51F, 0.60F};
-    const auto twilight_ambient = glm::vec3 {0.26F, 0.23F, 0.28F};
+    const auto twilight_ambient = glm::vec3 {0.32F, 0.20F, 0.24F};
     const auto night_ambient = glm::vec3 {0.11F, 0.13F, 0.19F};
     state.ambient_color = blend_cycle_color(night_ambient, twilight_ambient, day_ambient, twilight_presence, daylight);
 
     const auto day_fog = glm::vec3 {0.52F, 0.68F, 0.86F};
-    const auto twilight_fog = glm::vec3 {0.42F, 0.34F, 0.40F};
+    const auto twilight_fog = glm::vec3 {0.64F, 0.30F, 0.28F};
     const auto night_fog = glm::vec3 {0.05F, 0.07F, 0.13F};
     state.fog_color = blend_cycle_color(night_fog, twilight_fog, day_fog, twilight_presence, daylight);
 
     const auto day_zenith = glm::vec3 {0.13F, 0.47F, 0.94F};
-    const auto twilight_zenith = glm::vec3 {0.21F, 0.30F, 0.56F};
+    const auto twilight_zenith = glm::vec3 {0.42F, 0.22F, 0.50F};
     const auto night_zenith = glm::vec3 {0.01F, 0.03F, 0.09F};
     state.sky_zenith_color = blend_cycle_color(night_zenith, twilight_zenith, day_zenith, twilight_presence * 0.92F, daylight);
 
     const auto day_horizon = glm::vec3 {0.72F, 0.88F, 1.00F};
-    const auto twilight_horizon = glm::vec3 {1.00F, 0.60F, 0.36F};
+    const auto twilight_horizon = glm::vec3 {1.00F, 0.34F, 0.15F};
     const auto night_horizon = glm::vec3 {0.07F, 0.10F, 0.18F};
     state.sky_horizon_color = blend_cycle_color(night_horizon, twilight_horizon, day_horizon, glow_presence, daylight);
 
     state.sky_color = glm::mix(state.sky_horizon_color, state.sky_zenith_color, 0.54F);
-    state.horizon_glow_color = glm::mix(glm::vec3 {0.17F, 0.22F, 0.40F}, glm::vec3 {1.00F, 0.58F, 0.26F}, glow_presence);
+    state.horizon_glow_color = glm::mix(glm::vec3 {0.17F, 0.22F, 0.40F}, glm::vec3 {1.00F, 0.25F, 0.08F}, cinematic_twilight);
     state.distant_fog_color = blend_cycle_color(
         glm::vec3 {0.14F, 0.18F, 0.30F},
-        glm::vec3 {0.52F, 0.42F, 0.46F},
+        glm::vec3 {0.72F, 0.34F, 0.30F},
         glm::vec3 {0.60F, 0.76F, 0.92F},
         twilight_presence,
         daylight);
@@ -384,7 +390,7 @@ auto EnvironmentClock::compute_state(float time_of_day, std::uint32_t weather_se
         glm::vec3 {0.05F, 0.07F, 0.13F},
         saturate(daylight + glow_presence * 0.18F));
     state.sun_disk_color = glm::mix(
-        glm::vec3 {1.00F, 0.62F, 0.32F},
+        glm::vec3 {1.00F, 0.38F, 0.14F},
         glm::vec3 {1.00F, 0.95F, 0.78F},
         smooth_curve(-0.04F, 0.54F, sun_height));
     state.moon_disk_color = glm::mix(glm::vec3 {0.68F, 0.78F, 0.92F}, glm::vec3 {0.92F, 0.96F, 1.00F}, night_factor);
@@ -393,14 +399,14 @@ auto EnvironmentClock::compute_state(float time_of_day, std::uint32_t weather_se
         glm::mix(0.18F, 0.58F, daylight) * glm::mix(0.74F, 1.00F, 1.0F - night_factor) + twilight_presence * 0.06F;
     state.cloud_shadow_strength = glm::mix(0.08F, 0.18F, daylight) + twilight_presence * 0.04F;
     state.wind_strength = glm::mix(0.20F, 0.34F, saturate(state.cloud_intensity)) + low_sun * 0.04F;
-    state.atmospheric_scatter_strength = glm::mix(0.035F, 0.070F, daylight) + glow_presence * 0.070F;
-    state.height_fog_density = glm::mix(0.0060F, 0.0025F, daylight) + glow_presence * 0.0015F;
-    state.exposure = glm::mix(0.84F, 1.06F, daylight) + glow_presence * 0.05F;
-    state.saturation_boost = glm::mix(0.95F, 1.04F, daylight) + twilight_presence * 0.08F;
-    state.contrast = glm::mix(1.06F, 1.12F, daylight) + twilight_presence * 0.03F;
+    state.atmospheric_scatter_strength = glm::mix(0.035F, 0.070F, daylight) + glow_presence * 0.088F;
+    state.height_fog_density = glm::mix(0.0060F, 0.0025F, daylight) + glow_presence * 0.0019F;
+    state.exposure = glm::mix(0.84F, 1.06F, daylight) + cinematic_twilight * 0.065F;
+    state.saturation_boost = glm::mix(0.95F, 1.04F, daylight) + cinematic_twilight * 0.12F;
+    state.contrast = glm::mix(1.06F, 1.12F, daylight) + twilight_presence * 0.04F;
     state.vignette_strength = glm::mix(0.22F, 0.10F, daylight);
-    state.glow_threshold = glm::mix(0.55F, 0.78F, daylight) - twilight_presence * 0.04F;
-    state.glow_strength = glm::mix(0.30F, 0.20F, daylight) + twilight_presence * 0.10F;
+    state.glow_threshold = glm::mix(0.55F, 0.78F, daylight) - cinematic_twilight * 0.055F;
+    state.glow_strength = glm::mix(0.30F, 0.20F, daylight) + cinematic_twilight * 0.14F;
     state.post_sharpen_strength = glm::mix(0.10F, 0.18F, daylight);
     state.post_edge_strength = glm::mix(0.17F, 0.11F, daylight) + twilight_presence * 0.04F;
 

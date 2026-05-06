@@ -10,6 +10,13 @@
 #include <system_error>
 #include <type_traits>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace valcraft {
 
 namespace {
@@ -21,9 +28,52 @@ constexpr std::uint32_t kSaveVersionWeatherCycle = 4;
 constexpr std::uint32_t kSaveVersionWaterState = 3;
 constexpr std::uint32_t kSaveVersionStartingVillage = 2;
 constexpr std::uint32_t kSaveVersionLegacy = 1;
+constexpr std::uint32_t kMaxSavedCreatureCount = 256;
+constexpr std::uint32_t kMaxSavedItemDropCount = 128;
+constexpr std::uint32_t kMaxSavedChunkSnapshotCount = 4096;
 
 auto is_supported_save_version(std::uint32_t version) noexcept -> bool {
     return version >= kSaveVersionLegacy && version <= kSaveVersion;
+}
+
+auto has_sane_save_metadata_counts(const SaveSlotMetadata& metadata) noexcept -> bool {
+    return metadata.modified_chunk_count <= kMaxSavedChunkSnapshotCount;
+}
+
+void validate_snapshot_payload_limits(const SaveGameSnapshot& snapshot) {
+    if (snapshot.creatures.size() > kMaxSavedCreatureCount ||
+        snapshot.item_drops.size() > kMaxSavedItemDropCount ||
+        snapshot.chunk_snapshots.size() > kMaxSavedChunkSnapshotCount) {
+        throw std::runtime_error("Save snapshot exceeds supported payload limits");
+    }
+}
+
+void remove_temp_save_file(const std::filesystem::path& temp_path) noexcept {
+    std::error_code error_code;
+    std::filesystem::remove(temp_path, error_code);
+}
+
+void replace_save_file_with_temp(const std::filesystem::path& temp_path, const std::filesystem::path& file_path) {
+#if defined(_WIN32)
+    // Je remplace le slot final uniquement apres une ecriture complete du .tmp,
+    // pour ne pas perdre une sauvegarde valide si la preparation echoue.
+    if (MoveFileExW(
+            temp_path.wstring().c_str(),
+            file_path.wstring().c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
+        const auto last_error = static_cast<unsigned long>(GetLastError());
+        remove_temp_save_file(temp_path);
+        throw std::runtime_error(std::string("Unable to finalize save slot data: MoveFileExW failed with error ") +
+                                 std::to_string(last_error));
+    }
+#else
+    std::error_code error_code;
+    std::filesystem::rename(temp_path, file_path, error_code);
+    if (error_code) {
+        remove_temp_save_file(temp_path);
+        throw std::runtime_error("Unable to finalize save slot data");
+    }
+#endif
 }
 
 class BinaryWriter {
@@ -288,6 +338,9 @@ auto load_metadata_from_file(const std::filesystem::path& file_path) -> std::opt
         !reader.read_value(metadata.modified_chunk_count)) {
         return std::nullopt;
     }
+    if (!has_sane_save_metadata_counts(metadata)) {
+        return std::nullopt;
+    }
     if (version >= kSaveVersionStartingVillage && !read_bool(reader, metadata.has_starting_village)) {
         return std::nullopt;
     }
@@ -354,6 +407,9 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
         !reader.read_value(snapshot.metadata.modified_chunk_count)) {
         return std::nullopt;
     }
+    if (!has_sane_save_metadata_counts(snapshot.metadata)) {
+        return std::nullopt;
+    }
     if (version >= kSaveVersionStartingVillage && !read_bool(reader, snapshot.metadata.has_starting_village)) {
         return std::nullopt;
     }
@@ -398,7 +454,7 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
     snapshot.inventory.visible = false;
     snapshot.inventory.hovered_slot.reset();
 
-    if (!reader.read_value(creature_count)) {
+    if (!reader.read_value(creature_count) || creature_count > kMaxSavedCreatureCount) {
         return std::nullopt;
     }
     snapshot.creatures.resize(creature_count);
@@ -408,7 +464,7 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
         }
     }
 
-    if (!reader.read_value(item_drop_count)) {
+    if (!reader.read_value(item_drop_count) || item_drop_count > kMaxSavedItemDropCount) {
         return std::nullopt;
     }
     snapshot.item_drops.resize(item_drop_count);
@@ -418,7 +474,7 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
         }
     }
 
-    if (!reader.read_value(chunk_count)) {
+    if (!reader.read_value(chunk_count) || chunk_count > kMaxSavedChunkSnapshotCount) {
         return std::nullopt;
     }
     snapshot.chunk_snapshots.resize(chunk_count);
@@ -489,11 +545,18 @@ void write_save_slot(const std::filesystem::path& root_directory, std::size_t sl
         return;
     }
 
-    std::error_code error_code;
-    std::filesystem::create_directories(root_directory, error_code);
+    validate_snapshot_payload_limits(snapshot);
+
+    if (!root_directory.empty()) {
+        std::error_code error_code;
+        std::filesystem::create_directories(root_directory, error_code);
+        if (error_code) {
+            throw std::runtime_error("Unable to create save directory");
+        }
+    }
 
     const auto file_path = save_slot_file_path(root_directory, slot_index);
-    const auto temp_path = file_path.string() + ".tmp";
+    const auto temp_path = std::filesystem::path(file_path.string() + ".tmp");
     std::ofstream output(temp_path, std::ios::binary | std::ios::trunc);
     if (!output) {
         throw std::runtime_error("Unable to open save slot for writing");
@@ -505,15 +568,9 @@ void write_save_slot(const std::filesystem::path& root_directory, std::size_t sl
                                                                 std::chrono::system_clock::now().time_since_epoch())
                                                                 .count())
                               : snapshot.metadata.saved_at_unix_seconds;
-    const auto chunk_count = static_cast<std::uint32_t>(std::min<std::size_t>(
-        snapshot.chunk_snapshots.size(),
-        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
-    const auto creature_count = static_cast<std::uint32_t>(std::min<std::size_t>(
-        snapshot.creatures.size(),
-        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
-    const auto item_drop_count = static_cast<std::uint32_t>(std::min<std::size_t>(
-        snapshot.item_drops.size(),
-        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    const auto chunk_count = static_cast<std::uint32_t>(snapshot.chunk_snapshots.size());
+    const auto creature_count = static_cast<std::uint32_t>(snapshot.creatures.size());
+    const auto item_drop_count = static_cast<std::uint32_t>(snapshot.item_drops.size());
 
     writer.write_bytes(kSaveMagic.data(), kSaveMagic.size());
     writer.write_value(kSaveVersion);
@@ -561,16 +618,17 @@ void write_save_slot(const std::filesystem::path& root_directory, std::size_t sl
 
     output.flush();
     if (!writer.ok() || !output.good()) {
+        output.close();
+        remove_temp_save_file(temp_path);
         throw std::runtime_error("Unable to write save slot data");
     }
     output.close();
-
-    std::filesystem::remove(file_path, error_code);
-    std::filesystem::rename(temp_path, file_path, error_code);
-    if (error_code) {
-        std::filesystem::remove(temp_path, error_code);
-        throw std::runtime_error("Unable to finalize save slot data");
+    if (!output.good()) {
+        remove_temp_save_file(temp_path);
+        throw std::runtime_error("Unable to close save slot data");
     }
+
+    replace_save_file_with_temp(temp_path, file_path);
 }
 
 } // namespace valcraft

@@ -16,10 +16,14 @@ namespace valcraft {
 namespace {
 
 constexpr float kMoveSpeed = 5.6F;
+constexpr float kSprintMoveSpeed = 7.2F;
 constexpr float kFlySpeed = 10.0F;
 constexpr float kJumpVelocity = 7.5F;
+constexpr float kJumpCoyoteSeconds = 0.10F;
+constexpr float kJumpBufferSeconds = 0.12F;
 constexpr float kGravity = 24.0F;
 constexpr float kWadeMoveSpeed = 4.0F;
+constexpr float kWadeSprintMoveSpeed = 4.8F;
 constexpr float kWadeGravity = 18.0F;
 constexpr float kWadeJumpVelocity = 6.2F;
 constexpr float kSwimMoveSpeed = 3.8F;
@@ -122,6 +126,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
 
     if (state_.dead) {
         state_.velocity = {};
+        reset_jump_assist_state();
         state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
         state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
         state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, 0.0F, kLookSwayReturnSharpness, clamped_dt);
@@ -138,6 +143,8 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     state_.damage_cooldown = std::max(0.0F, state_.damage_cooldown - clamped_dt);
     state_.regen_delay = std::max(0.0F, state_.regen_delay - clamped_dt);
     state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
+    jump_buffer_timer_ = input.jump ? kJumpBufferSeconds : std::max(0.0F, jump_buffer_timer_ - clamped_dt);
+    ground_coyote_timer_ = std::max(0.0F, ground_coyote_timer_ - clamped_dt);
 
     const auto advance_action_progress = [clamped_dt](float& progress, bool& active, float duration) {
         if (!active) {
@@ -157,6 +164,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
 
     if (input.toggle_fly) {
         state_.fly_mode = !state_.fly_mode;
+        reset_jump_assist_state();
         if (state_.fly_mode) {
             state_.velocity = {};
         }
@@ -185,8 +193,23 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     }
 
     const auto standing_on_solid = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
+    if (standing_on_solid) {
+        ground_coyote_timer_ = kJumpCoyoteSeconds;
+    }
+    const auto has_buffered_jump = [&]() noexcept {
+        return jump_buffer_timer_ > 0.0F;
+    };
+    const auto can_ground_jump = [&]() noexcept {
+        return has_buffered_jump() && ground_coyote_timer_ > 0.0F;
+    };
+    const auto consume_jump_assist = [&]() noexcept {
+        jump_buffer_timer_ = 0.0F;
+        ground_coyote_timer_ = 0.0F;
+    };
+    const auto sprinting = input.sprint && input.move_forward > 0.0F && glm::dot(wish, wish) > 1.0e-5F;
 
     if (state_.fly_mode) {
+        reset_jump_assist_state();
         auto fly_velocity = wish + glm::vec3 {0.0F, input.move_up, 0.0F};
         if (glm::dot(fly_velocity, fly_velocity) > 1.0e-5F) {
             fly_velocity = glm::normalize(fly_velocity) * kFlySpeed;
@@ -202,22 +225,27 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.velocity.y /= 1.0F + kSwimVerticalDamping * clamped_dt;
         state_.velocity.y = std::clamp(state_.velocity.y, -kSwimSinkSpeed, kSwimRiseSpeed);
 
-        if (!water_contact_before_move.head_in_water && input.jump && standing_on_solid) {
+        if (!water_contact_before_move.head_in_water && has_buffered_jump() && standing_on_solid) {
             state_.velocity.y = std::max(state_.velocity.y, kSwimSurfaceJumpVelocity);
+            consume_jump_assist();
         }
     } else if (water_contact_before_move.feet_in_water) {
-        state_.velocity.x = wish.x * kWadeMoveSpeed;
-        state_.velocity.z = wish.z * kWadeMoveSpeed;
+        const auto move_speed = sprinting ? kWadeSprintMoveSpeed : kWadeMoveSpeed;
+        state_.velocity.x = wish.x * move_speed;
+        state_.velocity.z = wish.z * move_speed;
         state_.velocity.y -= kWadeGravity * clamped_dt;
-        if (input.jump && standing_on_solid) {
+        if (can_ground_jump()) {
             state_.velocity.y = kWadeJumpVelocity;
+            consume_jump_assist();
         }
     } else {
-        state_.velocity.x = wish.x * kMoveSpeed;
-        state_.velocity.z = wish.z * kMoveSpeed;
+        const auto move_speed = sprinting ? kSprintMoveSpeed : kMoveSpeed;
+        state_.velocity.x = wish.x * move_speed;
+        state_.velocity.z = wish.z * move_speed;
         state_.velocity.y -= kGravity * clamped_dt;
-        if (input.jump && standing_on_solid) {
+        if (can_ground_jump()) {
             state_.velocity.y = kJumpVelocity;
+            consume_jump_assist();
         }
     }
 
@@ -251,6 +279,9 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
 
     if (!state_.fly_mode) {
         state_.on_ground = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F});
+        if (state_.on_ground) {
+            ground_coyote_timer_ = kJumpCoyoteSeconds;
+        }
         if (state_.on_ground && !was_on_ground) {
             landed_in_water =
                 water_contact_after_move.feet_in_water || water_contact_after_move.body_in_water || water_contact_after_move.head_in_water;
@@ -267,6 +298,12 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
             state_.fall_start_y = state_.position.y;
         } else {
             state_.fall_start_y = std::max(state_.fall_start_y, state_.position.y);
+        }
+        if (state_.on_ground && has_buffered_jump() && !water_contact_after_move.swimming) {
+            state_.velocity.y = water_contact_after_move.feet_in_water ? kWadeJumpVelocity : kJumpVelocity;
+            state_.on_ground = false;
+            state_.fall_start_y = state_.position.y;
+            consume_jump_assist();
         }
     } else {
         state_.fall_start_y = state_.position.y;
@@ -342,6 +379,7 @@ auto PlayerController::is_dead() const noexcept -> bool {
 void PlayerController::load_state(const PlayerState& state) noexcept {
     state_ = state;
     block_break_progress_ = {};
+    reset_jump_assist_state();
     state_.health = std::clamp(state_.health, 0.0F, kMaxHealth);
     state_.air_seconds = std::clamp(state_.air_seconds, 0.0F, kMaxAirSeconds);
     state_.pitch_degrees = std::clamp(state_.pitch_degrees, -89.0F, 89.0F);
@@ -354,6 +392,7 @@ void PlayerController::set_position(const glm::vec3& position) noexcept {
     state_.position = position;
     state_.fall_start_y = position.y;
     block_break_progress_ = {};
+    reset_jump_assist_state();
 }
 
 void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
@@ -389,6 +428,7 @@ void PlayerController::trigger_secondary_action() noexcept {
 void PlayerController::respawn(const glm::vec3& position) noexcept {
     state_ = {};
     block_break_progress_ = {};
+    reset_jump_assist_state();
     state_.position = position;
     state_.fall_start_y = position.y;
     state_.body_yaw_degrees = state_.yaw_degrees;
@@ -730,6 +770,7 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
         state_.primary_action_progress = 0.0F;
         state_.secondary_action_progress = 0.0F;
         state_.landing_impact = 0.0F;
+        reset_jump_assist_state();
     }
 }
 
@@ -738,6 +779,11 @@ void PlayerController::heal(float amount) noexcept {
         return;
     }
     state_.health = std::min(kMaxHealth, state_.health + amount);
+}
+
+void PlayerController::reset_jump_assist_state() noexcept {
+    ground_coyote_timer_ = 0.0F;
+    jump_buffer_timer_ = 0.0F;
 }
 
 auto PlayerController::is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool {

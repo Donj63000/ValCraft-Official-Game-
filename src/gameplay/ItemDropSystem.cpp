@@ -23,6 +23,12 @@ constexpr float kGroundFriction = 0.82F;
 constexpr float kAirFriction = 0.98F;
 constexpr std::size_t kMaxActiveDrops = 128;
 
+auto drop_physics_block(const World& world, int x, int y, int z) -> BlockId {
+    // Je garde les drops bloques par le terrain deterministe avant meme que le
+    // chunk soit charge, sinon ils peuvent tomber sous le sol pendant le streaming.
+    return world.peek_block_or_generated(x, y, z);
+}
+
 auto drop_collides_at(const World& world, const glm::vec3& position) -> bool {
     const auto min_corner = glm::vec3 {position.x - kDropHalfWidth, position.y, position.z - kDropHalfWidth};
     const auto max_corner = glm::vec3 {position.x + kDropHalfWidth, position.y + kDropHeight, position.z + kDropHalfWidth};
@@ -37,7 +43,7 @@ auto drop_collides_at(const World& world, const glm::vec3& position) -> bool {
     for (int y = min_y; y <= max_y; ++y) {
         for (int z = min_z; z <= max_z; ++z) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (is_block_collidable(world.get_block(x, y, z))) {
+                if (is_block_collidable(drop_physics_block(world, x, y, z))) {
                     return true;
                 }
             }
@@ -69,7 +75,7 @@ void move_drop_axis(ItemDrop& drop, float delta, int axis, const World& world) {
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int z = min_z; z <= max_z; ++z) {
-                if (!is_block_collidable(world.get_block(block_x, y, z))) {
+                if (!is_block_collidable(drop_physics_block(world, block_x, y, z))) {
                     continue;
                 }
                 next_position.x = delta > 0.0F
@@ -91,7 +97,7 @@ void move_drop_axis(ItemDrop& drop, float delta, int axis, const World& world) {
 
         for (int z = min_z; z <= max_z; ++z) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_collidable(world.get_block(x, block_y, z))) {
+                if (!is_block_collidable(drop_physics_block(world, x, block_y, z))) {
                     continue;
                 }
                 if (delta > 0.0F) {
@@ -116,7 +122,7 @@ void move_drop_axis(ItemDrop& drop, float delta, int axis, const World& world) {
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_collidable(world.get_block(x, y, block_z))) {
+                if (!is_block_collidable(drop_physics_block(world, x, y, block_z))) {
                     continue;
                 }
                 next_position.z = delta > 0.0F

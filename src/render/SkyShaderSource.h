@@ -166,7 +166,10 @@ void main() {
     }
 
     float twilight_softening = (1.0 - day_factor) * (1.0 - night_factor);
-    color = mix(color, mix(u_sky_horizon_color, u_sky_zenith_color, 0.44), horizon_band * twilight_softening * 0.08);
+    vec3 twilight_wash = mix(u_sky_horizon_color, u_horizon_glow_color, 0.62);
+    float twilight_wash_strength = horizon_band * twilight_softening * disk_visibility * (0.08 + 0.05 * (1.0 - overcast_factor));
+    color = mix(color, twilight_wash, twilight_wash_strength);
+    color += u_horizon_glow_color * horizon_band * twilight_softening * disk_visibility * 0.045;
     color += vec3(0.62, 0.72, 1.00) * clamp(u_lightning_intensity, 0.0, 1.0) * (0.12 + horizon_band * 0.22 + storm_factor * 0.18);
 
     frag_color = vec4(clamp(color, 0.0, 1.0), 1.0);

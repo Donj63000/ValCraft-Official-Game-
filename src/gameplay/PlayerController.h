@@ -44,6 +44,7 @@ struct PlayerInput {
     float look_delta_x = 0.0F;
     float look_delta_y = 0.0F;
     bool jump = false;
+    bool sprint = false;
     bool toggle_fly = false;
 };
 
@@ -148,6 +149,7 @@ private:
     void move_axis(float delta, int axis, const World& world);
     void apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown = false) noexcept;
     void heal(float amount) noexcept;
+    void reset_jump_assist_state() noexcept;
     [[nodiscard]] auto block_overlaps_player(const BlockCoord& block_coord) const noexcept -> bool;
     [[nodiscard]] auto point_block(const World& world, const glm::vec3& point) const noexcept -> BlockId;
     [[nodiscard]] auto is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool;
@@ -157,6 +159,8 @@ private:
     BlockBreakProgress block_break_progress_ {};
     BlockId selected_block_ = to_block_id(BlockType::Grass);
     float damage_resistance_percent_ = 0.0F;
+    float ground_coyote_timer_ = 0.0F;
+    float jump_buffer_timer_ = 0.0F;
     static constexpr float kPlayerWidth = 0.6F;
     static constexpr float kPlayerHeight = 1.8F;
     static constexpr float kEyeHeight = 1.62F;

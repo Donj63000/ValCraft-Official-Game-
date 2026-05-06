@@ -2,6 +2,8 @@
 
 #include "world/Chunk.h"
 
+#include <memory>
+
 class FastNoiseLite;
 
 namespace valcraft {
@@ -73,15 +75,14 @@ private:
     void place_oak_tree(Chunk& chunk, int local_x, int surface_y, int local_z, std::uint32_t column_hash) const;
     void place_pine_tree(Chunk& chunk, int local_x, int surface_y, int local_z, std::uint32_t column_hash) const;
     void place_cactus(Chunk& chunk, int local_x, int surface_y, int local_z, std::uint32_t column_hash) const;
-    void release() noexcept;
 
     int seed_ = 1337;
-    FastNoiseLite* terrain_noise_ = nullptr;
-    FastNoiseLite* detail_noise_ = nullptr;
-    FastNoiseLite* temperature_noise_ = nullptr;
-    FastNoiseLite* moisture_noise_ = nullptr;
-    FastNoiseLite* ridge_noise_ = nullptr;
-    FastNoiseLite* cave_noise_ = nullptr;
+    std::unique_ptr<FastNoiseLite> terrain_noise_ {};
+    std::unique_ptr<FastNoiseLite> detail_noise_ {};
+    std::unique_ptr<FastNoiseLite> temperature_noise_ {};
+    std::unique_ptr<FastNoiseLite> moisture_noise_ {};
+    std::unique_ptr<FastNoiseLite> ridge_noise_ {};
+    std::unique_ptr<FastNoiseLite> cave_noise_ {};
 };
 
 } // namespace valcraft

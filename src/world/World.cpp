@@ -240,7 +240,7 @@ void append_chunk_mesh_section(ChunkMeshData& destination, const ChunkMeshData& 
 } // namespace
 
 World::World(int seed, int stream_radius)
-    : stream_radius_(stream_radius),
+    : stream_radius_(std::clamp(stream_radius, 0, kMaxStreamRadius)),
       generator_(seed) {
     const auto loaded_side = static_cast<std::size_t>(std::max(stream_radius_, 0) * 2 + 3);
     const auto max_loaded_chunks = loaded_side * loaded_side;

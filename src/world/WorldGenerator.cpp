@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <utility>
+#include <memory>
 
 namespace valcraft {
 
@@ -29,8 +29,8 @@ auto hash_column(int x, int z, int seed) noexcept -> std::uint32_t {
     return value ^ (value >> 16U);
 }
 
-auto make_noise(int seed, FastNoiseLite::NoiseType type, float frequency) -> FastNoiseLite* {
-    auto* noise = new FastNoiseLite(seed);
+auto make_noise(int seed, FastNoiseLite::NoiseType type, float frequency) -> std::unique_ptr<FastNoiseLite> {
+    auto noise = std::make_unique<FastNoiseLite>(seed);
     noise->SetNoiseType(type);
     noise->SetFrequency(frequency);
     return noise;
@@ -52,35 +52,11 @@ WorldGenerator::WorldGenerator(int seed)
     moisture_noise_->SetFractalOctaves(2);
 }
 
-WorldGenerator::~WorldGenerator() {
-    release();
-}
+WorldGenerator::~WorldGenerator() = default;
 
-WorldGenerator::WorldGenerator(WorldGenerator&& other) noexcept
-    : seed_(other.seed_),
-      terrain_noise_(std::exchange(other.terrain_noise_, nullptr)),
-      detail_noise_(std::exchange(other.detail_noise_, nullptr)),
-      temperature_noise_(std::exchange(other.temperature_noise_, nullptr)),
-      moisture_noise_(std::exchange(other.moisture_noise_, nullptr)),
-      ridge_noise_(std::exchange(other.ridge_noise_, nullptr)),
-      cave_noise_(std::exchange(other.cave_noise_, nullptr)) {
-}
+WorldGenerator::WorldGenerator(WorldGenerator&& other) noexcept = default;
 
-auto WorldGenerator::operator=(WorldGenerator&& other) noexcept -> WorldGenerator& {
-    if (this == &other) {
-        return *this;
-    }
-
-    release();
-    seed_ = other.seed_;
-    terrain_noise_ = std::exchange(other.terrain_noise_, nullptr);
-    detail_noise_ = std::exchange(other.detail_noise_, nullptr);
-    temperature_noise_ = std::exchange(other.temperature_noise_, nullptr);
-    moisture_noise_ = std::exchange(other.moisture_noise_, nullptr);
-    ridge_noise_ = std::exchange(other.ridge_noise_, nullptr);
-    cave_noise_ = std::exchange(other.cave_noise_, nullptr);
-    return *this;
-}
+auto WorldGenerator::operator=(WorldGenerator&& other) noexcept -> WorldGenerator& = default;
 
 void WorldGenerator::generate_chunk(Chunk& chunk) {
     chunk.fill(to_block_id(BlockType::Air));
@@ -523,21 +499,6 @@ void WorldGenerator::place_cactus(Chunk& chunk, int local_x, int surface_y, int 
     for (int y = 1; y <= height; ++y) {
         chunk.set_local(local_x, surface_y + y, local_z, to_block_id(BlockType::Cactus));
     }
-}
-
-void WorldGenerator::release() noexcept {
-    delete terrain_noise_;
-    delete detail_noise_;
-    delete temperature_noise_;
-    delete moisture_noise_;
-    delete ridge_noise_;
-    delete cave_noise_;
-    terrain_noise_ = nullptr;
-    detail_noise_ = nullptr;
-    temperature_noise_ = nullptr;
-    moisture_noise_ = nullptr;
-    ridge_noise_ = nullptr;
-    cave_noise_ = nullptr;
 }
 
 } // namespace valcraft

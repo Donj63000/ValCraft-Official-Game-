@@ -1,6 +1,8 @@
 #include "app/GameOptions.h"
 
 #include <charconv>
+#include <cmath>
+#include <type_traits>
 #include <vector>
 
 namespace valcraft {
@@ -12,7 +14,13 @@ auto parse_number(std::string_view text, Number& value) -> bool {
     const auto* begin = text.data();
     const auto* end = begin + text.size();
     const auto result = std::from_chars(begin, end, value);
-    return result.ec == std::errc {} && result.ptr == end;
+    if (result.ec != std::errc {} || result.ptr != end) {
+        return false;
+    }
+    if constexpr (std::is_floating_point_v<Number>) {
+        return std::isfinite(value);
+    }
+    return true;
 }
 
 auto make_error(std::string_view message) -> GameOptionParseResult {
@@ -98,7 +106,9 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
         }
         if (argument.starts_with("--stream-radius=")) {
             int parsed_value = 0;
-            if (!parse_number(argument.substr(16), parsed_value) || parsed_value < 0) {
+            if (!parse_number(argument.substr(16), parsed_value) ||
+                parsed_value < 0 ||
+                parsed_value > kMaxStreamRadius) {
                 return make_error("Invalid value for --stream-radius");
             }
             result.options.performance.stream_radius = parsed_value;

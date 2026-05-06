@@ -427,6 +427,42 @@ TEST_CASE("positive and negative strafe inputs move on the expected horizontal s
     CHECK(left_player.position().x < 0.45F);
 }
 
+TEST_CASE("sprint boosts only intentional forward ground movement") {
+    World world(231, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_chunk_empty(world, {0, -1});
+    test::make_flat_floor(world, -4, 4, 0, -10, 10);
+
+    PlayerController walk_player({0.5F, 1.001F, 0.5F});
+    PlayerController sprint_player({0.5F, 1.001F, 0.5F});
+    PlayerController reverse_player({0.5F, 1.001F, 0.5F});
+    PlayerController reverse_sprint_player({0.5F, 1.001F, 0.5F});
+
+    PlayerInput walk_input {};
+    walk_input.move_forward = 1.0F;
+    PlayerInput sprint_input = walk_input;
+    sprint_input.sprint = true;
+    PlayerInput reverse_input {};
+    reverse_input.move_forward = -1.0F;
+    PlayerInput reverse_sprint_input = reverse_input;
+    reverse_sprint_input.sprint = true;
+
+    for (int frame = 0; frame < 30; ++frame) {
+        walk_player.update(walk_input, 1.0F / 60.0F, world);
+        sprint_player.update(sprint_input, 1.0F / 60.0F, world);
+        reverse_player.update(reverse_input, 1.0F / 60.0F, world);
+        reverse_sprint_player.update(reverse_sprint_input, 1.0F / 60.0F, world);
+    }
+
+    const auto walk_distance = std::abs(walk_player.position().z - 0.5F);
+    const auto sprint_distance = std::abs(sprint_player.position().z - 0.5F);
+    const auto reverse_distance = std::abs(reverse_player.position().z - 0.5F);
+    const auto reverse_sprint_distance = std::abs(reverse_sprint_player.position().z - 0.5F);
+
+    CHECK(sprint_distance > walk_distance + 0.5F);
+    CHECK(reverse_sprint_distance == doctest::Approx(reverse_distance).epsilon(0.01));
+}
+
 TEST_CASE("player jump from the ground increases vertical position") {
     World world(24, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -441,6 +477,52 @@ TEST_CASE("player jump from the ground increases vertical position") {
     player.update(PlayerInput {}, 1.0F / 60.0F, world);
 
     CHECK(player.position().y > starting_y);
+}
+
+TEST_CASE("player can still jump briefly after leaving a ledge") {
+    World world(241, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    player.update(PlayerInput {}, 1.0F / 60.0F, world);
+    REQUIRE(player.state().on_ground);
+
+    world.set_block(0, 0, 0, to_block_id(BlockType::Air));
+    PlayerInput jump_input {};
+    jump_input.jump = true;
+    player.update(jump_input, 1.0F / 60.0F, world);
+
+    CHECK_FALSE(player.state().on_ground);
+    CHECK(player.state().velocity.y > 0.0F);
+    CHECK(player.position().y > 1.001F);
+}
+
+TEST_CASE("jump input just before landing is buffered") {
+    World world(242, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.35F, 0.5F});
+    player.set_velocity({0.0F, -7.0F, 0.0F});
+
+    PlayerInput early_jump {};
+    early_jump.jump = true;
+    player.update(early_jump, 1.0F / 60.0F, world);
+    REQUIRE_FALSE(player.state().on_ground);
+    REQUIRE(player.state().velocity.y < 0.0F);
+
+    bool buffered_jump_triggered = false;
+    for (int frame = 0; frame < 8; ++frame) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world);
+        if (!player.state().on_ground && player.state().velocity.y > 0.0F) {
+            buffered_jump_triggered = true;
+            break;
+        }
+    }
+
+    CHECK(buffered_jump_triggered);
+    CHECK(player.position().y >= 1.001F);
 }
 
 TEST_CASE("player cannot place a block inside the player volume") {
@@ -742,6 +824,44 @@ TEST_CASE("item drops stay in the world when the inventory is full") {
     CHECK(drop_system.active_drop_count() == 1);
     CHECK(hotbar.slots[0].block_id == to_block_id(BlockType::Stone));
     CHECK(hotbar.slots[0].count == 64);
+}
+
+TEST_CASE("item drops collide with generated terrain before the chunk is loaded") {
+    World world(364, 1);
+    const int world_x = 48;
+    const int world_z = 48;
+    const auto chunk_coord = world.world_to_chunk(world_x, world_z);
+    REQUIRE(world.find_chunk(chunk_coord) == nullptr);
+
+    int surface_y = kWorldMinY - 1;
+    for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
+        if (is_block_collidable(world.peek_block_or_generated(world_x, y, world_z))) {
+            surface_y = y;
+            break;
+        }
+    }
+
+    REQUIRE(surface_y >= kWorldMinY);
+    REQUIRE(world.find_chunk(chunk_coord) == nullptr);
+
+    ItemDropSystem drop_system {};
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    drop_system.spawn_drop(
+        inventory_make_slot(to_block_id(BlockType::Wood), 1),
+        {static_cast<float>(world_x) + 0.5F, static_cast<float>(surface_y) + 3.0F, static_cast<float>(world_z) + 0.5F},
+        {0.0F, 0.0F, 0.0F});
+
+    constexpr float kStep = 1.0F / 60.0F;
+    for (int frame = 0; frame < 240; ++frame) {
+        drop_system.update(kStep, world, {1000.0F, 80.0F, 1000.0F}, inventory, hotbar);
+    }
+
+    REQUIRE(drop_system.active_drop_count() == 1);
+    const auto& drop = drop_system.drops().front();
+    CHECK(drop.position.y > static_cast<float>(surface_y) + 0.75F);
+    CHECK(drop.position.y < static_cast<float>(surface_y) + 3.0F);
+    CHECK(world.find_chunk(chunk_coord) == nullptr);
 }
 
 TEST_CASE("placing a solid block can replace decorative flora") {
