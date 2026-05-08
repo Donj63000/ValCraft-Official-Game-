@@ -711,6 +711,53 @@ TEST_CASE("day animals keep their rendered facing direction aligned with every r
     }
 }
 
+TEST_CASE("settlement residents keep rendered facing direction aligned with every realised step") {
+    CreatureSystem system {};
+    World world(90111, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    const auto anchor = make_test_resident_anchor({4, 12, 4});
+    system.set_settlement_residents({anchor});
+
+    auto resident = make_test_creature(anchor, anchor.spawn_position);
+    resident.behavior_state = CreatureBehaviorState::Wander;
+    resident.behavior_timer = 2.0F;
+    resident.yaw_radians = -1.30F;
+    resident.wander_heading = 0.22F;
+    system.load_creatures({resident}, environment);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    REQUIRE(system.render_instances().size() == 1);
+    auto previous_position = system.active_creatures().front().position;
+    int moved_frames = 0;
+    for (int frame = 0; frame < 90; ++frame) {
+        system.update(1.0F / 30.0F, world, {12.5F, anchor.spawn_position.y, 12.5F}, environment, cycle);
+
+        REQUIRE(system.active_creatures().size() == 1);
+        REQUIRE(system.render_instances().size() == 1);
+        const auto& updated = system.active_creatures().front();
+        const glm::vec2 displacement {
+            updated.position.x - previous_position.x,
+            updated.position.z - previous_position.z,
+        };
+        const auto distance_squared = glm::dot(displacement, displacement);
+        if (distance_squared > 1.0e-7F) {
+            const auto travel_direction = glm::normalize(displacement);
+            const auto live_facing = yaw_direction(updated.yaw_radians);
+            const auto render_facing = yaw_direction(system.render_instances().front().yaw_radians);
+            CAPTURE(frame);
+            CHECK(glm::dot(travel_direction, live_facing) > 0.97F);
+            CHECK(glm::dot(travel_direction, render_facing) > 0.97F);
+            ++moved_frames;
+        }
+        previous_position = updated.position;
+    }
+
+    CHECK(moved_frames > 12);
+}
+
 TEST_CASE("creatures enter chase exactly at 19 and stop attacking immediately at dawn") {
     CreatureSystem system {};
     World world(9002, 1);
@@ -722,7 +769,7 @@ TEST_CASE("creatures enter chase exactly at 19 and stop attacking immediately at
     REQUIRE(system.active_creatures().size() == 1);
 
     const auto spawn_position = system.active_creatures().front().position;
-    const auto chase_player_position = spawn_position + glm::vec3 {2.4F, 0.0F, 0.0F};
+    const auto chase_player_position = spawn_position + glm::vec3 {3.4F, 0.0F, 0.0F};
     system.update(1.0F / 60.0F, world, chase_player_position, night_environment, night_cycle);
 
     REQUIRE(system.active_creatures().size() == 1);
@@ -850,6 +897,52 @@ TEST_CASE("player weapon ray damages and kills targeted creatures") {
     CHECK(system.render_instances().empty());
 }
 
+TEST_CASE("player weapon ray can hit the giant night monster torso and head") {
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(23.0F);
+
+    CreatureSpawnAnchor anchor {};
+    anchor.chunk = {0, 0};
+    anchor.ground_block = {0, 12, 4};
+    anchor.spawn_position = {0.5F, 13.001F, 4.0F};
+    anchor.species = CreatureSpecies::Cow;
+    anchor.roam_radius = 8.0F;
+
+    auto day_creature = make_test_creature(anchor, anchor.spawn_position);
+    day_creature.health = creature_max_health(anchor.species);
+    day_creature.phase = CreaturePhase::Day;
+    day_creature.morph_factor = 0.0F;
+    system.load_creatures({day_creature}, environment);
+
+    const glm::vec3 high_weapon_origin {
+        anchor.spawn_position.x,
+        anchor.spawn_position.y + 3.24F,
+        anchor.spawn_position.z - 3.0F,
+    };
+    const glm::vec3 weapon_direction {0.0F, 0.0F, 1.0F};
+    CHECK_FALSE(system.try_damage_from_player(high_weapon_origin, weapon_direction, 5.0F, 1.0F).hit);
+
+    auto night_creature = day_creature;
+    night_creature.phase = CreaturePhase::Night;
+    night_creature.morph_factor = 1.0F;
+    night_creature.health = creature_max_health(anchor.species);
+    system.load_creatures({night_creature}, environment);
+
+    const auto torso_hit = system.try_damage_from_player(high_weapon_origin, weapon_direction, 5.0F, 2.0F);
+    REQUIRE(torso_hit.hit);
+    CHECK_FALSE(torso_hit.killed);
+    CHECK(torso_hit.species == anchor.species);
+    CHECK(torso_hit.distance == doctest::Approx(2.18F).epsilon(0.05F));
+
+    const glm::vec3 head_weapon_origin {
+        anchor.spawn_position.x,
+        anchor.spawn_position.y + 4.22F,
+        anchor.spawn_position.z - 3.0F,
+    };
+    const auto head_hit = system.try_damage_from_player(head_weapon_origin, weapon_direction, 5.0F, 2.0F);
+    CHECK(head_hit.hit);
+}
+
 TEST_CASE("player weapon range clipped by a world raycast does not hit creatures behind blocks") {
     CreatureSystem system {};
     World world(90041, 1);
@@ -915,7 +1008,7 @@ TEST_CASE("killed settlement residents do not respawn during the current session
     CHECK(system.render_instances().empty());
 }
 
-TEST_CASE("night melee attacks require the player to stay on the same floor layer") {
+TEST_CASE("giant night melee reaches an elevated player when the path is clear") {
     CreatureSystem system {};
     World world(90031, 1);
     test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
@@ -945,9 +1038,9 @@ TEST_CASE("night melee attacks require the player to stay on the same floor laye
         }
     }
 
-    CHECK_FALSE(attacked);
+    REQUIRE(attacked);
     REQUIRE(system.active_creatures().size() == 1);
-    CHECK(system.active_creatures().front().behavior_state != CreatureBehaviorState::Strike);
+    CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Strike);
 }
 
 TEST_CASE("night melee attacks cannot pass through solid walls") {
@@ -1037,6 +1130,51 @@ TEST_CASE("night chase steers around a frontal wall instead of stalling") {
     CHECK(std::abs(updated.position.z - creature_position.z) > 0.10F);
 }
 
+TEST_CASE("giant night chase respects its tall body under low overhangs") {
+    CreatureSystem system {};
+    World world(90036, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto environment = EnvironmentClock::compute_state(23.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(23.0F);
+    const auto anchor = system.spawn_anchor_for_chunk(world, {0, 0});
+    REQUIRE(anchor.has_value());
+
+    const auto travel_sign = anchor->spawn_position.x < static_cast<float>(kChunkSizeX) * 0.5F ? 1.0F : -1.0F;
+    const auto overhang_near_x = static_cast<int>(std::floor(anchor->spawn_position.x + travel_sign * 2.0F));
+    const auto overhang_far_x = static_cast<int>(std::floor(anchor->spawn_position.x + travel_sign * 7.0F));
+    const auto min_overhang_x = std::min(overhang_near_x, overhang_far_x);
+    const auto max_overhang_x = std::max(overhang_near_x, overhang_far_x);
+    const auto ceiling_y = anchor->ground_block.y + 4;
+    for (int z = 0; z < kChunkSizeZ; ++z) {
+        for (int x = min_overhang_x; x <= max_overhang_x; ++x) {
+            world.set_block(x, ceiling_y, z, to_block_id(BlockType::Stone));
+        }
+    }
+
+    auto creature = make_test_creature(*anchor, anchor->spawn_position);
+    creature.yaw_radians = 0.0F;
+    system.load_creatures({creature}, environment);
+
+    const glm::vec3 player_position {
+        anchor->spawn_position.x + travel_sign * 9.0F,
+        anchor->spawn_position.y,
+        anchor->spawn_position.z,
+    };
+
+    auto max_forward_progress = 0.0F;
+    for (int frame = 0; frame < 180; ++frame) {
+        system.update(1.0F / 60.0F, world, player_position, environment, cycle);
+        REQUIRE(system.active_creatures().size() == 1);
+        const auto forward_progress =
+            (system.active_creatures().front().position.x - anchor->spawn_position.x) * travel_sign;
+        max_forward_progress = std::max(max_forward_progress, forward_progress);
+    }
+
+    CHECK(max_forward_progress < 1.72F);
+    CHECK(system.recent_attacks().empty());
+}
+
 TEST_CASE("settlement residents keep routine behavior until their timer expires") {
     CreatureSystem system {};
     World world(90034, 1);
@@ -1113,7 +1251,7 @@ TEST_CASE("dense grassy spawn regions still cap active creature counts") {
     CHECK(system.render_instances().size() == kCreatureMaxActiveCount);
 }
 
-TEST_CASE("creature atlas exposes distinct farm animals and emissive zombie details") {
+TEST_CASE("creature atlas exposes distinct farm animals and red eyed charcoal night monster details") {
     const auto atlas = build_creature_atlas_pixels();
     REQUIRE(atlas.size() == static_cast<std::size_t>(kCreatureAtlasSize * kCreatureAtlasSize * 4));
 
@@ -1130,10 +1268,13 @@ TEST_CASE("creature atlas exposes distinct farm animals and emissive zombie deta
     CHECK(tile_average_rgba(atlas, CreatureAtlasTile::PigSnout)[0] > 180.0F);
     CHECK(tile_average_rgba(atlas, CreatureAtlasTile::CowHorn)[0] > 120.0F);
     CHECK(tile_average_rgba(atlas, CreatureAtlasTile::SheepHoof)[0] < 90.0F);
-    CHECK(flesh_average[1] > 118.0F);
-    CHECK(bone_average[0] > flesh_average[0] + 36.0F);
-    CHECK(eye_average[0] > eye_average[2] + 70.0F);
-    CHECK(eye_average[3] > 60.0F);
+    CHECK(flesh_average[0] < 72.0F);
+    CHECK(flesh_average[1] < 72.0F);
+    CHECK(bone_average[0] > flesh_average[0] + 18.0F);
+    CHECK(bone_average[0] < 112.0F);
+    CHECK(eye_average[0] > eye_average[1] + 150.0F);
+    CHECK(eye_average[0] > eye_average[2] + 165.0F);
+    CHECK(eye_average[3] > 120.0F);
     CHECK(scar_average[3] > 5.0F);
     CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieEye) > 0.35F);
     CHECK(tile_alpha_coverage(atlas, CreatureAtlasTile::ZombieScar) > 0.04F);
@@ -1292,7 +1433,9 @@ TEST_CASE("day animal walking animation keeps quadruped legs attached to the bod
     }
 }
 
-TEST_CASE("creature geometry stretches day animals into deterministic long-limbed zombies") {
+TEST_CASE("creature geometry transforms night animals into one giant red eyed skeletal monster") {
+    CreatureMeshData reference_night_mesh {};
+
     for (const auto species : {CreatureSpecies::Pig, CreatureSpecies::Cow, CreatureSpecies::Sheep}) {
         const CreatureRenderInstance day {
             species,
@@ -1329,22 +1472,33 @@ TEST_CASE("creature geometry stretches day animals into deterministic long-limbe
         const auto night_mesh = build_creature_mesh(night);
         const auto day_bounds = mesh_bounds(day_mesh);
         const auto night_bounds = mesh_bounds(night_mesh);
+        const auto night_height = night_bounds.max.y - night_bounds.min.y;
 
         CAPTURE(static_cast<int>(species));
         CHECK_FALSE(day_mesh.empty());
         CHECK_FALSE(night_mesh.empty());
         CHECK(night_mesh.part_count > day_mesh.part_count);
         CHECK(night_mesh.vertices.size() > day_mesh.vertices.size());
-        CHECK((night_bounds.max.y - night_bounds.min.y) > (day_bounds.max.y - day_bounds.min.y) + 0.18F);
+        CHECK(night_height > 4.45F);
+        CHECK(night_bounds.max.y > 4.35F);
+        CHECK(night_height > (day_bounds.max.y - day_bounds.min.y) + 2.55F);
+        CHECK(band_depth_span(night_mesh, 0.22F, 1.12F) > 0.88F);
+        CHECK(band_volume_proxy(night_mesh, 2.02F, 3.12F) > 0.30F);
         CHECK(max_material_class(day_mesh) < 0.70F);
         CHECK(max_material_class(night_mesh) > 0.85F);
         CHECK(has_emissive_vertices(night_mesh));
         CHECK(all_vertex_attributes_are_bounded(day_mesh));
         CHECK(all_vertex_attributes_are_bounded(night_mesh));
+
+        if (reference_night_mesh.empty()) {
+            reference_night_mesh = night_mesh;
+        } else {
+            CHECK(meshes_match_exactly(reference_night_mesh, night_mesh));
+        }
     }
 }
 
-TEST_CASE("night creature silhouettes keep readable torso mass and depth") {
+TEST_CASE("night creature silhouettes keep the shared photo reference proportions") {
     for (const auto species : {CreatureSpecies::Pig, CreatureSpecies::Cow, CreatureSpecies::Sheep}) {
         const CreatureRenderInstance night {
             species,
@@ -1363,9 +1517,16 @@ TEST_CASE("night creature silhouettes keep readable torso mass and depth") {
         };
 
         const auto night_mesh = build_creature_mesh(night);
+        const auto bounds = mesh_bounds(night_mesh);
+        const auto height = bounds.max.y - bounds.min.y;
         CAPTURE(static_cast<int>(species));
-        CHECK(band_volume_proxy(night_mesh, 0.90F, 1.85F) > 0.12F);
-        CHECK(band_depth_span(night_mesh, 0.90F, 1.85F) > 0.22F);
+        CHECK(height > 4.45F);
+        CHECK((bounds.max.x - bounds.min.x) > 1.05F);
+        CHECK((bounds.max.z - bounds.min.z) > 1.05F);
+        CHECK(band_volume_proxy(night_mesh, 2.00F, 3.10F) > 0.30F);
+        CHECK(band_depth_span(night_mesh, 2.00F, 3.10F) > 0.58F);
+        CHECK(band_depth_span(night_mesh, 0.18F, 1.08F) > 0.88F);
+        CHECK(band_volume_proxy(night_mesh, 3.38F, 4.25F) > 0.15F);
     }
 }
 

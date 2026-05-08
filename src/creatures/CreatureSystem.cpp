@@ -23,16 +23,24 @@ constexpr int kSpawnCandidateCount = 4;
 constexpr float kPlayerShyDistance = 3.25F;
 constexpr float kNightDetectionDistance = 11.5F;
 constexpr float kNightAttackDistance = 1.65F;
+constexpr float kCreatureBodyRadius = 0.30F;
+constexpr float kNightMonsterAttackDistance = 2.85F;
+constexpr float kNightMonsterHitboxRadius = 0.82F;
+constexpr float kNightMonsterHitboxHeight = 4.70F;
+constexpr float kNightMonsterMovementRadius = kCreatureBodyRadius;
+constexpr float kNightMonsterMinAttackHeight = 0.95F;
+constexpr float kNightMonsterMaxAttackHeight = 3.15F;
+constexpr float kPlayerMeleeTargetHeight = 0.90F;
+constexpr float kNightBlockedAttackMargin = 0.55F;
+constexpr float kNightMonsterBlockedAttackMargin = 0.25F;
 constexpr float kNightStrikeCooldown = 0.9F;
 constexpr float kZombieDamage = 3.0F;
 constexpr float kMaxStepHeight = 1.4F;
 constexpr float kDawnAttackVisualCap = 0.42F;
-constexpr float kNightAttackSampleHeight = 0.9F;
 constexpr float kNightChasePersistenceSeconds = 1.35F;
 constexpr float kResidentGreetingDistance = 5.0F;
 constexpr float kResidentPersonalSpace = 1.65F;
 constexpr float kResidentHomeSnapThreshold = 1.75F;
-constexpr float kCreatureBodyRadius = 0.30F;
 constexpr float kCreatureHurtDuration = 0.34F;
 constexpr float kCreatureDeathVisualDuration = 1.18F;
 constexpr float kCreatureSpawnSuppressionDuration = 14.0F;
@@ -76,9 +84,25 @@ auto is_morph_visible(const CreatureCycleState& cycle) noexcept -> bool;
 auto is_hostile_night(const CreatureCycleState& cycle) noexcept -> bool;
 auto is_spawn_column_clear(const World& world, int world_x, int ground_y, int world_z) -> bool;
 auto is_creature_airspace_clear(const World& world, int world_x, int ground_y, int world_z) -> bool;
-auto creature_body_blocker_count_at(const World& world, float center_x, int ground_y, float center_z) -> int;
+auto creature_body_blocker_count_at(const World& world,
+                                    float center_x,
+                                    int ground_y,
+                                    float center_z,
+                                    float body_radius,
+                                    int clear_air_blocks) -> int;
 auto tuning_for(CreatureSpecies species) noexcept -> SpeciesTuning;
 auto hitbox_for(CreatureSpecies species) noexcept -> CreatureHitbox;
+auto is_resident_species(CreatureSpecies species) noexcept -> bool;
+auto hitbox_for(const CreatureInstance& creature) noexcept -> CreatureHitbox;
+auto is_large_night_creature(const CreatureInstance& creature) noexcept -> bool;
+auto attack_distance_for(const CreatureInstance& creature) noexcept -> float;
+auto movement_body_radius_for(const CreatureInstance& creature) noexcept -> float;
+auto movement_clear_air_blocks_for(const CreatureInstance& creature) noexcept -> int;
+auto player_height_reachable_by(const CreatureInstance& creature, const glm::vec3& player_position) noexcept -> bool;
+auto has_clear_creature_attack_path(const CreatureInstance& creature,
+                                    const World& world,
+                                    const glm::vec3& player_position,
+                                    float horizontal_distance_sq) -> bool;
 void ensure_creature_health(CreatureInstance& creature) noexcept;
 auto horizontal_direction_or_fallback(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3;
 auto ray_intersects_aabb(const glm::vec3& origin,
@@ -636,7 +660,9 @@ void update_resident_creature(CreatureInstance& creature,
             preferred_floor_y);
         moved = steering_result.moved;
         steering_diverted = steering_result.diverted;
-        resolved_yaw = steering_result.heading;
+        if (moved) {
+            resolved_yaw = steering_result.heading;
+        }
     }
 
     const glm::vec2 travelled_horizontal {
@@ -656,7 +682,9 @@ void update_resident_creature(CreatureInstance& creature,
     if (steering_diverted && creature.behavior_state == CreatureBehaviorState::Wander) {
         creature.wander_heading = resolved_yaw;
     }
-    creature.yaw_radians = rotate_towards(creature.yaw_radians, resolved_yaw, 5.8F * std::max(dt, 0.0F));
+    creature.yaw_radians = moved ?
+        resolved_yaw :
+        rotate_towards(creature.yaw_radians, resolved_yaw, 5.8F * std::max(dt, 0.0F));
 
     if (dt > 0.0F) {
         const auto reference_distance = std::max(resident_speed * dt, 0.001F);
@@ -714,6 +742,11 @@ auto has_clear_melee_path(const World& world, const glm::vec3& origin, const glm
         static_cast<int>(std::floor(target.y)),
         static_cast<int>(std::floor(target.z)),
     };
+    // Je refuse un coup dont la ligne de melee part deja dans un obstacle ou vise un bloc solide.
+    if (is_block_collidable(world.get_block(current.x, current.y, current.z)) ||
+        is_block_collidable(world.get_block(target_cell.x, target_cell.y, target_cell.z))) {
+        return false;
+    }
     if (current == target_cell) {
         return true;
     }
@@ -782,18 +815,14 @@ auto can_strike_player(const CreatureInstance& creature,
                        const glm::vec3& player_position,
                        float horizontal_distance,
                        float horizontal_distance_sq) -> bool {
-    if (horizontal_distance_sq <= 1.0e-6F || horizontal_distance > kNightAttackDistance) {
+    if (horizontal_distance_sq <= 1.0e-6F || horizontal_distance > attack_distance_for(creature)) {
         return false;
     }
-    if (!shares_melee_height_layer(creature.position, player_position)) {
+    if (!player_height_reachable_by(creature, player_position)) {
         return false;
     }
 
-    // Je n'autorise le coup de melee que si le monstre et le joueur partagent
-    // la meme couche verticale et qu'aucun bloc solide ne coupe la ligne directe.
-    const auto attack_origin = creature.position + glm::vec3 {0.0F, kNightAttackSampleHeight, 0.0F};
-    const auto player_target = player_position + glm::vec3 {0.0F, kNightAttackSampleHeight, 0.0F};
-    return has_clear_melee_path(world, attack_origin, player_target);
+    return has_clear_creature_attack_path(creature, world, player_position, horizontal_distance_sq);
 }
 
 auto tuning_for(CreatureSpecies species) noexcept -> SpeciesTuning {
@@ -822,6 +851,69 @@ auto hitbox_for(CreatureSpecies species) noexcept -> CreatureHitbox {
     default:
         return {0.46F, 0.88F};
     }
+}
+
+auto is_large_night_creature(const CreatureInstance& creature) noexcept -> bool {
+    return !is_resident_species(creature.anchor.species) &&
+           (creature.phase == CreaturePhase::Night || creature.morph_factor >= 0.55F);
+}
+
+auto hitbox_for(const CreatureInstance& creature) noexcept -> CreatureHitbox {
+    if (is_large_night_creature(creature)) {
+        return {kNightMonsterHitboxRadius, kNightMonsterHitboxHeight};
+    }
+    return hitbox_for(creature.anchor.species);
+}
+
+auto attack_distance_for(const CreatureInstance& creature) noexcept -> float {
+    return is_large_night_creature(creature) ? kNightMonsterAttackDistance : kNightAttackDistance;
+}
+
+auto movement_body_radius_for(const CreatureInstance& creature) noexcept -> float {
+    return is_large_night_creature(creature) ? kNightMonsterMovementRadius : kCreatureBodyRadius;
+}
+
+auto movement_clear_air_blocks_for(const CreatureInstance& creature) noexcept -> int {
+    if (!is_large_night_creature(creature)) {
+        return 2;
+    }
+
+    return std::max(2, static_cast<int>(std::ceil(kNightMonsterHitboxHeight)));
+}
+
+auto player_height_reachable_by(const CreatureInstance& creature, const glm::vec3& player_position) noexcept -> bool {
+    if (!is_large_night_creature(creature)) {
+        return shares_melee_height_layer(creature.position, player_position);
+    }
+
+    const auto target_y = player_position.y + kPlayerMeleeTargetHeight;
+    const auto min_y = creature.position.y + 0.12F;
+    const auto max_y = creature.position.y + kNightMonsterHitboxHeight;
+    return target_y >= min_y && target_y <= max_y;
+}
+
+auto has_clear_creature_attack_path(const CreatureInstance& creature,
+                                    const World& world,
+                                    const glm::vec3& player_position,
+                                    float horizontal_distance_sq) -> bool {
+    if (horizontal_distance_sq <= 1.0e-6F) {
+        return false;
+    }
+
+    const auto to_player = glm::vec2 {
+        player_position.x - creature.position.x,
+        player_position.z - creature.position.z,
+    };
+    const auto attack_direction = glm::normalize(to_player);
+    const auto target_height = player_position.y + kPlayerMeleeTargetHeight - creature.position.y;
+    const auto source_height = is_large_night_creature(creature) ?
+        glm::clamp(target_height, kNightMonsterMinAttackHeight, kNightMonsterMaxAttackHeight) :
+        kPlayerMeleeTargetHeight;
+    const auto reach_offset = is_large_night_creature(creature) ? 0.58F : 0.0F;
+    const auto attack_origin =
+        creature.position + glm::vec3 {attack_direction.x * reach_offset, source_height, attack_direction.y * reach_offset};
+    const auto player_target = player_position + glm::vec3 {0.0F, kPlayerMeleeTargetHeight, 0.0F};
+    return has_clear_melee_path(world, attack_origin, player_target);
 }
 
 void ensure_creature_health(CreatureInstance& creature) noexcept {
@@ -977,22 +1069,33 @@ auto is_creature_airspace_clear(const World& world, int world_x, int ground_y, i
     return true;
 }
 
-auto creature_body_blocker_count_at(const World& world, float center_x, int ground_y, float center_z) -> int {
+auto creature_body_blocker_count_at(const World& world,
+                                    float center_x,
+                                    int ground_y,
+                                    float center_z,
+                                    float body_radius,
+                                    int clear_air_blocks) -> int {
     const std::array<glm::vec2, 5> sample_offsets {{
         {0.0F, 0.0F},
-        {kCreatureBodyRadius, 0.0F},
-        {-kCreatureBodyRadius, 0.0F},
-        {0.0F, kCreatureBodyRadius},
-        {0.0F, -kCreatureBodyRadius},
+        {body_radius, 0.0F},
+        {-body_radius, 0.0F},
+        {0.0F, body_radius},
+        {0.0F, -body_radius},
     }};
 
     int blockers = 0;
     for (const auto& offset : sample_offsets) {
         const auto sample_x = static_cast<int>(std::floor(center_x + offset.x));
         const auto sample_z = static_cast<int>(std::floor(center_z + offset.y));
-        if (world.has_water(sample_x, ground_y, sample_z) ||
-            !is_block_collidable(world.get_block(sample_x, ground_y, sample_z)) ||
-            !is_creature_airspace_clear(world, sample_x, ground_y, sample_z)) {
+        bool blocked = world.has_water(sample_x, ground_y, sample_z) ||
+                       !is_block_collidable(world.get_block(sample_x, ground_y, sample_z));
+        for (int clear_index = 1; !blocked && clear_index <= clear_air_blocks; ++clear_index) {
+            const auto y = ground_y + clear_index;
+            blocked = !is_world_y_valid(y) ||
+                      world.has_water(sample_x, y, sample_z) ||
+                      is_block_collidable(world.get_block(sample_x, y, sample_z));
+        }
+        if (blocked) {
             ++blockers;
         }
     }
@@ -1142,10 +1245,18 @@ auto try_move_grounded(CreatureInstance& creature,
         return false;
     }
     const auto target_floor_y = static_cast<int>(std::floor(*target_y - kGroundSnapOffset + 0.01F));
-    const auto candidate_body_blockers = creature_body_blocker_count_at(world, candidate.x, target_floor_y, candidate.y);
+    const auto body_radius = movement_body_radius_for(creature);
+    const auto clear_air_blocks = movement_clear_air_blocks_for(creature);
+    const auto candidate_body_blockers =
+        creature_body_blocker_count_at(world, candidate.x, target_floor_y, candidate.y, body_radius, clear_air_blocks);
     if (candidate_body_blockers != 0) {
-        const auto current_body_blockers =
-            creature_body_blocker_count_at(world, creature.position.x, target_floor_y, creature.position.z);
+        const auto current_body_blockers = creature_body_blocker_count_at(
+            world,
+            creature.position.x,
+            target_floor_y,
+            creature.position.z,
+            body_radius,
+            clear_air_blocks);
         if (current_body_blockers == 0 || candidate_body_blockers > current_body_blockers) {
             return false;
         }
@@ -1299,7 +1410,7 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
             continue;
         }
 
-        const auto hitbox = hitbox_for(creature.anchor.species);
+        const auto hitbox = hitbox_for(creature);
         const auto min_corner = creature.position + glm::vec3 {-hitbox.radius, 0.05F, -hitbox.radius};
         const auto max_corner = creature.position + glm::vec3 { hitbox.radius, hitbox.height, hitbox.radius};
 
@@ -1658,14 +1769,15 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
     const auto player_distance_factor = glm::clamp(1.0F - player_distance / detection_distance, 0.0F, 1.0F);
     const auto can_attack_player =
         resident_species ? false : can_strike_player(creature, world, player_position, player_distance, player_distance_sq);
-    const auto same_melee_layer = shares_melee_height_layer(creature.position, player_position);
+    const auto melee_height_reachable = player_height_reachable_by(creature, player_position);
+    const auto melee_attack_distance = attack_distance_for(creature);
+    const auto melee_blocked_margin =
+        is_large_night_creature(creature) ? kNightMonsterBlockedAttackMargin : kNightBlockedAttackMargin;
     bool close_melee_path_clear = false;
-    if (same_melee_layer &&
+    if (melee_height_reachable &&
         player_distance_sq > 1.0e-6F &&
-        player_distance <= kNightAttackDistance + 0.55F) {
-        const auto attack_origin = creature.position + glm::vec3 {0.0F, kNightAttackSampleHeight, 0.0F};
-        const auto player_target = player_position + glm::vec3 {0.0F, kNightAttackSampleHeight, 0.0F};
-        close_melee_path_clear = has_clear_melee_path(world, attack_origin, player_target);
+        player_distance <= melee_attack_distance + melee_blocked_margin) {
+        close_melee_path_clear = has_clear_creature_attack_path(creature, world, player_position, player_distance_sq);
     }
     const auto player_detected = player_distance <= detection_distance && player_distance_sq > 1.0e-6F;
     const auto position_before_move = creature.position;
@@ -1770,8 +1882,8 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
             creature.behavior_state == CreatureBehaviorState::Chase && creature.behavior_timer > 0.0F;
         const auto close_but_blocked =
             player_distance_sq > 1.0e-6F &&
-            player_distance <= kNightAttackDistance + 0.55F &&
-            (!same_melee_layer || !close_melee_path_clear);
+            player_distance <= melee_attack_distance + melee_blocked_margin &&
+            (!melee_height_reachable || !close_melee_path_clear);
 
         if (can_attack_player) {
             const auto attack_direction = glm::normalize(to_player);
@@ -1787,7 +1899,11 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                 creature.behavior_timer = 0.18F;
                 attacks_.push_back({
                     creature.anchor.species,
-                    creature.position + glm::vec3 {attack_direction.x * 0.45F, 0.65F, attack_direction.y * 0.45F},
+                    creature.position + glm::vec3 {
+                        attack_direction.x * (is_large_night_creature(creature) ? 0.80F : 0.45F),
+                        is_large_night_creature(creature) ? 1.55F : 0.65F,
+                        attack_direction.y * (is_large_night_creature(creature) ? 0.80F : 0.45F),
+                    },
                     kZombieDamage,
                 });
             }
