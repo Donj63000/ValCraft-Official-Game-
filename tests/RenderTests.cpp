@@ -326,6 +326,55 @@ TEST_CASE("equipment items stay inventory-only and expose readable antique icons
     }
 }
 
+TEST_CASE("resource ore blocks expose distinct atlas tiles and item-drop materials") {
+    struct OreVisualCase {
+        BlockType type;
+        BlockAtlasTile tile;
+    };
+
+    const std::array<OreVisualCase, 5> ore_items {{
+        {BlockType::CoalOre, {0, 6}},
+        {BlockType::IronOre, {1, 6}},
+        {BlockType::GoldOre, {2, 6}},
+        {BlockType::DiamondOre, {3, 6}},
+        {BlockType::MetallicAlloyOre, {4, 6}},
+    }};
+
+    const auto atlas_pixels = build_block_atlas_pixels();
+    REQUIRE(atlas_pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
+    const auto stone_tile = block_atlas_tile(to_block_id(BlockType::Stone), BlockVisualFace::PositiveX);
+
+    for (const auto& ore : ore_items) {
+        const auto block_id = to_block_id(ore.type);
+        auto opaque_pixels = 0;
+        auto differentiated_pixels = 0;
+
+        CHECK(is_resource_ore(block_id));
+        CHECK_FALSE(is_inventory_only_item(block_id));
+        CHECK(is_placeable_item(block_id));
+        CHECK(block_atlas_tile(block_id, BlockVisualFace::PositiveX) == ore.tile);
+        CHECK(block_hotbar_tile(block_id) == ore.tile);
+        CHECK(block_visual_material(block_id) == BlockVisualMaterial::Rock);
+
+        for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto ore_pixel = sample_block_atlas_pixel(atlas_pixels, ore.tile.x, ore.tile.y, x, y);
+                const auto stone_pixel = sample_block_atlas_pixel(atlas_pixels, stone_tile.x, stone_tile.y, x, y);
+                opaque_pixels += ore_pixel[3] == 255 ? 1 : 0;
+
+                const auto red_delta = std::abs(static_cast<int>(ore_pixel[0]) - static_cast<int>(stone_pixel[0]));
+                const auto green_delta = std::abs(static_cast<int>(ore_pixel[1]) - static_cast<int>(stone_pixel[1]));
+                const auto blue_delta = std::abs(static_cast<int>(ore_pixel[2]) - static_cast<int>(stone_pixel[2]));
+                differentiated_pixels += red_delta + green_delta + blue_delta > 42 ? 1 : 0;
+            }
+        }
+
+        CAPTURE(static_cast<int>(ore.type));
+        CHECK(opaque_pixels == kBlockAtlasTileSize * kBlockAtlasTileSize);
+        CHECK(differentiated_pixels > 64);
+    }
+}
+
 TEST_CASE("block atlas supports the antique Greek village material palette") {
     const auto atlas_pixels = build_block_atlas_pixels();
     REQUIRE(atlas_pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));

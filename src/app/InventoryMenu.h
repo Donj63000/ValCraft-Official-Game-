@@ -216,6 +216,16 @@ inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::st
         return "CHAUSSURES";
     case BlockType::Pants:
         return "PANTALON";
+    case BlockType::CoalOre:
+        return "CHARBON";
+    case BlockType::IronOre:
+        return "FER";
+    case BlockType::GoldOre:
+        return "OR";
+    case BlockType::DiamondOre:
+        return "DIAMANT";
+    case BlockType::MetallicAlloyOre:
+        return "ALLIAGE METALIQUE";
     case BlockType::Air:
     default:
         return "";

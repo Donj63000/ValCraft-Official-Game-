@@ -42,6 +42,11 @@ enum class BlockType : BlockId {
     Spear = 29,
     Shoes = 30,
     Pants = 31,
+    CoalOre = 32,
+    IronOre = 33,
+    GoldOre = 34,
+    DiamondOre = 35,
+    MetallicAlloyOre = 36,
 };
 
 enum class BlockMeshType : std::uint8_t {
@@ -166,6 +171,11 @@ inline constexpr auto is_torch_block(BlockId block_id) noexcept -> bool {
     case BlockType::Cactus:
     case BlockType::Water:
     case BlockType::Glass:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     default:
         return false;
     }
@@ -200,6 +210,11 @@ inline constexpr auto is_wall_torch_block(BlockId block_id) noexcept -> bool {
     case BlockType::Cactus:
     case BlockType::Water:
     case BlockType::Glass:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     default:
         return false;
     }
@@ -207,6 +222,51 @@ inline constexpr auto is_wall_torch_block(BlockId block_id) noexcept -> bool {
 
 inline constexpr auto block_item_id(BlockId block_id) noexcept -> BlockId {
     return is_torch_block(block_id) ? to_block_id(BlockType::Torch) : block_id;
+}
+
+inline constexpr auto is_resource_ore(BlockId block_id) noexcept -> bool {
+    switch (static_cast<BlockType>(block_item_id(block_id))) {
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
+        return true;
+    case BlockType::Air:
+    case BlockType::Grass:
+    case BlockType::Dirt:
+    case BlockType::Stone:
+    case BlockType::Sand:
+    case BlockType::Wood:
+    case BlockType::Leaves:
+    case BlockType::Torch:
+    case BlockType::Cobblestone:
+    case BlockType::Planks:
+    case BlockType::Gravel:
+    case BlockType::MossyStone:
+    case BlockType::Snow:
+    case BlockType::PineWood:
+    case BlockType::PineLeaves:
+    case BlockType::TallGrass:
+    case BlockType::RedFlower:
+    case BlockType::YellowFlower:
+    case BlockType::DeadShrub:
+    case BlockType::Cactus:
+    case BlockType::Water:
+    case BlockType::TorchWallPositiveX:
+    case BlockType::TorchWallNegativeX:
+    case BlockType::TorchWallPositiveZ:
+    case BlockType::TorchWallNegativeZ:
+    case BlockType::Glass:
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+    case BlockType::Shoes:
+    case BlockType::Pants:
+    default:
+        return false;
+    }
 }
 
 inline constexpr auto is_inventory_only_item(BlockId block_id) noexcept -> bool {
@@ -245,6 +305,11 @@ inline constexpr auto is_inventory_only_item(BlockId block_id) noexcept -> bool 
     case BlockType::TorchWallPositiveZ:
     case BlockType::TorchWallNegativeZ:
     case BlockType::Glass:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     default:
         return false;
     }
@@ -299,6 +364,11 @@ inline constexpr auto torch_support_offset(BlockId block_id) noexcept -> BlockCo
     case BlockType::Spear:
     case BlockType::Shoes:
     case BlockType::Pants:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     default:
         return {};
     }
@@ -362,6 +432,11 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
     case BlockType::Snow:
     case BlockType::PineWood:
     case BlockType::Cactus:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     default:
         return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     }
@@ -413,6 +488,16 @@ inline constexpr auto block_break_duration_seconds(BlockId block_id) noexcept ->
         return 0.80F;
     case BlockType::Stone:
         return 1.30F;
+    case BlockType::CoalOre:
+        return 1.42F;
+    case BlockType::IronOre:
+        return 1.62F;
+    case BlockType::GoldOre:
+        return 1.76F;
+    case BlockType::DiamondOre:
+        return 2.08F;
+    case BlockType::MetallicAlloyOre:
+        return 2.38F;
     case BlockType::Sand:
         return 0.72F;
     case BlockType::Wood:

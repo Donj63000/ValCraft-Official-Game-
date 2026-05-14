@@ -686,6 +686,23 @@ auto ui_material_accent(BlockId block_id) -> HudColor {
     if (block_id == to_block_id(BlockType::Air)) {
         return {0.56F, 0.60F, 0.66F, 1.0F};
     }
+    if (is_resource_ore(block_id)) {
+        switch (static_cast<BlockType>(block_item_id(block_id))) {
+        case BlockType::CoalOre:
+            return {0.32F, 0.32F, 0.34F, 1.0F};
+        case BlockType::IronOre:
+            return {0.86F, 0.50F, 0.28F, 1.0F};
+        case BlockType::GoldOre:
+            return {0.98F, 0.76F, 0.28F, 1.0F};
+        case BlockType::DiamondOre:
+            return {0.36F, 0.82F, 0.90F, 1.0F};
+        case BlockType::MetallicAlloyOre:
+            return {0.74F, 0.68F, 0.94F, 1.0F};
+        case BlockType::Air:
+        default:
+            return {0.63F, 0.67F, 0.74F, 1.0F};
+        }
+    }
     if (is_weapon_item(block_id)) {
         return {0.82F, 0.80F, 0.74F, 1.0F};
     }
@@ -740,6 +757,9 @@ auto item_material_label(BlockId block_id) -> std::string_view {
     }
     if (is_inventory_only_item(block_id)) {
         return "EQUIPEMENT";
+    }
+    if (is_resource_ore(block_id)) {
+        return "MINERAI";
     }
 
     switch (block_visual_material(block_id)) {
@@ -3344,6 +3364,16 @@ vec4 block_uv_rect(uint block_id, uint face_index) {
         return atlas_uv_rect(6, 4);
     case 31u:
         return atlas_uv_rect(7, 4);
+    case 32u:
+        return atlas_uv_rect(0, 6);
+    case 33u:
+        return atlas_uv_rect(1, 6);
+    case 34u:
+        return atlas_uv_rect(2, 6);
+    case 35u:
+        return atlas_uv_rect(3, 6);
+    case 36u:
+        return atlas_uv_rect(4, 6);
     default:
         return atlas_uv_rect(0, 0);
     }

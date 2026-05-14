@@ -166,6 +166,16 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {6, 4};
     case BlockType::Pants:
         return {7, 4};
+    case BlockType::CoalOre:
+        return {0, 6};
+    case BlockType::IronOre:
+        return {1, 6};
+    case BlockType::GoldOre:
+        return {2, 6};
+    case BlockType::DiamondOre:
+        return {3, 6};
+    case BlockType::MetallicAlloyOre:
+        return {4, 6};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -199,6 +209,16 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {6, 4};
     case BlockType::Pants:
         return {7, 4};
+    case BlockType::CoalOre:
+        return {0, 6};
+    case BlockType::IronOre:
+        return {1, 6};
+    case BlockType::GoldOre:
+        return {2, 6};
+    case BlockType::DiamondOre:
+        return {3, 6};
+    case BlockType::MetallicAlloyOre:
+        return {4, 6};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }
@@ -220,6 +240,11 @@ enum class BlockVisualMaterial : std::uint8_t {
     case BlockType::Cobblestone:
     case BlockType::Gravel:
     case BlockType::MossyStone:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
         return BlockVisualMaterial::Rock;
     case BlockType::Sand:
     case BlockType::Cactus:

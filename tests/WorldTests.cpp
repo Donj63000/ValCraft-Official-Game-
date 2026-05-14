@@ -49,6 +49,48 @@ auto density_percent(int count, int total) noexcept -> float {
     return static_cast<float>(count) * 100.0F / static_cast<float>(total);
 }
 
+constexpr std::array<BlockType, 5> kResourceOreTypes {{
+    BlockType::CoalOre,
+    BlockType::IronOre,
+    BlockType::GoldOre,
+    BlockType::DiamondOre,
+    BlockType::MetallicAlloyOre,
+}};
+
+auto resource_ore_index(BlockId block_id) noexcept -> int {
+    switch (static_cast<BlockType>(block_item_id(block_id))) {
+    case BlockType::CoalOre:
+        return 0;
+    case BlockType::IronOre:
+        return 1;
+    case BlockType::GoldOre:
+        return 2;
+    case BlockType::DiamondOre:
+        return 3;
+    case BlockType::MetallicAlloyOre:
+        return 4;
+    default:
+        return -1;
+    }
+}
+
+auto resource_ore_max_y(BlockId block_id) noexcept -> int {
+    switch (static_cast<BlockType>(block_item_id(block_id))) {
+    case BlockType::CoalOre:
+        return 82;
+    case BlockType::IronOre:
+        return 62;
+    case BlockType::GoldOre:
+        return 36;
+    case BlockType::DiamondOre:
+        return 22;
+    case BlockType::MetallicAlloyOre:
+        return 14;
+    default:
+        return kWorldMaxY;
+    }
+}
+
 auto replacement_block_for(BlockId generated_block) noexcept -> BlockId {
     const auto stone = to_block_id(BlockType::Stone);
     const auto cobblestone = to_block_id(BlockType::Cobblestone);
@@ -161,6 +203,95 @@ TEST_CASE("world generator move operations preserve deterministic sampling") {
     CHECK(assigned.sample_surface(12, -34).surface_block == expected_surface.surface_block);
     CHECK(assigned.sample_block(12, expected_surface.surface_height, -34) == expected_block);
     CHECK(assigned.sample_water_state(12, expected_surface.water_level, -34) == expected_water);
+}
+
+TEST_CASE("resource ores generate underground with low deterministic densities") {
+    WorldGenerator generator(424242);
+    std::array<int, kResourceOreTypes.size()> ore_counts {};
+    int solid_block_count = 0;
+    int ore_block_count = 0;
+
+    for (int chunk_z = -3; chunk_z <= 3; ++chunk_z) {
+        for (int chunk_x = -3; chunk_x <= 3; ++chunk_x) {
+            for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
+                for (int local_x = 0; local_x < kChunkSizeX; ++local_x) {
+                    const auto world_x = chunk_x * kChunkSizeX + local_x;
+                    const auto world_z = chunk_z * kChunkSizeZ + local_z;
+                    const auto surface = generator.sample_surface(world_x, world_z);
+                    const auto max_scan_y = std::min(surface.surface_height - 1, 90);
+                    for (int y = kWorldMinY; y <= max_scan_y; ++y) {
+                        const auto block = generator.sample_block(world_x, y, world_z);
+                        if (block != to_block_id(BlockType::Air) && block != to_block_id(BlockType::Water)) {
+                            ++solid_block_count;
+                        }
+
+                        const auto ore_index = resource_ore_index(block);
+                        if (ore_index < 0) {
+                            continue;
+                        }
+
+                        ++ore_counts[static_cast<std::size_t>(ore_index)];
+                        ++ore_block_count;
+                        CAPTURE(world_x);
+                        CAPTURE(y);
+                        CAPTURE(world_z);
+                        CAPTURE(ore_index);
+                        CHECK(y <= surface.surface_height - 5);
+                        CHECK(y <= resource_ore_max_y(block));
+                    }
+                }
+            }
+        }
+    }
+
+    REQUIRE(solid_block_count > 0);
+    for (std::size_t index = 0; index < ore_counts.size(); ++index) {
+        CAPTURE(index);
+        CHECK(ore_counts[index] > 0);
+    }
+
+    CHECK(ore_block_count * 100 < solid_block_count * 3);
+    CHECK(ore_counts[0] > ore_counts[1]);
+    CHECK(ore_counts[1] > ore_counts[2]);
+    CHECK(ore_counts[2] > ore_counts[3]);
+    CHECK(ore_counts[3] > ore_counts[4]);
+}
+
+TEST_CASE("generated chunks keep resource ore blocks identical to direct sampling") {
+    WorldGenerator generator(515151);
+    struct FoundOre {
+        bool found = false;
+        BlockCoord coord {};
+        BlockId block = to_block_id(BlockType::Air);
+    };
+    FoundOre found {};
+
+    for (int world_z = -96; world_z <= 96 && !found.found; ++world_z) {
+        for (int world_x = -96; world_x <= 96 && !found.found; ++world_x) {
+            const auto surface = generator.sample_surface(world_x, world_z);
+            for (int y = kWorldMinY; y <= std::min(surface.surface_height - 5, 70); ++y) {
+                const auto block = generator.sample_block(world_x, y, world_z);
+                if (!is_resource_ore(block)) {
+                    continue;
+                }
+                found = {true, {world_x, y, world_z}, block};
+                break;
+            }
+        }
+    }
+
+    REQUIRE(found.found);
+    const ChunkCoord coord {
+        World::floor_div(found.coord.x, kChunkSizeX),
+        World::floor_div(found.coord.z, kChunkSizeZ),
+    };
+    Chunk chunk(coord);
+    generator.generate_chunk(chunk);
+
+    const auto local_x = World::positive_mod(found.coord.x, kChunkSizeX);
+    const auto local_z = World::positive_mod(found.coord.z, kChunkSizeZ);
+    CHECK(chunk.get_local(local_x, found.coord.y, local_z) == found.block);
+    CHECK(chunk.get_local(local_x, found.coord.y, local_z) == generator.sample_block(found.coord.x, found.coord.y, found.coord.z));
 }
 
 TEST_CASE("chunk stores and retrieves local blocks") {
@@ -675,10 +806,39 @@ TEST_CASE("water block properties are translucent replaceable and non collidable
     CHECK(properties.mesh_type == BlockMeshType::Water);
 }
 
+TEST_CASE("resource ore blocks are solid placeable terrain resources") {
+    for (const auto ore_type : kResourceOreTypes) {
+        const auto block_id = to_block_id(ore_type);
+        const auto properties = block_properties(block_id);
+        CAPTURE(static_cast<int>(ore_type));
+
+        CHECK(is_resource_ore(block_id));
+        CHECK_FALSE(is_inventory_only_item(block_id));
+        CHECK(is_placeable_item(block_id));
+        CHECK(has_block_mesh(block_id));
+        CHECK(properties.opaque);
+        CHECK(properties.collidable);
+        CHECK(properties.surface_support);
+        CHECK_FALSE(properties.replaceable);
+        CHECK(properties.mesh_type == BlockMeshType::FullCube);
+        CHECK(block_visual_material(block_id) == BlockVisualMaterial::Rock);
+    }
+}
+
 TEST_CASE("block break durations stay coherent across fragile terrain and hard rock") {
     CHECK(block_break_duration_seconds(to_block_id(BlockType::Air)) == doctest::Approx(0.0F));
     CHECK(block_break_duration_seconds(to_block_id(BlockType::Dirt)) == doctest::Approx(0.80F));
     CHECK(block_break_duration_seconds(to_block_id(BlockType::Stone)) == doctest::Approx(1.30F));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::CoalOre)) >
+          block_break_duration_seconds(to_block_id(BlockType::Stone)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::IronOre)) >
+          block_break_duration_seconds(to_block_id(BlockType::CoalOre)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::GoldOre)) >
+          block_break_duration_seconds(to_block_id(BlockType::IronOre)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::DiamondOre)) >
+          block_break_duration_seconds(to_block_id(BlockType::GoldOre)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::MetallicAlloyOre)) >
+          block_break_duration_seconds(to_block_id(BlockType::DiamondOre)));
     CHECK(block_break_duration_seconds(to_block_id(BlockType::Cobblestone)) >
           block_break_duration_seconds(to_block_id(BlockType::Stone)));
     CHECK(block_break_duration_seconds(to_block_id(BlockType::TallGrass)) <

@@ -3,6 +3,7 @@
 #include <FastNoiseLite.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,25 @@ constexpr std::uint32_t kForestDecorationPlacementModulo = 7U;
 constexpr std::uint32_t kDesertDecorationPlacementModulo = 9U;
 constexpr std::uint32_t kTaigaDecorationPlacementModulo = 11U;
 constexpr std::uint32_t kRockyPeaksDecorationPlacementModulo = 19U;
+constexpr int kResourceOreSurfaceMargin = 5;
+
+struct ResourceOreDefinition {
+    BlockType block = BlockType::CoalOre;
+    int min_y = kWorldMinY;
+    int max_y = kWorldMaxY;
+    int cell_size = 16;
+    std::uint32_t chance_divisor = 1U;
+    int radius_squared = 3;
+    int salt = 0;
+};
+
+constexpr std::array<ResourceOreDefinition, 5> kResourceOreDefinitions {{
+    {BlockType::MetallicAlloyOre, 2, 14, 20, 8U, 2, 1507},
+    {BlockType::DiamondOre, 3, 22, 16, 6U, 3, 1409},
+    {BlockType::GoldOre, 4, 36, 14, 4U, 3, 1301},
+    {BlockType::IronOre, 6, 62, 12, 3U, 3, 1201},
+    {BlockType::CoalOre, 8, 82, 12, 2U, 3, 1103},
+}};
 
 auto hash_column(int x, int z, int seed) noexcept -> std::uint32_t {
     auto value = static_cast<std::uint32_t>(x) * 374761393U;
@@ -27,6 +47,32 @@ auto hash_column(int x, int z, int seed) noexcept -> std::uint32_t {
     value ^= static_cast<std::uint32_t>(seed) * 362437U;
     value = (value ^ (value >> 13U)) * 1274126177U;
     return value ^ (value >> 16U);
+}
+
+auto hash_resource_cell(int x, int y, int z, int seed, int salt) noexcept -> std::uint32_t {
+    auto value = static_cast<std::uint32_t>(x) * 374761393U;
+    value ^= static_cast<std::uint32_t>(y) * 668265263U;
+    value ^= static_cast<std::uint32_t>(z) * 2246822519U;
+    value ^= static_cast<std::uint32_t>(seed) * 3266489917U;
+    value ^= static_cast<std::uint32_t>(salt) * 1274126177U;
+    value = (value ^ (value >> 15U)) * 2246822519U;
+    value = (value ^ (value >> 13U)) * 3266489917U;
+    return value ^ (value >> 16U);
+}
+
+auto floor_div(int value, int divisor) noexcept -> int {
+    auto quotient = value / divisor;
+    const auto remainder = value % divisor;
+    if (remainder != 0 && ((remainder < 0) != (divisor < 0))) {
+        --quotient;
+    }
+    return quotient;
+}
+
+auto is_resource_host_block(BlockId block_id) noexcept -> bool {
+    return block_id == to_block_id(BlockType::Stone) ||
+           block_id == to_block_id(BlockType::Cobblestone) ||
+           block_id == to_block_id(BlockType::MossyStone);
 }
 
 auto make_noise(int seed, FastNoiseLite::NoiseType type, float frequency) -> std::unique_ptr<FastNoiseLite> {
@@ -285,10 +331,74 @@ auto WorldGenerator::choose_terrain_block(const TerrainColumnSample& column, int
             return to_block_id(BlockType::Air);
         }
 
-        return block;
+        return choose_resource_ore_block(column, block, world_x, y, world_z);
     }
 
     return to_block_id(BlockType::Air);
+}
+
+auto WorldGenerator::choose_resource_ore_block(const TerrainColumnSample& column,
+                                               BlockId base_block,
+                                               int world_x,
+                                               int y,
+                                               int world_z) const noexcept -> BlockId {
+    if (!is_resource_host_block(base_block) || y > column.surface_height - kResourceOreSurfaceMargin) {
+        return base_block;
+    }
+
+    for (const auto& definition : kResourceOreDefinitions) {
+        if (y < definition.min_y || y > std::min(definition.max_y, column.surface_height - kResourceOreSurfaceMargin)) {
+            continue;
+        }
+
+        const auto cell_x = floor_div(world_x, definition.cell_size);
+        const auto cell_y = floor_div(y, definition.cell_size);
+        const auto cell_z = floor_div(world_z, definition.cell_size);
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const auto candidate_cell_x = cell_x + dx;
+                    const auto candidate_cell_y = cell_y + dy;
+                    const auto candidate_cell_z = cell_z + dz;
+                    const auto vein_hash =
+                        hash_resource_cell(candidate_cell_x, candidate_cell_y, candidate_cell_z, seed_, definition.salt);
+                    if ((vein_hash % definition.chance_divisor) != 0U) {
+                        continue;
+                    }
+
+                    const auto cell_size = static_cast<std::uint32_t>(definition.cell_size);
+                    const auto center_x =
+                        candidate_cell_x * definition.cell_size +
+                        static_cast<int>(hash_resource_cell(candidate_cell_x, candidate_cell_y, candidate_cell_z, seed_, definition.salt + 11) % cell_size);
+                    const auto center_y =
+                        candidate_cell_y * definition.cell_size +
+                        static_cast<int>(hash_resource_cell(candidate_cell_x, candidate_cell_y, candidate_cell_z, seed_, definition.salt + 23) % cell_size);
+                    const auto center_z =
+                        candidate_cell_z * definition.cell_size +
+                        static_cast<int>(hash_resource_cell(candidate_cell_x, candidate_cell_y, candidate_cell_z, seed_, definition.salt + 37) % cell_size);
+
+                    const auto offset_x = world_x - center_x;
+                    const auto offset_y = y - center_y;
+                    const auto offset_z = world_z - center_z;
+                    const auto distance_squared =
+                        offset_x * offset_x + offset_y * offset_y + offset_z * offset_z;
+                    if (distance_squared > definition.radius_squared) {
+                        continue;
+                    }
+
+                    const auto edge_hash =
+                        hash_resource_cell(world_x, y, world_z, seed_, definition.salt + 53);
+                    // Je casse legerement le bord des filons pour eviter des boules trop regulieres.
+                    if (distance_squared == definition.radius_squared && (edge_hash % 100U) > 58U) {
+                        continue;
+                    }
+                    return to_block_id(definition.block);
+                }
+            }
+        }
+    }
+
+    return base_block;
 }
 
 auto WorldGenerator::should_place_tree(BiomeType biome, int surface_y, std::uint32_t column_hash) const noexcept -> bool {

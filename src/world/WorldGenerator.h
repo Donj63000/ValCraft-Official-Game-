@@ -63,6 +63,11 @@ private:
     [[nodiscard]] auto choose_surface_height(BiomeType biome, float base_noise, float detail_noise, float ridge_noise) const noexcept -> int;
     [[nodiscard]] auto choose_water_level(int surface_height) const noexcept -> int;
     [[nodiscard]] auto choose_terrain_block(const TerrainColumnSample& column, int world_x, int y, int world_z) const noexcept -> BlockId;
+    [[nodiscard]] auto choose_resource_ore_block(const TerrainColumnSample& column,
+                                                 BlockId base_block,
+                                                 int world_x,
+                                                 int y,
+                                                 int world_z) const noexcept -> BlockId;
     [[nodiscard]] auto should_place_tree(BiomeType biome, int surface_y, std::uint32_t column_hash) const noexcept -> bool;
     [[nodiscard]] auto should_place_decoration(BiomeType biome, std::uint32_t column_hash) const noexcept -> bool;
     void place_tree(Chunk& chunk, int local_x, int surface_y, int local_z, BiomeType biome, std::uint32_t column_hash) const;

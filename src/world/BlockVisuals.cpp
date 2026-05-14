@@ -187,6 +187,35 @@ void blit_packed_tile(std::vector<std::uint8_t>& pixels,
     }
 }
 
+void fill_ore_tile(std::vector<std::uint8_t>& pixels,
+                   int tile_x,
+                   const std::array<float, 3>& ore_color,
+                   int seed,
+                   float fleck_density) {
+    fill_tile(pixels, tile_x, 6, [ore_color, seed, fleck_density](int x, int y) {
+        const auto grain = tile_noise(x, y, seed);
+        const auto stone = 90.0F + grain * 44.0F;
+        const auto chip = (x == 0 || y == 0 || x == 15 || y == 15) ? -18.0F : 0.0F;
+        const auto wave =
+            std::sin(static_cast<float>(x) * 0.76F + static_cast<float>(y) * 0.48F + tile_noise(x + 4, y + 9, seed + 17) * 3.0F);
+        const auto vein = line_mask(wave, 0.0F, 0.13F);
+        const auto fleck = tile_noise(x * 2 + 3, y * 2 + 5, seed + 31) > 1.0F - fleck_density ? 1.0F : 0.0F;
+        const auto pocket =
+            radial_falloff(static_cast<float>(x), static_cast<float>(y), 5.5F, 6.5F, 2.4F) *
+            (tile_noise(x + 11, y + 13, seed + 43) > 0.42F ? 1.0F : 0.0F);
+        const auto ore = saturate(vein * 0.58F + fleck * 0.72F + pocket * 0.44F);
+        const auto base_red = stone + chip;
+        const auto base_green = stone + grain * 10.0F + chip * 0.82F;
+        const auto base_blue = stone + grain * 8.0F + chip * 0.68F;
+
+        return make_rgba(
+            base_red * (1.0F - ore) + ore_color[0] * ore,
+            base_green * (1.0F - ore) + ore_color[1] * ore,
+            base_blue * (1.0F - ore) + ore_color[2] * ore,
+            255.0F);
+    });
+}
+
 void overwrite_antique_theme_tiles(std::vector<std::uint8_t>& pixels) {
     fill_tile(pixels, 3, 0, [](int x, int y) {
         const auto noise = tile_noise(x, y, 103);
@@ -538,6 +567,13 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
         }
         return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
     });
+
+    fill_ore_tile(pixels, 0, {38.0F, 36.0F, 34.0F}, 251, 0.34F);
+    fill_ore_tile(pixels, 1, {196.0F, 112.0F, 56.0F}, 263, 0.30F);
+    fill_ore_tile(pixels, 2, {238.0F, 190.0F, 72.0F}, 277, 0.27F);
+    fill_ore_tile(pixels, 3, {94.0F, 218.0F, 226.0F}, 293, 0.23F);
+    fill_ore_tile(pixels, 4, {192.0F, 178.0F, 226.0F}, 307, 0.18F);
+
     fill_tile(pixels, 1, 3, [](int x, int y) {
         const auto stem = ((x == 7) || (x == 8)) && y > 5;
         const auto blade_a = y > 4 && x >= 3 && x <= 6 && x <= y;
