@@ -39,12 +39,19 @@ struct PerformanceOptions {
     }
 };
 
+enum class StartupUiOverlay {
+    None = 0,
+    Inventory = 1,
+    Pause = 2,
+};
+
 struct GameOptions {
     bool smoke_test = false;
     int smoke_frames = 60;
     bool hidden_window = false;
     bool freeze_time = false;
     float initial_time_of_day = 8.0F;
+    StartupUiOverlay startup_ui_overlay = StartupUiOverlay::None;
     PerformanceOptions performance {};
     AuditOptions audit {};
     std::vector<std::string> raw_arguments {};

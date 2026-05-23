@@ -406,7 +406,16 @@ auto Game::initialize() -> bool {
     present_loading_screen("VALCRAFT", "LECTURE DES SAUVEGARDES", 0.92F);
     refresh_save_slots();
 
-    if (options_.smoke_test) {
+    if (options_.startup_ui_overlay != StartupUiOverlay::None) {
+        has_active_session_ = true;
+        environment_.set_frozen(true);
+        prepare_game_session();
+        if (options_.startup_ui_overlay == StartupUiOverlay::Inventory) {
+            set_inventory_visible(true);
+        } else if (options_.startup_ui_overlay == StartupUiOverlay::Pause) {
+            set_paused(true);
+        }
+    } else if (options_.smoke_test) {
         has_active_session_ = true;
         player_.set_position({0.5F, 80.0F, 0.5F});
         player_.set_velocity({});

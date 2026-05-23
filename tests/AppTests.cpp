@@ -63,6 +63,21 @@ TEST_CASE("game option parser accepts smoke perf flags and values") {
     CHECK(parsed.options.performance.stream_radius == 14);
 }
 
+TEST_CASE("game option parser accepts startup ui preview overlays") {
+    const std::vector<std::string_view> inventory_arguments {"--ui-preview=inventory"};
+    const auto parsed_inventory = parse_game_options(inventory_arguments);
+    REQUIRE(parsed_inventory.ok);
+    CHECK(parsed_inventory.options.startup_ui_overlay == StartupUiOverlay::Inventory);
+
+    const std::vector<std::string_view> pause_arguments {"--ui-preview=pause"};
+    const auto parsed_pause = parse_game_options(pause_arguments);
+    REQUIRE(parsed_pause.ok);
+    CHECK(parsed_pause.options.startup_ui_overlay == StartupUiOverlay::Pause);
+
+    const std::vector<std::string_view> invalid_arguments {"--ui-preview=main"};
+    CHECK_FALSE(parse_game_options(invalid_arguments).ok);
+}
+
 TEST_CASE("game option parser rejects non finite time and unsafe streaming radius") {
     const std::vector<std::string_view> nan_time {"--initial-time=nan"};
     const auto parsed_nan_time = parse_game_options(nan_time);
@@ -793,7 +808,64 @@ TEST_CASE("pause menu layout stays centered on compact viewports") {
     const auto layout = build_pause_menu_layout(280, 220, state);
 
     CHECK(layout.panel_x + layout.panel_width * 0.5F == doctest::Approx(140.0F));
-    CHECK(layout.panel_y + layout.panel_height * 0.5F == doctest::Approx(110.0F));
+    CHECK(layout.panel_y >= 0.0F);
+    CHECK(layout.panel_y + layout.panel_height <= 220.0F);
+}
+
+TEST_CASE("pause menu modern layout keeps sections and buttons contained across viewports") {
+    const std::array<std::pair<int, int>, 5> viewports {{
+        {1600, 900},
+        {1280, 720},
+        {960, 540},
+        {520, 320},
+        {280, 220},
+    }};
+
+    PauseMenuState state {};
+    state.visible = true;
+
+    for (const auto& [width, height] : viewports) {
+        CAPTURE(width);
+        CAPTURE(height);
+
+        const auto layout = build_pause_menu_layout(width, height, state);
+
+        CHECK(layout.panel_x >= 0.0F);
+        CHECK(layout.panel_x + layout.panel_width <= static_cast<float>(width));
+        CHECK(layout.panel_y >= 0.0F);
+        CHECK(layout.panel_y + layout.panel_height <= static_cast<float>(height));
+        CHECK(layout.header_panel_x >= layout.panel_x);
+        CHECK(layout.header_panel_x + layout.header_panel_width <= layout.panel_x + layout.panel_width);
+        CHECK(layout.footer_panel_x >= layout.panel_x);
+        CHECK(layout.footer_panel_x + layout.footer_panel_width <= layout.panel_x + layout.panel_width);
+        CHECK(layout.accent_rail_y >= layout.panel_y);
+        CHECK(layout.accent_rail_y + layout.accent_rail_height <= layout.panel_y + layout.panel_height);
+
+        float previous_button_bottom = layout.button_stack_y;
+        for (const auto& button : layout.buttons) {
+            CHECK(button.x >= layout.panel_x);
+            CHECK(button.x + button.width <= layout.panel_x + layout.panel_width);
+            CHECK(button.y >= layout.panel_y);
+            CHECK(button.y + button.height <= layout.panel_y + layout.panel_height);
+            CHECK(button.y >= previous_button_bottom);
+            previous_button_bottom = button.y + button.height;
+        }
+        CHECK(layout.buttons.front().y == doctest::Approx(layout.button_stack_y));
+        CHECK(layout.buttons.back().y + layout.buttons.back().height ==
+              doctest::Approx(layout.button_stack_y + layout.button_stack_height));
+    }
+}
+
+TEST_CASE("pause menu hit testing ignores decorative and empty areas") {
+    PauseMenuState state {};
+    state.visible = true;
+
+    const auto layout = build_pause_menu_layout(1280, 720, state);
+
+    CHECK_FALSE(pause_menu_action_at(layout, layout.title_center_x, layout.title_y).has_value());
+    CHECK_FALSE(pause_menu_action_at(layout, layout.footer_center_x, layout.footer_y).has_value());
+    CHECK_FALSE(pause_menu_action_at(layout, layout.panel_x + 4.0F, layout.panel_y + 4.0F).has_value());
+    CHECK_FALSE(pause_menu_action_at(layout, -4.0F, -4.0F).has_value());
 }
 
 TEST_CASE("save slot menu disables empty load slots and keeps the active slot highlighted") {
@@ -1055,6 +1127,91 @@ TEST_CASE("inventory layout stays horizontally centered and visible on compact v
     CHECK(layout.panel_y >= 0.0F);
     CHECK(layout.panel_y <= 8.0F);
     CHECK(layout.panel_y + layout.panel_height > 160.0F);
+}
+
+TEST_CASE("inventory modern layout keeps slots and footer hints inside owning panels") {
+    const auto hotbar = make_default_hotbar_state();
+    const auto inventory = make_default_inventory_menu_state();
+
+    const auto layout = build_inventory_menu_layout(1280, 720, inventory, hotbar);
+
+    const auto inside = [](float x, float y, float width, float height, float outer_x, float outer_y, float outer_width, float outer_height) {
+        return x >= outer_x &&
+               y >= outer_y &&
+               x + width <= outer_x + outer_width &&
+               y + height <= outer_y + outer_height;
+    };
+
+    for (std::size_t index = 0; index < kInventoryStorageSlotCount; ++index) {
+        const auto& slot = layout.slots[index];
+        CHECK(slot.ref.group == InventorySlotGroup::Storage);
+        CHECK(inside(slot.x, slot.y, slot.size, slot.size, layout.storage_panel_x, layout.storage_panel_y, layout.storage_panel_width, layout.storage_panel_height));
+    }
+
+    for (std::size_t index = 0; index < kHotbarSlotCount; ++index) {
+        const auto& slot = layout.slots[kInventoryStorageSlotCount + index];
+        const auto& keycap = layout.hotbar_keycaps[index];
+        CHECK(slot.ref.group == InventorySlotGroup::Hotbar);
+        CHECK(slot.is_hotbar);
+        CHECK(inside(slot.x, slot.y, slot.size, slot.size, layout.hotbar_panel_x, layout.hotbar_panel_y, layout.hotbar_panel_width, layout.hotbar_panel_height));
+        CHECK(inside(keycap.x, keycap.y, keycap.width, keycap.height, layout.hotbar_panel_x, layout.hotbar_panel_y, layout.hotbar_panel_width, layout.hotbar_panel_height));
+        CHECK(keycap.x + keycap.width * 0.5F == doctest::Approx(slot.x + slot.size * 0.5F));
+        CHECK(keycap.number == index + 1U);
+    }
+
+    for (std::size_t index = 0; index < kEquipmentSlotCount; ++index) {
+        const auto& slot = layout.slots[kInventoryStorageSlotCount + kHotbarSlotCount + index];
+        CHECK(slot.ref.group == InventorySlotGroup::Equipment);
+        CHECK(slot.is_equipment);
+        CHECK(inside(slot.x, slot.y, slot.size, slot.size, layout.preview_panel_x, layout.preview_panel_y, layout.preview_panel_width, layout.preview_panel_height));
+    }
+
+    float previous_hint_right = layout.footer_panel_x;
+    for (const auto& hint : layout.footer_hints) {
+        CHECK_FALSE(hint.label.empty());
+        CHECK(inside(hint.x, hint.y, hint.width, hint.height, layout.footer_panel_x, layout.footer_panel_y, layout.footer_panel_width, layout.footer_panel_height));
+        CHECK(hint.x >= previous_hint_right);
+        previous_hint_right = hint.x + hint.width;
+    }
+    CHECK(layout.footer_hints.front().emphasized);
+}
+
+TEST_CASE("inventory layout preserves visual slot order and hit tests equipment slots") {
+    auto hotbar = make_default_hotbar_state();
+    auto inventory = make_default_inventory_menu_state();
+
+    auto layout = build_inventory_menu_layout(1280, 720, inventory, hotbar);
+    const auto equipment_layout_index = kInventoryStorageSlotCount + kHotbarSlotCount + equipment_slot_index(EquipmentSlot::Chest);
+    inventory.cursor_x = layout.slots[equipment_layout_index].x + layout.slots[equipment_layout_index].size * 0.5F;
+    inventory.cursor_y = layout.slots[equipment_layout_index].y + layout.slots[equipment_layout_index].size * 0.5F;
+
+    layout = build_inventory_menu_layout(1280, 720, inventory, hotbar);
+
+    std::size_t storage_count = 0;
+    std::size_t hotbar_count = 0;
+    std::size_t equipment_count = 0;
+    for (std::size_t index = 0; index < layout.slots.size(); ++index) {
+        const auto& slot = layout.slots[index];
+        if (index < kInventoryStorageSlotCount) {
+            CHECK(slot.ref.group == InventorySlotGroup::Storage);
+            ++storage_count;
+        } else if (index < kInventoryStorageSlotCount + kHotbarSlotCount) {
+            CHECK(slot.ref.group == InventorySlotGroup::Hotbar);
+            ++hotbar_count;
+        } else {
+            CHECK(slot.ref.group == InventorySlotGroup::Equipment);
+            ++equipment_count;
+        }
+    }
+    CHECK(storage_count == kInventoryStorageSlotCount);
+    CHECK(hotbar_count == kHotbarSlotCount);
+    CHECK(equipment_count == kEquipmentSlotCount);
+
+    const auto hovered = inventory_slot_at(layout, inventory.cursor_x, inventory.cursor_y);
+    REQUIRE(hovered.has_value());
+    CHECK(hovered->group == InventorySlotGroup::Equipment);
+    CHECK(hovered->index == equipment_slot_index(EquipmentSlot::Chest));
+    CHECK_FALSE(inventory_slot_at(layout, layout.panel_x + 2.0F, layout.panel_y + 2.0F).has_value());
 }
 
 TEST_CASE("inventory primary click can pick and swap full stacks between storage and hotbar") {

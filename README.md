@@ -43,8 +43,8 @@ L'objectif n'est pas seulement de refaire une boucle de jeu "a la Minecraft", ma
 technique propre, testee et evolutive pour un vrai projet de jeu.
 
 Aujourd'hui, le depot propose deja une experience jouable : exploration d'un monde procedural, deplacement
-en vue FPS, casse et pose de blocs, eau traversable et nageable, creatures jour/nuit, hotbar, inventaire,
-item drops, HUD, ecran de mort et pipeline de build/validation automatise.
+en vue FPS, casse et pose de blocs, eau traversable et nageable, creatures jour/nuit, hotbar, inventaire
+modernise, item drops, HUD, menu pause modernise, ecran de mort et pipeline de build/validation automatise.
 
 Le projet reste en developpement actif. La base est solide, le coeur sandbox est deja la, mais il reste
 encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
@@ -60,7 +60,7 @@ encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
 - un monde voxel genere proceduralement avec seed deterministe
 - des deplacements FPS avec collisions, saut, nage, plongee et mode fly debug
 - une interaction directe avec le terrain : casser, poser, remplacer certaines decorations
-- une boucle sandbox plus complete que la simple demo terrain : hotbar, inventaire, item drops et respawn
+- une boucle sandbox plus complete que la simple demo terrain : hotbar, inventaire modernise, menu pause, item drops et respawn
 - des creatures avec cycle jour/nuit : animaux passifs le jour, zombies agressifs la nuit
 - un rendu deja lisible avec eau translucide, torches emissives, vegetation decorative et presentation FPS
 - un projet code comme un vrai depot de production, pas juste un prototype jetable
@@ -86,18 +86,18 @@ encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
   </tr>
   <tr>
     <td width="50%">
-      <img src="Images/img_3.png" alt="Capture de gameplay avec interface et hotbar dans ValCraft">
+      <img src="Images/img_3.png" alt="Menu inventaire modernise de ValCraft">
     </td>
     <td width="50%">
-      <img src="Images/img_4.png" alt="Capture montrant la construction et la lecture du terrain dans ValCraft">
+      <img src="Images/img_4.png" alt="Menu pause modernise de ValCraft">
     </td>
   </tr>
   <tr>
     <td align="center">
-      <strong>Retrouver les bases du sandbox voxel avec une UI deja en place</strong>
+      <strong>Gerer l'inventaire dans une interface lisible, moderne et testee</strong>
     </td>
     <td align="center">
-      <strong>Modifier le terrain en temps reel avec une boucle simple et directe</strong>
+      <strong>Mettre le jeu en pause avec un menu clair, compact et conforme a l'UI actuelle</strong>
     </td>
   </tr>
   <tr>
@@ -135,11 +135,11 @@ encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
 - exploration libre en vue FPS
 - collisions joueur / terrain, chute, degats de chute, nage et gestion de l'air sous l'eau
 - hotbar `9` slots avec selection clavier et roulette
-- inventaire jouable avec drag/drop, split de stack, echanges hotbar et drop d'objets
+- inventaire jouable avec UI modernisee, drag/drop, split de stack, echanges hotbar et drop d'objets
 - casse de blocs au clic gauche et pose de blocs au clic droit
 - torches placables avec lumiere
 - objets recoltes transformes en item drops recuperables
-- ecran de mort, respawn et menu pause
+- ecran de mort, respawn et menu pause modernise
 - cycle de creatures avec animaux le jour et zombies offensifs la nuit
 
 ### Monde et rendu
@@ -159,6 +159,7 @@ encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
 - warnings stricts avec `-Werror`
 - tests unitaires et de regression
 - smoke test non interactif du jeu
+- mode `--ui-preview=inventory|pause` pour valider rapidement les menus
 - verification de couverture critique
 - meme logique de verification en local et en CI GitHub Actions
 

@@ -69,6 +69,15 @@ struct InventoryKeycapLayout {
     bool selected = false;
 };
 
+struct InventoryFooterHintLayout {
+    float x = 0.0F;
+    float y = 0.0F;
+    float width = 0.0F;
+    float height = 0.0F;
+    std::string_view label {};
+    bool emphasized = false;
+};
+
 struct InventoryMenuLayout {
     float panel_x = 0.0F;
     float panel_y = 0.0F;
@@ -132,6 +141,7 @@ struct InventoryMenuLayout {
     float slot_gap = 0.0F;
     float icon_inset = 0.0F;
     std::array<InventoryKeycapLayout, kHotbarSlotCount> hotbar_keycaps {};
+    std::array<InventoryFooterHintLayout, 3> footer_hints {};
     std::array<InventorySlotLayout, kInventoryVisibleSlotCount> slots {};
 };
 
@@ -687,6 +697,17 @@ inline auto build_inventory_menu_layout(int viewport_width,
     const auto footer_panel_y = body_y + body_height + footer_gap;
     const auto footer_panel_width = std::max(0.0F, panel_width - 20.0F);
     const auto footer_panel_height = footer_height;
+    const auto footer_hint_gap = std::max(6.0F, slot_size * 0.16F);
+    const auto footer_hint_padding = std::max(8.0F, slot_size * 0.22F);
+    const auto footer_hint_height = std::max(18.0F, footer_panel_height - footer_hint_padding * 1.20F);
+    const auto footer_hint_y = footer_panel_y + (footer_panel_height - footer_hint_height) * 0.5F;
+    const auto footer_hint_available_width =
+        std::max(0.0F, footer_panel_width - footer_hint_padding * 2.0F - footer_hint_gap * 2.0F);
+    const auto close_hint_width = std::max(0.0F, footer_hint_available_width * 0.34F);
+    const auto action_hint_width = std::max(0.0F, (footer_hint_available_width - close_hint_width) * 0.5F);
+    const auto close_hint_x = footer_panel_x + footer_hint_padding;
+    const auto primary_hint_x = close_hint_x + close_hint_width + footer_hint_gap;
+    const auto secondary_hint_x = primary_hint_x + action_hint_width + footer_hint_gap;
 
     const auto preview_panel_x = body_x;
     const auto preview_panel_y = body_y;
@@ -794,6 +815,30 @@ inline auto build_inventory_menu_layout(int viewport_width,
     layout.slot_size = slot_size;
     layout.slot_gap = slot_gap;
     layout.icon_inset = icon_inset;
+    layout.footer_hints[0] = {
+        close_hint_x,
+        footer_hint_y,
+        close_hint_width,
+        footer_hint_height,
+        "E OU ECHAP FERMER",
+        true,
+    };
+    layout.footer_hints[1] = {
+        primary_hint_x,
+        footer_hint_y,
+        action_hint_width,
+        footer_hint_height,
+        "CLIC GAUCHE DEPLACER",
+        false,
+    };
+    layout.footer_hints[2] = {
+        secondary_hint_x,
+        footer_hint_y,
+        action_hint_width,
+        footer_hint_height,
+        "CLIC DROIT DIVISER",
+        false,
+    };
 
     for (std::size_t row = 0; row < kInventoryRows; ++row) {
         for (std::size_t column = 0; column < kInventoryColumns; ++column) {

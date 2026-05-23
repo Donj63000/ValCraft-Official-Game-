@@ -96,6 +96,17 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             result.options.initial_time_of_day = parsed_value;
             continue;
         }
+        if (argument.starts_with("--ui-preview=")) {
+            const auto overlay = argument.substr(13);
+            if (overlay == "inventory") {
+                result.options.startup_ui_overlay = StartupUiOverlay::Inventory;
+            } else if (overlay == "pause") {
+                result.options.startup_ui_overlay = StartupUiOverlay::Pause;
+            } else {
+                return make_error("Invalid value for --ui-preview");
+            }
+            continue;
+        }
         if (argument.starts_with("--shadow-map-size=")) {
             int parsed_value = 0;
             if (!parse_number(argument.substr(18), parsed_value) || parsed_value <= 0) {
