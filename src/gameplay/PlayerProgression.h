@@ -61,6 +61,7 @@ public:
     [[nodiscard]] auto apnea_resistance_percent() const noexcept -> float;
     [[nodiscard]] auto fall_safety_multiplier() const noexcept -> float;
     [[nodiscard]] auto movement_speed_multiplier() const noexcept -> float;
+    [[nodiscard]] auto block_break_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto has_super_vision_power() const noexcept -> bool;
     [[nodiscard]] auto has_flight_power() const noexcept -> bool;
     [[nodiscard]] auto is_max_level() const noexcept -> bool;

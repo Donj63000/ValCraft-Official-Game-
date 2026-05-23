@@ -107,6 +107,14 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             }
             continue;
         }
+        if (argument.starts_with("--capture-frame=")) {
+            const auto path = argument.substr(16);
+            if (path.empty()) {
+                return make_error("Invalid value for --capture-frame");
+            }
+            result.options.frame_capture_path = std::string(path);
+            continue;
+        }
         if (argument.starts_with("--shadow-map-size=")) {
             int parsed_value = 0;
             if (!parse_number(argument.substr(18), parsed_value) || parsed_value <= 0) {

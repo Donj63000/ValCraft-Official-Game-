@@ -222,6 +222,7 @@ private:
     void update_smoke_player(float dt);
     void update_menu_preview_camera(float dt);
     void validate_smoke_frame(const WorldWorkBudget& budget, const WorldWorkStats& stats) const;
+    void capture_current_frame_if_requested();
     void record_frame_stats(const FramePerformanceStats& frame_stats);
     void record_performance_event(PerformanceEventKind kind, const BlockCoord& block, std::string_view label);
     void record_audit_event(AuditEventCategory category,
@@ -323,6 +324,7 @@ private:
     bool starting_village_enabled_ = false;
     bool runtime_shadows_enabled_ = true;
     bool runtime_post_process_enabled_ = true;
+    bool frame_capture_written_ = false;
     UiScreen last_audit_ui_screen_ = UiScreen::Gameplay;
     bool last_audit_mouse_captured_ = true;
     AuditSecondAccumulator audit_second_accumulator_ {};

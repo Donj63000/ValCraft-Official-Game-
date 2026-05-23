@@ -118,6 +118,7 @@ public:
     [[nodiscard]] auto apnea_resistance_percent() const noexcept -> float;
     [[nodiscard]] auto fall_safety_multiplier() const noexcept -> float;
     [[nodiscard]] auto movement_speed_multiplier() const noexcept -> float;
+    [[nodiscard]] auto block_break_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto is_dead() const noexcept -> bool;
 
     void load_state(const PlayerState& state) noexcept;
@@ -129,6 +130,7 @@ public:
     void set_apnea_resistance_percent(float percent) noexcept;
     void set_fall_safety_multiplier(float multiplier) noexcept;
     void set_movement_speed_multiplier(float multiplier) noexcept;
+    void set_block_break_speed_multiplier(float multiplier) noexcept;
     void trigger_primary_action() noexcept;
     void trigger_secondary_action() noexcept;
     void respawn(const glm::vec3& position) noexcept;
@@ -169,6 +171,7 @@ private:
     float apnea_resistance_percent_ = 0.0F;
     float fall_safety_multiplier_ = 1.0F;
     float movement_speed_multiplier_ = 1.0F;
+    float block_break_speed_multiplier_ = 1.0F;
     float ground_coyote_timer_ = 0.0F;
     float jump_buffer_timer_ = 0.0F;
     static constexpr float kPlayerWidth = 0.6F;

@@ -78,6 +78,20 @@ TEST_CASE("game option parser accepts startup ui preview overlays") {
     CHECK_FALSE(parse_game_options(invalid_arguments).ok);
 }
 
+TEST_CASE("game option parser accepts explicit visual frame capture target") {
+    const std::vector<std::string_view> arguments {
+        "--smoke-test",
+        "--capture-frame=artifacts/visual-check.bmp",
+    };
+
+    const auto parsed = parse_game_options(arguments);
+
+    REQUIRE(parsed.ok);
+    CHECK(parsed.options.smoke_test);
+    CHECK(parsed.options.frame_capture_path == "artifacts/visual-check.bmp");
+    CHECK_FALSE(parse_game_options(std::vector<std::string_view> {"--capture-frame="}).ok);
+}
+
 TEST_CASE("game option parser rejects non finite time and unsafe streaming radius") {
     const std::vector<std::string_view> nan_time {"--initial-time=nan"};
     const auto parsed_nan_time = parse_game_options(nan_time);

@@ -46,6 +46,14 @@ auto sample_block_atlas_pixel(const std::vector<std::uint8_t>& pixels, int tile_
     return {pixels[index + 0], pixels[index + 1], pixels[index + 2], pixels[index + 3]};
 }
 
+auto sample_accent_atlas_pixel(const std::vector<std::uint8_t>& pixels, int tile_x, int tile_y, int x, int y)
+    -> std::array<std::uint8_t, 4> {
+    const auto atlas_x = tile_x * kAccentAtlasTileSize + x;
+    const auto atlas_y = tile_y * kAccentAtlasTileSize + y;
+    const auto index = static_cast<std::size_t>((atlas_y * kAccentAtlasSize + atlas_x) * 4);
+    return {pixels[index + 0], pixels[index + 1], pixels[index + 2], pixels[index + 3]};
+}
+
 auto collect_face_samples(std::span<const ChunkVertex> vertices) -> std::vector<FaceSample> {
     std::vector<FaceSample> samples;
     samples.reserve(vertices.size() / 6U);
@@ -96,6 +104,27 @@ TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     CHECK(shader_source.find("u_lightning_intensity") != std::string_view::npos);
     CHECK(shader_source.find("volumetric_cloud_minimum") != std::string_view::npos);
     CHECK(shader_source.find("max(cloud_factor, overcast_factor) > volumetric_cloud_minimum") != std::string_view::npos);
+    CHECK(shader_source.find("star_spawn") != std::string_view::npos);
+    CHECK(shader_source.find("star_weather_visibility") != std::string_view::npos);
+}
+
+TEST_CASE("accent atlas keeps celestial sprites bright and readable") {
+    const auto atlas_pixels = build_accent_atlas_pixels();
+    REQUIRE(atlas_pixels.size() == static_cast<std::size_t>(kAccentAtlasSize * kAccentAtlasSize * 4));
+
+    const auto sun_tile = accent_atlas_tile(AccentAtlasSprite::Sun);
+    const auto moon_tile = accent_atlas_tile(AccentAtlasSprite::Moon);
+    const auto star_tile = accent_atlas_tile(AccentAtlasSprite::Star);
+    const auto sun_core = sample_accent_atlas_pixel(atlas_pixels, sun_tile.x, sun_tile.y, 7, 7);
+    const auto moon_core = sample_accent_atlas_pixel(atlas_pixels, moon_tile.x, moon_tile.y, 7, 7);
+    const auto star_core = sample_accent_atlas_pixel(atlas_pixels, star_tile.x, star_tile.y, 7, 7);
+
+    CHECK(sun_core[0] > 230);
+    CHECK(sun_core[1] > 210);
+    CHECK(moon_core[2] > moon_core[0]);
+    CHECK(moon_core[3] > 200);
+    CHECK(star_core[3] > 220);
+    CHECK(star_core[0] > 220);
 }
 
 TEST_CASE("scene sampler bindings keep neutral fallback textures outside refraction passes") {

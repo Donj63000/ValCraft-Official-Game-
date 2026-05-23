@@ -191,6 +191,10 @@ auto PlayerProgression::movement_speed_multiplier() const noexcept -> float {
     return 1.0F + player_progression_bonus_percent(state_.level) * 0.01F;
 }
 
+auto PlayerProgression::block_break_speed_multiplier() const noexcept -> float {
+    return 1.0F + player_progression_bonus_percent(state_.level) * 0.01F;
+}
+
 auto PlayerProgression::has_super_vision_power() const noexcept -> bool {
     return player_has_super_vision_power(state_.level);
 }

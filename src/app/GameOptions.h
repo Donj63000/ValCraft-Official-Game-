@@ -52,6 +52,7 @@ struct GameOptions {
     bool freeze_time = false;
     float initial_time_of_day = 8.0F;
     StartupUiOverlay startup_ui_overlay = StartupUiOverlay::None;
+    std::string frame_capture_path {};
     PerformanceOptions performance {};
     AuditOptions audit {};
     std::vector<std::string> raw_arguments {};

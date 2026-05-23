@@ -10,16 +10,19 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace valcraft {
 
@@ -146,6 +149,42 @@ void apply_window_icon(SDL_Window* window) noexcept {
     }
 }
 
+void save_current_backbuffer_bmp(const std::filesystem::path& output_path, int width, int height) {
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("Invalid frame capture dimensions");
+    }
+
+    const auto capture_width = static_cast<std::size_t>(width);
+    const auto capture_height = static_cast<std::size_t>(height);
+    std::vector<std::uint8_t> pixels(capture_width * capture_height * 4U);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)> surface(
+        SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGBA32),
+        SDL_FreeSurface);
+    if (!surface) {
+        throw std::runtime_error("Unable to allocate frame capture surface");
+    }
+
+    const auto source_pitch = capture_width * 4U;
+    auto* destination_pixels = static_cast<std::uint8_t*>(surface->pixels);
+    for (int y = 0; y < height; ++y) {
+        const auto source_y = height - 1 - y;
+        const auto* source_row = pixels.data() + static_cast<std::size_t>(source_y) * source_pitch;
+        auto* destination_row = destination_pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(surface->pitch);
+        std::memcpy(destination_row, source_row, source_pitch);
+    }
+
+    if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path());
+    }
+    if (SDL_SaveBMP(surface.get(), output_path.string().c_str()) != 0) {
+        throw std::runtime_error(std::string("Unable to save frame capture: ") + SDL_GetError());
+    }
+}
+
 } // namespace
 
 Game::Game(const GameOptions& options)
@@ -263,6 +302,7 @@ auto Game::run() -> int {
             frame_stats.shadow_chunks += render_stats.shadow_chunks;
             frame_stats.world_chunks += render_stats.world_chunks;
 
+            capture_current_frame_if_requested();
             SDL_GL_SwapWindow(window_);
             frame_stats.frame_total_ms =
                 std::chrono::duration<double, std::milli>(clock::now() - frame_begin).count();
@@ -1954,7 +1994,7 @@ void Game::queue_level_up_announcements(std::uint32_t previous_level, std::uint3
     const auto bonus_percent = static_cast<int>(std::lround(player_progression_bonus_percent(current_level)));
     queue_gameplay_announcement(
         std::string("NIVEAU ") + std::to_string(current_level),
-        std::string("BONUS +") + std::to_string(bonus_percent) + "% DEGATS DEF VIT APNEE CHUTE",
+        std::string("BONUS +") + std::to_string(bonus_percent) + "% DEGATS DEF VIT MINAGE APNEE CHUTE",
         3.35F);
 
     if (!player_has_super_vision_power(previous_level) && player_has_super_vision_power(current_level)) {
@@ -2007,6 +2047,7 @@ void Game::sync_selected_hotbar_slot() noexcept {
     player_.set_apnea_resistance_percent(progression_.apnea_resistance_percent());
     player_.set_fall_safety_multiplier(progression_.fall_safety_multiplier());
     player_.set_movement_speed_multiplier(progression_.movement_speed_multiplier());
+    player_.set_block_break_speed_multiplier(progression_.block_break_speed_multiplier());
 }
 
 void Game::select_hotbar_slot(std::size_t index) noexcept {
@@ -2711,6 +2752,29 @@ void Game::validate_smoke_frame(const WorldWorkBudget& budget, const WorldWorkSt
     if (!world_.are_chunks_ready(player_.position(), options_.performance.spawn_preload_radius)) {
         throw std::runtime_error("Smoke test detected missing ready chunks near the player");
     }
+}
+
+void Game::capture_current_frame_if_requested() {
+    if (frame_capture_written_ || options_.frame_capture_path.empty()) {
+        return;
+    }
+    if (options_.smoke_test && rendered_frames_ + 1 < options_.smoke_frames) {
+        return;
+    }
+
+    const std::filesystem::path output_path(options_.frame_capture_path);
+    save_current_backbuffer_bmp(output_path, window_width_, window_height_);
+    frame_capture_written_ = true;
+    record_audit_event(
+        AuditEventCategory::Session,
+        "frame_captured",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"path", audit_json_string(output_path.string())},
+            {"width", audit_json_number(window_width_)},
+            {"height", audit_json_number(window_height_)},
+        }),
+        AuditPriority::High);
 }
 
 void Game::record_frame_stats(const FramePerformanceStats& frame_stats) {

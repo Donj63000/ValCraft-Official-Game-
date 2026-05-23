@@ -119,6 +119,21 @@ void main() {
     color += u_moon_disk_color * moon_disc * (0.05 + 0.55 * night_factor) * disk_visibility;
     color += vec3(1.0) * moon_core * (0.02 + 0.10 * night_factor) * disk_visibility;
 
+    if (night_factor > 0.001 && direction.y > 0.02) {
+        vec3 star_position = normalize(direction + vec3(0.0, 0.025, 0.0)) * 220.0;
+        vec3 star_cell = floor(star_position);
+        vec3 star_local = fract(star_position) - vec3(0.5);
+        float star_seed = hash13(star_cell);
+        float star_spawn = step(0.9962, star_seed);
+        float star_core = 1.0 - smoothstep(0.014, 0.060, length(star_local.xy));
+        float star_twinkle = 0.72 + 0.28 * sin(u_weather_time * (0.55 + star_seed * 1.35) + star_seed * 37.0);
+        float star_altitude = smoothstep(0.05, 0.34, direction.y);
+        float star_weather_visibility =
+            1.0 - clamp(overcast_factor * 0.86 + precipitation_factor * 0.72 + storm_factor * 0.65 + cloud_factor * 0.18, 0.0, 0.96);
+        vec3 star_color = mix(vec3(0.70, 0.82, 1.00), vec3(1.00, 0.92, 0.76), star_seed);
+        color += star_color * star_spawn * star_core * star_twinkle * night_factor * star_altitude * star_weather_visibility * 0.42;
+    }
+
     float overcast_band = smoothstep(-0.04, 0.16, direction.y) * (1.0 - smoothstep(0.90, 1.0, direction.y));
     if (overcast_band > 0.001 && overcast_factor > 0.01) {
         vec3 blanket_flow = direction * vec3(3.8, 2.2, 3.8) + vec3(u_weather_time * 0.010, 0.0, -u_weather_time * 0.007);

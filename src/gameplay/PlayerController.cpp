@@ -386,6 +386,10 @@ auto PlayerController::movement_speed_multiplier() const noexcept -> float {
     return movement_speed_multiplier_;
 }
 
+auto PlayerController::block_break_speed_multiplier() const noexcept -> float {
+    return block_break_speed_multiplier_;
+}
+
 auto PlayerController::is_dead() const noexcept -> bool {
     return state_.dead;
 }
@@ -444,6 +448,10 @@ void PlayerController::set_movement_speed_multiplier(float multiplier) noexcept 
     movement_speed_multiplier_ = std::clamp(multiplier, 0.25F, 2.0F);
 }
 
+void PlayerController::set_block_break_speed_multiplier(float multiplier) noexcept {
+    block_break_speed_multiplier_ = std::clamp(multiplier, 0.25F, 2.0F);
+}
+
 void PlayerController::trigger_primary_action() noexcept {
     if (state_.dead) {
         return;
@@ -492,7 +500,7 @@ auto PlayerController::update_block_breaking(World& world, float dt, bool breaki
         return std::nullopt;
     }
 
-    const auto duration_seconds = block_break_duration_seconds(hit.block_id);
+    const auto duration_seconds = block_break_duration_seconds(hit.block_id) / block_break_speed_multiplier_;
     if (!block_break_progress_.active ||
         block_break_progress_.block != hit.block ||
         block_break_progress_.block_id != hit.block_id) {

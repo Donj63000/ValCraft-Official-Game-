@@ -207,6 +207,7 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(progression.apnea_resistance_percent() == doctest::Approx(0.0F));
     CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.0F));
     CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.0F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.0F));
     CHECK_FALSE(progression.has_super_vision_power());
     CHECK_FALSE(player_has_super_vision_power(29U));
     CHECK(player_has_super_vision_power(30U));
@@ -229,6 +230,7 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(progression.apnea_resistance_percent() == doctest::Approx(1.0F));
     CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.01F));
     CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.01F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.01F));
     CHECK_FALSE(progression.has_super_vision_power());
     CHECK_FALSE(progression.has_flight_power());
 
@@ -238,6 +240,7 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(progression.apnea_resistance_percent() == doctest::Approx(30.0F));
     CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.30F));
     CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.30F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.30F));
     CHECK(progression.has_super_vision_power());
     CHECK_FALSE(progression.has_flight_power());
 
@@ -254,6 +257,7 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(progression.apnea_resistance_percent() == doctest::Approx(99.0F));
     CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.99F));
     CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.99F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.99F));
     CHECK(progression.has_super_vision_power());
     CHECK(progression.has_flight_power());
 
@@ -915,6 +919,41 @@ TEST_CASE("held block breaking waits for the configured duration before removing
     CHECK(completed_break->block_id == to_block_id(BlockType::Stone));
     CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
     CHECK_FALSE(player.block_break_progress().active);
+}
+
+TEST_CASE("progression block break speed multiplier shortens held block breaking") {
+    World base_world(36110, 1);
+    World leveled_world(36111, 1);
+    test::make_chunk_empty(base_world, {0, -1});
+    test::make_chunk_empty(leveled_world, {0, -1});
+    base_world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+    leveled_world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+
+    PlayerController base_player({0.5F, 5.001F, -0.5F});
+    PlayerController leveled_player({0.5F, 5.001F, -0.5F});
+    leveled_player.set_block_break_speed_multiplier(1.25F);
+    CHECK(leveled_player.block_break_speed_multiplier() == doctest::Approx(1.25F));
+
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    base_player.update(aim_input, 0.0F, base_world);
+    leveled_player.update(aim_input, 0.0F, leveled_world);
+
+    const auto stone_duration = block_break_duration_seconds(to_block_id(BlockType::Stone));
+    const auto leveled_duration = stone_duration / leveled_player.block_break_speed_multiplier();
+    REQUIRE(leveled_duration + 0.02F < stone_duration);
+
+    CHECK_FALSE(base_player.update_block_breaking(base_world, leveled_duration + 0.02F, true, 4.0F).has_value());
+    REQUIRE(base_player.block_break_progress().active);
+    CHECK(base_player.block_break_progress().duration_seconds == doctest::Approx(stone_duration));
+    CHECK(base_world.get_block(0, 4, -1) == to_block_id(BlockType::Stone));
+
+    const auto completed_break =
+        leveled_player.update_block_breaking(leveled_world, leveled_duration + 0.02F, true, 4.0F);
+    REQUIRE(completed_break.has_value());
+    CHECK(completed_break->block == BlockCoord {0, 4, -1});
+    CHECK(completed_break->block_id == to_block_id(BlockType::Stone));
+    CHECK(leveled_world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
 }
 
 TEST_CASE("releasing the break input cancels the current breaking progress") {

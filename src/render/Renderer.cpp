@@ -3601,6 +3601,19 @@ vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
     return world_position.xyz / max(world_position.w, 0.0001);
 }
 
+float atlas_tile_edge_factor(vec2 uv) {
+    vec2 local_uv = fract(uv * 8.0);
+    float edge_distance = min(min(local_uv.x, 1.0 - local_uv.x), min(local_uv.y, 1.0 - local_uv.y));
+    return 1.0 - smoothstep(0.018, 0.092, edge_distance);
+}
+
+float material_grain(vec3 world_position, float material_class) {
+    float height_slice = floor(world_position.y * 0.53);
+    float coarse = hash12(floor(world_position.xz * 0.72) + vec2(height_slice * 0.37, material_class * 11.17));
+    float fine = hash12(floor(world_position.xy * 2.35) + vec2(floor(world_position.z * 0.41), material_class * 7.91));
+    return coarse * 0.66 + fine * 0.34 - 0.5;
+}
+
 void main() {
     float water_mask = material_mask(v_material_class, 6.0);
     float water_surface_mask = water_mask * clamp(v_wave_weight * max(v_normal.y, 0.0), 0.0, 1.0);
@@ -3635,6 +3648,7 @@ void main() {
     float shadow = sample_shadow(normal);
     float cloud_shadow = sample_cloud_shadow(v_world_position + normal * 0.35, sun_direction);
 
+    float terrain_mask = material_mask(v_material_class, 0.0);
     float rock_mask = material_mask(v_material_class, 1.0);
     float sand_mask = material_mask(v_material_class, 2.0);
     float wood_mask = material_mask(v_material_class, 3.0);
@@ -3678,11 +3692,28 @@ void main() {
     leaf_translucency *= mix(0.75, 1.0, cloud_shadow);
 
     vec3 material_tint = vec3(1.0);
+    material_tint = mix(material_tint, vec3(0.70, 0.82, 0.58), terrain_mask * smoothstep(0.15, 1.0, normal.y) * 0.52);
     material_tint = mix(material_tint, vec3(1.03, 0.99, 0.92), sand_mask);
     material_tint = mix(material_tint, vec3(0.94, 0.98, 1.06), snow_mask);
     material_tint = mix(material_tint, vec3(0.84, 0.94, 1.08), glass_mask);
-    material_tint = mix(material_tint, vec3(0.96, 1.03, 0.97), foliage_mask * 0.65 + flora_mask * 0.45);
+    material_tint = mix(material_tint, vec3(0.58, 0.72, 0.44), foliage_mask * 0.84);
+    material_tint = mix(material_tint, vec3(0.90, 1.00, 0.84), flora_mask * 0.54);
     material_tint = mix(material_tint, vec3(1.02, 0.98, 0.94), wood_mask * 0.45);
+
+    float natural_material_mask = clamp(terrain_mask + rock_mask + sand_mask + wood_mask + foliage_mask + flora_mask + snow_mask, 0.0, 1.0);
+    float grain = material_grain(v_world_position, v_material_class);
+    float grain_strength =
+        terrain_mask * 0.032 + rock_mask * 0.045 + sand_mask * 0.030 + wood_mask * 0.038 +
+        foliage_mask * 0.034 + flora_mask * 0.026 + snow_mask * 0.020;
+    albedo *= 1.0 + grain * grain_strength * (0.55 + 0.45 * sky_light);
+
+    vec3 grain_tint = mix(vec3(0.97, 1.02, 0.98), vec3(1.04, 0.98, 0.92), smoothstep(-0.22, 0.26, grain));
+    material_tint = mix(material_tint, material_tint * grain_tint, natural_material_mask * 0.22);
+
+    float solid_edge_mask = clamp(terrain_mask + rock_mask + sand_mask + wood_mask + snow_mask + glass_mask * 0.35, 0.0, 1.0);
+    float tile_edge = atlas_tile_edge_factor(v_uv) * solid_edge_mask;
+    float bevel_shadow = tile_edge * (0.020 + 0.030 * (1.0 - smoothstep(-0.25, 0.85, normal.y)));
+    material_tint *= 1.0 - bevel_shadow;
 
     vec3 lit_color = albedo * material_tint * face_light * (ambient + bounce_light + sunlight + torch_light);
     lit_color += leaf_translucency;
@@ -3741,7 +3772,15 @@ void main() {
         reflection += u_sun_color * sparkle * shadow * cloud_shadow * (0.12 + 0.18 * daylight);
 
         float shallow_foam = (1.0 - smoothstep(0.08, 0.70, body_depth)) * (0.40 + 0.60 * water_surface_mask);
-        vec3 foam = mix(u_fog_color, vec3(0.86, 0.94, 1.0), 0.65) * shallow_foam * (0.10 + 0.06 * daylight);
+        float crest_noise = value_noise2(v_world_position.xz * 0.54 + vec2(u_time_of_day * 0.34, -u_time_of_day * 0.27));
+        float crest_wave =
+            0.5 + 0.5 * sin(v_world_position.x * 0.76 - v_world_position.z * 0.62 + u_time_of_day * 17.0);
+        float crest_foam =
+            smoothstep(0.78, 0.96, crest_noise * 0.58 + crest_wave * 0.42) *
+            water_surface_mask *
+            (0.18 + 0.82 * fresnel);
+        vec3 foam_color = mix(u_fog_color, vec3(0.86, 0.94, 1.0), 0.65);
+        vec3 foam = foam_color * (shallow_foam * (0.10 + 0.06 * daylight) + crest_foam * (0.035 + 0.045 * daylight));
 
         float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.26 + v_world_position.z * 0.30 + u_time_of_day * 21.0);
         lit_color = water_body + reflection + foam;
@@ -4234,6 +4273,17 @@ float rain_streak_layer(vec2 uv, vec2 scale, float speed, float slant) {
     return spawn * line * tail * (0.55 + 0.45 * hash12(cell + vec2(5.0, 29.0)));
 }
 
+vec3 apply_palette_grade(vec3 color, float storm, float lightning) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    vec3 shadow_tint = vec3(0.93, 0.97, 1.05);
+    vec3 highlight_tint = vec3(1.055, 1.010, 0.940);
+    vec3 graded = color;
+    graded *= mix(shadow_tint, vec3(1.0), smoothstep(0.18, 0.55, luma));
+    graded *= mix(vec3(1.0), highlight_tint, smoothstep(0.48, 0.94, luma));
+    float grade_strength = (0.34 + 0.10 * smoothstep(0.10, 0.78, luma)) * (1.0 - storm * 0.28) * (1.0 - lightning * 0.55);
+    return mix(color, graded, clamp(grade_strength, 0.0, 0.46));
+}
+
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(u_scene_texture, 0));
     vec3 scene = texture(u_scene_texture, v_uv).rgb;
@@ -4286,6 +4336,7 @@ void main() {
     color = vec3(1.0) - exp(-color * max(u_exposure, 0.001));
     color = apply_saturation(color, u_saturation_boost);
     color = (color - 0.5) * u_contrast + 0.5;
+    color = apply_palette_grade(color, clamp(u_storm_intensity, 0.0, 1.0), clamp(u_lightning_intensity, 0.0, 1.0));
 
     float rain = clamp(u_precipitation_intensity, 0.0, 1.0);
     if (rain > 0.001) {
