@@ -491,11 +491,13 @@ void append_day_pig(std::vector<CreaturePartInstance>& mesh,
     const auto gaze = saturate(creature.gaze_weight);
     const auto attack = saturate(creature.attack_amount);
     const auto tension = saturate(creature.tension);
+    const auto graze = creature.behavior_state == CreatureBehaviorState::Graze ? 1.0F : 0.0F;
     const auto phase = seed_unit(creature.appearance_seed, 24) * kTwoPi;
     const auto stride = std::sin(creature.animation_time * (5.8F + motion * 4.4F) + phase);
     const auto breath = std::sin(creature.animation_time * 2.3F + phase * 0.4F) * 0.018F;
     const auto sway = std::sin(creature.animation_time * 3.1F + phase) * (0.012F + motion * 0.018F);
-    const auto head_pitch = 0.02F + gaze * 0.05F - attack * 0.10F;
+    const auto head_pitch = 0.02F + gaze * 0.05F - attack * 0.10F +
+                            graze * (0.15F + std::sin(creature.animation_time * 3.0F + phase) * 0.025F);
     const auto head_yaw = std::sin(creature.animation_time * 1.6F + phase) * 0.05F + gaze * 0.04F;
     const auto front_swing = -stride * (0.16F + motion * 0.10F);
     const auto rear_swing = stride * (0.18F + motion * 0.12F);
@@ -622,10 +624,12 @@ void append_day_cow(std::vector<CreaturePartInstance>& mesh,
     const auto gaze = saturate(creature.gaze_weight);
     const auto attack = saturate(creature.attack_amount);
     const auto tension = saturate(creature.tension);
+    const auto graze = creature.behavior_state == CreatureBehaviorState::Graze ? 1.0F : 0.0F;
     const auto phase = seed_unit(creature.appearance_seed, 24) * kTwoPi;
     const auto stride = std::sin(creature.animation_time * (4.8F + motion * 3.8F) + phase);
     const auto breath = std::sin(creature.animation_time * 2.0F + phase * 0.3F) * 0.016F;
-    const auto head_pitch = 0.01F + gaze * 0.04F - attack * 0.08F;
+    const auto head_pitch = 0.01F + gaze * 0.04F - attack * 0.08F +
+                            graze * (0.13F + std::sin(creature.animation_time * 2.8F + phase) * 0.022F);
     const auto head_yaw = std::sin(creature.animation_time * 1.4F + phase) * 0.04F + gaze * 0.03F;
     const auto front_swing = -stride * (0.10F + motion * 0.10F);
     const auto rear_swing = stride * (0.12F + motion * 0.12F);
@@ -759,10 +763,12 @@ void append_day_sheep(std::vector<CreaturePartInstance>& mesh,
     const auto gaze = saturate(creature.gaze_weight);
     const auto attack = saturate(creature.attack_amount);
     const auto tension = saturate(creature.tension);
+    const auto graze = creature.behavior_state == CreatureBehaviorState::Graze ? 1.0F : 0.0F;
     const auto phase = seed_unit(creature.appearance_seed, 24) * kTwoPi;
     const auto stride = std::sin(creature.animation_time * (4.4F + motion * 3.6F) + phase);
     const auto breath = std::sin(creature.animation_time * 2.2F + phase * 0.5F) * 0.014F;
-    const auto head_pitch = 0.05F + gaze * 0.05F - attack * 0.06F;
+    const auto head_pitch = 0.05F + gaze * 0.05F - attack * 0.06F +
+                            graze * (0.16F + std::sin(creature.animation_time * 3.1F + phase) * 0.024F);
     const auto head_yaw = std::sin(creature.animation_time * 1.5F + phase) * 0.04F + gaze * 0.03F;
     const auto front_swing = -stride * (0.10F + motion * 0.08F);
     const auto rear_swing = stride * (0.12F + motion * 0.10F);
@@ -1133,15 +1139,27 @@ void append_day_villager(std::vector<CreaturePartInstance>& mesh,
     const auto motion = saturate(creature.motion_amount);
     const auto gaze = saturate(creature.gaze_weight);
     const auto tension = saturate(creature.tension);
+    const auto activity = saturate(creature.attack_amount);
+    const auto work_pose = creature.behavior_state == CreatureBehaviorState::Work ? 1.0F : 0.0F;
+    const auto graze_pose = creature.behavior_state == CreatureBehaviorState::Graze ? 1.0F : 0.0F;
+    const auto social_pose = creature.behavior_state == CreatureBehaviorState::Socialize ? 1.0F : 0.0F;
+    const auto sleep_pose = creature.behavior_state == CreatureBehaviorState::Sleep ? 1.0F : 0.0F;
+    const auto return_home_pose = creature.behavior_state == CreatureBehaviorState::ReturnHome ? 1.0F : 0.0F;
     const auto phase = seed_unit(creature.appearance_seed, 22) * kTwoPi;
     const auto stride_wave = std::sin(creature.animation_time * (4.8F + motion * 3.6F) + phase);
     const auto stride = stride_wave * motion;
-    const auto breath = std::sin(creature.animation_time * 2.0F + phase * 0.35F) * 0.018F;
-    const auto body_bob = motion * 0.012F * std::sin(creature.animation_time * 8.0F + phase);
-    const auto head_pitch = 0.012F + gaze * 0.045F;
-    const auto head_yaw = std::sin(creature.animation_time * 1.2F + phase) * 0.025F + gaze * 0.070F;
-    const auto arm_swing = stride * (0.10F + motion * 0.08F);
-    const auto folded_sway = stride * motion * 0.035F;
+    const auto work_wave = std::sin(creature.animation_time * (5.4F + activity * 2.2F) + phase * 0.7F);
+    const auto social_wave = std::sin(creature.animation_time * 3.8F + phase * 1.3F);
+    const auto sleep_breath = std::sin(creature.animation_time * 1.15F + phase * 0.20F);
+    const auto breath = std::sin(creature.animation_time * 2.0F + phase * 0.35F) * (0.018F - sleep_pose * 0.008F);
+    const auto body_bob = motion * 0.012F * std::sin(creature.animation_time * 8.0F + phase) +
+                          return_home_pose * motion * 0.010F;
+    const auto head_pitch = 0.012F + gaze * 0.045F + work_pose * (0.065F + work_wave * 0.040F) +
+                            graze_pose * (0.135F + work_wave * 0.035F) + sleep_pose * (0.155F + sleep_breath * 0.025F);
+    const auto head_yaw = std::sin(creature.animation_time * 1.2F + phase) * 0.025F + gaze * 0.070F +
+                          social_pose * social_wave * 0.105F;
+    const auto arm_swing = stride * (0.10F + motion * 0.08F) + return_home_pose * stride * 0.055F;
+    const auto folded_sway = stride * motion * 0.035F + social_pose * social_wave * 0.018F;
     const auto scale = 0.98F + seed_detail_signed(creature.appearance_seed, 1) * 0.035F;
     const auto hip_span = 0.108F * scale;
     const auto torso_half = glm::vec3 {
@@ -1205,20 +1223,57 @@ void append_day_villager(std::vector<CreaturePartInstance>& mesh,
                 glm::vec3 {head_pitch * 0.3F, head_yaw, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.01F},
                 CreatureAtlasTile::VillagerEye, state.morph, tension, kMaterialSkin, 0.88F, 0.0F);
 
-    append_pair(mesh, root, glm::vec3 {0.0F, 1.17F + body_bob, 0.0F}, shoulder_span,
+    append_pair(mesh, root, glm::vec3 {0.0F, 1.17F + body_bob - sleep_pose * 0.035F, 0.0F}, shoulder_span,
                 upper_arm_half,
-                glm::vec3 {0.0F, 0.0F, -0.05F + arm_swing}, glm::vec3 {0.0F, 0.0F, 0.025F},
+                glm::vec3 {0.0F, 0.0F, -0.05F + arm_swing - sleep_pose * 0.06F}, glm::vec3 {0.0F, 0.0F, 0.025F},
                 CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.12F, 0.0F);
-    append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.19F + body_bob, 0.055F * scale + folded_sway},
-               folded_arm_half, glm::vec3 {0.0F, 0.0F, 0.12F}, CreatureAtlasTile::VillagerCloth,
-               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
-    append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.10F + body_bob, -0.055F * scale - folded_sway},
-               folded_arm_half, glm::vec3 {0.0F, 0.0F, -0.12F}, CreatureAtlasTile::VillagerCloth,
-               state.morph, tension, kMaterialHide, 0.12F, 0.0F);
-    append_pair(mesh, root, glm::vec3 {torso_half.x + 0.105F * scale, 1.14F + body_bob, 0.0F}, 0.115F * scale,
-                hand_half,
-                glm::vec3 {0.0F, 0.0F, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.04F},
-                CreatureAtlasTile::VillagerSkin, state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+
+    if (work_pose > 0.5F || graze_pose > 0.5F) {
+        const auto task_pose = std::max(work_pose, graze_pose);
+        const auto work_reach = (0.115F + activity * 0.035F + work_wave * 0.018F) * scale;
+        const auto work_height = (graze_pose > 0.5F ? 0.96F : 1.16F) + body_bob + work_wave * 0.018F;
+        append_pair(mesh, root, glm::vec3 {torso_half.x + work_reach, work_height, 0.0F}, 0.116F * scale,
+                    glm::vec3 {0.050F * scale, 0.168F * scale, 0.052F * scale},
+                    glm::vec3 {0.0F, 0.0F, -0.42F - work_wave * 0.10F - graze_pose * 0.22F},
+                    glm::vec3 {0.0F, 0.0F, 0.08F},
+                    CreatureAtlasTile::VillagerCloth, state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+        append_pair(mesh, root, glm::vec3 {torso_half.x + work_reach + 0.075F * scale, work_height - 0.142F * scale, 0.0F},
+                    0.104F * scale,
+                    glm::vec3 {hand_half.x, hand_half.y * (1.0F + task_pose * 0.12F), hand_half.z},
+                    glm::vec3 {0.0F, 0.0F, -0.20F - work_wave * 0.10F}, glm::vec3 {0.0F, 0.0F, 0.05F},
+                    CreatureAtlasTile::VillagerSkin, state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+        if (work_pose > 0.5F) {
+            append_box(mesh, root, glm::vec3 {torso_half.x + 0.265F * scale, work_height - 0.20F * scale, 0.0F},
+                       glm::vec3 {0.028F * scale, 0.145F * scale, 0.030F * scale},
+                       glm::vec3 {0.0F, 0.0F, 0.62F + work_wave * 0.20F}, CreatureAtlasTile::VillagerHair,
+                       state.morph, tension, kMaterialKeratin, 0.08F, 0.0F);
+        }
+    } else if (social_pose > 0.5F) {
+        append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.18F + body_bob, 0.060F * scale + folded_sway},
+                   folded_arm_half, glm::vec3 {0.0F, 0.0F, 0.12F + social_wave * 0.04F}, CreatureAtlasTile::VillagerCloth,
+                   state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+        append_box(mesh, root, glm::vec3 {torso_half.x + 0.115F * scale, 1.31F + body_bob + social_wave * 0.030F, -0.122F * scale},
+                   glm::vec3 {0.052F * scale, 0.190F * scale, 0.052F * scale},
+                   glm::vec3 {0.0F, 0.0F, -0.70F + social_wave * 0.12F}, CreatureAtlasTile::VillagerCloth,
+                   state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+        append_box(mesh, root, glm::vec3 {torso_half.x + 0.210F * scale, 1.44F + body_bob + social_wave * 0.040F, -0.128F * scale},
+                   hand_half, glm::vec3 {0.0F, 0.0F, -0.42F + social_wave * 0.18F}, CreatureAtlasTile::VillagerSkin,
+                   state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+        append_box(mesh, root, glm::vec3 {torso_half.x + 0.105F * scale, 1.12F + body_bob, 0.104F * scale},
+                   hand_half, glm::vec3 {0.0F, 0.0F, 0.04F}, CreatureAtlasTile::VillagerSkin,
+                   state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+    } else {
+        append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.19F + body_bob - sleep_pose * 0.030F, 0.055F * scale + folded_sway},
+                   folded_arm_half, glm::vec3 {0.0F, 0.0F, 0.12F - sleep_pose * 0.08F}, CreatureAtlasTile::VillagerCloth,
+                   state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+        append_box(mesh, root, glm::vec3 {torso_half.x + folded_arm_half.x * 0.82F, 1.10F + body_bob - sleep_pose * 0.050F, -0.055F * scale - folded_sway},
+                   folded_arm_half, glm::vec3 {0.0F, 0.0F, -0.12F + sleep_pose * 0.08F}, CreatureAtlasTile::VillagerCloth,
+                   state.morph, tension, kMaterialHide, 0.12F, 0.0F);
+        append_pair(mesh, root, glm::vec3 {torso_half.x + 0.105F * scale, 1.14F + body_bob - sleep_pose * 0.040F, 0.0F}, 0.115F * scale,
+                    hand_half,
+                    glm::vec3 {0.0F, 0.0F, 0.0F}, glm::vec3 {0.0F, 0.0F, 0.04F},
+                    CreatureAtlasTile::VillagerSkin, state.morph, tension, kMaterialSkin, 0.10F, 0.0F);
+    }
 
     const auto upper_leg_length = 0.280F * scale;
     const auto lower_leg_length = 0.300F * scale;

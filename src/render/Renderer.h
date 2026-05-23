@@ -12,6 +12,7 @@
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerProgression.h"
 #include "player/PlayerGeometry.h"
 #include "render/ItemDropGeometry.h"
 #include "render/ShadowCulling.h"
@@ -44,6 +45,13 @@ struct RendererFrameStats {
     std::size_t visible_chunks = 0;
     std::size_t shadow_chunks = 0;
     std::size_t world_chunks = 0;
+};
+
+struct GameplayHudAnnouncementView {
+    std::string_view title {};
+    std::string_view detail {};
+    float normalized_time = 1.0F;
+    bool visible = false;
 };
 
 struct HudVertex {
@@ -80,6 +88,9 @@ public:
                       const ConfirmDialogState& confirm_dialog,
                       std::span<const CreatureRenderInstance> creatures,
                       std::span<const ItemDropRenderInstance> item_drops,
+                      const PlayerProgressionState& progression,
+                      bool super_vision_active,
+                      const GameplayHudAnnouncementView& gameplay_announcement,
                       const EnvironmentState& environment,
                       int width,
                       int height);
@@ -133,6 +144,7 @@ private:
         GLint scene_depth = -1;
         GLint inverse_view_projection = -1;
         GLint shadows_enabled = -1;
+        GLint super_vision_strength = -1;
     };
 
     struct ShadowUniformLocations {
@@ -227,6 +239,7 @@ private:
         GLint shadows_enabled = -1;
         GLint time_of_day = -1;
         GLint player_light_strength = -1;
+        GLint super_vision_strength = -1;
     };
 
     struct VisibleChunk {
@@ -247,6 +260,8 @@ private:
         int health_steps = 0;
         int air_steps = 0;
         int damage_flash_step = 0;
+        std::uint32_t player_level = 1U;
+        int level_progress_step = 0;
         bool air_visible = false;
         bool underwater = false;
 
@@ -354,7 +369,8 @@ private:
                         const glm::mat4& light_view_projection,
                         const glm::vec3& camera_position,
                         const EnvironmentState& environment,
-                        bool player_light_active);
+                        bool player_light_active,
+                        float super_vision_strength);
     void draw_player_viewmodel(const PlayerController& player,
                                BlockId held_item,
                                const glm::mat4& view_projection,
@@ -362,7 +378,13 @@ private:
                                const glm::vec3& camera_position,
                                const EnvironmentState& environment);
     void draw_block_break_overlay(const PlayerController& player);
-    void draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& environment, int width, int height);
+    void draw_hotbar(const PlayerController& player,
+                     const HotbarState& hotbar,
+                     const PlayerProgressionState& progression,
+                     const EnvironmentState& environment,
+                     int width,
+                     int height);
+    void draw_gameplay_announcement(const GameplayHudAnnouncementView& announcement, int width, int height);
     void draw_inventory_menu(const InventoryMenuState& inventory_menu, const HotbarState& hotbar, int width, int height);
     void draw_death_screen(const DeathScreenState& death_screen, int width, int height);
     void draw_pause_menu(const PauseMenuState& pause_menu, int width, int height);

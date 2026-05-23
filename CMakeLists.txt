@@ -182,6 +182,7 @@ add_library(valcraft_core
     src/world/ChunkMesher.cpp
     src/world/Environment.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/PlayerProgression.cpp
     src/gameplay/StartingVillage.cpp
     src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp

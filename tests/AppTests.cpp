@@ -95,6 +95,33 @@ TEST_CASE("game option parser accepts perf capture flags outside smoke mode") {
     CHECK(parsed.options.performance.perf_scenario == "interactive_session");
 }
 
+TEST_CASE("gameplay action keys use physical scancodes") {
+    SDL_Keysym drop_key {};
+    drop_key.sym = SDLK_q;
+    drop_key.scancode = SDL_SCANCODE_Q;
+    CHECK(is_drop_action_key(drop_key));
+
+    SDL_Keysym super_vision_key {};
+    super_vision_key.sym = SDLK_v;
+    super_vision_key.scancode = SDL_SCANCODE_V;
+    CHECK(is_super_vision_action_key(super_vision_key));
+
+    SDL_Keysym flight_key {};
+    flight_key.sym = SDLK_f;
+    flight_key.scancode = SDL_SCANCODE_F;
+    CHECK(is_flight_action_key(flight_key));
+
+    SDL_Keysym remapped_v_key {};
+    remapped_v_key.sym = SDLK_v;
+    remapped_v_key.scancode = SDL_SCANCODE_B;
+    CHECK_FALSE(is_super_vision_action_key(remapped_v_key));
+
+    SDL_Keysym remapped_f_key {};
+    remapped_f_key.sym = SDLK_f;
+    remapped_f_key.scancode = SDL_SCANCODE_G;
+    CHECK_FALSE(is_flight_action_key(remapped_f_key));
+}
+
 TEST_CASE("game option parser enables audit only when audit or perf capture flags are present") {
     const std::vector<std::string_view> default_arguments {
         "--hidden-window",
@@ -649,6 +676,21 @@ TEST_CASE("vital glyph mapping resolves full half and empty states for hearts an
     CHECK(std::all_of(empty_row.begin(), empty_row.end(), [](HudGlyphFill fill) { return fill == HudGlyphFill::Empty; }));
 }
 
+TEST_CASE("gameplay hud level badge stays top right and exposes stable progress geometry") {
+    auto hotbar = make_default_hotbar_state();
+
+    const auto desktop = build_gameplay_hud_layout(1600, 900, hotbar, 20.0F, 20.0F, 10.0F, 10.0F, false, 0.42F);
+    CHECK(desktop.level.x >= desktop.safe_margin);
+    CHECK(desktop.level.y >= desktop.safe_margin);
+    CHECK(desktop.level.x + desktop.level.width <= 1600.0F - desktop.safe_margin + 0.01F);
+    CHECK(desktop.level.progress_fill_width == doctest::Approx(desktop.level.progress_width * 0.42F));
+
+    const auto mobile = build_gameplay_hud_layout(480, 320, hotbar, 20.0F, 20.0F, 10.0F, 10.0F, false, 1.0F);
+    CHECK(mobile.level.x + mobile.level.width <= 480.0F - mobile.safe_margin + 0.01F);
+    CHECK(mobile.level.y + mobile.level.height < mobile.cluster_top);
+    CHECK(mobile.level.progress_fill_width == doctest::Approx(mobile.level.progress_width));
+}
+
 TEST_CASE("gameplay hud slot mapping keeps empty slots and stack counters stable") {
     HotbarState hotbar {};
     hotbar.slots[0] = make_item_stack(to_block_id(BlockType::Stone), 1);
@@ -1147,6 +1189,7 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     snapshot.player_state.fly_mode = true;
     snapshot.player_state.health = 13.5F;
     snapshot.player_state.death_cause = PlayerDeathCause::Zombie;
+    snapshot.progression = {12U, 3456ULL};
     snapshot.hotbar.slots[0] = make_item_stack(to_block_id(BlockType::Stone), 12);
     snapshot.hotbar.slots[4] = make_item_stack(to_block_id(BlockType::Torch), 16);
     snapshot.hotbar.selected_index = 4;
@@ -1218,6 +1261,8 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     CHECK(loaded->player_state.fly_mode == snapshot.player_state.fly_mode);
     CHECK(loaded->player_state.health == doctest::Approx(snapshot.player_state.health));
     CHECK(loaded->player_state.death_cause == snapshot.player_state.death_cause);
+    CHECK(loaded->progression.level == 12U);
+    CHECK(loaded->progression.experience == 3456ULL);
     CHECK(loaded->hotbar.selected_index == 4);
     CHECK(loaded->hotbar.slots[4].block_id == to_block_id(BlockType::Torch));
     CHECK(loaded->inventory.storage_slots[7].block_id == to_block_id(BlockType::Water));
@@ -1360,6 +1405,8 @@ TEST_CASE("save game loader preserves backward compatibility with version 1 file
     CHECK(loaded->spawn_position.z == doctest::Approx(spawn_position.z));
     CHECK(loaded->player_state.fly_mode);
     CHECK(loaded->player_state.health == doctest::Approx(player_state.health));
+    CHECK(loaded->progression.level == 1U);
+    CHECK(loaded->progression.experience == 0ULL);
     CHECK(std::all_of(loaded->inventory.equipment_slots.begin(), loaded->inventory.equipment_slots.end(), [](const HotbarSlot& slot) {
         return !inventory_slot_has_item(slot);
     }));

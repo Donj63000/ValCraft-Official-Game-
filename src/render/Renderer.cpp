@@ -516,6 +516,7 @@ auto glyph_rows(char character) -> std::array<std::uint8_t, 7> {
     case '(': return {{0x03, 0x06, 0x0C, 0x0C, 0x0C, 0x06, 0x03}};
     case ')': return {{0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18}};
     case '+': return {{0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00}};
+    case '%': return {{0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03}};
     case '.': return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}};
     case '-': return {{0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}};
     default: return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
@@ -2300,6 +2301,9 @@ void Renderer::render_frame(World& world,
                             const ConfirmDialogState& confirm_dialog,
                             std::span<const CreatureRenderInstance> creatures,
                             std::span<const ItemDropRenderInstance> item_drops,
+                            const PlayerProgressionState& progression,
+                            bool super_vision_active,
+                            const GameplayHudAnnouncementView& gameplay_announcement,
                             const EnvironmentState& environment,
                             int width,
                             int height) {
@@ -2337,6 +2341,7 @@ void Renderer::render_frame(World& world,
     constexpr float kBackCullStartDistance = 20.0F;
     constexpr float kBackCullStartDistanceSq = kBackCullStartDistance * kBackCullStartDistance;
     const auto sun_visible = environment.sun_direction.y > 0.0F;
+    const auto super_vision_strength = super_vision_active ? 1.0F : 0.0F;
     glm::mat4 light_view_projection(1.0F);
     ShadowPassContext shadow_context {};
     auto shadow_map_size = 0;
@@ -2498,6 +2503,7 @@ void Renderer::render_frame(World& world,
     glUniform1f(world_uniforms_.precipitation_intensity, environment.precipitation_intensity);
     glUniform1f(world_uniforms_.storm_intensity, environment.storm_intensity);
     glUniform1f(world_uniforms_.lightning_intensity, environment.lightning_intensity);
+    glUniform1f(world_uniforms_.super_vision_strength, super_vision_strength);
     glUniform1i(world_uniforms_.atlas, 0);
     glUniform1i(world_uniforms_.shadow_map, 1);
     glUniform1i(world_uniforms_.scene_color, 2);
@@ -2545,7 +2551,8 @@ void Renderer::render_frame(World& world,
         light_view_projection,
         eye,
         environment,
-        selected_hotbar_emits_local_light(hotbar));
+        selected_hotbar_emits_local_light(hotbar),
+        super_vision_strength);
 
     if (has_visible_water) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
@@ -2650,8 +2657,9 @@ void Renderer::render_frame(World& world,
     } else if (inventory_menu.visible) {
         draw_inventory_menu(inventory_menu, hotbar, width, height);
     } else {
-        draw_hotbar(player, hotbar, environment, width, height);
+        draw_hotbar(player, hotbar, progression, environment, width, height);
         draw_crosshair();
+        draw_gameplay_announcement(gameplay_announcement, width, height);
     }
     if (confirm_dialog.visible) {
         draw_confirm_dialog(confirm_dialog, width, height);
@@ -3460,6 +3468,7 @@ uniform float u_height_fog_density;
 uniform float u_precipitation_intensity;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
+uniform float u_super_vision_strength;
 uniform int u_shadows_enabled;
 
 out vec4 frag_color;
@@ -3722,6 +3731,10 @@ void main() {
     lit_color += albedo * vec3(0.62, 0.72, 1.00) * lightning_surface * (0.24 + 0.22 * clamp(u_storm_intensity, 0.0, 1.0));
 
     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
+    float super_vision = clamp(u_super_vision_strength, 0.0, 1.0) * (1.0 - daylight);
+    vec3 super_floor = albedo * vec3(0.58, 0.70, 0.78);
+    lit_color = mix(lit_color, max(lit_color, super_floor), super_vision * 0.72);
+    lit_color += vec3(0.05, 0.13, 0.16) * super_vision * (0.50 + 0.50 * sky_light);
 
     vec3 view_ray = normalize(v_world_position - u_camera_position);
     float weather_fog = 1.0 + clamp(u_precipitation_intensity, 0.0, 1.0) * 0.42 + clamp(u_storm_intensity, 0.0, 1.0) * 0.38;
@@ -3729,6 +3742,7 @@ void main() {
     float height_haze = 1.0 - exp(-max(30.0 - v_world_position.y, 0.0) * u_height_fog_density);
     height_haze *= clamp(v_distance / 140.0, 0.0, 1.0) * (0.10 + 0.18 * (1.0 - daylight));
     float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
+    fog = mix(fog, fog * 0.45, super_vision);
     float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
     float horizon = 1.0 - clamp(abs(view_ray.y), 0.0, 1.0);
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
@@ -3841,6 +3855,7 @@ uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform int u_shadows_enabled;
 uniform float u_player_light_strength;
+uniform float u_super_vision_strength;
 
 out vec4 frag_color;
 
@@ -3918,6 +3933,7 @@ void main() {
     float shadow = sample_shadow(normal);
     float cloud_shadow = sample_cloud_shadow(v_world_position + normal * 0.50, sun_direction);
     float sky_mix = clamp(u_daylight_factor, 0.0, 1.0);
+    float super_vision = clamp(u_super_vision_strength, 0.0, 1.0) * (1.0 - sky_mix);
     float cavity = clamp(v_cavity_mask, 0.0, 1.0);
     float hard_material = smoothstep(0.44, 0.90, v_material_class);
     float soft_fiber = 1.0 - smoothstep(0.28, 0.58, v_material_class);
@@ -3944,6 +3960,8 @@ void main() {
     float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), 2.45);
     vec3 rim_light = mix(vec3(0.12, 0.10, 0.08), vec3(0.34, 0.50, 0.60), 1.0 - sky_mix);
     rim_light *= rim * mix(0.08, 0.16, 1.0 - hard_material) * mix(0.78, 1.04, v_nightmare_factor);
+    vec3 super_vision_glow = mix(vec3(0.12, 0.72, 0.90), vec3(1.00, 0.24, 0.14), v_nightmare_factor);
+    super_vision_glow *= super_vision * (0.24 + 0.32 * rim + 0.18 * emissive_mask + 0.16 * v_nightmare_factor);
 
     vec3 reflected = reflect(-sun_direction, normal);
     float specular = pow(max(dot(reflected, view_direction), 0.0), mix(42.0, 16.0, hard_material));
@@ -3957,6 +3975,7 @@ void main() {
     vec3 lit_color = albedo * (ambient + sunlight + translucency + player_light);
     lit_color *= cavity_occlusion;
     lit_color += rim_light + specular_color;
+    lit_color = mix(lit_color, max(lit_color, albedo * vec3(0.62, 0.82, 0.88)), super_vision * 0.72);
     lit_color += u_night_tint_color * (0.09 + 0.08 * v_nightmare_factor) * (1.0 - sky_mix);
     float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) * (0.40 + 0.60 * smoothstep(-0.10, 1.0, normal.y));
     lit_color = mix(lit_color, lit_color * vec3(0.74, 0.80, 0.88), wetness * (0.12 + 0.12 * clamp(u_storm_intensity, 0.0, 1.0)));
@@ -3968,13 +3987,14 @@ void main() {
     float height_haze = 1.0 - exp(-max(28.0 - v_world_position.y, 0.0) * u_height_fog_density);
     height_haze *= clamp(v_distance / 130.0, 0.0, 1.0) * (0.08 + 0.12 * (1.0 - sky_mix));
     float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
+    fog = mix(fog, fog * 0.38, super_vision);
     float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
     float horizon = 1.0 - clamp(abs(view_ray.y), 0.0, 1.0);
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
     fog_color += mix(u_horizon_glow_color, u_sun_color, 0.34 + 0.20 * sky_mix) *
                  sun_scatter * horizon * u_atmospheric_scatter_strength * (0.16 + 0.78 * sky_mix);
     vec3 fogged_color = mix(lit_color, fog_color, fog);
-    vec3 fogged_glow = nightmare_glow * (1.0 - fog * 0.72);
+    vec3 fogged_glow = (nightmare_glow + super_vision_glow) * (1.0 - fog * 0.72);
     frag_color = vec4(fogged_color + fogged_glow, 1.0);
 }
 )";
@@ -4343,6 +4363,7 @@ void main() {
     world_uniforms_.scene_depth = glGetUniformLocation(world_program_, "u_scene_depth");
     world_uniforms_.inverse_view_projection = glGetUniformLocation(world_program_, "u_inverse_view_projection");
     world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
+    world_uniforms_.super_vision_strength = glGetUniformLocation(world_program_, "u_super_vision_strength");
 
     item_drop_uniforms_.view_projection = glGetUniformLocation(item_drop_program_, "u_view_projection");
     item_drop_uniforms_.light_view_projection = glGetUniformLocation(item_drop_program_, "u_light_view_projection");
@@ -4396,6 +4417,7 @@ void main() {
     creature_uniforms_.shadows_enabled = glGetUniformLocation(creature_program_, "u_shadows_enabled");
     creature_uniforms_.time_of_day = glGetUniformLocation(creature_program_, "u_time_of_day");
     creature_uniforms_.player_light_strength = glGetUniformLocation(creature_program_, "u_player_light_strength");
+    creature_uniforms_.super_vision_strength = glGetUniformLocation(creature_program_, "u_super_vision_strength");
 
     shadow_uniforms_.light_view_projection = glGetUniformLocation(shadow_program_, "u_light_view_projection");
     shadow_uniforms_.time_of_day = glGetUniformLocation(shadow_program_, "u_time_of_day");
@@ -5125,7 +5147,8 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
                               const glm::mat4& light_view_projection,
                               const glm::vec3& camera_position,
                               const EnvironmentState& environment,
-                              bool player_light_active) {
+                              bool player_light_active,
+                              float super_vision_strength) {
     if (creatures.empty() || creature_program_ == 0 || creature_vao_ == 0 || creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
         return;
     }
@@ -5224,6 +5247,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glUniform1f(creature_uniforms_.player_light_strength, player_light_active ? 1.0F : 0.0F);
+    glUniform1f(creature_uniforms_.super_vision_strength, std::clamp(super_vision_strength, 0.0F, 1.0F));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, creature_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
@@ -5297,6 +5321,7 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glUniform1i(creature_uniforms_.shadows_enabled, 0);
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glUniform1f(creature_uniforms_.player_light_strength, 0.0F);
+    glUniform1f(creature_uniforms_.super_vision_strength, 0.0F);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
@@ -5337,7 +5362,12 @@ void Renderer::draw_block_break_overlay(const PlayerController& player) {
     glDepthMask(GL_TRUE);
 }
 
-void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& hotbar, const EnvironmentState& /*environment*/, int width, int height) {
+void Renderer::draw_hotbar(const PlayerController& player,
+                           const HotbarState& hotbar,
+                           const PlayerProgressionState& progression,
+                           const EnvironmentState& /*environment*/,
+                           int width,
+                           int height) {
     if (width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
         return;
     }
@@ -5350,8 +5380,28 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
             glm::clamp(player_state.hurt_timer / 0.35F, 0.0F, 1.0F) * 0.32F,
             glm::clamp((max_health - player_state.health) / max_health, 0.0F, 1.0F) * 0.18F);
     const auto air_visible = player_state.head_underwater || player_state.air_seconds < max_air - 0.05F;
+    const auto normalized_progression = sanitize_player_progression_state(progression);
+    const auto experience_for_next_level = player_experience_for_next_level(normalized_progression.level);
+    const auto level_progress = experience_for_next_level == 0ULL
+                                    ? 1.0F
+                                    : std::clamp(
+                                          static_cast<float>(normalized_progression.experience) /
+                                              static_cast<float>(experience_for_next_level),
+                                          0.0F,
+                                          1.0F);
+    const auto level_progress_step = std::clamp(quantize_hud_value(level_progress, 128.0F), 0, 128);
+    const auto visible_level_progress = static_cast<float>(level_progress_step) / 128.0F;
     const auto hud_layout =
-        build_gameplay_hud_layout(width, height, hotbar, player_state.health, max_health, player_state.air_seconds, max_air, air_visible);
+        build_gameplay_hud_layout(
+            width,
+            height,
+            hotbar,
+            player_state.health,
+            max_health,
+            player_state.air_seconds,
+            max_air,
+            air_visible,
+            visible_level_progress);
 
     HotbarHudCacheKey cache_key {};
     cache_key.hotbar = hotbar;
@@ -5360,6 +5410,8 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
     cache_key.health_steps = quantize_hud_value(player_state.health, 16.0F);
     cache_key.air_steps = quantize_hud_value(player_state.air_seconds, 64.0F);
     cache_key.damage_flash_step = quantize_hud_value(damage_flash, 128.0F);
+    cache_key.player_level = normalized_progression.level;
+    cache_key.level_progress_step = level_progress_step;
     cache_key.air_visible = air_visible;
     cache_key.underwater = player_state.head_underwater;
 
@@ -5456,6 +5508,54 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
         const auto rail_palette = make_warm_panel_palette({0.70F, 0.56F, 0.30F, 1.0F});
         const auto heart_panel_palette = make_warm_panel_palette({0.90F, 0.28F, 0.32F, 1.0F});
         const auto bubble_panel_palette = make_warm_panel_palette({0.42F, 0.80F, 0.98F, 1.0F});
+        const auto level_panel_palette = make_warm_panel_palette({0.78F, 0.66F, 0.36F, 1.0F});
+
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.level.x,
+            hud_layout.level.y,
+            hud_layout.level.width,
+            hud_layout.level.height,
+            3.0F,
+            level_panel_palette,
+            true);
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.level.progress_x,
+            hud_layout.level.progress_y,
+            hud_layout.level.progress_width,
+            hud_layout.level.progress_height,
+            {0.03F, 0.04F, 0.05F, 0.58F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.level.progress_x,
+            hud_layout.level.progress_y,
+            hud_layout.level.progress_fill_width,
+            hud_layout.level.progress_height,
+            {0.97F, 0.78F, 0.35F, 0.92F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            hud_layout.level.progress_x,
+            hud_layout.level.progress_y,
+            hud_layout.level.progress_fill_width,
+            std::max(1.0F, hud_layout.level.progress_height * 0.32F),
+            {1.0F, 0.96F, 0.74F, 0.24F});
+        const auto level_label = std::string("LV ") + std::to_string(normalized_progression.level);
+        draw_text_bottom(
+            hud_layout.level.text_center_x,
+            viewport_height - hud_layout.level.text_y - hud_layout.level.text_pixel_size * 7.0F,
+            hud_layout.level.text_pixel_size,
+            level_label,
+            {0.98F, 0.96F, 0.88F, 0.98F},
+            true);
 
         append_hud_shadow_bottom_left(
             vertices,
@@ -5601,6 +5701,105 @@ void Renderer::draw_hotbar(const PlayerController& player, const HotbarState& ho
                 {0.98F, 0.98F, 0.96F, 0.98F},
                 true);
         }
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_gameplay_announcement(const GameplayHudAnnouncementView& announcement, int width, int height) {
+    if (!announcement.visible || width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    const auto progress = std::clamp(announcement.normalized_time, 0.0F, 1.0F);
+    const auto fade_in = std::clamp(progress / 0.10F, 0.0F, 1.0F);
+    const auto fade_out = std::clamp((1.0F - progress) / 0.22F, 0.0F, 1.0F);
+    const auto alpha = std::min(fade_in, fade_out);
+    if (alpha <= 0.01F) {
+        return;
+    }
+
+    auto title_pixel_size = viewport_width < 720.0F ? 3.0F : 4.0F;
+    auto detail_pixel_size = viewport_width < 720.0F ? 2.0F : 3.0F;
+    const auto panel_max_width = std::max(180.0F, viewport_width - 40.0F);
+    const auto padding_x = viewport_width < 720.0F ? 16.0F : 24.0F;
+    while (title_pixel_size > 2.0F &&
+           measure_pixel_text(announcement.title, title_pixel_size) > panel_max_width - padding_x * 2.0F) {
+        title_pixel_size -= 1.0F;
+    }
+    while (detail_pixel_size > 2.0F &&
+           measure_pixel_text(announcement.detail, detail_pixel_size) > panel_max_width - padding_x * 2.0F) {
+        detail_pixel_size -= 1.0F;
+    }
+
+    const auto title_width = measure_pixel_text(announcement.title, title_pixel_size);
+    const auto detail_width = measure_pixel_text(announcement.detail, detail_pixel_size);
+    const auto panel_width = std::min(panel_max_width, std::max(title_width, detail_width) + padding_x * 2.0F);
+    const auto panel_height = (detail_width > 0.0F ? 58.0F : 44.0F) + (viewport_width < 720.0F ? -8.0F : 0.0F);
+    const auto panel_x = (viewport_width - panel_width) * 0.5F;
+    const auto panel_y = std::max(18.0F, viewport_height * 0.055F);
+    const auto accent = HudColor {0.34F, 0.92F, 1.0F, 1.0F};
+    auto palette = make_warm_panel_palette(accent);
+    palette.frame = hud_with_alpha(palette.frame, palette.frame[3] * alpha);
+    palette.fill = hud_with_alpha(palette.fill, palette.fill[3] * alpha);
+    palette.highlight = hud_with_alpha(palette.highlight, palette.highlight[3] * alpha);
+    palette.shadow = hud_with_alpha(palette.shadow, palette.shadow[3] * alpha);
+    palette.trim = hud_with_alpha(palette.trim, palette.trim[3] * alpha);
+
+    std::vector<HudVertex> vertices {};
+    vertices.reserve(1536U);
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        3.0F,
+        palette,
+        true);
+
+    const auto draw_text = [&](float center_x, float y, float pixel_size, std::string_view text, const HudColor& color) {
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            center_x + pixel_size,
+            y + pixel_size,
+            pixel_size,
+            text,
+            {0.0F, 0.0F, 0.0F, 0.48F * alpha},
+            true);
+        append_pixel_text(vertices, viewport_width, viewport_height, center_x, y, pixel_size, text, hud_with_alpha(color, color[3] * alpha), true);
+    };
+
+    const auto title_y = panel_y + (announcement.detail.empty() ? 15.0F : 12.0F);
+    draw_text(panel_x + panel_width * 0.5F, title_y, title_pixel_size, announcement.title, {0.96F, 0.99F, 1.0F, 1.0F});
+    if (!announcement.detail.empty()) {
+        draw_text(
+            panel_x + panel_width * 0.5F,
+            title_y + title_pixel_size * 8.0F + 7.0F,
+            detail_pixel_size,
+            announcement.detail,
+            {0.72F, 0.94F, 1.0F, 0.92F});
     }
 
     glDisable(GL_DEPTH_TEST);

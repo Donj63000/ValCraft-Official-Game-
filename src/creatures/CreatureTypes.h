@@ -51,6 +51,11 @@ enum class CreatureBehaviorState : std::uint8_t {
     Twitch = 6,
     Chase = 7,
     Strike = 8,
+    Graze = 9,
+    Work = 10,
+    Socialize = 11,
+    Sleep = 12,
+    ReturnHome = 13,
 };
 
 struct CreatureSpawnAnchor {

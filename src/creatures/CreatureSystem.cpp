@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 
 namespace valcraft {
 
@@ -41,6 +42,12 @@ constexpr float kNightChasePersistenceSeconds = 1.35F;
 constexpr float kResidentGreetingDistance = 5.0F;
 constexpr float kResidentPersonalSpace = 1.65F;
 constexpr float kResidentHomeSnapThreshold = 1.75F;
+constexpr float kResidentArrivalRadius = 0.72F;
+constexpr float kResidentCrowdRadius = 1.20F;
+constexpr float kResidentSocialDistance = 5.75F;
+constexpr float kResidentPlayerLookDistance = 6.75F;
+constexpr float kResidentPanicDuration = 1.45F;
+constexpr float kResidentStepLookahead = 0.90F;
 constexpr float kCreatureHurtDuration = 0.34F;
 constexpr float kCreatureDeathVisualDuration = 1.18F;
 constexpr float kCreatureSpawnSuppressionDuration = 14.0F;
@@ -64,6 +71,14 @@ struct SteeringMoveResult {
     bool moved = false;
     bool diverted = false;
     float heading = 0.0F;
+};
+
+struct ResidentCrowdContext {
+    glm::vec2 separation {0.0F};
+    glm::vec2 social_pull {0.0F};
+    glm::vec2 nearest_resident_direction {0.0F};
+    float nearest_resident_distance = std::numeric_limits<float>::max();
+    bool has_nearby_resident = false;
 };
 
 struct CreatureHitbox {
@@ -124,6 +139,15 @@ auto try_move_grounded_with_steering(CreatureInstance& creature,
                                      float roam_radius,
                                      bool aggressive,
                                      std::optional<int> preferred_floor_y = std::nullopt) -> SteeringMoveResult;
+auto try_move_grounded_towards(CreatureInstance& creature,
+                               const World& world,
+                               float base_heading,
+                               float step_distance,
+                               float roam_radius,
+                               const glm::vec2& target_position,
+                               const glm::vec2& preferred_direction,
+                               bool aggressive,
+                               std::optional<int> preferred_floor_y = std::nullopt) -> SteeringMoveResult;
 
 auto hash_coords(int x, int z, std::uint32_t seed) noexcept -> std::uint32_t {
     auto value = static_cast<std::uint32_t>(x) * 374761393U;
@@ -449,12 +473,214 @@ auto resolve_grounded_target_y(const World& world,
     return try_floor(*surface_y);
 }
 
+auto clamp_vec2_length(const glm::vec2& value, float max_length) noexcept -> glm::vec2 {
+    const auto length_sq = glm::dot(value, value);
+    if (length_sq <= 1.0e-8F) {
+        return {0.0F, 0.0F};
+    }
+
+    const auto length = std::sqrt(length_sq);
+    if (length <= max_length) {
+        return value;
+    }
+    return value / length * max_length;
+}
+
+auto resident_phase_offset(const ResidentProfile& profile, ResidentRoutinePhase phase, float radius) noexcept -> glm::vec2 {
+    if (radius <= 1.0e-4F) {
+        return {0.0F, 0.0F};
+    }
+
+    auto seed = profile.routine_seed ^ (static_cast<std::uint32_t>(phase) + 1U) * 0x9E3779B9U;
+    const auto angle = next_unit(seed) * kTwoPi;
+    const auto distance = radius * (0.35F + next_unit(seed) * 0.65F);
+    return direction_from_yaw(angle) * distance;
+}
+
+auto resident_activity_target(const ResidentProfile& profile, ResidentRoutinePhase phase) noexcept -> glm::vec3 {
+    auto target = resident_target_for_phase(profile, phase);
+    float jitter_radius = 0.0F;
+    switch (phase) {
+    case ResidentRoutinePhase::Morning:
+        jitter_radius = 0.28F;
+        break;
+    case ResidentRoutinePhase::Work:
+        jitter_radius = profile.role == CreatureResidentRole::Gardener ? 0.55F : 0.34F;
+        break;
+    case ResidentRoutinePhase::Social:
+        jitter_radius = 0.82F;
+        break;
+    case ResidentRoutinePhase::Evening:
+        jitter_radius = 0.26F;
+        break;
+    case ResidentRoutinePhase::Home:
+    case ResidentRoutinePhase::Night:
+    default:
+        jitter_radius = 0.10F;
+        break;
+    }
+
+    const auto offset = resident_phase_offset(profile, phase, jitter_radius);
+    target.x += offset.x;
+    target.z += offset.y;
+    return target;
+}
+
+auto is_resident_travel_state(CreatureBehaviorState state) noexcept -> bool {
+    return state == CreatureBehaviorState::Wander ||
+           state == CreatureBehaviorState::ReturnHome ||
+           state == CreatureBehaviorState::Flee;
+}
+
+auto is_resident_stationary_activity(CreatureBehaviorState state) noexcept -> bool {
+    return state == CreatureBehaviorState::Idle ||
+           state == CreatureBehaviorState::Sniff ||
+           state == CreatureBehaviorState::Stare ||
+           state == CreatureBehaviorState::Graze ||
+           state == CreatureBehaviorState::Work ||
+           state == CreatureBehaviorState::Socialize ||
+           state == CreatureBehaviorState::Sleep;
+}
+
+auto resident_crowd_context(const CreatureInstance& creature,
+                            std::span<const CreatureInstance> active_creatures) noexcept -> ResidentCrowdContext {
+    ResidentCrowdContext context {};
+
+    for (const auto& other : active_creatures) {
+        if (&other == &creature ||
+            !is_resident_species(other.anchor.species) ||
+            other.health <= 0.0F) {
+            continue;
+        }
+
+        const glm::vec2 delta {other.position.x - creature.position.x, other.position.z - creature.position.z};
+        const auto distance_sq = glm::dot(delta, delta);
+        if (distance_sq <= 1.0e-6F) {
+            continue;
+        }
+
+        const auto distance = std::sqrt(distance_sq);
+        const auto direction = delta / distance;
+        if (distance < kResidentCrowdRadius) {
+            const auto strength = (kResidentCrowdRadius - distance) / kResidentCrowdRadius;
+            context.separation -= direction * strength;
+        }
+
+        if (distance < context.nearest_resident_distance) {
+            context.nearest_resident_distance = distance;
+            context.nearest_resident_direction = direction;
+            context.has_nearby_resident = true;
+        }
+    }
+
+    context.separation = clamp_vec2_length(context.separation, 1.0F);
+    if (context.has_nearby_resident &&
+        context.nearest_resident_distance > kResidentCrowdRadius * 1.22F &&
+        context.nearest_resident_distance < kResidentSocialDistance) {
+        const auto attraction = 1.0F - context.nearest_resident_distance / kResidentSocialDistance;
+        context.social_pull = context.nearest_resident_direction * glm::clamp(attraction, 0.0F, 1.0F);
+    }
+    return context;
+}
+
+auto resident_choose_arrived_activity(const ResidentProfile& profile,
+                                      ResidentRoutinePhase phase,
+                                      float player_distance,
+                                      bool has_nearby_resident,
+                                      std::uint32_t& behavior_seed) noexcept -> CreatureBehaviorState {
+    const auto choice = next_unit(behavior_seed);
+
+    switch (phase) {
+    case ResidentRoutinePhase::Night:
+    case ResidentRoutinePhase::Home:
+        if (player_distance < kResidentGreetingDistance && choice < 0.24F) {
+            return CreatureBehaviorState::Stare;
+        }
+        return choice < 0.78F ? CreatureBehaviorState::Sleep : CreatureBehaviorState::Idle;
+    case ResidentRoutinePhase::Morning:
+        if (profile.role == CreatureResidentRole::Gardener && choice < 0.70F) {
+            return CreatureBehaviorState::Graze;
+        }
+        if (choice < 0.58F) {
+            return CreatureBehaviorState::Work;
+        }
+        return choice < 0.80F ? CreatureBehaviorState::Sniff : CreatureBehaviorState::Idle;
+    case ResidentRoutinePhase::Work:
+        if (profile.role == CreatureResidentRole::Gardener) {
+            return choice < 0.72F ? CreatureBehaviorState::Graze : CreatureBehaviorState::Sniff;
+        }
+        if (profile.role == CreatureResidentRole::Elder) {
+            return choice < 0.38F ? CreatureBehaviorState::Stare : CreatureBehaviorState::Idle;
+        }
+        return choice < 0.76F ? CreatureBehaviorState::Work : CreatureBehaviorState::Sniff;
+    case ResidentRoutinePhase::Social:
+        if (has_nearby_resident && choice < 0.68F) {
+            return CreatureBehaviorState::Socialize;
+        }
+        if (player_distance < kResidentGreetingDistance && choice < 0.48F) {
+            return CreatureBehaviorState::Stare;
+        }
+        return choice < 0.78F ? CreatureBehaviorState::Socialize : CreatureBehaviorState::Idle;
+    case ResidentRoutinePhase::Evening:
+    default:
+        if (choice < 0.42F) {
+            return CreatureBehaviorState::Socialize;
+        }
+        if (choice < 0.68F) {
+            return CreatureBehaviorState::Stare;
+        }
+        return CreatureBehaviorState::Idle;
+    }
+}
+
+auto resident_activity_timer(CreatureBehaviorState state,
+                             CreatureResidentRole role,
+                             std::uint32_t& behavior_seed) noexcept -> float {
+    const auto roll = next_unit(behavior_seed);
+    const auto role_bias = resident_behavior_bias(role);
+    switch (state) {
+    case CreatureBehaviorState::Sleep:
+        return 1.35F + roll * 1.85F;
+    case CreatureBehaviorState::Work:
+        return 0.95F + roll * 1.25F + role_bias * 0.35F;
+    case CreatureBehaviorState::Graze:
+        return 0.85F + roll * 1.15F;
+    case CreatureBehaviorState::Socialize:
+        return 0.72F + roll * 1.10F;
+    case CreatureBehaviorState::ReturnHome:
+    case CreatureBehaviorState::Wander:
+        return 0.58F + roll * 0.82F;
+    case CreatureBehaviorState::Stare:
+        return 0.46F + roll * 0.72F;
+    case CreatureBehaviorState::Sniff:
+        return 0.52F + roll * 0.70F;
+    case CreatureBehaviorState::Idle:
+    default:
+        return 0.72F + roll * 0.92F;
+    }
+}
+
+auto resident_travel_state_for_phase(ResidentRoutinePhase phase) noexcept -> CreatureBehaviorState {
+    switch (phase) {
+    case ResidentRoutinePhase::Evening:
+    case ResidentRoutinePhase::Home:
+    case ResidentRoutinePhase::Night:
+        return CreatureBehaviorState::ReturnHome;
+    case ResidentRoutinePhase::Morning:
+    case ResidentRoutinePhase::Work:
+    case ResidentRoutinePhase::Social:
+    default:
+        return CreatureBehaviorState::Wander;
+    }
+}
+
 void update_resident_creature(CreatureInstance& creature,
                               const ResidentProfile& profile,
                               float dt,
                               const World& world,
                               const glm::vec3& player_position,
-                              const EnvironmentState& environment) {
+                              const EnvironmentState& environment,
+                              std::span<const CreatureInstance> active_creatures) {
     const auto tuning = tuning_for(creature.anchor.species);
     const auto home_position = resident_floor_position(creature.anchor);
     const auto preferred_floor_y = creature.anchor.ground_block.y;
@@ -463,6 +689,8 @@ void update_resident_creature(CreatureInstance& creature,
         creature.position = home_position;
         creature.yaw_radians = settle_yaw_from_seed(profile.routine_seed);
         creature.wander_heading = creature.yaw_radians;
+        creature.behavior_state = CreatureBehaviorState::Idle;
+        creature.behavior_timer = 0.0F;
     }
 
     creature.phase = CreaturePhase::Day;
@@ -478,169 +706,198 @@ void update_resident_creature(CreatureInstance& creature,
     const auto player_distance_sq = glm::dot(to_player, to_player);
     const auto player_distance = std::sqrt(std::max(player_distance_sq, 0.0F));
     const auto player_close = player_distance < kResidentPersonalSpace && player_distance_sq > 1.0e-6F;
+    const auto player_lookable = player_distance < kResidentPlayerLookDistance && player_distance_sq > 1.0e-6F;
     const auto phase = resident_routine_phase(environment.time_of_day);
-    const auto target_position = resident_target_for_phase(profile, phase);
+    auto target_position = resident_activity_target(profile, phase);
+    const auto crowd = resident_crowd_context(creature, active_creatures);
+
+    if (phase == ResidentRoutinePhase::Social && crowd.has_nearby_resident) {
+        const auto meet_distance = glm::clamp(crowd.nearest_resident_distance * 0.45F, 1.65F, 2.80F);
+        const auto meet_target = creature.position + glm::vec3 {
+            crowd.nearest_resident_direction.x * meet_distance,
+            0.0F,
+            crowd.nearest_resident_direction.y * meet_distance,
+        };
+        target_position.x = glm::mix(target_position.x, meet_target.x, 0.34F);
+        target_position.z = glm::mix(target_position.z, meet_target.z, 0.34F);
+    }
+
     const auto to_target = glm::vec2 {
         target_position.x - creature.position.x,
         target_position.z - creature.position.z,
     };
-    const auto target_distance = std::sqrt(std::max(glm::dot(to_target, to_target), 0.0F));
+    const auto target_distance_sq = glm::dot(to_target, to_target);
+    const auto target_distance = std::sqrt(std::max(target_distance_sq, 0.0F));
     const auto target_direction = normalize_or_cardinal(to_target, profile.routine_seed);
     const auto orbit_direction = perpendicular_left(target_direction) * ((profile.routine_seed & 1U) == 0U ? 1.0F : -1.0F);
     const auto resident_speed = tuning.day_speed * resident_speed_factor(profile.role);
-    const auto bias = resident_behavior_bias(profile.role);
+    const auto role_bias = resident_behavior_bias(profile.role);
     const auto position_before_move = creature.position;
+
+    const auto far_from_target = target_distance > kResidentArrivalRadius * 1.70F;
+    const auto panic_active = creature.behavior_state == CreatureBehaviorState::Flee && creature.behavior_timer > 0.0F;
+    const auto recently_hurt = creature.hurt_timer > 0.0F;
+    const auto should_pick_routine_behavior =
+        creature.behavior_timer <= 0.0F ||
+        creature.behavior_state == CreatureBehaviorState::Chase ||
+        creature.behavior_state == CreatureBehaviorState::Strike ||
+        (!far_from_target && is_resident_travel_state(creature.behavior_state));
+
+    if ((recently_hurt || panic_active) && player_distance_sq > 1.0e-6F) {
+        creature.behavior_state = CreatureBehaviorState::Flee;
+        creature.behavior_timer = std::max(creature.behavior_timer, kResidentPanicDuration);
+    } else if (player_close) {
+        creature.behavior_state = CreatureBehaviorState::Wander;
+        creature.behavior_timer = 0.34F;
+    } else if (far_from_target &&
+               (creature.behavior_timer <= 0.0F || is_resident_stationary_activity(creature.behavior_state))) {
+        creature.behavior_state = resident_travel_state_for_phase(phase);
+        creature.behavior_timer = resident_activity_timer(creature.behavior_state, profile.role, creature.behavior_seed);
+        creature.wander_heading = yaw_from_direction(target_direction);
+    } else if (should_pick_routine_behavior) {
+        creature.behavior_state = resident_choose_arrived_activity(
+            profile,
+            phase,
+            player_distance,
+            crowd.has_nearby_resident,
+            creature.behavior_seed);
+        creature.behavior_timer = resident_activity_timer(creature.behavior_state, profile.role, creature.behavior_seed);
+        if (creature.behavior_state == CreatureBehaviorState::Sniff ||
+            creature.behavior_state == CreatureBehaviorState::Graze ||
+            creature.behavior_state == CreatureBehaviorState::Socialize) {
+            creature.wander_heading = yaw_from_direction(orbit_direction);
+        }
+    }
 
     glm::vec2 desired_move {0.0F};
     auto desired_yaw = creature.yaw_radians;
-    float target_motion_amount = 0.08F;
-    float target_gaze_weight = 0.26F;
+    float target_motion_amount = 0.07F;
+    float target_gaze_weight = 0.24F + role_bias * 0.14F;
+    float target_attack_amount = 0.0F;
+    float speed_multiplier = 0.70F;
 
-    if (player_close) {
+    if (creature.behavior_state == CreatureBehaviorState::Flee && player_distance_sq > 1.0e-6F) {
+        const auto flee_direction = -glm::normalize(to_player);
+        desired_move = flee_direction * tuning.flee_speed * dt * 0.78F;
+        desired_yaw = yaw_from_direction(flee_direction);
+        target_motion_amount = 0.92F;
+        target_gaze_weight = 0.10F;
+    } else if (player_close && player_distance_sq > 1.0e-6F) {
         const auto give_space_direction = -glm::normalize(to_player);
-        creature.behavior_state = CreatureBehaviorState::Wander;
-        creature.behavior_timer = 0.34F;
-        desired_move = give_space_direction * resident_speed * dt * (0.36F + bias * 0.16F);
+        desired_move = give_space_direction * resident_speed * dt * (0.42F + role_bias * 0.12F);
         desired_yaw = yaw_from_direction(give_space_direction);
-        target_motion_amount = 0.38F + bias * 0.12F;
-        target_gaze_weight = 0.20F;
-    } else if (target_distance > profile.walk_radius * 0.60F) {
-        const auto target_heading = yaw_from_direction(target_direction);
-        if (creature.behavior_state != CreatureBehaviorState::Wander || creature.behavior_timer <= 0.0F) {
-            creature.behavior_state = CreatureBehaviorState::Wander;
-            creature.behavior_timer = 0.75F + bias * 0.80F;
-            creature.wander_heading = target_heading;
-        } else {
-            creature.wander_heading = rotate_towards(creature.wander_heading, target_heading, 1.35F * std::max(dt, 0.0F));
-        }
-        desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.58F + bias * 0.18F);
-        desired_yaw = creature.wander_heading;
-        target_motion_amount = 0.34F + bias * 0.26F;
-        target_gaze_weight = 0.18F + bias * 0.18F;
+        target_motion_amount = 0.46F + role_bias * 0.10F;
+        target_gaze_weight = 0.16F;
     } else {
-        const auto should_pick_routine_behavior =
-            creature.behavior_timer <= 0.0F ||
-            creature.behavior_state == CreatureBehaviorState::Flee ||
-            creature.behavior_state == CreatureBehaviorState::Chase ||
-            creature.behavior_state == CreatureBehaviorState::Strike;
-        if (should_pick_routine_behavior) {
-            const auto choice = next_unit(creature.behavior_seed);
-            switch (phase) {
-            case ResidentRoutinePhase::Night:
-            case ResidentRoutinePhase::Home:
-                if (choice < 0.55F) {
-                    creature.behavior_state = CreatureBehaviorState::Idle;
-                    creature.behavior_timer = 0.90F + choice * 0.80F;
-                } else {
-                    creature.behavior_state = CreatureBehaviorState::Stare;
-                    creature.behavior_timer = 0.50F + choice * 0.70F;
-                }
-                break;
-            case ResidentRoutinePhase::Morning:
-            case ResidentRoutinePhase::Work:
-                if (choice < 0.38F) {
-                    creature.behavior_state = CreatureBehaviorState::Sniff;
-                    creature.behavior_timer = 0.65F + choice * 0.55F;
-                    creature.wander_heading = yaw_from_direction(orbit_direction);
-                } else if (choice < 0.72F) {
-                    creature.behavior_state = CreatureBehaviorState::Wander;
-                    creature.behavior_timer = 0.75F + choice * 0.90F;
-                    creature.wander_heading = yaw_from_direction(target_direction);
-                } else {
-                    creature.behavior_state = CreatureBehaviorState::Idle;
-                    creature.behavior_timer = 0.70F + choice * 0.60F;
-                }
-                break;
-            case ResidentRoutinePhase::Social:
-            case ResidentRoutinePhase::Evening:
-            default:
-                if (choice < 0.42F) {
-                    creature.behavior_state = CreatureBehaviorState::Stare;
-                    creature.behavior_timer = 0.60F + choice * 0.60F;
-                } else if (choice < 0.78F) {
-                    creature.behavior_state = CreatureBehaviorState::Sniff;
-                    creature.behavior_timer = 0.55F + choice * 0.50F;
-                    creature.wander_heading = yaw_from_direction(orbit_direction);
-                } else {
-                    creature.behavior_state = CreatureBehaviorState::Idle;
-                    creature.behavior_timer = 0.80F + choice * 0.60F;
-                }
-                break;
-            }
-        }
-
-        switch (phase) {
-        case ResidentRoutinePhase::Night:
-        case ResidentRoutinePhase::Home:
-            if (creature.behavior_state == CreatureBehaviorState::Stare) {
-                if (player_distance_sq > 1.0e-6F) {
-                    desired_yaw = yaw_from_direction(glm::normalize(to_player));
-                } else {
-                    desired_yaw = creature.wander_heading;
-                }
-                target_gaze_weight = 0.72F;
-            } else {
-                creature.behavior_state = CreatureBehaviorState::Idle;
-                desired_yaw = creature.wander_heading;
-            }
-            target_motion_amount = 0.05F + bias * 0.04F;
+        switch (creature.behavior_state) {
+        case CreatureBehaviorState::ReturnHome:
+            speed_multiplier = phase == ResidentRoutinePhase::Night ? 0.92F : 0.78F;
+            desired_move = target_direction * resident_speed * dt * speed_multiplier;
+            desired_yaw = yaw_from_direction(target_direction);
+            target_motion_amount = 0.54F + role_bias * 0.18F;
+            target_gaze_weight = 0.20F;
             break;
-        case ResidentRoutinePhase::Morning:
-        case ResidentRoutinePhase::Work:
-            if (creature.behavior_state == CreatureBehaviorState::Sniff) {
-                desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.10F + bias * 0.06F);
-                desired_yaw = creature.wander_heading;
-                target_motion_amount = 0.22F + bias * 0.16F;
-                target_gaze_weight = 0.32F;
-            } else if (creature.behavior_state == CreatureBehaviorState::Wander) {
-                desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.18F + bias * 0.08F);
-                desired_yaw = creature.wander_heading;
-                target_motion_amount = 0.30F + bias * 0.20F;
-                target_gaze_weight = 0.22F;
-            } else if (creature.behavior_state == CreatureBehaviorState::Stare) {
-                if (player_distance_sq > 1.0e-6F) {
-                    desired_yaw = yaw_from_direction(glm::normalize(to_player));
-                } else {
-                    desired_yaw = creature.wander_heading;
-                }
-                target_motion_amount = 0.10F + bias * 0.06F;
-                target_gaze_weight = 0.68F;
+        case CreatureBehaviorState::Wander:
+            if (target_distance > kResidentArrivalRadius) {
+                creature.wander_heading = rotate_towards(
+                    creature.wander_heading,
+                    yaw_from_direction(target_direction),
+                    (1.60F + role_bias * 0.35F) * std::max(dt, 0.0F));
+            }
+            desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.56F + role_bias * 0.20F);
+            desired_yaw = creature.wander_heading;
+            target_motion_amount = 0.40F + role_bias * 0.28F;
+            target_gaze_weight = 0.20F + role_bias * 0.15F;
+            break;
+        case CreatureBehaviorState::Work:
+            if (target_distance > kResidentArrivalRadius) {
+                desired_move = target_direction * resident_speed * dt * (0.42F + role_bias * 0.14F);
+                desired_yaw = yaw_from_direction(target_direction);
+                target_motion_amount = 0.34F + role_bias * 0.18F;
             } else {
-                creature.behavior_state = CreatureBehaviorState::Idle;
+                desired_yaw = wrap_angle(yaw_from_direction(target_direction) + std::sin(creature.animation_time * 1.6F) * 0.20F);
+                target_motion_amount = 0.13F + role_bias * 0.08F;
+            }
+            target_gaze_weight = 0.38F + role_bias * 0.22F;
+            target_attack_amount = 0.58F;
+            break;
+        case CreatureBehaviorState::Graze:
+            if (target_distance > kResidentArrivalRadius * 1.20F) {
+                desired_move = target_direction * resident_speed * dt * 0.38F;
+                desired_yaw = yaw_from_direction(target_direction);
+                target_motion_amount = 0.28F;
+            } else {
+                desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * 0.10F;
+                desired_yaw = wrap_angle(creature.wander_heading + std::sin(creature.animation_time * 3.2F) * 0.10F);
+                target_motion_amount = 0.18F;
+            }
+            target_gaze_weight = 0.44F;
+            target_attack_amount = 0.34F;
+            break;
+        case CreatureBehaviorState::Socialize:
+            if (target_distance > kResidentArrivalRadius * 1.45F) {
+                desired_move = target_direction * resident_speed * dt * (0.40F + role_bias * 0.16F);
+                desired_yaw = yaw_from_direction(target_direction);
+                target_motion_amount = 0.34F + role_bias * 0.16F;
+            } else if (crowd.has_nearby_resident) {
+                desired_yaw = yaw_from_direction(crowd.nearest_resident_direction);
+                desired_move = (crowd.social_pull + orbit_direction * 0.18F) * resident_speed * dt * 0.12F;
+                target_motion_amount = 0.16F + role_bias * 0.08F;
+            } else {
+                desired_yaw = player_lookable ? yaw_from_direction(glm::normalize(to_player)) : creature.wander_heading;
+                target_motion_amount = 0.10F + role_bias * 0.05F;
+            }
+            target_gaze_weight = 0.74F + role_bias * 0.16F;
+            target_attack_amount = 0.44F;
+            break;
+        case CreatureBehaviorState::Sleep:
+            if (target_distance > kResidentArrivalRadius * 0.75F) {
+                desired_move = target_direction * resident_speed * dt * 0.36F;
+                desired_yaw = yaw_from_direction(target_direction);
+                target_motion_amount = 0.26F;
+                target_gaze_weight = 0.10F;
+            } else {
                 desired_yaw = creature.wander_heading;
-                target_motion_amount = 0.12F + bias * 0.08F;
-                target_gaze_weight = 0.24F;
+                target_motion_amount = 0.02F;
+                target_gaze_weight = player_lookable ? 0.20F : 0.06F;
+                target_attack_amount = 0.0F;
             }
             break;
-        case ResidentRoutinePhase::Social:
-        case ResidentRoutinePhase::Evening:
+        case CreatureBehaviorState::Sniff:
+            desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.10F + role_bias * 0.06F);
+            desired_yaw = wrap_angle(creature.wander_heading + std::sin(creature.animation_time * 3.8F) * 0.12F);
+            target_motion_amount = 0.20F + role_bias * 0.12F;
+            target_gaze_weight = 0.36F;
+            break;
+        case CreatureBehaviorState::Stare:
+            if (player_lookable) {
+                desired_yaw = yaw_from_direction(glm::normalize(to_player));
+            } else if (crowd.has_nearby_resident) {
+                desired_yaw = yaw_from_direction(crowd.nearest_resident_direction);
+            } else {
+                desired_yaw = creature.wander_heading;
+            }
+            target_motion_amount = 0.07F + role_bias * 0.04F;
+            target_gaze_weight = 0.82F;
+            break;
+        case CreatureBehaviorState::Idle:
         default:
-            if (creature.behavior_state == CreatureBehaviorState::Stare) {
-                if (player_distance_sq > 1.0e-6F) {
-                    desired_yaw = yaw_from_direction(glm::normalize(to_player));
-                } else {
-                    desired_yaw = creature.wander_heading;
-                }
-                target_motion_amount = 0.10F + bias * 0.06F;
-                target_gaze_weight = 0.80F;
-            } else if (creature.behavior_state == CreatureBehaviorState::Sniff) {
-                desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.08F + bias * 0.04F);
-                desired_yaw = creature.wander_heading;
-                target_motion_amount = 0.18F + bias * 0.10F;
-                target_gaze_weight = 0.34F;
-            } else if (creature.behavior_state == CreatureBehaviorState::Wander) {
-                desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.12F + bias * 0.05F);
-                desired_yaw = creature.wander_heading;
-                target_motion_amount = 0.24F + bias * 0.14F;
-                target_gaze_weight = 0.28F;
-            } else {
-                creature.behavior_state = CreatureBehaviorState::Idle;
-                desired_yaw = creature.wander_heading;
-                target_motion_amount = 0.12F + bias * 0.08F;
-                target_gaze_weight = 0.26F;
-            }
+            desired_yaw = player_lookable && player_distance < kResidentGreetingDistance * 0.72F ?
+                yaw_from_direction(glm::normalize(to_player)) : creature.wander_heading;
+            target_motion_amount = 0.05F + role_bias * 0.04F;
+            target_gaze_weight = player_lookable ? 0.46F : 0.22F + role_bias * 0.10F;
             break;
         }
+    }
+
+    if (glm::dot(crowd.separation, crowd.separation) > 1.0e-6F &&
+        creature.behavior_state != CreatureBehaviorState::Sleep) {
+        desired_move += crowd.separation * resident_speed * dt * 0.62F;
+        if (glm::dot(desired_move, desired_move) > 1.0e-6F &&
+            (creature.behavior_state == CreatureBehaviorState::Idle || creature.behavior_state == CreatureBehaviorState::Socialize)) {
+            desired_yaw = yaw_from_direction(glm::normalize(desired_move));
+        }
+        target_motion_amount = std::max(target_motion_amount, 0.28F);
     }
 
     const auto desired_distance = glm::length(desired_move);
@@ -650,12 +907,15 @@ void update_resident_creature(CreatureInstance& creature,
     auto resolved_yaw = desired_yaw;
     if (desired_distance > 1.0e-6F) {
         attempted_move = true;
-        const auto steering_result = try_move_grounded_with_steering(
+        const auto base_heading = yaw_from_direction(normalize_or_cardinal(desired_move, profile.routine_seed));
+        const auto steering_result = try_move_grounded_towards(
             creature,
             world,
-            resolved_yaw,
+            base_heading,
             desired_distance,
             profile.roam_radius,
+            {target_position.x, target_position.z},
+            normalize_or_cardinal(desired_move, profile.routine_seed),
             true,
             preferred_floor_y);
         moved = steering_result.moved;
@@ -672,14 +932,20 @@ void update_resident_creature(CreatureInstance& creature,
     if (glm::dot(travelled_horizontal, travelled_horizontal) > 1.0e-6F) {
         resolved_yaw = yaw_from_direction(glm::normalize(travelled_horizontal));
         if (creature.behavior_state == CreatureBehaviorState::Wander ||
-            creature.behavior_state == CreatureBehaviorState::Sniff) {
+            creature.behavior_state == CreatureBehaviorState::ReturnHome ||
+            creature.behavior_state == CreatureBehaviorState::Sniff ||
+            creature.behavior_state == CreatureBehaviorState::Graze) {
             creature.wander_heading = resolved_yaw;
         }
     } else if (attempted_move && !moved) {
-        creature.wander_heading = wrap_angle(creature.wander_heading + kPi * 0.35F);
+        creature.wander_heading = wrap_angle(creature.wander_heading + next_signed_unit(creature.behavior_seed) * 1.18F + 0.72F);
         target_motion_amount = std::min(target_motion_amount, 0.16F);
+        if (far_from_target) {
+            creature.behavior_timer = std::min(creature.behavior_timer, 0.22F);
+        }
     }
-    if (steering_diverted && creature.behavior_state == CreatureBehaviorState::Wander) {
+    if (steering_diverted &&
+        (creature.behavior_state == CreatureBehaviorState::Wander || creature.behavior_state == CreatureBehaviorState::ReturnHome)) {
         creature.wander_heading = resolved_yaw;
     }
     creature.yaw_radians = moved ?
@@ -689,13 +955,20 @@ void update_resident_creature(CreatureInstance& creature,
     if (dt > 0.0F) {
         const auto reference_distance = std::max(resident_speed * dt, 0.001F);
         const auto realised_motion = glm::clamp(glm::length(travelled_horizontal) / reference_distance, 0.0F, 1.0F);
-        target_motion_amount = std::max(target_motion_amount, realised_motion * 0.88F);
+        target_motion_amount = std::max(target_motion_amount, realised_motion * 0.92F);
     }
 
-    const auto response = smoothing_factor(dt, 8.2F);
+    creature.nervous_intensity = glm::clamp(
+        (recently_hurt || panic_active ? 0.55F : 0.0F) +
+            (player_close ? 0.18F : 0.0F) +
+            std::max(0.0F, 0.16F - environment.daylight_factor * 0.10F),
+        0.0F,
+        0.72F);
+
+    const auto response = smoothing_factor(dt, 8.6F);
     creature.motion_amount = glm::mix(creature.motion_amount, glm::clamp(target_motion_amount, 0.0F, 1.0F), response);
     creature.gaze_weight = glm::mix(creature.gaze_weight, glm::clamp(target_gaze_weight, 0.0F, 1.0F), response);
-    creature.attack_amount = glm::mix(creature.attack_amount, 0.0F, response);
+    creature.attack_amount = glm::mix(creature.attack_amount, glm::clamp(target_attack_amount, 0.0F, 1.0F), response);
 }
 
 auto is_chunk_within_radius(const ChunkCoord& center, const ChunkCoord& coord, int radius) noexcept -> bool {
@@ -1161,13 +1434,17 @@ auto classify_spawn_species(const World& world, int world_x, int ground_y, int w
 
 void pick_day_behavior(CreatureInstance& creature) {
     const auto choice = next_unit(creature.behavior_seed);
-    if (choice < 0.32F) {
+    if (choice < 0.26F) {
         creature.behavior_state = CreatureBehaviorState::Idle;
         creature.behavior_timer = 0.85F + next_unit(creature.behavior_seed) * 1.10F;
-    } else if (choice < 0.76F) {
+    } else if (choice < 0.66F) {
         creature.behavior_state = CreatureBehaviorState::Wander;
         creature.behavior_timer = 1.10F + next_unit(creature.behavior_seed) * 1.55F;
         creature.wander_heading = wrap_angle(creature.wander_heading + next_signed_unit(creature.behavior_seed) * 1.05F);
+    } else if (choice < 0.86F) {
+        creature.behavior_state = CreatureBehaviorState::Graze;
+        creature.behavior_timer = 0.90F + next_unit(creature.behavior_seed) * 1.35F;
+        creature.wander_heading = wrap_angle(creature.wander_heading + next_signed_unit(creature.behavior_seed) * 0.48F);
     } else {
         creature.behavior_state = CreatureBehaviorState::Sniff;
         creature.behavior_timer = 0.65F + next_unit(creature.behavior_seed) * 0.80F;
@@ -1307,6 +1584,68 @@ auto try_move_grounded_with_steering(CreatureInstance& creature,
     return {};
 }
 
+auto try_move_grounded_towards(CreatureInstance& creature,
+                               const World& world,
+                               float base_heading,
+                               float step_distance,
+                               float roam_radius,
+                               const glm::vec2& target_position,
+                               const glm::vec2& preferred_direction,
+                               bool aggressive,
+                               std::optional<int> preferred_floor_y) -> SteeringMoveResult {
+    if (step_distance <= 1.0e-6F) {
+        return {};
+    }
+
+    const auto candidate_offsets = aggressive ?
+        std::array<float, 15> {0.0F, 0.22F, -0.22F, 0.44F, -0.44F, 0.72F, -0.72F, 1.04F, -1.04F, 1.36F, -1.36F, 1.57F, -1.57F, 2.18F, -2.18F} :
+        std::array<float, 15> {0.0F, 0.30F, -0.30F, 0.60F, -0.60F, 0.92F, -0.92F, 1.20F, -1.20F, 1.57F, -1.57F, 2.05F, -2.05F, 2.60F, -2.60F};
+
+    auto best_score = std::numeric_limits<float>::max();
+    auto best_creature = creature;
+    SteeringMoveResult best_result {};
+    const glm::vec2 before {creature.position.x, creature.position.z};
+    const auto preferred = glm::dot(preferred_direction, preferred_direction) > 1.0e-6F ?
+        glm::normalize(preferred_direction) :
+        direction_from_yaw(base_heading);
+
+    for (const auto heading_offset : candidate_offsets) {
+        const auto heading = wrap_angle(base_heading + heading_offset);
+        auto probe = creature;
+        if (!try_move_grounded(
+                probe,
+                world,
+                direction_from_yaw(heading) * step_distance,
+                roam_radius,
+                preferred_floor_y)) {
+            continue;
+        }
+
+        const glm::vec2 after {probe.position.x, probe.position.z};
+        const auto to_target = target_position - after;
+        const auto moved_delta = after - before;
+        const auto moved_distance = glm::length(moved_delta);
+        const auto moved_direction = moved_distance > 1.0e-6F ? moved_delta / moved_distance : direction_from_yaw(heading);
+        const auto target_score = glm::dot(to_target, to_target);
+        const auto alignment_bonus = glm::clamp(glm::dot(moved_direction, preferred), -1.0F, 1.0F);
+        const auto offset_penalty = std::abs(heading_offset) * 0.055F;
+        const auto score = target_score + offset_penalty - alignment_bonus * kResidentStepLookahead;
+        if (score < best_score) {
+            best_score = score;
+            best_creature = probe;
+            best_result = {true, std::abs(heading_offset) > 0.05F, heading};
+        }
+    }
+
+    if (!best_result.moved) {
+        return {};
+    }
+
+    creature.position = best_creature.position;
+    creature.anchor = best_creature.anchor;
+    return best_result;
+}
+
 auto is_morph_visible(const CreatureCycleState& cycle) noexcept -> bool {
     return cycle.phase == CreaturePhase::Night ||
            cycle.phase == CreaturePhase::DuskMorph ||
@@ -1357,8 +1696,9 @@ void CreatureSystem::update(float dt,
     update_spawn_suppressions(clamped_dt);
     sync_active_creatures(world, player_position, cycle);
 
+    const auto active_view = std::span<const CreatureInstance>(creatures_.data(), creatures_.size());
     for (auto& creature : creatures_) {
-        update_creature(creature, clamped_dt, world, player_position, environment, cycle);
+        update_creature(creature, clamped_dt, world, player_position, environment, cycle, active_view);
     }
 
     update_death_visuals(clamped_dt);
@@ -1731,7 +2071,8 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                                      const World& world,
                                      const glm::vec3& player_position,
                                      const EnvironmentState& environment,
-                                     const CreatureCycleState& cycle) {
+                                     const CreatureCycleState& cycle,
+                                     std::span<const CreatureInstance> active_creatures) {
     ensure_creature_health(creature);
     creature.hurt_timer = std::max(0.0F, creature.hurt_timer - std::max(dt, 0.0F));
     if (creature.health <= 0.0F) {
@@ -1743,7 +2084,7 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
 
     if (is_resident_species(creature.anchor.species)) {
         if (const auto* profile = find_resident_profile(creature.anchor); profile != nullptr) {
-            update_resident_creature(creature, *profile, dt, world, player_position, environment);
+            update_resident_creature(creature, *profile, dt, world, player_position, environment, active_creatures);
             return;
         }
     }
@@ -1868,6 +2209,12 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                 desired_yaw = wrap_angle(creature.wander_heading + std::sin(creature.animation_time * 4.8F) * 0.18F);
                 target_motion_amount = 0.20F;
                 target_gaze_weight = 0.50F;
+                break;
+            case CreatureBehaviorState::Graze:
+                desired_move = direction_from_yaw(creature.wander_heading) * tuning.day_speed * dt * 0.10F;
+                desired_yaw = wrap_angle(creature.wander_heading + std::sin(creature.animation_time * 3.4F) * 0.10F);
+                target_motion_amount = 0.16F;
+                target_gaze_weight = 0.68F;
                 break;
             case CreatureBehaviorState::Idle:
             default:
@@ -2061,7 +2408,8 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
         resolved_yaw = yaw_from_direction(glm::normalize(travelled_horizontal));
         if (creature.behavior_state == CreatureBehaviorState::Wander ||
             creature.behavior_state == CreatureBehaviorState::Lurk ||
-            creature.behavior_state == CreatureBehaviorState::Flee) {
+            creature.behavior_state == CreatureBehaviorState::Flee ||
+            creature.behavior_state == CreatureBehaviorState::Graze) {
             creature.wander_heading = resolved_yaw;
         } else if (creature.behavior_state == CreatureBehaviorState::Chase) {
             if (player_detected) {
@@ -2074,6 +2422,7 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                (creature.behavior_state == CreatureBehaviorState::Wander ||
                 creature.behavior_state == CreatureBehaviorState::Lurk ||
                 creature.behavior_state == CreatureBehaviorState::Flee ||
+                creature.behavior_state == CreatureBehaviorState::Graze ||
                 creature.behavior_state == CreatureBehaviorState::Chase)) {
         creature.wander_heading = wrap_angle(creature.wander_heading + kPi * 0.75F);
     }

@@ -5,6 +5,7 @@
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerProgression.h"
 #include "world/World.h"
 
 #include <glm/vec3.hpp>
@@ -36,6 +37,7 @@ struct SaveGameSnapshot {
     SaveSlotMetadata metadata {};
     glm::vec3 spawn_position {0.5F, 70.0F, 0.5F};
     PlayerState player_state {};
+    PlayerProgressionState progression {};
     HotbarState hotbar {};
     InventoryMenuState inventory {};
     std::vector<CreatureInstance> creatures {};

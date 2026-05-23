@@ -212,12 +212,13 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         reset_jump_assist_state();
         auto fly_velocity = wish + glm::vec3 {0.0F, input.move_up, 0.0F};
         if (glm::dot(fly_velocity, fly_velocity) > 1.0e-5F) {
-            fly_velocity = glm::normalize(fly_velocity) * kFlySpeed;
+            fly_velocity = glm::normalize(fly_velocity) * kFlySpeed * movement_speed_multiplier_;
         }
         state_.velocity = fly_velocity;
     } else if (water_contact_before_move.swimming) {
-        state_.velocity.x = wish.x * kSwimMoveSpeed;
-        state_.velocity.z = wish.z * kSwimMoveSpeed;
+        const auto move_speed = kSwimMoveSpeed * movement_speed_multiplier_;
+        state_.velocity.x = wish.x * move_speed;
+        state_.velocity.z = wish.z * move_speed;
         state_.velocity.y += (std::clamp(input.move_up, -1.0F, 1.0F) * kSwimVerticalAcceleration - kSwimGravity) * clamped_dt;
         if (water_contact_before_move.head_in_water) {
             state_.velocity.y += kSwimBuoyancy * clamped_dt;
@@ -230,7 +231,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
             consume_jump_assist();
         }
     } else if (water_contact_before_move.feet_in_water) {
-        const auto move_speed = sprinting ? kWadeSprintMoveSpeed : kWadeMoveSpeed;
+        const auto move_speed = (sprinting ? kWadeSprintMoveSpeed : kWadeMoveSpeed) * movement_speed_multiplier_;
         state_.velocity.x = wish.x * move_speed;
         state_.velocity.z = wish.z * move_speed;
         state_.velocity.y -= kWadeGravity * clamped_dt;
@@ -239,7 +240,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
             consume_jump_assist();
         }
     } else {
-        const auto move_speed = sprinting ? kSprintMoveSpeed : kMoveSpeed;
+        const auto move_speed = (sprinting ? kSprintMoveSpeed : kMoveSpeed) * movement_speed_multiplier_;
         state_.velocity.x = wish.x * move_speed;
         state_.velocity.z = wish.z * move_speed;
         state_.velocity.y -= kGravity * clamped_dt;
@@ -286,8 +287,9 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
             landed_in_water =
                 water_contact_after_move.feet_in_water || water_contact_after_move.body_in_water || water_contact_after_move.head_in_water;
             const auto fall_distance = state_.fall_start_y - state_.position.y;
-            if (!landed_in_water && fall_distance > kFallDamageThreshold) {
-                apply_damage(std::ceil(fall_distance - 3.0F), PlayerDeathCause::Fall, true);
+            const auto safe_fall_distance = kFallDamageThreshold * fall_safety_multiplier_;
+            if (!landed_in_water && fall_distance > safe_fall_distance) {
+                apply_damage(std::ceil(fall_distance - safe_fall_distance), PlayerDeathCause::Fall, true);
             }
             state_.landing_impact = landed_in_water ? 0.0F : 1.0F;
         }
@@ -372,6 +374,18 @@ auto PlayerController::damage_resistance_percent() const noexcept -> float {
     return damage_resistance_percent_;
 }
 
+auto PlayerController::apnea_resistance_percent() const noexcept -> float {
+    return apnea_resistance_percent_;
+}
+
+auto PlayerController::fall_safety_multiplier() const noexcept -> float {
+    return fall_safety_multiplier_;
+}
+
+auto PlayerController::movement_speed_multiplier() const noexcept -> float {
+    return movement_speed_multiplier_;
+}
+
 auto PlayerController::is_dead() const noexcept -> bool {
     return state_.dead;
 }
@@ -399,12 +413,35 @@ void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
     state_.velocity = velocity;
 }
 
+void PlayerController::set_fly_mode_enabled(bool enabled) noexcept {
+    if (state_.fly_mode == enabled) {
+        return;
+    }
+
+    state_.fly_mode = enabled;
+    state_.velocity = {};
+    state_.fall_start_y = state_.position.y;
+    reset_jump_assist_state();
+}
+
 void PlayerController::set_selected_block(BlockId block_id) noexcept {
     selected_block_ = block_item_id(block_id);
 }
 
 void PlayerController::set_damage_resistance_percent(float percent) noexcept {
-    damage_resistance_percent_ = std::clamp(percent, 0.0F, 85.0F);
+    damage_resistance_percent_ = std::clamp(percent, 0.0F, 99.0F);
+}
+
+void PlayerController::set_apnea_resistance_percent(float percent) noexcept {
+    apnea_resistance_percent_ = std::clamp(percent, 0.0F, 99.0F);
+}
+
+void PlayerController::set_fall_safety_multiplier(float multiplier) noexcept {
+    fall_safety_multiplier_ = std::clamp(multiplier, 0.25F, 3.0F);
+}
+
+void PlayerController::set_movement_speed_multiplier(float multiplier) noexcept {
+    movement_speed_multiplier_ = std::clamp(multiplier, 0.25F, 2.0F);
 }
 
 void PlayerController::trigger_primary_action() noexcept {
@@ -435,8 +472,7 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
 }
 
 void PlayerController::apply_external_damage(float amount, PlayerDeathCause cause) noexcept {
-    const auto mitigated_amount = amount * (1.0F - damage_resistance_percent_ / 100.0F);
-    apply_damage(mitigated_amount, cause, false);
+    apply_damage(amount, cause, false);
 }
 
 auto PlayerController::current_target(const World& world, float max_distance) const -> RaycastHit {
@@ -615,7 +651,8 @@ void PlayerController::update_survival_state(float dt, const World& world) {
     state_.head_underwater = !state_.fly_mode && water_contact.head_in_water;
 
     if (state_.head_underwater) {
-        state_.air_seconds = std::max(0.0F, state_.air_seconds - dt);
+        const auto air_loss_multiplier = 1.0F - apnea_resistance_percent_ / 100.0F;
+        state_.air_seconds = std::max(0.0F, state_.air_seconds - dt * air_loss_multiplier);
         if (state_.air_seconds <= 0.0F) {
             state_.drowning_tick_timer += dt;
             while (state_.drowning_tick_timer >= kDrowningDamageInterval && !state_.dead) {
@@ -753,7 +790,12 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
         return;
     }
 
-    state_.health = std::max(0.0F, state_.health - amount);
+    const auto mitigated_amount = amount * (1.0F - damage_resistance_percent_ / 100.0F);
+    if (mitigated_amount <= 0.0F) {
+        return;
+    }
+
+    state_.health = std::max(0.0F, state_.health - mitigated_amount);
     state_.hurt_timer = kHurtFlashDuration;
     state_.damage_cooldown = kInvulnerabilityDuration;
     state_.regen_delay = kRegenerationDelay;

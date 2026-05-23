@@ -115,13 +115,20 @@ public:
     [[nodiscard]] auto max_health() const noexcept -> float;
     [[nodiscard]] auto max_air_seconds() const noexcept -> float;
     [[nodiscard]] auto damage_resistance_percent() const noexcept -> float;
+    [[nodiscard]] auto apnea_resistance_percent() const noexcept -> float;
+    [[nodiscard]] auto fall_safety_multiplier() const noexcept -> float;
+    [[nodiscard]] auto movement_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto is_dead() const noexcept -> bool;
 
     void load_state(const PlayerState& state) noexcept;
     void set_position(const glm::vec3& position) noexcept;
     void set_velocity(const glm::vec3& velocity) noexcept;
+    void set_fly_mode_enabled(bool enabled) noexcept;
     void set_selected_block(BlockId block_id) noexcept;
     void set_damage_resistance_percent(float percent) noexcept;
+    void set_apnea_resistance_percent(float percent) noexcept;
+    void set_fall_safety_multiplier(float multiplier) noexcept;
+    void set_movement_speed_multiplier(float multiplier) noexcept;
     void trigger_primary_action() noexcept;
     void trigger_secondary_action() noexcept;
     void respawn(const glm::vec3& position) noexcept;
@@ -159,6 +166,9 @@ private:
     BlockBreakProgress block_break_progress_ {};
     BlockId selected_block_ = to_block_id(BlockType::Grass);
     float damage_resistance_percent_ = 0.0F;
+    float apnea_resistance_percent_ = 0.0F;
+    float fall_safety_multiplier_ = 1.0F;
+    float movement_speed_multiplier_ = 1.0F;
     float ground_coyote_timer_ = 0.0F;
     float jump_buffer_timer_ = 0.0F;
     static constexpr float kPlayerWidth = 0.6F;

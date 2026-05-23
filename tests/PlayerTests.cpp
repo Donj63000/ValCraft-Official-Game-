@@ -3,6 +3,7 @@
 #include "creatures/CreatureSystem.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerProgression.h"
 #include "player/PlayerGeometry.h"
 
 #include "TestUtils.h"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <optional>
 
@@ -188,6 +190,104 @@ auto find_unloaded_generated_face_block(const World& world, int world_x) -> std:
 
 } // namespace
 
+TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
+    CHECK(player_experience_for_next_level(1U) == 100ULL);
+    CHECK(player_experience_for_next_level(2U) == 150ULL);
+    CHECK(player_experience_for_next_level(3U) == 225ULL);
+
+    const auto level_30_experience = player_experience_for_next_level(30U);
+    CHECK(player_experience_for_next_level(31U) == level_30_experience + (level_30_experience + 1ULL) / 2ULL);
+    CHECK(player_experience_for_next_level(99U) < std::numeric_limits<std::uint64_t>::max());
+    CHECK(player_experience_for_next_level(100U) == 0ULL);
+
+    PlayerProgression progression {};
+    CHECK(progression.level() == 1U);
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.0F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(0.0F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(0.0F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.0F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.0F));
+    CHECK_FALSE(progression.has_super_vision_power());
+    CHECK_FALSE(player_has_super_vision_power(29U));
+    CHECK(player_has_super_vision_power(30U));
+    CHECK_FALSE(progression.has_flight_power());
+    CHECK_FALSE(player_has_flight_power(99U));
+    CHECK(player_has_flight_power(100U));
+
+    auto gain = progression.add_experience(99ULL);
+    CHECK(gain.levels_gained == 0U);
+    CHECK(progression.level() == 1U);
+    CHECK(progression.experience() == 99ULL);
+
+    gain = progression.add_experience(1ULL);
+    CHECK(gain.awarded_experience == 1ULL);
+    CHECK(gain.levels_gained == 1U);
+    CHECK(progression.level() == 2U);
+    CHECK(progression.experience() == 0ULL);
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.01F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(1.0F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(1.0F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.01F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.01F));
+    CHECK_FALSE(progression.has_super_vision_power());
+    CHECK_FALSE(progression.has_flight_power());
+
+    progression.load_state({31U, 0ULL});
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.30F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(30.0F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(30.0F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.30F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.30F));
+    CHECK(progression.has_super_vision_power());
+    CHECK_FALSE(progression.has_flight_power());
+
+    progression.load_state({99U, player_experience_for_next_level(99U) - 1ULL});
+    gain = progression.add_experience(2ULL);
+    CHECK(gain.awarded_experience == 1ULL);
+    CHECK(gain.levels_gained == 1U);
+    CHECK(gain.reached_max_level);
+    CHECK(progression.level() == 100U);
+    CHECK(progression.experience() == 0ULL);
+    CHECK(progression.experience_for_next_level() == 0ULL);
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.99F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(99.0F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(99.0F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.99F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.99F));
+    CHECK(progression.has_super_vision_power());
+    CHECK(progression.has_flight_power());
+
+    const auto sanitized_low = sanitize_player_progression_state({0U, 101ULL});
+    CHECK(sanitized_low.level == 2U);
+    CHECK(sanitized_low.experience == 1ULL);
+
+    const auto sanitized_high = sanitize_player_progression_state({1000U, std::numeric_limits<std::uint64_t>::max()});
+    CHECK(sanitized_high.level == 100U);
+    CHECK(sanitized_high.experience == 0ULL);
+}
+
+TEST_CASE("experience reward rules stay bounded and apply the night surface bonus only on surface") {
+    CHECK(block_break_experience(to_block_id(BlockType::Stone)) == 10ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Wood)) == 15ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::PineWood)) == 15ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Planks)) == 15ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Air)) == 0ULL);
+
+    const auto kill_reward = creature_kill_experience(CreatureSpecies::Villager, {2.5F, 13.001F, -4.5F}, 42U);
+    CHECK(kill_reward >= 1ULL);
+    CHECK(kill_reward <= 100ULL);
+    CHECK(creature_kill_experience(CreatureSpecies::Villager, {2.5F, 13.001F, -4.5F}, 42U) == kill_reward);
+
+    const auto day_cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    const auto night_cycle = EnvironmentClock::classify_creature_cycle(23.0F);
+    CHECK(experience_multiplier_for_activity(day_cycle, 12, 13) == 1U);
+    CHECK(experience_multiplier_for_activity(night_cycle, 12, 13) == 2U);
+    CHECK(experience_multiplier_for_activity(night_cycle, 12, 8) == 1U);
+    CHECK(experience_multiplier_for_activity(night_cycle, std::nullopt, 13) == 1U);
+    CHECK(multiply_experience(15ULL, experience_multiplier_for_activity(night_cycle, 12, 13)) == 30ULL);
+    CHECK(multiply_experience(std::numeric_limits<std::uint64_t>::max(), 2U) == std::numeric_limits<std::uint64_t>::max());
+}
+
 TEST_CASE("player falls onto the ground and stays grounded") {
     World world(15, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -236,6 +336,27 @@ TEST_CASE("falling from a height deals survival damage to the player") {
     CHECK(player.state().death_cause == PlayerDeathCause::None);
 }
 
+TEST_CASE("fall safety progression lets the player fall higher before damage") {
+    World world(1511, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController base_player({0.5F, 7.0F, 0.5F});
+    PlayerController protected_player({0.5F, 7.0F, 0.5F});
+    protected_player.set_fall_safety_multiplier(2.0F);
+
+    for (int i = 0; i < 240; ++i) {
+        base_player.update(PlayerInput {}, 1.0F / 60.0F, world);
+        protected_player.update(PlayerInput {}, 1.0F / 60.0F, world);
+    }
+
+    CHECK(base_player.state().on_ground);
+    CHECK(protected_player.state().on_ground);
+    CHECK(base_player.state().health < base_player.max_health());
+    CHECK(protected_player.state().health == doctest::Approx(protected_player.max_health()));
+    CHECK(protected_player.fall_safety_multiplier() == doctest::Approx(2.0F));
+}
+
 TEST_CASE("underwater players lose air and eventually take drowning damage") {
     World world(152, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -253,6 +374,33 @@ TEST_CASE("underwater players lose air and eventually take drowning damage") {
     CHECK(player.state().head_underwater);
     CHECK(player.state().air_seconds <= 0.1F);
     CHECK(player.state().health < player.max_health());
+}
+
+TEST_CASE("apnea progression slows underwater air loss before drowning") {
+    World world(15201, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+    for (int y = 1; y <= 6; ++y) {
+        world.set_block(0, y, 0, to_block_id(BlockType::Water));
+        world.set_block(1, y, 0, to_block_id(BlockType::Water));
+    }
+
+    PlayerController base_player({0.5F, 1.001F, 0.5F});
+    PlayerController resistant_player({1.5F, 1.001F, 0.5F});
+    resistant_player.set_apnea_resistance_percent(90.0F);
+
+    for (int i = 0; i < 300; ++i) {
+        base_player.update(PlayerInput {}, 1.0F / 60.0F, world);
+        resistant_player.update(PlayerInput {}, 1.0F / 60.0F, world);
+    }
+
+    CHECK(base_player.state().head_underwater);
+    CHECK(resistant_player.state().head_underwater);
+    CHECK(base_player.state().air_seconds == doctest::Approx(5.0F).epsilon(0.08));
+    CHECK(resistant_player.state().air_seconds == doctest::Approx(9.5F).epsilon(0.08));
+    CHECK(resistant_player.state().air_seconds > base_player.state().air_seconds + 4.0F);
+    CHECK(resistant_player.state().health == doctest::Approx(resistant_player.max_health()));
+    CHECK(resistant_player.apnea_resistance_percent() == doctest::Approx(90.0F));
 }
 
 TEST_CASE("deep water enables swimming and upward movement") {
@@ -461,6 +609,51 @@ TEST_CASE("sprint boosts only intentional forward ground movement") {
 
     CHECK(sprint_distance > walk_distance + 0.5F);
     CHECK(reverse_sprint_distance == doctest::Approx(reverse_distance).epsilon(0.01));
+}
+
+TEST_CASE("progression movement multiplier increases player travel speed") {
+    World world(2311, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_chunk_empty(world, {0, -1});
+    test::make_flat_floor(world, -4, 4, 0, -12, 12);
+
+    PlayerController base_player({0.5F, 1.001F, 0.5F});
+    PlayerController leveled_player({0.5F, 1.001F, 0.5F});
+    leveled_player.set_movement_speed_multiplier(1.20F);
+    CHECK(leveled_player.movement_speed_multiplier() == doctest::Approx(1.20F));
+
+    PlayerInput input {};
+    input.move_forward = 1.0F;
+
+    for (int frame = 0; frame < 40; ++frame) {
+        base_player.update(input, 1.0F / 60.0F, world);
+        leveled_player.update(input, 1.0F / 60.0F, world);
+    }
+
+    const auto base_distance = std::abs(base_player.position().z - 0.5F);
+    const auto leveled_distance = std::abs(leveled_player.position().z - 0.5F);
+    CHECK(leveled_distance > base_distance * 1.15F);
+}
+
+TEST_CASE("flight mode can be force disabled when progression does not allow it") {
+    World world(2312, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    PlayerInput flight_toggle {};
+    flight_toggle.toggle_fly = true;
+    player.update(flight_toggle, 1.0F / 60.0F, world);
+    REQUIRE(player.state().fly_mode);
+
+    player.set_velocity({1.0F, 2.0F, 3.0F});
+    player.set_fly_mode_enabled(false);
+
+    CHECK_FALSE(player.state().fly_mode);
+    CHECK(player.state().velocity.x == doctest::Approx(0.0F));
+    CHECK(player.state().velocity.y == doctest::Approx(0.0F));
+    CHECK(player.state().velocity.z == doctest::Approx(0.0F));
+    CHECK(player.state().fall_start_y == doctest::Approx(player.position().y));
 }
 
 TEST_CASE("player jump from the ground increases vertical position") {
@@ -949,9 +1142,9 @@ TEST_CASE("equipped resistance reduces external survival damage") {
 
     player.update(PlayerInput {}, 0.60F, world);
     player.set_damage_resistance_percent(120.0F);
-    CHECK(player.damage_resistance_percent() == doctest::Approx(85.0F));
+    CHECK(player.damage_resistance_percent() == doctest::Approx(99.0F));
     player.apply_external_damage(10.0F, PlayerDeathCause::Zombie);
-    CHECK(player.state().health == doctest::Approx(player.max_health() - 7.5F));
+    CHECK(player.state().health == doctest::Approx(player.max_health() - 6.1F).epsilon(0.001F));
     CHECK_FALSE(player.state().dead);
 }
 

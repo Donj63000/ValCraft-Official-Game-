@@ -22,7 +22,8 @@ namespace valcraft {
 namespace {
 
 constexpr std::array<char, 8> kSaveMagic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
-constexpr std::uint32_t kSaveVersion = 5;
+constexpr std::uint32_t kSaveVersion = 6;
+constexpr std::uint32_t kSaveVersionPlayerProgression = 6;
 constexpr std::uint32_t kSaveVersionEquipmentAndCreatureHealth = 5;
 constexpr std::uint32_t kSaveVersionWeatherCycle = 4;
 constexpr std::uint32_t kSaveVersionWaterState = 3;
@@ -241,6 +242,22 @@ auto read_player_state(BinaryReader& reader, PlayerState& state) -> bool {
            read_enum(reader, state.death_cause);
 }
 
+void write_player_progression(BinaryWriter& writer, const PlayerProgressionState& progression) {
+    const auto normalized = sanitize_player_progression_state(progression);
+    writer.write_value(normalized.level);
+    writer.write_value(normalized.experience);
+}
+
+auto read_player_progression(BinaryReader& reader, PlayerProgressionState& progression) -> bool {
+    PlayerProgressionState raw {};
+    if (!reader.read_value(raw.level) ||
+        !reader.read_value(raw.experience)) {
+        return false;
+    }
+    progression = sanitize_player_progression_state(raw);
+    return true;
+}
+
 void write_creature(BinaryWriter& writer, const CreatureInstance& creature) {
     writer.write_value(creature.anchor.chunk.x);
     writer.write_value(creature.anchor.chunk.z);
@@ -420,6 +437,13 @@ auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slo
         !read_player_state(reader, snapshot.player_state)) {
         return std::nullopt;
     }
+    if (version >= kSaveVersionPlayerProgression) {
+        if (!read_player_progression(reader, snapshot.progression)) {
+            return std::nullopt;
+        }
+    } else {
+        snapshot.progression = {};
+    }
 
     snapshot.metadata.exists = true;
 
@@ -582,6 +606,7 @@ void write_save_slot(const std::filesystem::path& root_directory, std::size_t sl
     writer.write_value(snapshot.metadata.weather_time_seconds);
     write_vec3(writer, snapshot.spawn_position);
     write_player_state(writer, snapshot.player_state);
+    write_player_progression(writer, snapshot.progression);
 
     for (const auto& slot : snapshot.hotbar.slots) {
         write_hotbar_slot(writer, slot);

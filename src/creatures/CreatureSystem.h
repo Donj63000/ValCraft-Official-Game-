@@ -13,7 +13,7 @@ namespace valcraft {
 
 inline constexpr int kCreatureActivationRadiusChunks = 3;
 inline constexpr int kCreatureKeepAliveRadiusChunks = 4;
-inline constexpr std::size_t kCreatureMaxActiveCount = 18;
+inline constexpr std::size_t kCreatureMaxActiveCount = 32;
 
 struct CreatureAuditStats {
     std::size_t spawned = 0;
@@ -73,7 +73,8 @@ private:
                          const World& world,
                          const glm::vec3& player_position,
                          const EnvironmentState& environment,
-                         const CreatureCycleState& cycle);
+                         const CreatureCycleState& cycle,
+                         std::span<const CreatureInstance> active_creatures);
     void update_death_visuals(float dt) noexcept;
     void update_spawn_suppressions(float dt) noexcept;
     void rebuild_render_instances(const EnvironmentState& environment);

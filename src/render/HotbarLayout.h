@@ -72,6 +72,21 @@ struct GameplayHudLabelLayout {
     float height = 0.0F;
 };
 
+struct GameplayHudLevelLayout {
+    float x = 0.0F;
+    float y = 0.0F;
+    float width = 0.0F;
+    float height = 0.0F;
+    float text_center_x = 0.0F;
+    float text_y = 0.0F;
+    float text_pixel_size = 0.0F;
+    float progress_x = 0.0F;
+    float progress_y = 0.0F;
+    float progress_width = 0.0F;
+    float progress_height = 0.0F;
+    float progress_fill_width = 0.0F;
+};
+
 // Gameplay HUD layout intentionally keeps the same bottom-origin convention as
 // build_hotbar_layout(). The renderer converts to top-left explicitly only when
 // a helper requires it.
@@ -100,6 +115,7 @@ struct GameplayHudLayout {
     float cluster_top = 0.0F;
     bool air_visible = false;
     GameplayHudLabelLayout label {};
+    GameplayHudLevelLayout level {};
     std::array<GameplayHudSlotLayout, kHotbarSlotCount> slots {};
     std::array<VitalGlyphLayout, kHudVitalGlyphCount> hearts {};
     std::array<VitalGlyphLayout, kHudVitalGlyphCount> bubbles {};
@@ -208,8 +224,10 @@ inline auto build_gameplay_hud_layout(int viewport_width,
                                       float max_health,
                                       float air_seconds,
                                       float max_air_seconds,
-                                      bool air_visible) -> GameplayHudLayout {
+                                      bool air_visible,
+                                      float level_progress = 0.0F) -> GameplayHudLayout {
     const auto hotbar = build_hotbar_layout(viewport_width, viewport_height, state);
+    const auto width = static_cast<float>(std::max(viewport_width, 1));
     const auto slot_raise = std::max(3.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.12F)));
     const auto panel_padding_x = std::max(12.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.26F)));
     const auto panel_padding_y = std::max(8.0F, static_cast<float>(std::floor(hotbar.slot_size * 0.22F)));
@@ -246,6 +264,18 @@ inline auto build_gameplay_hud_layout(int viewport_width,
     const auto label_height = label_pixel_size * 7.0F;
     const auto label_gap = std::max(8.0F, static_cast<float>(std::floor(vital_size * 0.85F)));
     const auto label_bottom = hearts_panel_bottom + vital_panel_height + label_gap;
+    const auto level_pixel_size = label_pixel_size;
+    const auto level_padding_x = std::max(9.0F, level_pixel_size * 4.0F);
+    const auto level_padding_y = std::max(7.0F, level_pixel_size * 3.0F);
+    const auto max_level_text_width = 33.0F * level_pixel_size;
+    const auto level_panel_width = std::max(86.0F, max_level_text_width + level_padding_x * 2.0F);
+    const auto level_progress_height = std::max(4.0F, level_pixel_size * 1.8F);
+    const auto level_panel_height = level_padding_y * 2.0F + level_pixel_size * 7.0F + level_progress_height + std::max(5.0F, level_pixel_size * 2.0F);
+    const auto level_x = std::max(hotbar.safe_margin, width - hotbar.safe_margin - level_panel_width);
+    const auto level_y = hotbar.safe_margin;
+    const auto level_progress_x = level_x + level_padding_x;
+    const auto level_progress_y = level_y + level_panel_height - level_padding_y - level_progress_height;
+    const auto level_progress_width = std::max(0.0F, level_panel_width - level_padding_x * 2.0F);
 
     GameplayHudLayout layout {};
     layout.hotbar = hotbar;
@@ -275,6 +305,18 @@ inline auto build_gameplay_hud_layout(int viewport_width,
     layout.label.bottom = label_bottom;
     layout.label.pixel_size = label_pixel_size;
     layout.label.height = label_height;
+    layout.level.x = level_x;
+    layout.level.y = level_y;
+    layout.level.width = level_panel_width;
+    layout.level.height = level_panel_height;
+    layout.level.text_center_x = level_x + level_panel_width * 0.5F;
+    layout.level.text_y = level_y + level_padding_y;
+    layout.level.text_pixel_size = level_pixel_size;
+    layout.level.progress_x = level_progress_x;
+    layout.level.progress_y = level_progress_y;
+    layout.level.progress_width = level_progress_width;
+    layout.level.progress_height = level_progress_height;
+    layout.level.progress_fill_width = level_progress_width * std::clamp(level_progress, 0.0F, 1.0F);
 
     const auto heart_fills = build_vital_glyph_fills<kHudVitalGlyphCount>(health, max_health);
     const auto bubble_fills = build_vital_glyph_fills<kHudVitalGlyphCount>(air_seconds, max_air_seconds);

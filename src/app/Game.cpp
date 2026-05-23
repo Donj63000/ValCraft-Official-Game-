@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -35,6 +36,8 @@ constexpr std::string_view kPerformanceBuildType = VALCRAFT_BUILD_TYPE;
 #else
 constexpr std::string_view kPerformanceBuildType = "unknown";
 #endif
+
+constexpr std::size_t kMaxGameplayAnnouncementQueue = 6U;
 
 auto hotbar_number_from_keycode(SDL_Keycode keycode) noexcept -> int {
     switch (keycode) {
@@ -101,6 +104,14 @@ auto safe_drop_direction(const glm::vec3& look_direction) noexcept -> glm::vec3 
         return {0.0F, 0.0F, -1.0F};
     }
     return glm::normalize(look_direction);
+}
+
+auto block_coord_from_position(const glm::vec3& position) noexcept -> BlockCoord {
+    return {
+        static_cast<int>(std::floor(position.x)),
+        static_cast<int>(std::floor(position.y)),
+        static_cast<int>(std::floor(position.z)),
+    };
 }
 
 auto executable_directory_from_sdl() -> std::filesystem::path {
@@ -237,6 +248,9 @@ auto Game::run() -> int {
                 confirm_dialog_,
                 creatures_.render_instances(),
                 item_drop_render_instances_,
+                progression_.state(),
+                super_vision_active_ && progression_.has_super_vision_power(),
+                current_gameplay_announcement_view(),
                 environment_state,
                 window_width_,
                 window_height_);
@@ -987,13 +1001,38 @@ void Game::process_events() {
                         {"full_stack", audit_json_bool((event.key.keysym.mod & KMOD_CTRL) != 0)},
                     }),
                     AuditPriority::Normal);
-            } else if (event.key.keysym.sym == SDLK_f) {
-                pending_toggle_fly_ = true;
+            } else if (is_flight_action_key(event.key.keysym)) {
+                const auto flight_unlocked = progression_.has_flight_power();
+                // Je bloque le vol ici pour que la touche F ne contourne jamais le niveau 100.
+                if (flight_unlocked) {
+                    pending_toggle_fly_ = true;
+                    queue_gameplay_announcement(
+                        player_.state().fly_mode ? "VOL COUPE" : "VOL ACTIVE",
+                        player_.state().fly_mode ? "RETOUR AU SOL" : "TOUCHE F POUR DESCENDRE",
+                        2.4F);
+                } else {
+                    pending_toggle_fly_ = false;
+                    queue_gameplay_announcement("VOL", "NIVEAU 100 REQUIS", 2.6F);
+                }
                 record_audit_event(
                     AuditEventCategory::InputAction,
                     "fly_toggle_request",
                     AuditSeverity::Info,
-                    audit_json_object({}),
+                    audit_json_object({
+                        {"unlocked", audit_json_bool(flight_unlocked)},
+                        {"requested_active", audit_json_bool(flight_unlocked && !player_.state().fly_mode)},
+                    }),
+                    AuditPriority::Normal);
+            } else if (is_super_vision_action_key(event.key.keysym)) {
+                toggle_super_vision();
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "super_vision_toggle_request",
+                    AuditSeverity::Info,
+                    audit_json_object({
+                        {"unlocked", audit_json_bool(progression_.has_super_vision_power())},
+                        {"active", audit_json_bool(super_vision_active_)},
+                    }),
                     AuditPriority::Normal);
             } else {
                 select_hotbar_slot_from_keycode(event.key.keysym.sym);
@@ -1050,6 +1089,8 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         return;
     }
 
+    update_gameplay_announcements(dt);
+
     environment_.set_frozen(options_.freeze_time || options_.smoke_test);
     environment_.update(dt);
     const auto environment_state = environment_.current_state();
@@ -1090,10 +1131,19 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     player_.eye_position(),
                     player_.look_direction(),
                     weapon_range,
-                    weapon->damage);
+                    weapon->damage * progression_.attack_damage_multiplier());
                 if (hit_result.hit) {
                     music_.play_sfx(hit_result.killed ? GameSfxKind::CreatureDeath : GameSfxKind::CreatureHit,
                                     hit_result.killed ? 0.88F : 0.72F);
+                    if (hit_result.killed) {
+                        grant_player_experience(
+                            creature_kill_experience(
+                                hit_result.species,
+                                hit_result.position,
+                                static_cast<std::uint32_t>(world_.seed()) ^ static_cast<std::uint32_t>(rendered_frames_)),
+                            block_coord_from_position(hit_result.position),
+                            "creature_kill");
+                    }
                     record_audit_event(
                         AuditEventCategory::Creatures,
                         hit_result.killed ? "creature_killed" : "creature_damaged",
@@ -1114,6 +1164,10 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     PerformanceEventKind::BlockBreak,
                     broken_block->block,
                     inventory_item_label(broken_block->block_id));
+                grant_player_experience(
+                    block_break_experience(broken_block->block_id),
+                    broken_block->block,
+                    "block_break");
                 const auto drop_direction = safe_drop_direction(player_.look_direction());
                 const auto drop_origin = glm::vec3 {
                     static_cast<float>(broken_block->block.x) + 0.5F,
@@ -1817,9 +1871,133 @@ void Game::spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin,
     item_drops_.spawn_drop(stack, origin, initial_velocity);
 }
 
+void Game::grant_player_experience(std::uint64_t base_experience, const BlockCoord& activity_block, std::string_view source) {
+    if (base_experience == 0ULL || progression_.is_max_level()) {
+        return;
+    }
+
+    const auto surface_y = world_.loaded_surface_height(activity_block.x, activity_block.z);
+    const auto multiplier = experience_multiplier_for_activity(environment_.current_creature_cycle(), surface_y, activity_block.y);
+    const auto awarded_experience = multiply_experience(base_experience, multiplier);
+    const auto previous_level = progression_.level();
+    const auto result = progression_.add_experience(awarded_experience);
+    if (result.awarded_experience == 0ULL) {
+        return;
+    }
+
+    if (progression_.level() != previous_level) {
+        sync_selected_hotbar_slot();
+        queue_level_up_announcements(previous_level, progression_.level());
+    }
+
+    record_audit_event(
+        AuditEventCategory::Player,
+        result.levels_gained > 0U ? "player_level_up" : "experience_gain",
+        result.levels_gained > 0U ? AuditSeverity::Warning : AuditSeverity::Info,
+        audit_json_object({
+            {"source", audit_json_string(source)},
+            {"base_experience", audit_json_number(base_experience)},
+            {"multiplier", audit_json_number(multiplier)},
+            {"awarded_experience", audit_json_number(result.awarded_experience)},
+            {"levels_gained", audit_json_number(result.levels_gained)},
+            {"level", audit_json_number(progression_.level())},
+            {"experience", audit_json_number(progression_.experience())},
+            {"experience_for_next_level", audit_json_number(progression_.experience_for_next_level())},
+        }),
+        result.levels_gained > 0U ? AuditPriority::High : AuditPriority::Normal);
+}
+
+void Game::toggle_super_vision() {
+    if (!progression_.has_super_vision_power()) {
+        super_vision_active_ = false;
+        queue_gameplay_announcement("SUPER VISION", "NIVEAU 30 REQUIS", 2.6F);
+        return;
+    }
+
+    super_vision_active_ = !super_vision_active_;
+    if (super_vision_active_) {
+        queue_gameplay_announcement("SUPER VISION ACTIVE", "CREATURES LUMINEUSES DANS LE NOIR", 3.0F);
+    } else {
+        queue_gameplay_announcement("SUPER VISION COUPEE", "VISION NORMALE RESTAUREE", 2.4F);
+    }
+}
+
+void Game::queue_gameplay_announcement(std::string title, std::string detail, float duration_seconds) {
+    if (title.empty() && detail.empty()) {
+        return;
+    }
+
+    GameplayAnnouncement announcement {};
+    announcement.title = std::move(title);
+    announcement.detail = std::move(detail);
+    announcement.duration_seconds = std::clamp(duration_seconds, 1.0F, 8.0F);
+    if (gameplay_announcements_.size() >= kMaxGameplayAnnouncementQueue) {
+        gameplay_announcements_.pop_back();
+    }
+    gameplay_announcements_.push_back(std::move(announcement));
+}
+
+void Game::queue_level_up_announcements(std::uint32_t previous_level, std::uint32_t current_level) {
+    if (current_level <= previous_level) {
+        return;
+    }
+
+    const auto bonus_percent = static_cast<int>(std::lround(player_progression_bonus_percent(current_level)));
+    queue_gameplay_announcement(
+        std::string("NIVEAU ") + std::to_string(current_level),
+        std::string("BONUS +") + std::to_string(bonus_percent) + "% DEGATS DEF VIT APNEE CHUTE",
+        3.35F);
+
+    if (!player_has_super_vision_power(previous_level) && player_has_super_vision_power(current_level)) {
+        queue_gameplay_announcement("SUPER VISION DEBLOQUEE", "TOUCHE V POUR VOIR DANS LE NOIR", 4.2F);
+    }
+    if (!player_has_flight_power(previous_level) && player_has_flight_power(current_level)) {
+        queue_gameplay_announcement("VOL DEBLOQUE", "TOUCHE F POUR VOLER", 4.2F);
+    }
+}
+
+void Game::update_gameplay_announcements(float dt) noexcept {
+    if (dt <= 0.0F || !std::isfinite(dt) || gameplay_announcements_.empty()) {
+        return;
+    }
+
+    gameplay_announcements_.front().elapsed_seconds += dt;
+    while (!gameplay_announcements_.empty() &&
+           gameplay_announcements_.front().elapsed_seconds >= gameplay_announcements_.front().duration_seconds) {
+        gameplay_announcements_.pop_front();
+    }
+}
+
+auto Game::current_gameplay_announcement_view() const noexcept -> GameplayHudAnnouncementView {
+    if (gameplay_announcements_.empty()) {
+        return {};
+    }
+
+    const auto& announcement = gameplay_announcements_.front();
+    const auto duration = std::max(announcement.duration_seconds, 0.001F);
+    return {
+        announcement.title,
+        announcement.detail,
+        std::clamp(announcement.elapsed_seconds / duration, 0.0F, 1.0F),
+        true,
+    };
+}
+
 void Game::sync_selected_hotbar_slot() noexcept {
+    if (!progression_.has_super_vision_power()) {
+        super_vision_active_ = false;
+    }
+    if (!progression_.has_flight_power()) {
+        // Je coupe le vol si une ancienne sauvegarde le contient avant le niveau 100.
+        pending_toggle_fly_ = false;
+        player_.set_fly_mode_enabled(false);
+    }
     player_.set_selected_block(selected_hotbar_block(hotbar_));
-    player_.set_damage_resistance_percent(inventory_equipment_resistance_percent(inventory_menu_));
+    player_.set_damage_resistance_percent(
+        inventory_equipment_resistance_percent(inventory_menu_) + progression_.damage_resistance_percent());
+    player_.set_apnea_resistance_percent(progression_.apnea_resistance_percent());
+    player_.set_fall_safety_multiplier(progression_.fall_safety_multiplier());
+    player_.set_movement_speed_multiplier(progression_.movement_speed_multiplier());
 }
 
 void Game::select_hotbar_slot(std::size_t index) noexcept {
@@ -1968,6 +2146,7 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     snapshot.metadata.has_starting_village = starting_village_enabled_;
     snapshot.spawn_position = spawn_position_;
     snapshot.player_state = player_.state();
+    snapshot.progression = progression_.state();
     snapshot.hotbar = hotbar_;
     snapshot.inventory = inventory_menu_;
     snapshot.inventory.visible = false;
@@ -2196,6 +2375,8 @@ void Game::open_main_menu(bool from_session) {
     inventory_menu_.visible = false;
     death_screen_visible_ = false;
     death_screen_.visible = false;
+    super_vision_active_ = false;
+    gameplay_announcements_.clear();
     set_confirm_dialog_visible(false);
 
     menu_preview_time_of_day_ = 8.25F;
@@ -2321,6 +2502,9 @@ void Game::start_new_game_in_slot(std::size_t slot_index) {
     world_ = World(seed, options_.performance.stream_radius);
     creatures_.clear();
     item_drops_.clear();
+    progression_.reset();
+    super_vision_active_ = false;
+    gameplay_announcements_.clear();
     hotbar_ = make_default_hotbar_state();
     inventory_menu_ = make_default_inventory_menu_state();
     normalize_inventory_state(inventory_menu_, hotbar_);
@@ -2387,7 +2571,10 @@ void Game::load_snapshot_into_session(const SaveGameSnapshot& snapshot, std::opt
     creatures_.clear();
     configure_starting_village(snapshot.metadata.has_starting_village, false);
     spawn_position_ = snapshot.spawn_position;
+    progression_.load_state(snapshot.progression);
     player_.load_state(snapshot.player_state);
+    super_vision_active_ = false;
+    gameplay_announcements_.clear();
     sync_selected_hotbar_slot();
 
     environment_.set_time_of_day(snapshot.metadata.time_of_day);

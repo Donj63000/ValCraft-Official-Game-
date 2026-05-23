@@ -1202,6 +1202,37 @@ TEST_CASE("settlement residents keep routine behavior until their timer expires"
     CHECK(updated.yaw_radians == doctest::Approx(0.35F).epsilon(0.001F));
 }
 
+TEST_CASE("settlement residents separate when their personal space overlaps") {
+    CreatureSystem system {};
+    World world(90037, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto first_anchor = make_test_resident_anchor({4, 12, 4});
+    const auto second_anchor = make_test_resident_anchor({5, 12, 4});
+    system.set_settlement_residents({first_anchor, second_anchor});
+
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    auto first = make_test_creature(first_anchor, first_anchor.spawn_position);
+    first.behavior_state = CreatureBehaviorState::Idle;
+    first.behavior_timer = 2.0F;
+    auto second = make_test_creature(second_anchor, second_anchor.spawn_position);
+    second.behavior_state = CreatureBehaviorState::Idle;
+    second.behavior_timer = 2.0F;
+    second.behavior_seed = 77U;
+    system.load_creatures({first, second}, environment);
+
+    const auto initial_distance_sq = horizontal_distance_squared(first.position, second.position);
+    system.update(0.25F, world, {24.0F, first_anchor.spawn_position.y, 24.0F}, environment, cycle);
+
+    const auto residents = system.active_creatures();
+    REQUIRE(residents.size() == 2);
+    const auto separated_distance_sq = horizontal_distance_squared(residents[0].position, residents[1].position);
+    CHECK(separated_distance_sq > initial_distance_sq + 0.01F);
+    CHECK(residents[0].behavior_state == CreatureBehaviorState::Idle);
+    CHECK(residents[1].behavior_state == CreatureBehaviorState::Idle);
+}
+
 TEST_CASE("settlement residents stay on the village floor while steering around obstructions") {
     CreatureSystem system {};
     World world(90035, 1);
@@ -1430,6 +1461,72 @@ TEST_CASE("day animal walking animation keeps quadruped legs attached to the bod
                                              0.075F) < 0.065F);
             }
         }
+    }
+}
+
+TEST_CASE("day grazing and resident activity states produce distinct procedural poses") {
+    for (const auto species : {CreatureSpecies::Pig, CreatureSpecies::Cow, CreatureSpecies::Sheep}) {
+        const CreatureRenderInstance idle_animal {
+            species,
+            {0.0F, 0.0F, 0.0F},
+            0.0F,
+            0.55F,
+            0.0F,
+            1.0F,
+            0.15F,
+            42420U,
+            CreatureBehaviorState::Idle,
+            CreaturePhase::Day,
+            0.10F,
+            0.25F,
+            0.0F,
+        };
+        auto graze_animal = idle_animal;
+        graze_animal.behavior_state = CreatureBehaviorState::Graze;
+        graze_animal.motion_amount = 0.20F;
+        graze_animal.gaze_weight = 0.68F;
+
+        const auto idle_mesh = build_creature_mesh(idle_animal);
+        const auto graze_mesh = build_creature_mesh(graze_animal);
+        CAPTURE(static_cast<int>(species));
+        CHECK_FALSE(meshes_match_exactly(idle_mesh, graze_mesh));
+        CHECK(max_position_delta(idle_mesh, graze_mesh) > 0.01F);
+        CHECK(all_vertex_attributes_are_bounded(graze_mesh));
+    }
+
+    const CreatureRenderInstance idle_villager {
+        CreatureSpecies::Villager,
+        {0.0F, 0.0F, 0.0F},
+        0.0F,
+        0.65F,
+        0.0F,
+        1.0F,
+        0.20F,
+        31337U,
+        CreatureBehaviorState::Idle,
+        CreaturePhase::Day,
+        0.24F,
+        0.34F,
+        0.0F,
+    };
+    const auto idle_mesh = build_creature_mesh(idle_villager);
+    for (const auto state : {
+             CreatureBehaviorState::Graze,
+             CreatureBehaviorState::Work,
+             CreatureBehaviorState::Socialize,
+             CreatureBehaviorState::Sleep,
+             CreatureBehaviorState::ReturnHome,
+         }) {
+        auto active_villager = idle_villager;
+        active_villager.behavior_state = state;
+        active_villager.motion_amount = state == CreatureBehaviorState::ReturnHome ? 0.70F : 0.18F;
+        active_villager.attack_amount = state == CreatureBehaviorState::Work ? 0.58F : 0.34F;
+
+        const auto active_mesh = build_creature_mesh(active_villager);
+        CAPTURE(static_cast<int>(state));
+        CHECK_FALSE(meshes_match_exactly(idle_mesh, active_mesh));
+        CHECK_FALSE(active_mesh.empty());
+        CHECK(all_vertex_attributes_are_bounded(active_mesh));
     }
 }
 

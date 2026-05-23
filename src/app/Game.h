@@ -16,6 +16,7 @@
 #include "creatures/CreatureSystem.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerProgression.h"
 #include "gameplay/StartingVillage.h"
 #include "render/Renderer.h"
 #include "world/Environment.h"
@@ -24,9 +25,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -74,6 +77,13 @@ private:
         std::size_t visible_chunks = 0;
         std::size_t shadow_chunks = 0;
         std::size_t world_chunks = 0;
+    };
+
+    struct GameplayAnnouncement {
+        std::string title {};
+        std::string detail {};
+        float elapsed_seconds = 0.0F;
+        float duration_seconds = 3.25F;
     };
 
     struct AuditSecondAccumulator {
@@ -197,6 +207,12 @@ private:
     void drop_hovered_inventory_stack(bool full_stack) noexcept;
     void drop_carried_inventory_stack(bool full_stack) noexcept;
     void spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin, const glm::vec3& initial_velocity) noexcept;
+    void grant_player_experience(std::uint64_t base_experience, const BlockCoord& activity_block, std::string_view source);
+    void toggle_super_vision();
+    void queue_gameplay_announcement(std::string title, std::string detail, float duration_seconds = 3.25F);
+    void queue_level_up_announcements(std::uint32_t previous_level, std::uint32_t current_level);
+    void update_gameplay_announcements(float dt) noexcept;
+    [[nodiscard]] auto current_gameplay_announcement_view() const noexcept -> GameplayHudAnnouncementView;
     void sync_selected_hotbar_slot() noexcept;
     void select_hotbar_slot(std::size_t index) noexcept;
     void cycle_hotbar_selection(int delta) noexcept;
@@ -277,6 +293,9 @@ private:
     World world_ {};
     PlayerController player_ {};
     PlayerController preview_player_ {};
+    PlayerProgression progression_ {};
+    std::deque<GameplayAnnouncement> gameplay_announcements_ {};
+    bool super_vision_active_ = false;
     CreatureSystem creatures_ {};
     ItemDropSystem item_drops_ {};
     HotbarState hotbar_ = make_default_hotbar_state();
