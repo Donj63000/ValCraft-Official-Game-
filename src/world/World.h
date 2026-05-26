@@ -143,6 +143,11 @@ private:
         std::size_t generator_mismatch_count = 0;
     };
 
+    struct WaterPressureHead {
+        int y = kWorldMinY;
+        bool infinite = false;
+    };
+
     struct PendingLightingUpdate {
         ChunkCoord anchor {};
         std::vector<ChunkCoord> coverage;
@@ -211,16 +216,18 @@ private:
     [[nodiscard]] auto count_generator_mismatches(const ChunkCoord& coord,
                                                   const std::array<BlockId, kChunkVolume>& blocks,
                                                   const std::array<WaterState, kChunkVolume>& water_state) const -> std::size_t;
+    [[nodiscard]] auto normalize_water_state_for_generated(const BlockCoord& world_coord, WaterState water_state) const -> WaterState;
     [[nodiscard]] auto raw_water_state(int x, int y, int z) const -> WaterState;
     [[nodiscard]] auto can_water_flow_into_loaded(int x, int y, int z) const -> bool;
     [[nodiscard]] auto is_chunk_loaded_for_world(int x, int z) const noexcept -> bool;
+    [[nodiscard]] auto is_infinite_water_source(const BlockCoord& world_coord, WaterState water_state) const -> bool;
     [[nodiscard]] auto set_water_state(int x, int y, int z, WaterState water_state) -> bool;
     [[nodiscard]] auto try_prepare_cell_for_water(int x, int y, int z) -> bool;
-    [[nodiscard]] auto is_pressure_root(const BlockCoord& world_coord, WaterState water_state) const -> bool;
-    [[nodiscard]] auto has_pressure_support(const BlockCoord& world_coord,
-                                            WaterState water_state,
-                                            std::unordered_set<BlockCoord, BlockCoordHash>& supported_cache,
-                                            std::unordered_set<BlockCoord, BlockCoordHash>& unsupported_cache) const -> bool;
+    [[nodiscard]] auto pressure_head_y_for(
+        const BlockCoord& world_coord,
+        WaterState water_state,
+        std::unordered_map<BlockCoord, WaterPressureHead, BlockCoordHash>& pressure_head_cache,
+        std::unordered_set<BlockCoord, BlockCoordHash>& pressure_head_missing_cache) const -> std::optional<WaterPressureHead>;
     void update_chunk_override_after_cell_change(const ChunkCoord& coord,
                                                  const BlockCoord& local_coord,
                                                  BlockId previous_block,

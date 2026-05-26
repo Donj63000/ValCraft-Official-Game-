@@ -120,7 +120,12 @@ inline constexpr auto to_block_id(BlockType type) noexcept -> BlockId {
     return static_cast<BlockId>(type);
 }
 
+inline constexpr auto is_known_block_id(BlockId block_id) noexcept -> bool {
+    return block_id <= to_block_id(BlockType::MetallicAlloyOre);
+}
+
 inline constexpr WaterState kWaterSourceBit = static_cast<WaterState>(1U << 7U);
+inline constexpr WaterState kWaterInfiniteBit = static_cast<WaterState>(1U << 6U);
 inline constexpr WaterState kWaterLevelMask = static_cast<WaterState>(0x0FU);
 inline constexpr std::uint8_t kMaxWaterLevel = 8;
 
@@ -133,13 +138,20 @@ inline constexpr auto water_state_is_source(WaterState state) noexcept -> bool {
     return (state & kWaterSourceBit) != 0;
 }
 
-inline constexpr auto make_water_state(std::uint8_t level, bool source = false) noexcept -> WaterState {
+inline constexpr auto water_state_is_infinite(WaterState state) noexcept -> bool {
+    return (state & kWaterInfiniteBit) != 0;
+}
+
+inline constexpr auto make_water_state(std::uint8_t level, bool source = false, bool infinite = false) noexcept -> WaterState {
     const auto clamped_level = static_cast<WaterState>(std::min<std::uint8_t>(level, kMaxWaterLevel));
-    return static_cast<WaterState>(clamped_level | (source ? kWaterSourceBit : 0U));
+    return static_cast<WaterState>(
+        clamped_level |
+        (source ? kWaterSourceBit : 0U) |
+        (infinite ? kWaterInfiniteBit : 0U));
 }
 
 inline constexpr auto water_state_with_level(WaterState state, std::uint8_t level) noexcept -> WaterState {
-    return make_water_state(level, water_state_is_source(state));
+    return make_water_state(level, water_state_is_source(state), water_state_is_infinite(state));
 }
 
 inline constexpr auto is_torch_block(BlockId block_id) noexcept -> bool {
@@ -221,7 +233,10 @@ inline constexpr auto is_wall_torch_block(BlockId block_id) noexcept -> bool {
 }
 
 inline constexpr auto block_item_id(BlockId block_id) noexcept -> BlockId {
-    return is_torch_block(block_id) ? to_block_id(BlockType::Torch) : block_id;
+    if (is_torch_block(block_id)) {
+        return to_block_id(BlockType::Torch);
+    }
+    return is_known_block_id(block_id) ? block_id : to_block_id(BlockType::Air);
 }
 
 inline constexpr auto is_resource_ore(BlockId block_id) noexcept -> bool {
@@ -322,7 +337,9 @@ inline constexpr auto is_weapon_item(BlockId block_id) noexcept -> bool {
 
 inline constexpr auto is_placeable_item(BlockId block_id) noexcept -> bool {
     block_id = block_item_id(block_id);
-    return block_id != to_block_id(BlockType::Air) && !is_inventory_only_item(block_id);
+    return is_known_block_id(block_id) &&
+           block_id != to_block_id(BlockType::Air) &&
+           !is_inventory_only_item(block_id);
 }
 
 inline constexpr auto torch_support_offset(BlockId block_id) noexcept -> BlockCoord {
@@ -394,6 +411,10 @@ inline constexpr auto torch_block_from_support_offset(const BlockCoord& support_
 }
 
 inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProperties {
+    if (!is_known_block_id(block_id)) {
+        return {false, false, false, true, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
+    }
+
     if (is_torch_block(block_id)) {
         return {false, false, false, false, BlockMeshType::Torch, static_cast<std::uint8_t>(14)};
     }
@@ -467,7 +488,9 @@ inline constexpr auto is_block_liquid(BlockId block_id) noexcept -> bool {
 }
 
 inline constexpr auto has_block_mesh(BlockId block_id) noexcept -> bool {
-    return block_id != to_block_id(BlockType::Air) && !is_inventory_only_item(block_id);
+    return is_known_block_id(block_id) &&
+           block_id != to_block_id(BlockType::Air) &&
+           !is_inventory_only_item(block_id);
 }
 
 inline constexpr auto is_block_targetable(BlockId block_id) noexcept -> bool {
@@ -477,6 +500,9 @@ inline constexpr auto is_block_targetable(BlockId block_id) noexcept -> bool {
 inline constexpr auto block_break_duration_seconds(BlockId block_id) noexcept -> float {
     if (is_torch_block(block_id)) {
         return 0.18F;
+    }
+    if (!is_known_block_id(block_id)) {
+        return 0.0F;
     }
 
     switch (static_cast<BlockType>(block_id)) {

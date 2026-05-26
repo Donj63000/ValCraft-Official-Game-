@@ -30,7 +30,7 @@ struct HotbarState {
     auto operator==(const HotbarState&) const -> bool = default;
 
     [[nodiscard]] constexpr auto selected_slot() const noexcept -> const HotbarSlot& {
-        return slots[selected_index];
+        return slots[selected_index < slots.size() ? selected_index : 0U];
     }
 };
 
@@ -57,6 +57,10 @@ inline constexpr void normalize_item_stack(HotbarSlot& slot) noexcept {
         return;
     }
     slot.block_id = block_item_id(slot.block_id);
+    if (slot.block_id == to_block_id(BlockType::Air)) {
+        slot = {};
+        return;
+    }
     const auto max_count = max_item_stack_count(slot.block_id);
     if (slot.count > max_count) {
         slot.count = max_count;

@@ -105,6 +105,62 @@ auto vec3_components_at_least(const glm::vec3& value, float minimum) noexcept ->
     return value.x >= minimum && value.y >= minimum && value.z >= minimum;
 }
 
+auto water_volume_in_box(World& world, int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) -> int {
+    auto volume = 0;
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int z = min_z; z <= max_z; ++z) {
+            for (int x = min_x; x <= max_x; ++x) {
+                volume += static_cast<int>(world.water_level(x, y, z));
+            }
+        }
+    }
+    return volume;
+}
+
+auto loaded_water_state_at(const World& world, int x, int y, int z) -> WaterState {
+    const auto* chunk = world.find_chunk(world.world_to_chunk(x, z));
+    if (chunk == nullptr) {
+        return 0;
+    }
+    const auto local = world.world_to_local(x, y, z);
+    return chunk->get_water_state_local(local.x, local.y, local.z);
+}
+
+auto infinite_water_cells_in_box(const World& world, int min_x, int max_x, int min_y, int max_y, int min_z, int max_z) -> int {
+    auto cells = 0;
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int z = min_z; z <= max_z; ++z) {
+            for (int x = min_x; x <= max_x; ++x) {
+                if (water_state_is_infinite(loaded_water_state_at(world, x, y, z))) {
+                    ++cells;
+                }
+            }
+        }
+    }
+    return cells;
+}
+
+auto fluid_only_budget(std::size_t fluid_cell_budget, double max_fluid_ms = std::numeric_limits<double>::infinity()) -> WorldWorkBudget {
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = fluid_cell_budget;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 0U;
+    budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    budget.max_fluid_ms = max_fluid_ms;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+    return budget;
+}
+
+void place_infinite_test_water(World& world, int x, int y, int z) {
+    world.set_block(x, y, z, to_block_id(BlockType::Water));
+    auto* chunk = world.find_chunk(world.world_to_chunk(x, z));
+    REQUIRE(chunk != nullptr);
+    const auto local = world.world_to_local(x, y, z);
+    chunk->set_water_state_local(local.x, local.y, local.z, make_water_state(kMaxWaterLevel, true, true));
+}
+
 auto terrain_surface_height(const WorldGenerator& generator, int world_x, int world_z) noexcept -> int {
     for (int y = kWorldMaxY; y >= kWorldMinY; --y) {
         const auto block = generator.sample_block(world_x, y, world_z);
@@ -459,6 +515,22 @@ TEST_CASE("world set_block outside valid Y is a no-op") {
 
     CHECK(world.get_block(1, 0, 1) == to_block_id(BlockType::Air));
     CHECK(world.get_block(1, kWorldMaxY, 1) == to_block_id(BlockType::Air));
+}
+
+TEST_CASE("world spatial queries reject non finite inputs before coordinate casts") {
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+    constexpr auto infinity = std::numeric_limits<float>::infinity();
+
+    World world(9301, 1);
+
+    CHECK_FALSE(world.raycast({nan, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 8.0F).hit);
+    CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {infinity, 0.0F, 0.0F}, 8.0F).hit);
+    CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, nan).hit);
+
+    const auto streaming_stats = world.update_streaming({nan, 70.0F, infinity});
+    CHECK_FALSE(streaming_stats.chunk_changed);
+    CHECK_FALSE(world.are_chunks_ready({nan, 70.0F, 0.0F}, 1));
+    CHECK_FALSE(world.are_chunks_ready({0.5F, 70.0F, 0.5F}, -1));
 }
 
 TEST_CASE("modified chunks survive unload and reload within the same session") {
@@ -823,6 +895,22 @@ TEST_CASE("resource ore blocks are solid placeable terrain resources") {
         CHECK(properties.mesh_type == BlockMeshType::FullCube);
         CHECK(block_visual_material(block_id) == BlockVisualMaterial::Rock);
     }
+}
+
+TEST_CASE("invalid block ids behave like empty non placeable data") {
+    const auto invalid_block = static_cast<BlockId>(255U);
+    const auto properties = block_properties(invalid_block);
+
+    CHECK_FALSE(is_known_block_id(invalid_block));
+    CHECK(block_item_id(invalid_block) == to_block_id(BlockType::Air));
+    CHECK_FALSE(is_placeable_item(invalid_block));
+    CHECK_FALSE(has_block_mesh(invalid_block));
+    CHECK_FALSE(is_block_breakable(invalid_block));
+    CHECK_FALSE(properties.opaque);
+    CHECK_FALSE(properties.collidable);
+    CHECK_FALSE(properties.surface_support);
+    CHECK(properties.replaceable);
+    CHECK(properties.mesh_type == BlockMeshType::FullCube);
 }
 
 TEST_CASE("block break durations stay coherent across fragile terrain and hard rock") {
@@ -1286,7 +1374,38 @@ TEST_CASE("world generator fills every submerged column up to the global sea lev
     }
 }
 
-TEST_CASE("pressurized reservoirs fill large adjacent basins without fading by distance") {
+TEST_CASE("old saved natural sea sources normalize to the current infinite water flag") {
+    WorldGenerator generator(18300);
+    const ChunkCoord origin {0, 0};
+    std::array<BlockId, kChunkVolume> blocks {};
+    std::array<WaterState, kChunkVolume> legacy_water {};
+    auto found_natural_water = false;
+
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                const auto block_index = static_cast<std::size_t>((y * kChunkSizeZ + z) * kChunkSizeX + x);
+                const auto world_x = origin.x * kChunkSizeX + x;
+                const auto world_z = origin.z * kChunkSizeZ + z;
+                blocks[block_index] = generator.sample_block(world_x, y, world_z);
+                auto water_state = generator.sample_water_state(world_x, y, world_z);
+                if (water_state_is_infinite(water_state)) {
+                    water_state = make_water_state(kMaxWaterLevel, true);
+                    found_natural_water = true;
+                }
+                legacy_water[block_index] = water_state;
+            }
+        }
+    }
+    REQUIRE(found_natural_water);
+
+    World restored_world(18300, 0);
+    restored_world.replace_chunk_snapshots({{origin, blocks, legacy_water}});
+
+    CHECK(restored_world.modified_chunk_snapshots().empty());
+}
+
+TEST_CASE("finite reservoirs drain through opened channels without creating infinite water") {
     World world(18301, 2);
     test::make_chunk_empty(world, {0, 0});
     test::make_chunk_empty(world, {1, 0});
@@ -1333,6 +1452,7 @@ TEST_CASE("pressurized reservoirs fill large adjacent basins without fading by d
     }
 
     test::flush_pending_work(world);
+    const auto initial_volume = water_volume_in_box(world, min_x, max_x, water_min_y, water_max_y, min_z, max_z);
     CHECK_FALSE(world.has_water(cavity_far_x, water_max_y, cavity_mid_z));
 
     for (int y = water_min_y; y <= water_max_y; ++y) {
@@ -1343,12 +1463,13 @@ TEST_CASE("pressurized reservoirs fill large adjacent basins without fading by d
 
     test::flush_pending_work(world);
 
-    CHECK(world.water_level(cavity_far_x, water_min_y, cavity_mid_z) == kMaxWaterLevel);
-    CHECK(world.water_level(cavity_far_x, water_min_y + 1, cavity_mid_z) == kMaxWaterLevel);
-    CHECK(world.water_level(cavity_far_x, water_max_y, cavity_mid_z) == kMaxWaterLevel);
+    const auto final_volume = water_volume_in_box(world, min_x, max_x, water_min_y, water_max_y, min_z, max_z);
+    CHECK(final_volume == initial_volume);
+    CHECK(world.water_level(separator_x + 1, water_min_y, cavity_mid_z) > 0);
+    CHECK(world.water_level(min_x + 1, water_max_y, cavity_mid_z) < kMaxWaterLevel);
 }
 
-TEST_CASE("single isolated source keeps a localized spread on a flat floor") {
+TEST_CASE("single isolated finite source spreads as conserved water volume") {
     World world(18302, 2);
     test::make_chunk_empty(world, {0, 0});
     test::make_chunk_empty(world, {1, 0});
@@ -1368,8 +1489,487 @@ TEST_CASE("single isolated source keeps a localized spread on a flat floor") {
     world.set_block(2, water_y, 2, to_block_id(BlockType::Water));
     test::flush_pending_work(world);
 
-    CHECK(world.water_level(2, water_y, 2) == kMaxWaterLevel);
+    CHECK(water_volume_in_box(world, 0, kChunkSizeX * 2 - 1, water_y, water_y, 0, kChunkSizeZ - 1) == kMaxWaterLevel);
+    CHECK(world.water_level(2, water_y, 2) > 0);
+    CHECK(world.water_level(2, water_y, 2) < kMaxWaterLevel);
     CHECK_FALSE(world.has_water(14, water_y, 2));
+}
+
+TEST_CASE("mesh rebuilds do not fast forward active water simulation") {
+    World world(18308, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int floor_y = 72;
+    constexpr int water_y = floor_y + 1;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = 0; x <= 4; ++x) {
+        world.set_block(x, floor_y, 1, stone);
+    }
+
+    test::flush_pending_work(world);
+
+    world.set_block(1, water_y, 1, to_block_id(BlockType::Water));
+    REQUIRE(world.pending_fluid_count() > 0);
+    CHECK_FALSE(world.has_water(2, water_y, 1));
+
+    world.rebuild_dirty_meshes();
+
+    CHECK_FALSE(world.has_water(2, water_y, 1));
+    CHECK(world.water_level(1, water_y, 1) == kMaxWaterLevel);
+    CHECK(world.pending_fluid_count() > 0);
+}
+
+TEST_CASE("finite water drains downward progressively and conserves volume") {
+    World world(18309, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int source_y = 40;
+    constexpr int x = 2;
+    constexpr int z = 2;
+
+    test::flush_pending_work(world);
+
+    world.set_block(x, source_y, z, to_block_id(BlockType::Water));
+
+    const auto first_stats = world.process_pending_work(fluid_only_budget(1U));
+    CHECK(first_stats.processed_fluid_cells == 1U);
+    CHECK(world.water_level(x, source_y, z) == 6U);
+    CHECK(world.water_level(x, source_y - 1, z) == 2U);
+    CHECK(world.water_level(x, source_y - 2, z) == 0U);
+
+    auto budget = fluid_only_budget(32U);
+    for (int iteration = 0; iteration < 64; ++iteration) {
+        const auto stats = world.process_pending_work(budget);
+        CHECK(stats.processed_fluid_cells <= budget.fluid_cell_budget);
+    }
+
+    CHECK(water_volume_in_box(world, 0, 4, kWorldMinY, source_y, 0, 4) == kMaxWaterLevel);
+    CHECK(water_volume_in_box(world, x, x, kWorldMinY, source_y - 1, z, z) > 0);
+    CHECK(infinite_water_cells_in_box(world, 0, 4, kWorldMinY, source_y, 0, 4) == 0);
+}
+
+TEST_CASE("flowing water replaces fragile blocks but does not enter solid barriers") {
+    World world(18310, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int floor_y = 70;
+    constexpr int water_y = floor_y + 1;
+    constexpr int channel_z = 2;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = 0; x <= 5; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+    }
+    world.set_block(2, water_y, channel_z, to_block_id(BlockType::TallGrass));
+    world.set_block(3, water_y, channel_z, to_block_id(BlockType::Torch));
+    world.set_block(4, water_y, channel_z, stone);
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, 1, water_y, channel_z);
+
+    auto budget = fluid_only_budget(64U);
+    for (int iteration = 0; iteration < 64 && !world.has_water(3, water_y, channel_z); ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    CHECK(world.get_block(2, water_y, channel_z) == to_block_id(BlockType::Air));
+    CHECK(world.has_water(2, water_y, channel_z));
+    CHECK(world.get_block(3, water_y, channel_z) == to_block_id(BlockType::Air));
+    CHECK(world.has_water(3, water_y, channel_z));
+    CHECK(world.get_block(4, water_y, channel_z) == stone);
+    CHECK_FALSE(world.has_water(4, water_y, channel_z));
+    CHECK(infinite_water_cells_in_box(world, 2, 3, water_y, water_y, channel_z, channel_z) == 0);
+}
+
+TEST_CASE("zero fluid time budget defers active water without advancing the front") {
+    World world(18311, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int floor_y = 76;
+    constexpr int water_y = floor_y + 1;
+    constexpr int channel_z = 4;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = 0; x <= 4; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+    }
+
+    test::flush_pending_work(world);
+    world.set_block(1, water_y, channel_z, to_block_id(BlockType::Water));
+
+    const auto pending_before = world.pending_fluid_count();
+    REQUIRE(pending_before > 0);
+
+    const auto stats = world.process_pending_work(fluid_only_budget(64U, 0.0));
+
+    CHECK(stats.processed_fluid_cells == 0U);
+    CHECK(world.pending_fluid_count() == pending_before);
+    CHECK_FALSE(world.has_water(2, water_y, channel_z));
+    CHECK(world.water_level(1, water_y, channel_z) == kMaxWaterLevel);
+}
+
+TEST_CASE("loaded chunk revalidation resumes water across a newly loaded boundary") {
+    World world(18312, 2);
+    const ChunkCoord origin {0, 0};
+    const ChunkCoord east {1, 0};
+    test::make_chunk_empty(world, origin);
+
+    constexpr int floor_y = 72;
+    constexpr int water_y = floor_y + 1;
+    constexpr int channel_z = 3;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = 13; x <= 15; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+    }
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, 14, water_y, channel_z);
+
+    auto budget = fluid_only_budget(128U);
+    for (int iteration = 0; iteration < 64; ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    CHECK(world.find_chunk(east) == nullptr);
+    CHECK_FALSE(world.has_water(16, water_y, channel_z));
+
+    test::make_chunk_empty(world, east);
+    for (int x = 16; x <= 22; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+    }
+
+    for (int iteration = 0; iteration < 64 && !world.has_water(16, water_y, channel_z); ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    CHECK(world.has_water(16, water_y, channel_z));
+    CHECK(world.water_level(16, water_y, channel_z) > 0);
+    CHECK(infinite_water_cells_in_box(world, 16, 22, water_y, water_y, channel_z, channel_z) == 0);
+}
+
+TEST_CASE("large active flood respects fluid budgets and keeps pending work bounded") {
+    World world(18313, 4);
+    for (int chunk_x = 0; chunk_x <= 3; ++chunk_x) {
+        test::make_chunk_empty(world, {chunk_x, 0});
+    }
+
+    constexpr int floor_y = 66;
+    constexpr int water_y = floor_y + 1;
+    constexpr int channel_z = 6;
+    constexpr int far_x = 52;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = 0; x < kChunkSizeX * 4; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+    }
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, 0, water_y, channel_z);
+
+    auto budget = fluid_only_budget(7U);
+    auto max_pending = std::size_t {0U};
+    auto progressed_under_budget = false;
+
+    const auto first_stats = world.process_pending_work(budget);
+    CHECK(first_stats.processed_fluid_cells <= budget.fluid_cell_budget);
+    CHECK(std::isfinite(first_stats.fluid_ms));
+    CHECK_FALSE(world.has_water(far_x, water_y, channel_z));
+
+    for (int frame = 0; frame < 80; ++frame) {
+        const auto stats = world.process_pending_work(budget);
+        CAPTURE(frame);
+        CHECK(stats.processed_fluid_cells <= budget.fluid_cell_budget);
+        CHECK(std::isfinite(stats.fluid_ms));
+        max_pending = std::max(max_pending, world.pending_fluid_count());
+        progressed_under_budget = progressed_under_budget || world.has_water(8, water_y, channel_z);
+    }
+
+    CHECK(progressed_under_budget);
+    CHECK(max_pending <= 4096U);
+    CHECK(infinite_water_cells_in_box(world, 1, far_x, water_y, water_y, channel_z, channel_z) == 0);
+}
+
+TEST_CASE("infinite sea pressure advances through long channels by flow budget instead of stopping at a short gradient") {
+    World world(18303, 3);
+    for (int chunk_x = 0; chunk_x <= 3; ++chunk_x) {
+        test::make_chunk_empty(world, {chunk_x, 0});
+    }
+
+    constexpr int floor_y = 20;
+    constexpr int water_y = floor_y + 1;
+    constexpr int min_x = 0;
+    constexpr int max_x = 55;
+    constexpr int channel_z = 1;
+    constexpr int far_x = 40;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = min_x; x <= max_x; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+        world.set_block(x, water_y + 1, channel_z, stone);
+    }
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, min_x, water_y, channel_z);
+
+    WorldWorkBudget slow_budget {};
+    slow_budget.chunk_generation_budget = 0U;
+    slow_budget.fluid_cell_budget = 1U;
+    slow_budget.mesh_rebuild_budget = 0U;
+    slow_budget.light_node_budget = 0U;
+    slow_budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    slow_budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    slow_budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    slow_budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    (void)world.process_pending_work(slow_budget);
+    CHECK_FALSE(world.has_water(far_x, water_y, channel_z));
+
+    slow_budget.fluid_cell_budget = 128U;
+    for (int iteration = 0; iteration < 256 && !world.has_water(far_x, water_y, channel_z); ++iteration) {
+        (void)world.process_pending_work(slow_budget);
+    }
+
+    CHECK(world.has_water(far_x, water_y, channel_z));
+    CHECK(world.water_level(far_x, water_y, channel_z) > 0);
+}
+
+TEST_CASE("infinite source surface keeps advancing across same level floodplains") {
+    World world(18307, 3);
+    for (int chunk_x = 0; chunk_x <= 3; ++chunk_x) {
+        test::make_chunk_empty(world, {chunk_x, 0});
+    }
+
+    constexpr int floor_y = kSeaLevel;
+    constexpr int water_y = kSeaLevel + 1;
+    constexpr int min_x = 0;
+    constexpr int max_x = 55;
+    constexpr int channel_z = 5;
+    constexpr int far_x = 44;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = min_x; x <= max_x; ++x) {
+        world.set_block(x, floor_y, channel_z, stone);
+        world.set_block(x, water_y, channel_z - 1, stone);
+        world.set_block(x, water_y, channel_z + 1, stone);
+    }
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, min_x, water_y, channel_z);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 1U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 0U;
+    budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    (void)world.process_pending_work(budget);
+    CHECK_FALSE(world.has_water(far_x, water_y, channel_z));
+
+    budget.fluid_cell_budget = 128U;
+    for (int iteration = 0; iteration < 256 && !world.has_water(far_x, water_y, channel_z); ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    CHECK(world.has_water(far_x, water_y, channel_z));
+    CHECK(infinite_water_cells_in_box(world, min_x + 1, far_x, water_y, water_y, channel_z, channel_z) == 0);
+}
+
+TEST_CASE("infinite sea pressure raises a lower basin progressively") {
+    World world(18304, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int floor_y = 20;
+    constexpr int water_y = floor_y + 1;
+    constexpr int basin_min_x = 3;
+    constexpr int basin_max_x = 7;
+    constexpr int basin_min_z = 1;
+    constexpr int basin_max_z = 5;
+    constexpr int inlet_z = 3;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int z = basin_min_z; z <= basin_max_z; ++z) {
+        for (int x = basin_min_x; x <= basin_max_x; ++x) {
+            world.set_block(x, floor_y, z, stone);
+        }
+    }
+    for (int y = water_y; y <= water_y + 3; ++y) {
+        for (int x = basin_min_x; x <= basin_max_x; ++x) {
+            world.set_block(x, y, basin_min_z, stone);
+            world.set_block(x, y, basin_max_z, stone);
+        }
+        for (int z = basin_min_z; z <= basin_max_z; ++z) {
+            if (!(y == water_y && z == inlet_z)) {
+                world.set_block(basin_min_x, y, z, stone);
+            }
+            world.set_block(basin_max_x, y, z, stone);
+        }
+    }
+    world.set_block(basin_min_x - 1, floor_y, inlet_z, stone);
+    world.set_block(basin_min_x - 1, water_y, inlet_z - 1, stone);
+    world.set_block(basin_min_x - 1, water_y, inlet_z + 1, stone);
+    world.set_block(basin_min_x - 1, water_y + 1, inlet_z, stone);
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, basin_min_x - 1, water_y, inlet_z);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 2U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 0U;
+    budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+    CHECK_FALSE(world.has_water(basin_min_x + 1, water_y + 1, inlet_z));
+
+    budget.fluid_cell_budget = 64U;
+    for (int iteration = 0; iteration < 128 && !world.has_water(basin_min_x + 1, water_y + 1, inlet_z); ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    CHECK(world.has_water(basin_min_x + 1, water_y + 1, inlet_z));
+    CHECK(world.water_level(basin_min_x + 1, water_y + 1, inlet_z) > 0);
+}
+
+TEST_CASE("finite pressure transfer conserves reservoir volume while raising a connected basin") {
+    World world(18305, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int floor_y = 20;
+    constexpr int water_min_y = floor_y + 1;
+    constexpr int water_max_y = water_min_y + 4;
+    constexpr int min_x = 0;
+    constexpr int max_x = 9;
+    constexpr int channel_z = 2;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = min_x; x <= max_x; ++x) {
+        for (int z = channel_z - 1; z <= channel_z + 1; ++z) {
+            world.set_block(x, floor_y, z, stone);
+        }
+    }
+    for (int y = water_min_y; y <= water_max_y; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            world.set_block(x, y, channel_z - 1, stone);
+            world.set_block(x, y, channel_z + 1, stone);
+        }
+        world.set_block(min_x, y, channel_z, stone);
+        world.set_block(max_x, y, channel_z, stone);
+    }
+
+    test::flush_pending_work(world);
+
+    for (int y = water_min_y; y <= water_max_y; ++y) {
+        for (int x = min_x + 1; x <= min_x + 3; ++x) {
+            world.set_block(x, y, channel_z, to_block_id(BlockType::Water));
+        }
+    }
+
+    const auto initial_volume = water_volume_in_box(world, min_x, max_x, water_min_y, water_max_y, channel_z, channel_z);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 128U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 0U;
+    budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    auto raised_side_water = false;
+    for (int iteration = 0; iteration < 256; ++iteration) {
+        (void)world.process_pending_work(budget);
+        raised_side_water = raised_side_water || world.has_water(min_x + 4, water_min_y + 1, channel_z);
+    }
+
+    const auto final_volume = water_volume_in_box(world, min_x, max_x, water_min_y, water_max_y, channel_z, channel_z);
+    CHECK(raised_side_water);
+    CHECK(final_volume == initial_volume);
+    CHECK(infinite_water_cells_in_box(world, min_x, max_x, water_min_y, water_max_y, channel_z, channel_z) == 0);
+}
+
+TEST_CASE("sea floodwater does not become detached infinite sources and can drain after isolation") {
+    World world(18306, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    constexpr int floor_y = 20;
+    constexpr int water_y = floor_y + 1;
+    constexpr int min_x = 0;
+    constexpr int max_x = 8;
+    constexpr int channel_z = 2;
+    const auto stone = to_block_id(BlockType::Stone);
+
+    for (int x = min_x; x <= max_x; ++x) {
+        for (int z = channel_z - 1; z <= channel_z + 1; ++z) {
+            world.set_block(x, floor_y, z, stone);
+        }
+    }
+    for (int y = water_y; y <= water_y + 2; ++y) {
+        for (int x = min_x; x <= max_x; ++x) {
+            world.set_block(x, y, channel_z - 1, stone);
+            world.set_block(x, y, channel_z + 1, stone);
+        }
+        world.set_block(min_x, y, channel_z, stone);
+        world.set_block(max_x, y, channel_z, stone);
+    }
+
+    test::flush_pending_work(world);
+    place_infinite_test_water(world, min_x + 1, water_y, channel_z);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 128U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 0U;
+    budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    budget.max_fluid_ms = std::numeric_limits<double>::infinity();
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    for (int iteration = 0; iteration < 256 && world.water_level(max_x - 2, water_y, channel_z) < kMaxWaterLevel; ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    REQUIRE(world.water_level(max_x - 2, water_y, channel_z) == kMaxWaterLevel);
+    CHECK(infinite_water_cells_in_box(world, min_x + 2, max_x - 1, water_y, water_y, channel_z, channel_z) == 0);
+
+    for (int y = water_y; y <= water_y + 2; ++y) {
+        world.set_block(min_x + 2, y, channel_z, stone);
+    }
+    world.set_block(max_x - 2, floor_y, channel_z, to_block_id(BlockType::Air));
+
+    const auto isolated_volume = water_volume_in_box(world, min_x + 3, max_x - 1, water_y, water_y, channel_z, channel_z);
+    for (int iteration = 0; iteration < 256; ++iteration) {
+        (void)world.process_pending_work(budget);
+    }
+
+    const auto drained_volume = water_volume_in_box(world, min_x + 3, max_x - 1, water_y, water_y, channel_z, channel_z);
+    CHECK(drained_volume < isolated_volume);
+    CHECK(world.water_level(max_x - 2, water_y, channel_z) < kMaxWaterLevel);
 }
 
 TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {

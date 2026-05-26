@@ -588,6 +588,21 @@ TEST_CASE("default hotbar exposes starter stacks and an empty hand slot") {
     CHECK(hotbar.slots[8].count == 0);
 }
 
+TEST_CASE("hotbar helpers sanitize corrupted item ids and selected index") {
+    HotbarState hotbar {};
+    hotbar.slots[0] = make_item_stack(to_block_id(BlockType::Stone), 12);
+    hotbar.slots[1] = {static_cast<BlockId>(255U), 64};
+    hotbar.selected_index = 999U;
+
+    CHECK(hotbar.selected_slot().block_id == to_block_id(BlockType::Stone));
+    CHECK(selected_hotbar_block(hotbar) == to_block_id(BlockType::Stone));
+
+    normalize_item_stack(hotbar.slots[1]);
+    CHECK_FALSE(hotbar_slot_has_item(hotbar.slots[1]));
+    CHECK(hotbar.slots[1].block_id == to_block_id(BlockType::Air));
+    CHECK(hotbar.slots[1].count == 0);
+}
+
 TEST_CASE("hotbar selection supports number keys and mouse wheel wrap") {
     HotbarState hotbar = make_default_hotbar_state();
 

@@ -35,6 +35,8 @@ constexpr float kPlayerMeleeTargetHeight = 0.90F;
 constexpr float kNightBlockedAttackMargin = 0.55F;
 constexpr float kNightMonsterBlockedAttackMargin = 0.25F;
 constexpr float kNightStrikeCooldown = 0.9F;
+constexpr float kNightChaseRoamMargin = 3.20F;
+constexpr float kNightChaseRoamRadiusCap = 24.0F;
 constexpr float kZombieDamage = 3.0F;
 constexpr float kMaxStepHeight = 1.4F;
 constexpr float kDawnAttackVisualCap = 0.42F;
@@ -48,6 +50,7 @@ constexpr float kResidentSocialDistance = 5.75F;
 constexpr float kResidentPlayerLookDistance = 6.75F;
 constexpr float kResidentPanicDuration = 1.45F;
 constexpr float kResidentStepLookahead = 0.90F;
+constexpr int kResidentTargetSearchRadius = 3;
 constexpr float kCreatureHurtDuration = 0.34F;
 constexpr float kCreatureDeathVisualDuration = 1.18F;
 constexpr float kCreatureSpawnSuppressionDuration = 14.0F;
@@ -114,6 +117,7 @@ auto attack_distance_for(const CreatureInstance& creature) noexcept -> float;
 auto movement_body_radius_for(const CreatureInstance& creature) noexcept -> float;
 auto movement_clear_air_blocks_for(const CreatureInstance& creature) noexcept -> int;
 auto player_height_reachable_by(const CreatureInstance& creature, const glm::vec3& player_position) noexcept -> bool;
+auto wrap_angle(float angle) noexcept -> float;
 auto has_clear_creature_attack_path(const CreatureInstance& creature,
                                     const World& world,
                                     const glm::vec3& player_position,
@@ -171,11 +175,111 @@ auto next_signed_unit(std::uint32_t& state) noexcept -> float {
     return next_unit(state) * 2.0F - 1.0F;
 }
 
+auto finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? value : fallback;
+}
+
+auto non_negative_finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? std::max(value, 0.0F) : fallback;
+}
+
+auto non_negative_finite(float value) noexcept -> float {
+    return non_negative_finite_or(value, 0.0F);
+}
+
+auto is_finite_vec3(const glm::vec3& value) noexcept -> bool {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    return {
+        finite_or(value.x, fallback.x),
+        finite_or(value.y, fallback.y),
+        finite_or(value.z, fallback.z),
+    };
+}
+
+auto sanitize_creature_position(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    auto result = finite_vec3_or(value, fallback);
+    result.y = std::clamp(result.y, static_cast<float>(kWorldMinY) - 4.0F, static_cast<float>(kWorldMaxY) + 8.0F);
+    return result;
+}
+
+auto fallback_spawn_position(const CreatureSpawnAnchor& anchor) noexcept -> glm::vec3 {
+    return {
+        static_cast<float>(anchor.ground_block.x) + 0.5F,
+        static_cast<float>(anchor.ground_block.y) + kGroundSnapOffset,
+        static_cast<float>(anchor.ground_block.z) + 0.5F,
+    };
+}
+
+auto is_known_creature_species(CreatureSpecies species) noexcept -> bool {
+    return static_cast<std::uint8_t>(species) <= static_cast<std::uint8_t>(CreatureSpecies::Villager);
+}
+
+auto is_known_behavior_state(CreatureBehaviorState state) noexcept -> bool {
+    return static_cast<std::uint8_t>(state) <= static_cast<std::uint8_t>(CreatureBehaviorState::ReturnHome);
+}
+
+auto is_known_creature_phase(CreaturePhase phase) noexcept -> bool {
+    return static_cast<unsigned char>(phase) <= static_cast<unsigned char>(CreaturePhase::DawnRecover);
+}
+
+void sanitize_loaded_anchor(CreatureSpawnAnchor& anchor) noexcept {
+    if (!is_known_creature_species(anchor.species)) {
+        anchor.species = CreatureSpecies::Pig;
+    }
+
+    anchor.roam_radius = std::clamp(non_negative_finite_or(anchor.roam_radius, 0.0F), 0.0F, 128.0F);
+    anchor.spawn_position = sanitize_creature_position(anchor.spawn_position, fallback_spawn_position(anchor));
+    anchor.patrol_point_count =
+        static_cast<std::uint8_t>(std::min<std::size_t>(anchor.patrol_point_count, anchor.patrol_points.size()));
+    for (auto& point : anchor.patrol_points) {
+        point = sanitize_creature_position(point, anchor.spawn_position);
+    }
+}
+
+void sanitize_loaded_creature(CreatureInstance& creature) noexcept {
+    sanitize_loaded_anchor(creature.anchor);
+    creature.position = sanitize_creature_position(creature.position, creature.anchor.spawn_position);
+    creature.yaw_radians = wrap_angle(creature.yaw_radians);
+    creature.behavior_timer = non_negative_finite(creature.behavior_timer);
+    creature.animation_time = non_negative_finite(creature.animation_time);
+    creature.wander_heading = wrap_angle(creature.wander_heading);
+    creature.nervous_intensity = std::clamp(finite_or(creature.nervous_intensity, 0.0F), 0.0F, 1.0F);
+    if (!is_known_behavior_state(creature.behavior_state)) {
+        creature.behavior_state = CreatureBehaviorState::Idle;
+    }
+    if (!is_known_creature_phase(creature.phase)) {
+        creature.phase = CreaturePhase::Day;
+    }
+    creature.morph_factor = std::clamp(finite_or(creature.morph_factor, 0.0F), 0.0F, 1.0F);
+    creature.motion_amount = std::clamp(finite_or(creature.motion_amount, 0.0F), 0.0F, 1.0F);
+    creature.gaze_weight = std::clamp(finite_or(creature.gaze_weight, 0.0F), 0.0F, 1.0F);
+    creature.attack_cooldown = non_negative_finite(creature.attack_cooldown);
+    creature.attack_amount = std::clamp(finite_or(creature.attack_amount, 0.0F), 0.0F, 1.0F);
+    creature.hurt_timer = non_negative_finite(creature.hurt_timer);
+    creature.hit_direction = horizontal_direction_or_fallback(creature.hit_direction, {0.0F, 0.0F, 1.0F});
+    if (creature.anchor.patrol_point_count == 0U) {
+        creature.resident_target_index = 0U;
+    } else {
+        creature.resident_target_index =
+            static_cast<std::uint8_t>(std::min<std::uint8_t>(
+                creature.resident_target_index,
+                static_cast<std::uint8_t>(creature.anchor.patrol_point_count - 1U)));
+    }
+    ensure_creature_health(creature);
+}
+
 auto wrap_angle(float angle) noexcept -> float {
-    while (angle <= -kPi) {
+    if (!std::isfinite(angle)) {
+        return 0.0F;
+    }
+    angle = std::fmod(angle, kTwoPi);
+    if (angle <= -kPi) {
         angle += kTwoPi;
     }
-    while (angle > kPi) {
+    if (angle > kPi) {
         angle -= kTwoPi;
     }
     return angle;
@@ -526,6 +630,93 @@ auto resident_activity_target(const ResidentProfile& profile, ResidentRoutinePha
     return target;
 }
 
+auto resolve_resident_activity_target(const CreatureInstance& creature,
+                                      const ResidentProfile& profile,
+                                      const World& world,
+                                      const glm::vec3& raw_target) -> glm::vec3 {
+    const auto preferred_floor_y = creature.anchor.ground_block.y;
+    const auto target_block_x = static_cast<int>(std::floor(raw_target.x));
+    const auto target_block_z = static_cast<int>(std::floor(raw_target.z));
+    const glm::vec2 raw_xz {raw_target.x, raw_target.z};
+    const glm::vec2 current_xz {creature.position.x, creature.position.z};
+    const glm::vec2 home_xz {profile.home_position.x, profile.home_position.z};
+    const auto roam_radius_sq = profile.roam_radius * profile.roam_radius;
+    const auto body_radius = movement_body_radius_for(creature);
+    const auto clear_air_blocks = movement_clear_air_blocks_for(creature);
+
+    glm::vec3 best_target = profile.home_position;
+    auto best_score = std::numeric_limits<float>::max();
+    auto found_walkable_target = false;
+
+    for (int radius = 0; radius <= kResidentTargetSearchRadius; ++radius) {
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                if (radius != 0 && std::abs(dx) != radius && std::abs(dz) != radius) {
+                    continue;
+                }
+
+                const auto block_x = target_block_x + dx;
+                const auto block_z = target_block_z + dz;
+                if (!is_spawn_column_clear(world, block_x, preferred_floor_y, block_z)) {
+                    continue;
+                }
+
+                const auto candidate = radius == 0 ?
+                    glm::vec3 {raw_target.x, static_cast<float>(preferred_floor_y) + kGroundSnapOffset, raw_target.z} :
+                    glm::vec3 {static_cast<float>(block_x) + 0.5F,
+                               static_cast<float>(preferred_floor_y) + kGroundSnapOffset,
+                               static_cast<float>(block_z) + 0.5F};
+                const glm::vec2 candidate_xz {candidate.x, candidate.z};
+                const auto home_delta = candidate_xz - home_xz;
+                if (glm::dot(home_delta, home_delta) > roam_radius_sq) {
+                    continue;
+                }
+                if (creature_body_blocker_count_at(
+                        world,
+                        candidate.x,
+                        preferred_floor_y,
+                        candidate.z,
+                        body_radius,
+                        clear_air_blocks) != 0) {
+                    continue;
+                }
+
+                const auto target_delta = candidate_xz - raw_xz;
+                const auto current_delta = candidate_xz - current_xz;
+                const auto score =
+                    glm::dot(target_delta, target_delta) +
+                    glm::dot(current_delta, current_delta) * 0.035F +
+                    static_cast<float>(radius) * 0.08F;
+                if (score < best_score) {
+                    best_score = score;
+                    best_target = candidate;
+                    found_walkable_target = true;
+                }
+            }
+        }
+
+        if (found_walkable_target && radius <= 1) {
+            break;
+        }
+    }
+
+    if (found_walkable_target) {
+        return best_target;
+    }
+
+    const auto home_block_x = static_cast<int>(std::floor(profile.home_position.x));
+    const auto home_block_z = static_cast<int>(std::floor(profile.home_position.z));
+    if (is_spawn_column_clear(world, home_block_x, preferred_floor_y, home_block_z)) {
+        return {
+            profile.home_position.x,
+            static_cast<float>(preferred_floor_y) + kGroundSnapOffset,
+            profile.home_position.z,
+        };
+    }
+
+    return creature.position;
+}
+
 auto is_resident_travel_state(CreatureBehaviorState state) noexcept -> bool {
     return state == CreatureBehaviorState::Wander ||
            state == CreatureBehaviorState::ReturnHome ||
@@ -695,7 +886,7 @@ void update_resident_creature(CreatureInstance& creature,
 
     creature.phase = CreaturePhase::Day;
     creature.morph_factor = 0.0F;
-    creature.animation_time += std::max(dt, 0.0F);
+    creature.animation_time += non_negative_finite(dt);
     creature.behavior_timer = std::max(0.0F, creature.behavior_timer - dt);
     creature.attack_cooldown = 0.0F;
 
@@ -721,6 +912,9 @@ void update_resident_creature(CreatureInstance& creature,
         target_position.x = glm::mix(target_position.x, meet_target.x, 0.34F);
         target_position.z = glm::mix(target_position.z, meet_target.z, 0.34F);
     }
+    // Je replie les objectifs de routine vers une case marchable du village pour eviter
+    // qu'un villageois insiste sur une cible placee dans un mur, une decoration ou un trou.
+    target_position = resolve_resident_activity_target(creature, profile, world, target_position);
 
     const auto to_target = glm::vec2 {
         target_position.x - creature.position.x,
@@ -802,7 +996,7 @@ void update_resident_creature(CreatureInstance& creature,
                 creature.wander_heading = rotate_towards(
                     creature.wander_heading,
                     yaw_from_direction(target_direction),
-                    (1.60F + role_bias * 0.35F) * std::max(dt, 0.0F));
+                    (1.60F + role_bias * 0.35F) * non_negative_finite(dt));
             }
             desired_move = direction_from_yaw(creature.wander_heading) * resident_speed * dt * (0.56F + role_bias * 0.20F);
             desired_yaw = creature.wander_heading;
@@ -950,7 +1144,7 @@ void update_resident_creature(CreatureInstance& creature,
     }
     creature.yaw_radians = moved ?
         resolved_yaw :
-        rotate_towards(creature.yaw_radians, resolved_yaw, 5.8F * std::max(dt, 0.0F));
+        rotate_towards(creature.yaw_radians, resolved_yaw, 5.8F * non_negative_finite(dt));
 
     if (dt > 0.0F) {
         const auto reference_distance = std::max(resident_speed * dt, 0.001F);
@@ -972,15 +1166,21 @@ void update_resident_creature(CreatureInstance& creature,
 }
 
 auto is_chunk_within_radius(const ChunkCoord& center, const ChunkCoord& coord, int radius) noexcept -> bool {
-    return std::abs(coord.x - center.x) <= radius && std::abs(coord.z - center.z) <= radius;
+    const auto dx = static_cast<long long>(coord.x) - static_cast<long long>(center.x);
+    const auto dz = static_cast<long long>(coord.z) - static_cast<long long>(center.z);
+    const auto abs_dx = dx < 0 ? -dx : dx;
+    const auto abs_dz = dz < 0 ? -dz : dz;
+    return abs_dx <= static_cast<long long>(radius) && abs_dz <= static_cast<long long>(radius);
 }
 
 auto chunk_distance_squared_to_player(const ChunkCoord& coord, const glm::vec3& player_position) noexcept -> float {
-    const auto center_x = static_cast<float>(coord.x * kChunkSizeX) + static_cast<float>(kChunkSizeX) * 0.5F;
-    const auto center_z = static_cast<float>(coord.z * kChunkSizeZ) + static_cast<float>(kChunkSizeZ) * 0.5F;
+    const auto center_x = static_cast<double>(coord.x) * static_cast<double>(kChunkSizeX) +
+                          static_cast<double>(kChunkSizeX) * 0.5;
+    const auto center_z = static_cast<double>(coord.z) * static_cast<double>(kChunkSizeZ) +
+                          static_cast<double>(kChunkSizeZ) * 0.5;
     const auto dx = center_x - player_position.x;
     const auto dz = center_z - player_position.z;
-    return dx * dx + dz * dz;
+    return static_cast<float>(dx * dx + dz * dz);
 }
 
 auto horizontal_distance_squared(const glm::vec3& lhs, const glm::vec3& rhs) noexcept -> float {
@@ -1096,6 +1296,18 @@ auto can_strike_player(const CreatureInstance& creature,
     }
 
     return has_clear_creature_attack_path(creature, world, player_position, horizontal_distance_sq);
+}
+
+auto night_chase_roam_radius_for(const CreatureInstance& creature,
+                                 const SpeciesTuning& tuning,
+                                 const glm::vec3& player_position) noexcept -> float {
+    const glm::vec2 anchor_to_player {
+        player_position.x - creature.anchor.spawn_position.x,
+        player_position.z - creature.anchor.spawn_position.z,
+    };
+    const auto player_radius = glm::length(anchor_to_player);
+    const auto dynamic_radius = player_radius + attack_distance_for(creature) + kNightChaseRoamMargin;
+    return glm::clamp(std::max(tuning.chase_radius, dynamic_radius), tuning.chase_radius, kNightChaseRoamRadiusCap);
 }
 
 auto tuning_for(CreatureSpecies species) noexcept -> SpeciesTuning {
@@ -1554,31 +1766,36 @@ auto try_move_grounded_with_steering(CreatureInstance& creature,
         return {};
     }
 
+    constexpr std::array<float, 4> kStepScales {{1.0F, 0.62F, 0.36F, 0.18F}};
     if (aggressive) {
-        for (const auto heading_offset :
-             std::array<float, 13> {0.0F, 0.28F, -0.28F, 0.56F, -0.56F, 0.92F, -0.92F, 1.28F, -1.28F, 1.57F, -1.57F, 2.20F, -2.20F}) {
-            const auto heading = wrap_angle(base_heading + heading_offset);
-            if (try_move_grounded(
-                    creature,
-                    world,
-                    direction_from_yaw(heading) * step_distance,
-                    roam_radius,
-                    preferred_floor_y)) {
-                return {true, std::abs(heading_offset) > 0.05F, heading};
+        for (const auto step_scale : kStepScales) {
+            for (const auto heading_offset :
+                 std::array<float, 13> {0.0F, 0.28F, -0.28F, 0.56F, -0.56F, 0.92F, -0.92F, 1.28F, -1.28F, 1.57F, -1.57F, 2.20F, -2.20F}) {
+                const auto heading = wrap_angle(base_heading + heading_offset);
+                if (try_move_grounded(
+                        creature,
+                        world,
+                        direction_from_yaw(heading) * step_distance * step_scale,
+                        roam_radius,
+                        preferred_floor_y)) {
+                    return {true, std::abs(heading_offset) > 0.05F, heading};
+                }
             }
         }
         return {};
     }
 
-    for (const auto heading_offset : std::array<float, 5> {0.0F, 0.34F, -0.34F, 0.68F, -0.68F}) {
-        const auto heading = wrap_angle(base_heading + heading_offset);
-        if (try_move_grounded(
-                creature,
-                world,
-                direction_from_yaw(heading) * step_distance,
-                roam_radius,
-                preferred_floor_y)) {
-            return {true, std::abs(heading_offset) > 0.05F, heading};
+    for (const auto step_scale : kStepScales) {
+        for (const auto heading_offset : std::array<float, 5> {0.0F, 0.34F, -0.34F, 0.68F, -0.68F}) {
+            const auto heading = wrap_angle(base_heading + heading_offset);
+            if (try_move_grounded(
+                    creature,
+                    world,
+                    direction_from_yaw(heading) * step_distance * step_scale,
+                    roam_radius,
+                    preferred_floor_y)) {
+                return {true, std::abs(heading_offset) > 0.05F, heading};
+            }
         }
     }
     return {};
@@ -1609,31 +1826,35 @@ auto try_move_grounded_towards(CreatureInstance& creature,
         glm::normalize(preferred_direction) :
         direction_from_yaw(base_heading);
 
-    for (const auto heading_offset : candidate_offsets) {
-        const auto heading = wrap_angle(base_heading + heading_offset);
-        auto probe = creature;
-        if (!try_move_grounded(
-                probe,
-                world,
-                direction_from_yaw(heading) * step_distance,
-                roam_radius,
-                preferred_floor_y)) {
-            continue;
-        }
+    constexpr std::array<float, 4> kStepScales {{1.0F, 0.62F, 0.36F, 0.18F}};
+    for (const auto step_scale : kStepScales) {
+        for (const auto heading_offset : candidate_offsets) {
+            const auto heading = wrap_angle(base_heading + heading_offset);
+            auto probe = creature;
+            if (!try_move_grounded(
+                    probe,
+                    world,
+                    direction_from_yaw(heading) * step_distance * step_scale,
+                    roam_radius,
+                    preferred_floor_y)) {
+                continue;
+            }
 
-        const glm::vec2 after {probe.position.x, probe.position.z};
-        const auto to_target = target_position - after;
-        const auto moved_delta = after - before;
-        const auto moved_distance = glm::length(moved_delta);
-        const auto moved_direction = moved_distance > 1.0e-6F ? moved_delta / moved_distance : direction_from_yaw(heading);
-        const auto target_score = glm::dot(to_target, to_target);
-        const auto alignment_bonus = glm::clamp(glm::dot(moved_direction, preferred), -1.0F, 1.0F);
-        const auto offset_penalty = std::abs(heading_offset) * 0.055F;
-        const auto score = target_score + offset_penalty - alignment_bonus * kResidentStepLookahead;
-        if (score < best_score) {
-            best_score = score;
-            best_creature = probe;
-            best_result = {true, std::abs(heading_offset) > 0.05F, heading};
+            const glm::vec2 after {probe.position.x, probe.position.z};
+            const auto to_target = target_position - after;
+            const auto moved_delta = after - before;
+            const auto moved_distance = glm::length(moved_delta);
+            const auto moved_direction = moved_distance > 1.0e-6F ? moved_delta / moved_distance : direction_from_yaw(heading);
+            const auto target_score = glm::dot(to_target, to_target);
+            const auto alignment_bonus = glm::clamp(glm::dot(moved_direction, preferred), -1.0F, 1.0F);
+            const auto offset_penalty = std::abs(heading_offset) * 0.055F;
+            const auto short_step_penalty = (1.0F - step_scale) * 0.42F;
+            const auto score = target_score + offset_penalty + short_step_penalty - alignment_bonus * kResidentStepLookahead;
+            if (score < best_score) {
+                best_score = score;
+                best_creature = probe;
+                best_result = {true, std::abs(heading_offset) > 0.05F, heading};
+            }
         }
     }
 
@@ -1692,13 +1913,14 @@ void CreatureSystem::update(float dt,
     audit_stats_ = {};
     attacks_.clear();
 
-    const auto clamped_dt = std::max(dt, 0.0F);
+    const auto clamped_dt = non_negative_finite(dt);
     update_spawn_suppressions(clamped_dt);
-    sync_active_creatures(world, player_position, cycle);
+    const auto safe_player_position = finite_vec3_or(player_position, {});
+    sync_active_creatures(world, safe_player_position, cycle);
 
     const auto active_view = std::span<const CreatureInstance>(creatures_.data(), creatures_.size());
     for (auto& creature : creatures_) {
-        update_creature(creature, clamped_dt, world, player_position, environment, cycle, active_view);
+        update_creature(creature, clamped_dt, world, safe_player_position, environment, cycle, active_view);
     }
 
     update_death_visuals(clamped_dt);
@@ -1734,7 +1956,13 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
                                             const glm::vec3& direction,
                                             float max_distance,
                                             float damage) -> CreatureDamageResult {
-    if (damage <= 0.0F || max_distance <= 0.0F || glm::dot(direction, direction) <= 1.0e-6F) {
+    if (!is_finite_vec3(origin) ||
+        !is_finite_vec3(direction) ||
+        !std::isfinite(damage) ||
+        !std::isfinite(max_distance) ||
+        damage <= 0.0F ||
+        max_distance <= 0.0F ||
+        glm::dot(direction, direction) <= 1.0e-6F) {
         return {};
     }
 
@@ -1890,7 +2118,7 @@ void CreatureSystem::set_settlement_residents(std::vector<CreatureSpawnAnchor> r
 void CreatureSystem::load_creatures(const std::vector<CreatureInstance>& creatures, const EnvironmentState& environment) {
     creatures_ = creatures;
     for (auto& creature : creatures_) {
-        ensure_creature_health(creature);
+        sanitize_loaded_creature(creature);
     }
     attacks_.clear();
     death_visuals_.clear();
@@ -2074,7 +2302,7 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                                      const CreatureCycleState& cycle,
                                      std::span<const CreatureInstance> active_creatures) {
     ensure_creature_health(creature);
-    creature.hurt_timer = std::max(0.0F, creature.hurt_timer - std::max(dt, 0.0F));
+    creature.hurt_timer = std::max(0.0F, creature.hurt_timer - non_negative_finite(dt));
     if (creature.health <= 0.0F) {
         creature.motion_amount = 0.0F;
         creature.gaze_weight = 0.0F;
@@ -2093,9 +2321,9 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
     const auto resident_species = is_resident_species(creature.anchor.species);
     creature.phase = resident_species ? CreaturePhase::Day : cycle.phase;
     creature.morph_factor = resident_species ? 0.0F : cycle.morph_factor;
-    creature.animation_time += std::max(dt, 0.0F);
+    creature.animation_time += non_negative_finite(dt);
     creature.behavior_timer -= dt;
-    creature.attack_cooldown = std::max(0.0F, creature.attack_cooldown - std::max(dt, 0.0F));
+    creature.attack_cooldown = std::max(0.0F, creature.attack_cooldown - non_negative_finite(dt));
 
     const auto morph_visible = resident_species ? false : is_morph_visible(cycle);
     const auto hostile_night = resident_species ? false : is_hostile_night(cycle);
@@ -2231,6 +2459,9 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
             player_distance_sq > 1.0e-6F &&
             player_distance <= melee_attack_distance + melee_blocked_margin &&
             (!melee_height_reachable || !close_melee_path_clear);
+        if (player_detected || chase_memory_active || can_attack_player || close_but_blocked) {
+            roam_radius = night_chase_roam_radius_for(creature, tuning, player_position);
+        }
 
         if (can_attack_player) {
             const auto attack_direction = glm::normalize(to_player);
@@ -2367,7 +2598,7 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
     }
 
     const auto turn_speed = hostile_night ? 8.8F : (morph_visible ? 7.6F : 5.5F);
-    const auto rotated_yaw = rotate_towards(creature.yaw_radians, desired_yaw, turn_speed * std::max(dt, 0.0F));
+    const auto rotated_yaw = rotate_towards(creature.yaw_radians, desired_yaw, turn_speed * non_negative_finite(dt));
     auto resolved_yaw = rotated_yaw;
 
     const auto desired_distance = glm::length(desired_move);
@@ -2459,8 +2690,8 @@ void CreatureSystem::update_death_visuals(float dt) noexcept {
     }
 
     for (auto& visual : death_visuals_) {
-        visual.age_seconds = std::min(visual.age_seconds + std::max(dt, 0.0F), visual.duration_seconds + 0.1F);
-        visual.animation_time += std::max(dt, 0.0F) * 0.60F;
+        visual.age_seconds = std::min(visual.age_seconds + non_negative_finite(dt), visual.duration_seconds + 0.1F);
+        visual.animation_time += non_negative_finite(dt) * 0.60F;
     }
 
     death_visuals_.erase(
@@ -2475,7 +2706,7 @@ void CreatureSystem::update_spawn_suppressions(float dt) noexcept {
         return;
     }
 
-    const auto clamped_dt = std::max(dt, 0.0F);
+    const auto clamped_dt = non_negative_finite(dt);
     for (auto& suppression : spawn_suppressions_) {
         suppression.remaining_seconds -= clamped_dt;
     }
@@ -2490,6 +2721,7 @@ void CreatureSystem::update_spawn_suppressions(float dt) noexcept {
 void CreatureSystem::rebuild_render_instances(const EnvironmentState& environment) {
     render_instances_.clear();
     render_instances_.reserve(creatures_.size() + death_visuals_.size());
+    const auto daylight_factor = std::clamp(finite_or(environment.daylight_factor, 1.0F), 0.0F, 1.0F);
 
     for (const auto& creature : creatures_) {
         const auto hurt_amount = glm::clamp(creature.hurt_timer / kCreatureHurtDuration, 0.0F, 1.0F);
@@ -2499,7 +2731,7 @@ void CreatureSystem::rebuild_render_instances(const EnvironmentState& environmen
             creature.yaw_radians,
             creature.animation_time,
             creature.morph_factor,
-            environment.daylight_factor,
+            daylight_factor,
             glm::clamp(std::max(creature.nervous_intensity, hurt_amount * 0.78F), 0.0F, 1.0F),
             creature.appearance_seed,
             creature.behavior_state,

@@ -102,8 +102,23 @@ void clamp_ui_cursor(float& cursor_x, float& cursor_y, int window_width, int win
     cursor_y = std::clamp(cursor_y, 0.0F, max_y);
 }
 
+auto finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? value : fallback;
+}
+
+auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    return {
+        finite_or(value.x, fallback.x),
+        finite_or(value.y, fallback.y),
+        finite_or(value.z, fallback.z),
+    };
+}
+
 auto safe_drop_direction(const glm::vec3& look_direction) noexcept -> glm::vec3 {
-    if (glm::dot(look_direction, look_direction) <= 1.0e-6F) {
+    if (!std::isfinite(look_direction.x) ||
+        !std::isfinite(look_direction.y) ||
+        !std::isfinite(look_direction.z) ||
+        glm::dot(look_direction, look_direction) <= 1.0e-6F) {
         return {0.0F, 0.0F, -1.0F};
     }
     return glm::normalize(look_direction);
@@ -2620,7 +2635,7 @@ void Game::load_snapshot_into_session(const SaveGameSnapshot& snapshot, std::opt
     item_drops_.load_drops(snapshot.item_drops);
     creatures_.clear();
     configure_starting_village(snapshot.metadata.has_starting_village, false);
-    spawn_position_ = snapshot.spawn_position;
+    spawn_position_ = finite_vec3_or(snapshot.spawn_position, {0.5F, 70.0F, 0.5F});
     progression_.load_state(snapshot.progression);
     player_.load_state(snapshot.player_state);
     super_vision_active_ = false;
@@ -2637,7 +2652,7 @@ void Game::load_snapshot_into_session(const SaveGameSnapshot& snapshot, std::opt
     }
     creatures_.load_creatures(snapshot.creatures, environment_.current_state());
     preview_orbit_radians_ = 0.0F;
-    menu_preview_time_of_day_ = snapshot.metadata.time_of_day;
+    menu_preview_time_of_day_ = environment_.time_of_day();
     update_menu_preview_camera(0.0F);
 
     present_loading_screen("CHARGEMENT", "INITIALISATION DU RENDU", 0.94F);
@@ -2688,7 +2703,8 @@ void Game::mark_session_dirty() noexcept {
 
 void Game::update_menu_preview_camera(float dt) {
     constexpr float kTwoPi = 6.28318530718F;
-    preview_orbit_radians_ = std::fmod(preview_orbit_radians_ + dt * 0.12F, kTwoPi);
+    const auto clamped_dt = std::max(finite_or(dt, 0.0F), 0.0F);
+    preview_orbit_radians_ = std::fmod(finite_or(preview_orbit_radians_, 0.0F) + clamped_dt * 0.12F, kTwoPi);
     const auto focus = spawn_position_ + glm::vec3 {0.0F, 5.0F, 0.0F};
     const auto radius = 26.0F;
     const auto position = glm::vec3 {
@@ -2707,7 +2723,7 @@ void Game::update_menu_preview_camera(float dt) {
     preview_state.dead = false;
     preview_state.head_underwater = false;
     preview_state.swimming = false;
-    preview_state.animation_time += std::max(dt, 0.0F);
+    preview_state.animation_time += clamped_dt;
     preview_state.yaw_degrees = glm::degrees(std::atan2(direction.z, direction.x));
     preview_state.pitch_degrees = glm::degrees(std::asin(std::clamp(direction.y, -1.0F, 1.0F)));
     preview_state.body_yaw_degrees = preview_state.yaw_degrees;

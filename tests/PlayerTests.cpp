@@ -292,6 +292,98 @@ TEST_CASE("experience reward rules stay bounded and apply the night surface bonu
     CHECK(multiply_experience(std::numeric_limits<std::uint64_t>::max(), 2U) == std::numeric_limits<std::uint64_t>::max());
 }
 
+TEST_CASE("player controller sanitizes non finite loaded state before gameplay math") {
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+    constexpr auto infinity = std::numeric_limits<float>::infinity();
+
+    PlayerController player({4.0F, 8.0F, 2.0F});
+    PlayerState corrupted {};
+    corrupted.position = {nan, infinity, -infinity};
+    corrupted.velocity = {infinity, nan, -infinity};
+    corrupted.yaw_degrees = 1000000000.0F;
+    corrupted.pitch_degrees = infinity;
+    corrupted.body_yaw_degrees = nan;
+    corrupted.health = nan;
+    corrupted.air_seconds = -infinity;
+    corrupted.hurt_timer = infinity;
+    corrupted.damage_cooldown = nan;
+    corrupted.primary_action_progress = infinity;
+    corrupted.secondary_action_progress = -infinity;
+    corrupted.look_sway_yaw = nan;
+    corrupted.look_sway_pitch = infinity;
+
+    player.load_state(corrupted);
+
+    const auto& state = player.state();
+    CHECK(state.position.x == doctest::Approx(0.0F));
+    CHECK(state.position.y == doctest::Approx(70.0F));
+    CHECK(state.position.z == doctest::Approx(0.0F));
+    CHECK(state.velocity.x == doctest::Approx(0.0F));
+    CHECK(state.velocity.y == doctest::Approx(0.0F));
+    CHECK(state.velocity.z == doctest::Approx(0.0F));
+    CHECK(std::isfinite(state.yaw_degrees));
+    CHECK(state.pitch_degrees == doctest::Approx(-18.0F));
+    CHECK(state.body_yaw_degrees == doctest::Approx(state.yaw_degrees));
+    CHECK(state.health == doctest::Approx(player.max_health()));
+    CHECK(state.air_seconds == doctest::Approx(player.max_air_seconds()));
+    CHECK(state.hurt_timer == doctest::Approx(0.0F));
+    CHECK(state.damage_cooldown == doctest::Approx(0.0F));
+    CHECK(state.primary_action_progress == doctest::Approx(0.0F));
+    CHECK(state.secondary_action_progress == doctest::Approx(0.0F));
+    CHECK(state.look_sway_yaw == doctest::Approx(0.0F));
+    CHECK(state.look_sway_pitch == doctest::Approx(0.0F));
+
+    const auto look = player.look_direction();
+    CHECK(std::isfinite(look.x));
+    CHECK(std::isfinite(look.y));
+    CHECK(std::isfinite(look.z));
+
+    player.apply_external_damage(nan, PlayerDeathCause::Zombie);
+    CHECK(player.state().health == doctest::Approx(player.max_health()));
+    player.set_damage_resistance_percent(nan);
+    player.set_apnea_resistance_percent(infinity);
+    player.set_fall_safety_multiplier(nan);
+    player.set_movement_speed_multiplier(infinity);
+    player.set_block_break_speed_multiplier(-infinity);
+    CHECK(player.damage_resistance_percent() == doctest::Approx(0.0F));
+    CHECK(player.apnea_resistance_percent() == doctest::Approx(0.0F));
+    CHECK(player.fall_safety_multiplier() == doctest::Approx(1.0F));
+    CHECK(player.movement_speed_multiplier() == doctest::Approx(1.0F));
+    CHECK(player.block_break_speed_multiplier() == doctest::Approx(1.0F));
+}
+
+TEST_CASE("player controller ignores non finite frame input") {
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+    constexpr auto infinity = std::numeric_limits<float>::infinity();
+
+    World world(1500, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    PlayerInput input {};
+    input.move_forward = nan;
+    input.move_right = infinity;
+    input.move_up = -infinity;
+    input.look_delta_x = nan;
+    input.look_delta_y = infinity;
+    input.sprint = true;
+
+    player.update(input, nan, world);
+
+    const auto& state = player.state();
+    CHECK(std::isfinite(state.position.x));
+    CHECK(std::isfinite(state.position.y));
+    CHECK(std::isfinite(state.position.z));
+    CHECK(std::isfinite(state.velocity.x));
+    CHECK(std::isfinite(state.velocity.y));
+    CHECK(std::isfinite(state.velocity.z));
+    CHECK(std::isfinite(state.yaw_degrees));
+    CHECK(std::isfinite(state.pitch_degrees));
+    CHECK(std::isfinite(state.look_sway_yaw));
+    CHECK(std::isfinite(state.look_sway_pitch));
+}
+
 TEST_CASE("player falls onto the ground and stays grounded") {
     World world(15, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -1094,6 +1186,46 @@ TEST_CASE("item drops collide with generated terrain before the chunk is loaded"
     CHECK(drop.position.y > static_cast<float>(surface_y) + 0.75F);
     CHECK(drop.position.y < static_cast<float>(surface_y) + 3.0F);
     CHECK(world.find_chunk(chunk_coord) == nullptr);
+}
+
+TEST_CASE("item drops sanitize corrupted loaded state") {
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+    constexpr auto infinity = std::numeric_limits<float>::infinity();
+
+    ItemDrop valid_drop {};
+    valid_drop.position = {0.5F, 2.0F, 0.5F};
+    valid_drop.velocity = {infinity, nan, -infinity};
+    valid_drop.stack = inventory_make_slot(to_block_id(BlockType::Stone), 96);
+    valid_drop.age_seconds = nan;
+    valid_drop.pickup_cooldown = -infinity;
+
+    ItemDrop invalid_position = valid_drop;
+    invalid_position.position = {nan, 2.0F, 0.5F};
+
+    ItemDrop invalid_stack = valid_drop;
+    invalid_stack.stack = inventory_make_slot(static_cast<BlockId>(255U), 5);
+
+    ItemDropSystem drop_system {};
+    drop_system.load_drops({valid_drop, invalid_position, invalid_stack});
+
+    REQUIRE(drop_system.active_drop_count() == 1);
+    const auto& loaded = drop_system.drops().front();
+    CHECK(loaded.stack.block_id == to_block_id(BlockType::Stone));
+    CHECK(loaded.stack.count == kMaxItemStackCount);
+    CHECK(loaded.velocity.x == doctest::Approx(0.0F));
+    CHECK(loaded.velocity.y == doctest::Approx(0.0F));
+    CHECK(loaded.velocity.z == doctest::Approx(0.0F));
+    CHECK(loaded.age_seconds == doctest::Approx(0.0F));
+    CHECK(loaded.pickup_cooldown == doctest::Approx(0.0F));
+
+    World world(365, 1);
+    test::make_chunk_empty(world, {0, 0});
+    std::vector<ItemDropRenderInstance> render_instances {};
+    drop_system.build_render_instances(world, render_instances);
+    REQUIRE(render_instances.size() == 1);
+    CHECK(std::isfinite(render_instances.front().position.x));
+    CHECK(std::isfinite(render_instances.front().position.y));
+    CHECK(std::isfinite(render_instances.front().position.z));
 }
 
 TEST_CASE("placing a solid block can replace decorative flora") {

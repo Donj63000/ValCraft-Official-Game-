@@ -29,7 +29,8 @@ auto format_timestamp_utc(const std::chrono::system_clock::time_point& time_poin
 #endif
 
     std::ostringstream stream;
-    stream << std::put_time(&utc_time, format.data());
+    const std::string format_text {format};
+    stream << std::put_time(&utc_time, format_text.c_str());
     return stream.str();
 }
 

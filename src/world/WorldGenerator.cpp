@@ -181,7 +181,7 @@ auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const n
 
     const auto column = sample_column(world_x, world_z);
     if (column.water_level > column.surface_height && y > column.surface_height && y <= column.water_level) {
-        return make_water_state(kMaxWaterLevel, true);
+        return make_water_state(kMaxWaterLevel, true, true);
     }
     return 0;
 }

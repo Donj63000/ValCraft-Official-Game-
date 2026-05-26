@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace valcraft {
 
@@ -22,6 +23,38 @@ constexpr float kMergeRadius = 0.70F;
 constexpr float kGroundFriction = 0.82F;
 constexpr float kAirFriction = 0.98F;
 constexpr std::size_t kMaxActiveDrops = 128;
+
+auto finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? value : fallback;
+}
+
+auto non_negative_finite(float value) noexcept -> float {
+    return std::isfinite(value) ? std::max(value, 0.0F) : 0.0F;
+}
+
+auto is_finite_vec3(const glm::vec3& value) noexcept -> bool {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    return {
+        finite_or(value.x, fallback.x),
+        finite_or(value.y, fallback.y),
+        finite_or(value.z, fallback.z),
+    };
+}
+
+auto sanitize_loaded_drop(ItemDrop& drop) noexcept -> bool {
+    normalize_item_stack(drop.stack);
+    if (!inventory_slot_has_item(drop.stack) || !is_finite_vec3(drop.position)) {
+        return false;
+    }
+
+    drop.velocity = finite_vec3_or(drop.velocity, {});
+    drop.age_seconds = non_negative_finite(drop.age_seconds);
+    drop.pickup_cooldown = non_negative_finite(drop.pickup_cooldown);
+    return true;
+}
 
 auto drop_physics_block(const World& world, int x, int y, int z) -> BlockId {
     // Je garde les drops bloques par le terrain deterministe avant meme que le
@@ -160,6 +193,11 @@ void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& positi
     if (!inventory_slot_has_item(remaining)) {
         return;
     }
+    if (!is_finite_vec3(position)) {
+        ++audit_stats_.rejected_spawns;
+        return;
+    }
+    const auto safe_initial_velocity = finite_vec3_or(initial_velocity, {});
 
     const auto merge_radius_sq = kMergeRadius * kMergeRadius;
     for (auto& drop : drops_) {
@@ -195,7 +233,7 @@ void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& positi
         }
     }
 
-    drops_.push_back({position, initial_velocity, remaining, 0.0F, kPickupDelaySeconds, false});
+    drops_.push_back({position, safe_initial_velocity, remaining, 0.0F, kPickupDelaySeconds, false});
     ++audit_stats_.spawned;
     audit_stats_.active_drops = drops_.size();
 }
@@ -205,26 +243,30 @@ void ItemDropSystem::update(float dt,
                             const glm::vec3& player_position,
                             InventoryMenuState& inventory,
                             HotbarState& hotbar) {
-    const auto clamped_dt = std::max(dt, 0.0F);
+    const auto clamped_dt = non_negative_finite(dt);
     const auto pickup_radius_sq = kPickupRadius * kPickupRadius;
     const auto magnet_radius_sq = kMagnetRadius * kMagnetRadius;
+    const auto player_position_is_finite = is_finite_vec3(player_position);
 
     for (auto iterator = drops_.begin(); iterator != drops_.end();) {
         auto& drop = *iterator;
         normalize_item_stack(drop.stack);
-        if (!inventory_slot_has_item(drop.stack) || drop.position.y < -8.0F) {
+        if (!inventory_slot_has_item(drop.stack) || !is_finite_vec3(drop.position) || drop.position.y < -8.0F) {
             ++audit_stats_.expired;
             iterator = drops_.erase(iterator);
             continue;
         }
+        drop.velocity = finite_vec3_or(drop.velocity, {});
+        drop.age_seconds = non_negative_finite(drop.age_seconds);
+        drop.pickup_cooldown = non_negative_finite(drop.pickup_cooldown);
 
         drop.age_seconds += clamped_dt;
         drop.pickup_cooldown = std::max(0.0F, drop.pickup_cooldown - clamped_dt);
         drop.grounded = false;
 
-        const auto to_player = player_position - drop.position;
-        const auto distance_sq = glm::dot(to_player, to_player);
-        if (drop.pickup_cooldown <= 0.0F && distance_sq <= pickup_radius_sq) {
+        const auto to_player = player_position_is_finite ? player_position - drop.position : glm::vec3 {};
+        const auto distance_sq = player_position_is_finite ? glm::dot(to_player, to_player) : std::numeric_limits<float>::max();
+        if (player_position_is_finite && drop.pickup_cooldown <= 0.0F && distance_sq <= pickup_radius_sq) {
             drop.stack = inventory_try_store_stack(inventory, hotbar, drop.stack);
             if (!inventory_slot_has_item(drop.stack)) {
                 ++audit_stats_.picked_up;
@@ -233,7 +275,7 @@ void ItemDropSystem::update(float dt,
             }
         }
 
-        if (drop.pickup_cooldown <= 0.0F && distance_sq <= magnet_radius_sq && distance_sq > 1.0e-5F) {
+        if (player_position_is_finite && drop.pickup_cooldown <= 0.0F && distance_sq <= magnet_radius_sq && distance_sq > 1.0e-5F) {
             const auto distance = std::sqrt(distance_sq);
             const auto direction = to_player / distance;
             const auto pull = glm::clamp(7.0F - distance * 1.7F, 0.0F, 7.0F);
@@ -253,8 +295,8 @@ void ItemDropSystem::update(float dt,
         drop.velocity.x *= friction;
         drop.velocity.z *= friction;
 
-        const auto pickup_offset = player_position - drop.position;
-        if (drop.pickup_cooldown <= 0.0F && glm::dot(pickup_offset, pickup_offset) <= pickup_radius_sq) {
+        const auto pickup_offset = player_position_is_finite ? player_position - drop.position : glm::vec3 {};
+        if (player_position_is_finite && drop.pickup_cooldown <= 0.0F && glm::dot(pickup_offset, pickup_offset) <= pickup_radius_sq) {
             drop.stack = inventory_try_store_stack(inventory, hotbar, drop.stack);
             if (!inventory_slot_has_item(drop.stack)) {
                 ++audit_stats_.picked_up;
@@ -274,7 +316,7 @@ void ItemDropSystem::build_render_instances(const World& world, std::vector<Item
     out.reserve(drops_.size());
 
     for (const auto& drop : drops_) {
-        if (!inventory_slot_has_item(drop.stack)) {
+        if (!inventory_slot_has_item(drop.stack) || !is_finite_vec3(drop.position)) {
             continue;
         }
 
@@ -306,7 +348,17 @@ auto ItemDropSystem::consume_audit_stats() noexcept -> ItemDropAuditStats {
 }
 
 void ItemDropSystem::load_drops(const std::vector<ItemDrop>& drops) {
-    drops_ = drops;
+    drops_.clear();
+    drops_.reserve(std::min(drops.size(), kMaxActiveDrops));
+    for (auto drop : drops) {
+        if (!sanitize_loaded_drop(drop)) {
+            continue;
+        }
+        drops_.push_back(drop);
+        if (drops_.size() >= kMaxActiveDrops) {
+            break;
+        }
+    }
     audit_stats_ = {};
     audit_stats_.active_drops = drops_.size();
 }

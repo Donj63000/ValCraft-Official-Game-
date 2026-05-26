@@ -1,5 +1,6 @@
 #include "creatures/CreatureGeometry.h"
 #include "creatures/CreatureSystem.h"
+#include "gameplay/StartingVillage.h"
 
 #include "TestUtils.h"
 
@@ -601,6 +602,45 @@ TEST_CASE("settlement residents use village patrol anchors to live across the se
     CHECK(horizontal_distance_squared(villager.position, resident.spawn_position) < resident.roam_radius * resident.roam_radius);
 }
 
+TEST_CASE("generated starting village residents patrol the applied village terrain") {
+    constexpr int seed = 90115;
+    World world(seed, 4);
+    StartingVillageGenerator generator(seed);
+    const auto layout = generator.build_layout();
+    REQUIRE_FALSE(layout.residents.empty());
+    generator.apply(world, layout);
+
+    CreatureSystem system {};
+    system.set_settlement_residents(layout.residents);
+
+    const auto environment = EnvironmentClock::compute_state(13.25F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(13.25F);
+    const auto player_position = layout.player_spawn + glm::vec3 {3.0F, 0.0F, 3.0F};
+
+    for (int frame = 0; frame < 480; ++frame) {
+        system.update(1.0F / 60.0F, world, player_position, environment, cycle);
+    }
+
+    const auto creatures = system.active_creatures();
+    const auto villager_count = static_cast<std::size_t>(
+        std::count_if(creatures.begin(), creatures.end(), [](const CreatureInstance& creature) {
+            return creature.anchor.species == CreatureSpecies::Villager;
+        }));
+    const auto moved_villagers = static_cast<std::size_t>(
+        std::count_if(creatures.begin(), creatures.end(), [](const CreatureInstance& creature) {
+            return creature.anchor.species == CreatureSpecies::Villager &&
+                   horizontal_distance_squared(creature.position, creature.anchor.spawn_position) > 0.35F;
+        }));
+
+    REQUIRE(villager_count >= std::min<std::size_t>(layout.residents.size(), std::size_t {3}));
+    CHECK(moved_villagers >= std::min<std::size_t>(villager_count, std::size_t {2}));
+    CHECK(std::all_of(creatures.begin(), creatures.end(), [](const CreatureInstance& creature) {
+        return creature.anchor.species != CreatureSpecies::Villager ||
+               horizontal_distance_squared(creature.position, creature.anchor.spawn_position) <=
+                   creature.anchor.roam_radius * creature.anchor.roam_radius;
+    }));
+}
+
 TEST_CASE("creature locomotion keeps body yaw aligned with realised travel direction") {
     CreatureSystem system {};
     World world(90011, 1);
@@ -632,6 +672,106 @@ TEST_CASE("creature locomotion keeps body yaw aligned with realised travel direc
     const auto travel_direction = glm::normalize(displacement);
     const auto facing_direction = yaw_direction(updated.yaw_radians);
     CHECK(glm::dot(travel_direction, facing_direction) > 0.97F);
+}
+
+TEST_CASE("day animals take partial steps instead of freezing against a close obstacle") {
+    CreatureSystem system {};
+    World world(90113, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    const auto anchor = system.spawn_anchor_for_chunk(world, {0, 0});
+    REQUIRE(anchor.has_value());
+
+    world.set_block(anchor->ground_block.x + 1, anchor->ground_block.y + 1, anchor->ground_block.z, to_block_id(BlockType::Stone));
+    world.set_block(anchor->ground_block.x + 1, anchor->ground_block.y + 2, anchor->ground_block.z, to_block_id(BlockType::Stone));
+
+    auto creature = make_test_creature(*anchor, anchor->spawn_position);
+    creature.behavior_state = CreatureBehaviorState::Wander;
+    creature.behavior_timer = 3.0F;
+    creature.yaw_radians = 0.0F;
+    creature.wander_heading = 0.0F;
+    system.load_creatures({creature}, environment);
+
+    const auto before = system.active_creatures().front().position;
+    system.update(0.80F, world, before + glm::vec3 {20.0F, 0.0F, 20.0F}, environment, cycle);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    const auto& updated = system.active_creatures().front();
+    CHECK(updated.position.x > before.x + 0.08F);
+    CHECK(static_cast<int>(std::floor(updated.position.x)) == anchor->ground_block.x);
+    CHECK(updated.position.y == doctest::Approx(anchor->spawn_position.y).epsilon(0.01F));
+}
+
+TEST_CASE("creature loading sanitizes corrupted saved state") {
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+    constexpr auto infinity = std::numeric_limits<float>::infinity();
+
+    CreatureInstance creature {};
+    creature.anchor.chunk = {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()};
+    creature.anchor.ground_block = {3, 12, 4};
+    creature.anchor.spawn_position = {nan, infinity, -infinity};
+    creature.anchor.species = static_cast<CreatureSpecies>(255U);
+    creature.anchor.roam_radius = infinity;
+    creature.anchor.patrol_point_count = 99U;
+    creature.anchor.patrol_points[0] = {nan, 4.0F, 2.0F};
+    creature.position = {infinity, nan, -infinity};
+    creature.yaw_radians = infinity;
+    creature.behavior_timer = -infinity;
+    creature.animation_time = nan;
+    creature.wander_heading = -infinity;
+    creature.nervous_intensity = infinity;
+    creature.behavior_state = static_cast<CreatureBehaviorState>(255U);
+    creature.phase = static_cast<CreaturePhase>(255U);
+    creature.morph_factor = infinity;
+    creature.motion_amount = nan;
+    creature.gaze_weight = -infinity;
+    creature.attack_cooldown = infinity;
+    creature.attack_amount = infinity;
+    creature.hurt_timer = nan;
+    creature.health = nan;
+    creature.hit_direction = {nan, 0.0F, infinity};
+    creature.resident_target_index = 99U;
+
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    system.load_creatures({creature}, environment);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    const auto& loaded = system.active_creatures().front();
+    CHECK(loaded.anchor.species == CreatureSpecies::Pig);
+    CHECK(loaded.anchor.patrol_point_count == kCreatureResidentPatrolPointCount);
+    CHECK(loaded.anchor.roam_radius == doctest::Approx(0.0F));
+    CHECK(std::isfinite(loaded.anchor.spawn_position.x));
+    CHECK(std::isfinite(loaded.anchor.spawn_position.y));
+    CHECK(std::isfinite(loaded.anchor.spawn_position.z));
+    CHECK(std::isfinite(loaded.position.x));
+    CHECK(std::isfinite(loaded.position.y));
+    CHECK(std::isfinite(loaded.position.z));
+    CHECK(std::isfinite(loaded.yaw_radians));
+    CHECK(std::isfinite(loaded.wander_heading));
+    CHECK(loaded.behavior_timer == doctest::Approx(0.0F));
+    CHECK(loaded.animation_time == doctest::Approx(0.0F));
+    CHECK(loaded.nervous_intensity == doctest::Approx(0.0F));
+    CHECK(loaded.behavior_state == CreatureBehaviorState::Idle);
+    CHECK(loaded.phase == CreaturePhase::Day);
+    CHECK(loaded.health == doctest::Approx(creature_max_health(CreatureSpecies::Pig)));
+    CHECK(loaded.resident_target_index == kCreatureResidentPatrolPointCount - 1U);
+
+    REQUIRE(system.render_instances().size() == 1);
+    const auto& render = system.render_instances().front();
+    CHECK(std::isfinite(render.position.x));
+    CHECK(std::isfinite(render.position.y));
+    CHECK(std::isfinite(render.position.z));
+    CHECK(std::isfinite(render.yaw_radians));
+    CHECK(std::isfinite(render.hit_direction.x));
+    CHECK(std::isfinite(render.hit_direction.y));
+    CHECK(std::isfinite(render.hit_direction.z));
+
+    World world(90112, 1);
+    system.update(nan, world, {nan, infinity, -infinity}, environment, EnvironmentClock::classify_creature_cycle(12.0F));
+    CHECK(system.active_creatures().empty());
 }
 
 TEST_CASE("day animals keep their rendered facing direction aligned with every realised step") {
@@ -828,6 +968,42 @@ TEST_CASE("night chase keeps pressure after the player briefly leaves detection 
     REQUIRE(system.active_creatures().size() == 1);
     CHECK(system.active_creatures().front().behavior_state == CreatureBehaviorState::Chase);
     CHECK(horizontal_distance_squared(system.active_creatures().front().position, chase_position) > 0.01F);
+}
+
+TEST_CASE("night monsters pursue a nearby player beyond their passive roam ring") {
+    CreatureSystem system {};
+    World world(90114, 3);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    test::make_chunk_surface(world, {1, 0}, 12, to_block_id(BlockType::Stone), to_block_id(BlockType::Stone));
+    test::make_chunk_surface(world, {2, 0}, 12, to_block_id(BlockType::Stone), to_block_id(BlockType::Stone));
+
+    const auto environment = EnvironmentClock::compute_state(23.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(23.0F);
+    const auto anchor = system.spawn_anchor_for_chunk(world, {0, 0});
+    REQUIRE(anchor.has_value());
+
+    auto creature = make_test_creature(*anchor, anchor->spawn_position + glm::vec3 {5.0F, 0.0F, 0.0F});
+    creature.behavior_state = CreatureBehaviorState::Lurk;
+    creature.phase = CreaturePhase::Night;
+    creature.morph_factor = 1.0F;
+    system.load_creatures({creature}, environment);
+
+    const auto player_position = creature.position + glm::vec3 {9.40F, 0.0F, 0.0F};
+    auto closest_distance_sq = horizontal_distance_squared(creature.position, player_position);
+    auto attacked = false;
+    for (int frame = 0; frame < 420; ++frame) {
+        system.update(1.0F / 60.0F, world, player_position, environment, cycle);
+        REQUIRE_FALSE(system.active_creatures().empty());
+        const auto& updated = system.active_creatures().front();
+        closest_distance_sq = std::min(closest_distance_sq, horizontal_distance_squared(updated.position, player_position));
+        if (!system.recent_attacks().empty()) {
+            attacked = true;
+            break;
+        }
+    }
+
+    CHECK(closest_distance_sq < 8.20F);
+    CHECK(attacked);
 }
 
 TEST_CASE("night melee attacks emit stable zombie damage and aggressive render signals") {

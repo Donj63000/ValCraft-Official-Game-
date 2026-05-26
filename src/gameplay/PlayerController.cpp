@@ -69,11 +69,39 @@ auto normalized_horizontal(const glm::vec3& vector) -> glm::vec3 {
     return horizontal / length;
 }
 
+auto finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? value : fallback;
+}
+
+auto non_negative_finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? std::max(value, 0.0F) : fallback;
+}
+
+auto non_negative_finite(float value) noexcept -> float {
+    return non_negative_finite_or(value, 0.0F);
+}
+
+auto finite_input_axis(float value) noexcept -> float {
+    return std::clamp(finite_or(value, 0.0F), -1.0F, 1.0F);
+}
+
+auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    return {
+        finite_or(value.x, fallback.x),
+        finite_or(value.y, fallback.y),
+        finite_or(value.z, fallback.z),
+    };
+}
+
 auto wrap_degrees(float angle) noexcept -> float {
-    while (angle <= -180.0F) {
+    if (!std::isfinite(angle)) {
+        return 0.0F;
+    }
+    angle = std::fmod(angle, 360.0F);
+    if (angle <= -180.0F) {
         angle += 360.0F;
     }
-    while (angle > 180.0F) {
+    if (angle > 180.0F) {
         angle -= 360.0F;
     }
     return angle;
@@ -116,13 +144,18 @@ auto player_physics_block(const World& world, int x, int y, int z) -> BlockId {
 } // namespace
 
 PlayerController::PlayerController(glm::vec3 spawn_position) {
-    state_.position = spawn_position;
-    state_.fall_start_y = spawn_position.y;
+    state_.position = finite_vec3_or(spawn_position, state_.position);
+    state_.fall_start_y = state_.position.y;
     state_.body_yaw_degrees = state_.yaw_degrees;
 }
 
 void PlayerController::update(const PlayerInput& input, float dt, const World& world) {
-    const auto clamped_dt = std::max(dt, 0.0F);
+    const auto clamped_dt = non_negative_finite(dt);
+    const auto move_forward = finite_input_axis(input.move_forward);
+    const auto move_right = finite_input_axis(input.move_right);
+    const auto move_up = finite_input_axis(input.move_up);
+    const auto look_delta_x = finite_or(input.look_delta_x, 0.0F);
+    const auto look_delta_y = finite_or(input.look_delta_y, 0.0F);
 
     if (state_.dead) {
         state_.velocity = {};
@@ -170,12 +203,13 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         }
     }
 
-    state_.yaw_degrees += input.look_delta_x * kMouseSensitivity;
-    state_.pitch_degrees = std::clamp(state_.pitch_degrees - input.look_delta_y * kMouseSensitivity, -89.0F, 89.0F);
+    state_.yaw_degrees = wrap_degrees(finite_or(state_.yaw_degrees, -90.0F) + look_delta_x * kMouseSensitivity);
+    state_.pitch_degrees =
+        std::clamp(finite_or(state_.pitch_degrees, -18.0F) - look_delta_y * kMouseSensitivity, -89.0F, 89.0F);
 
-    const auto target_look_sway_yaw = glm::clamp(-input.look_delta_x * kLookSwayInputScale, -1.0F, 1.0F);
-    const auto target_look_sway_pitch = glm::clamp(input.look_delta_y * kLookSwayInputScale, -1.0F, 1.0F);
-    const auto look_input_active = std::abs(input.look_delta_x) > 1.0e-4F || std::abs(input.look_delta_y) > 1.0e-4F;
+    const auto target_look_sway_yaw = glm::clamp(-look_delta_x * kLookSwayInputScale, -1.0F, 1.0F);
+    const auto target_look_sway_pitch = glm::clamp(look_delta_y * kLookSwayInputScale, -1.0F, 1.0F);
+    const auto look_input_active = std::abs(look_delta_x) > 1.0e-4F || std::abs(look_delta_y) > 1.0e-4F;
     const auto look_sway_sharpness = look_input_active ? kLookSwayResponseSharpness : kLookSwayReturnSharpness;
     state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, target_look_sway_yaw, look_sway_sharpness, clamped_dt);
     state_.look_sway_pitch = damp_towards(state_.look_sway_pitch, target_look_sway_pitch, look_sway_sharpness, clamped_dt);
@@ -187,7 +221,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         forward = {0.0F, 0.0F, -1.0F};
     }
     const auto right = glm::cross(forward, glm::vec3 {0.0F, 1.0F, 0.0F});
-    auto wish = forward * input.move_forward + right * input.move_right;
+    auto wish = forward * move_forward + right * move_right;
     if (glm::dot(wish, wish) > 1.0e-5F) {
         wish = glm::normalize(wish);
     }
@@ -206,11 +240,11 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         jump_buffer_timer_ = 0.0F;
         ground_coyote_timer_ = 0.0F;
     };
-    const auto sprinting = input.sprint && input.move_forward > 0.0F && glm::dot(wish, wish) > 1.0e-5F;
+    const auto sprinting = input.sprint && move_forward > 0.0F && glm::dot(wish, wish) > 1.0e-5F;
 
     if (state_.fly_mode) {
         reset_jump_assist_state();
-        auto fly_velocity = wish + glm::vec3 {0.0F, input.move_up, 0.0F};
+        auto fly_velocity = wish + glm::vec3 {0.0F, move_up, 0.0F};
         if (glm::dot(fly_velocity, fly_velocity) > 1.0e-5F) {
             fly_velocity = glm::normalize(fly_velocity) * kFlySpeed * movement_speed_multiplier_;
         }
@@ -219,7 +253,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         const auto move_speed = kSwimMoveSpeed * movement_speed_multiplier_;
         state_.velocity.x = wish.x * move_speed;
         state_.velocity.z = wish.z * move_speed;
-        state_.velocity.y += (std::clamp(input.move_up, -1.0F, 1.0F) * kSwimVerticalAcceleration - kSwimGravity) * clamped_dt;
+        state_.velocity.y += (move_up * kSwimVerticalAcceleration - kSwimGravity) * clamped_dt;
         if (water_contact_before_move.head_in_water) {
             state_.velocity.y += kSwimBuoyancy * clamped_dt;
         }
@@ -395,26 +429,45 @@ auto PlayerController::is_dead() const noexcept -> bool {
 }
 
 void PlayerController::load_state(const PlayerState& state) noexcept {
+    const PlayerState defaults {};
     state_ = state;
     block_break_progress_ = {};
     reset_jump_assist_state();
-    state_.health = std::clamp(state_.health, 0.0F, kMaxHealth);
-    state_.air_seconds = std::clamp(state_.air_seconds, 0.0F, kMaxAirSeconds);
-    state_.pitch_degrees = std::clamp(state_.pitch_degrees, -89.0F, 89.0F);
+    state_.position = finite_vec3_or(state_.position, defaults.position);
+    state_.velocity = finite_vec3_or(state_.velocity, {});
+    state_.yaw_degrees = wrap_degrees(finite_or(state_.yaw_degrees, defaults.yaw_degrees));
+    state_.pitch_degrees = std::clamp(finite_or(state_.pitch_degrees, defaults.pitch_degrees), -89.0F, 89.0F);
+    state_.body_yaw_degrees = wrap_degrees(finite_or(state_.body_yaw_degrees, state_.yaw_degrees));
+    state_.animation_time = non_negative_finite_or(state_.animation_time, 0.0F);
+    state_.step_phase = finite_or(state_.step_phase, 0.0F);
+    state_.health = std::clamp(finite_or(state_.health, kMaxHealth), 0.0F, kMaxHealth);
+    state_.air_seconds = std::clamp(finite_or(state_.air_seconds, kMaxAirSeconds), 0.0F, kMaxAirSeconds);
+    state_.hurt_timer = non_negative_finite_or(state_.hurt_timer, 0.0F);
+    state_.damage_cooldown = non_negative_finite_or(state_.damage_cooldown, 0.0F);
+    state_.regen_delay = non_negative_finite_or(state_.regen_delay, 0.0F);
+    state_.regen_tick_timer = non_negative_finite_or(state_.regen_tick_timer, 0.0F);
+    state_.drowning_tick_timer = non_negative_finite_or(state_.drowning_tick_timer, 0.0F);
+    state_.fall_start_y = finite_or(state_.fall_start_y, state_.position.y);
+    state_.primary_action_progress = std::clamp(finite_or(state_.primary_action_progress, 0.0F), 0.0F, 1.0F);
+    state_.secondary_action_progress = std::clamp(finite_or(state_.secondary_action_progress, 0.0F), 0.0F, 1.0F);
+    state_.landing_impact = non_negative_finite_or(state_.landing_impact, 0.0F);
+    state_.airborne_time = non_negative_finite_or(state_.airborne_time, 0.0F);
+    state_.look_sway_yaw = finite_or(state_.look_sway_yaw, 0.0F);
+    state_.look_sway_pitch = finite_or(state_.look_sway_pitch, 0.0F);
     if (state_.dead) {
         state_.velocity = {};
     }
 }
 
 void PlayerController::set_position(const glm::vec3& position) noexcept {
-    state_.position = position;
-    state_.fall_start_y = position.y;
+    state_.position = finite_vec3_or(position, state_.position);
+    state_.fall_start_y = state_.position.y;
     block_break_progress_ = {};
     reset_jump_assist_state();
 }
 
 void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
-    state_.velocity = velocity;
+    state_.velocity = finite_vec3_or(velocity, {});
 }
 
 void PlayerController::set_fly_mode_enabled(bool enabled) noexcept {
@@ -433,23 +486,23 @@ void PlayerController::set_selected_block(BlockId block_id) noexcept {
 }
 
 void PlayerController::set_damage_resistance_percent(float percent) noexcept {
-    damage_resistance_percent_ = std::clamp(percent, 0.0F, 99.0F);
+    damage_resistance_percent_ = std::clamp(finite_or(percent, 0.0F), 0.0F, 99.0F);
 }
 
 void PlayerController::set_apnea_resistance_percent(float percent) noexcept {
-    apnea_resistance_percent_ = std::clamp(percent, 0.0F, 99.0F);
+    apnea_resistance_percent_ = std::clamp(finite_or(percent, 0.0F), 0.0F, 99.0F);
 }
 
 void PlayerController::set_fall_safety_multiplier(float multiplier) noexcept {
-    fall_safety_multiplier_ = std::clamp(multiplier, 0.25F, 3.0F);
+    fall_safety_multiplier_ = std::clamp(finite_or(multiplier, 1.0F), 0.25F, 3.0F);
 }
 
 void PlayerController::set_movement_speed_multiplier(float multiplier) noexcept {
-    movement_speed_multiplier_ = std::clamp(multiplier, 0.25F, 2.0F);
+    movement_speed_multiplier_ = std::clamp(finite_or(multiplier, 1.0F), 0.25F, 2.0F);
 }
 
 void PlayerController::set_block_break_speed_multiplier(float multiplier) noexcept {
-    block_break_speed_multiplier_ = std::clamp(multiplier, 0.25F, 2.0F);
+    block_break_speed_multiplier_ = std::clamp(finite_or(multiplier, 1.0F), 0.25F, 2.0F);
 }
 
 void PlayerController::trigger_primary_action() noexcept {
@@ -474,8 +527,8 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
     state_ = {};
     block_break_progress_ = {};
     reset_jump_assist_state();
-    state_.position = position;
-    state_.fall_start_y = position.y;
+    state_.position = finite_vec3_or(position, state_.position);
+    state_.fall_start_y = state_.position.y;
     state_.body_yaw_degrees = state_.yaw_degrees;
 }
 
@@ -484,7 +537,11 @@ void PlayerController::apply_external_damage(float amount, PlayerDeathCause caus
 }
 
 auto PlayerController::current_target(const World& world, float max_distance) const -> RaycastHit {
-    return world.raycast(eye_position(), look_direction(), max_distance);
+    const auto clamped_distance = non_negative_finite(max_distance);
+    if (clamped_distance <= 0.0F) {
+        return {};
+    }
+    return world.raycast(eye_position(), look_direction(), clamped_distance);
 }
 
 auto PlayerController::update_block_breaking(World& world, float dt, bool breaking_held, float max_distance)
@@ -521,7 +578,7 @@ auto PlayerController::update_block_breaking(World& world, float dt, bool breaki
 
     block_break_progress_.duration_seconds = duration_seconds;
     block_break_progress_.elapsed_seconds =
-        std::min(block_break_progress_.elapsed_seconds + std::max(dt, 0.0F), duration_seconds);
+        std::min(block_break_progress_.elapsed_seconds + non_negative_finite(dt), duration_seconds);
     block_break_progress_.progress = duration_seconds <= 1.0e-4F
                                          ? 1.0F
                                          : block_break_progress_.elapsed_seconds / duration_seconds;
@@ -639,7 +696,7 @@ void PlayerController::update_body_yaw(float dt, const glm::vec2& horizontal_dis
         return;
     }
 
-    const auto clamped_dt = std::max(dt, 0.0F);
+    const auto clamped_dt = non_negative_finite(dt);
     const auto horizontal_distance = glm::length(horizontal_displacement);
     const auto horizontal_speed = clamped_dt > 1.0e-5F ? horizontal_distance / clamped_dt : 0.0F;
 
@@ -654,6 +711,7 @@ void PlayerController::update_survival_state(float dt, const World& world) {
         return;
     }
 
+    dt = non_negative_finite(dt);
     const auto water_contact = state_.fly_mode ? WaterContactState {} : sample_water_contact(world, state_.position);
     state_.swimming = !state_.fly_mode && water_contact.swimming;
     state_.head_underwater = !state_.fly_mode && water_contact.head_in_water;
@@ -791,7 +849,7 @@ auto PlayerController::block_overlaps_player(const BlockCoord& block_coord) cons
 }
 
 void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown) noexcept {
-    if (amount <= 0.0F || state_.dead) {
+    if (!std::isfinite(amount) || amount <= 0.0F || state_.dead) {
         return;
     }
     if (!bypass_cooldown && state_.damage_cooldown > 0.0F) {
@@ -825,7 +883,7 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
 }
 
 void PlayerController::heal(float amount) noexcept {
-    if (amount <= 0.0F || state_.dead) {
+    if (!std::isfinite(amount) || amount <= 0.0F || state_.dead) {
         return;
     }
     state_.health = std::min(kMaxHealth, state_.health + amount);

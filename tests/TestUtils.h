@@ -11,6 +11,7 @@ inline void make_chunk_empty(World& world, const ChunkCoord& coord) {
     auto* chunk = world.find_chunk(coord);
     if (chunk != nullptr) {
         chunk->fill(to_block_id(BlockType::Air));
+        chunk->fill_water();
     }
 }
 
@@ -26,6 +27,7 @@ inline void make_chunk_surface(World& world,
     }
 
     chunk->fill(to_block_id(BlockType::Air));
+    chunk->fill_water();
     for (int z = 0; z < kChunkSizeZ; ++z) {
         for (int x = 0; x < kChunkSizeX; ++x) {
             for (int y = 0; y <= surface_y; ++y) {
