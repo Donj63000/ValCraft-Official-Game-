@@ -1383,16 +1383,31 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         input.look_delta_x = mouse_captured_ ? std::exchange(pending_look_x_, 0.0F) : 0.0F;
         input.look_delta_y = mouse_captured_ ? std::exchange(pending_look_y_, 0.0F) : 0.0F;
 
-        if (!inventory_visible_ && pending_place_block_) {
+        if (!inventory_visible_ &&
+            pending_place_block_ &&
+            !player_.is_dead()) {
+
             player_.trigger_secondary_action();
         }
 
-        const auto* dynamic_ship =
-            active_game_mode_ == GameMode::SeaAdventure ? &sea_adventure_.ship_entity() : nullptr;
-        auto dynamic_ship_delta = glm::vec3 {0.0F};
-        player_.update(input, dt, world_, dynamic_ship);
+        const auto maritime_session_active =
+            active_game_mode_ == GameMode::SeaAdventure &&
+            sea_adventure_.active();
 
-        if (active_game_mode_ == GameMode::SeaAdventure) {
+        const auto* dynamic_ship =
+            maritime_session_active
+                ? &sea_adventure_.ship_entity()
+                : nullptr;
+
+        auto dynamic_ship_delta = glm::vec3 {0.0F};
+
+        player_.update(
+            input,
+            dt,
+            world_,
+            dynamic_ship);
+
+        if (maritime_session_active) {
             const auto sea_result = sea_adventure_.update(
                 world_,
                 player_,
@@ -1436,7 +1451,10 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             pending_fishing_ = false;
         }
 
-        if (!inventory_visible_ && pending_primary_attack_) {
+        if (!inventory_visible_ &&
+            pending_primary_attack_ &&
+            !player_.is_dead()) {
+
             pending_primary_attack_ = false;
             if (const auto weapon = inventory_active_weapon_stats(inventory_menu_, hotbar_); weapon.has_value()) {
                 player_.trigger_primary_action();
@@ -1451,13 +1469,14 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                 }
 
                 const auto damage = weapon->damage * progression_.attack_damage_multiplier();
-                const auto crew_hit = active_game_mode_ == GameMode::SeaAdventure
-                                          ? sea_adventure_.try_damage_crew(
-                                                player_.eye_position(),
-                                                player_.look_direction(),
-                                                weapon_range,
-                                                damage)
-                                          : ShipCrewDamageResult {};
+                const auto crew_hit =
+                    maritime_session_active
+                        ? sea_adventure_.try_damage_crew(
+                              player_.eye_position(),
+                              player_.look_direction(),
+                              weapon_range,
+                              damage)
+                        : ShipCrewDamageResult {};
                 if (crew_hit.hit) {
                     music_.play_sfx(GameSfxKind::CreatureHit, 0.72F);
                     if (crew_hit.knocked_out) {
@@ -1483,8 +1502,14 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                         music_.play_sfx(hit_result.killed ? GameSfxKind::CreatureDeath : GameSfxKind::CreatureHit,
                                         hit_result.killed ? 0.88F : 0.72F);
                         if (hit_result.killed) {
-                            if (active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.record_hunt(hit_result.species)) {
-                                queue_gameplay_announcement("CHASSE", "VIANDE RECUPEREE", 2.4F);
+                            if (maritime_session_active &&
+                                sea_adventure_.record_hunt(
+                                    hit_result.species)) {
+
+                                queue_gameplay_announcement(
+                                    "CHASSE",
+                                    "VIANDE RECUPEREE",
+                                    2.4F);
                             }
                             grant_player_experience(
                                 creature_kill_experience(
@@ -1524,8 +1549,14 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     block_break_experience(broken_block->block_id),
                     broken_block->block,
                     "block_break");
-                if (active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.collect_resource(broken_block->block_id)) {
-                    queue_gameplay_announcement("RESSOURCE", "SOUTE MISE A JOUR", 2.1F);
+                if (maritime_session_active &&
+                    sea_adventure_.collect_resource(
+                        broken_block->block_id)) {
+
+                    queue_gameplay_announcement(
+                        "RESSOURCE",
+                        "SOUTE MISE A JOUR",
+                        2.1F);
                 }
                 const auto drop_direction = safe_drop_direction(player_.look_direction());
                 const auto drop_origin = glm::vec3 {
@@ -1541,7 +1572,10 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         } else {
             player_.cancel_block_breaking();
         }
-        if (!inventory_visible_ && pending_place_block_) {
+        if (!inventory_visible_ &&
+            pending_place_block_ &&
+            !player_.is_dead()) {
+
             auto& selected_slot = hotbar_.slots[hotbar_.selected_index];
             if (inventory_slot_has_item(selected_slot)) {
                 const auto placed_block = player_.try_place_block(world_);
@@ -2447,18 +2481,37 @@ void Game::sync_selected_hotbar_slot() noexcept {
     if (!progression_.has_super_vision_power()) {
         super_vision_active_ = false;
     }
-    if (!progression_.has_flight_power()) {
-        // Je coupe le vol si une ancienne sauvegarde le contient avant le niveau 100.
+
+    const auto flight_allowed =
+        active_game_mode_ != GameMode::SeaAdventure &&
+        progression_.has_flight_power();
+
+    if (!flight_allowed) {
+        // En mer, F pilote la peche et ne peut pas servir a quitter le vol. Je
+        // neutralise donc aussi les anciennes sauvegardes arrivees en mode vol.
         pending_toggle_fly_ = false;
         player_.set_fly_mode_enabled(false);
     }
-    player_.set_selected_block(selected_hotbar_block(hotbar_));
+
+    player_.set_selected_block(
+        selected_hotbar_block(hotbar_));
+
     player_.set_damage_resistance_percent(
-        inventory_equipment_resistance_percent(inventory_menu_) + progression_.damage_resistance_percent());
-    player_.set_apnea_resistance_percent(progression_.apnea_resistance_percent());
-    player_.set_fall_safety_multiplier(progression_.fall_safety_multiplier());
-    player_.set_movement_speed_multiplier(progression_.movement_speed_multiplier());
-    player_.set_block_break_speed_multiplier(progression_.block_break_speed_multiplier());
+        inventory_equipment_resistance_percent(
+            inventory_menu_) +
+        progression_.damage_resistance_percent());
+
+    player_.set_apnea_resistance_percent(
+        progression_.apnea_resistance_percent());
+
+    player_.set_fall_safety_multiplier(
+        progression_.fall_safety_multiplier());
+
+    player_.set_movement_speed_multiplier(
+        progression_.movement_speed_multiplier());
+
+    player_.set_block_break_speed_multiplier(
+        progression_.block_break_speed_multiplier());
 }
 
 auto Game::selected_tool_break_speed_multiplier(BlockId target_block_id) const noexcept -> float {
@@ -2534,22 +2587,52 @@ auto Game::find_initial_spawn_position(
 }
 
 void Game::respawn_player() {
-    spawn_position_ = active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active()
-                          ? sea_adventure_.deck_spawn_position()
-                          : find_initial_spawn_position();
+    const auto maritime_respawn =
+        active_game_mode_ == GameMode::SeaAdventure &&
+        sea_adventure_.active();
+
+    if (maritime_respawn) {
+        // Le voyage continue, mais les jauges transitoires doivent laisser au
+        // joueur une fenetre reelle pour reprendre le controle apres sa mort.
+        sea_adventure_.on_player_respawn();
+    }
+
+    spawn_position_ =
+        maritime_respawn
+            ? sea_adventure_.deck_spawn_position()
+            : find_initial_spawn_position();
+
     player_.respawn(spawn_position_);
     sync_selected_hotbar_slot();
     set_death_screen_visible(false);
-    (void)world_.update_streaming(player_.position());
-    creatures_.update(0.0F, world_, player_.position(), environment_.current_state(), environment_.current_creature_cycle());
+
+    (void)world_.update_streaming(
+        player_.position());
+
+    creatures_.update(
+        0.0F,
+        world_,
+        player_.position(),
+        environment_.current_state(),
+        environment_.current_creature_cycle());
+
     record_audit_event(
         AuditEventCategory::Player,
         "respawn",
         AuditSeverity::Info,
         audit_json_object({
-            {"x", audit_json_number(spawn_position_.x)},
-            {"y", audit_json_number(spawn_position_.y)},
-            {"z", audit_json_number(spawn_position_.z)},
+            {
+                "x",
+                audit_json_number(spawn_position_.x),
+            },
+            {
+                "y",
+                audit_json_number(spawn_position_.y),
+            },
+            {
+                "z",
+                audit_json_number(spawn_position_.z),
+            },
         }),
         AuditPriority::High);
 }

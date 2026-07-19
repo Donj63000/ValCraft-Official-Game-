@@ -124,6 +124,7 @@ enum class ShipPartShape : std::uint8_t {
     Panel,
     Wheel,
     Glyph,
+    ClimbableNet,
 };
 
 struct ShipPart {
@@ -147,6 +148,14 @@ struct ShipBounds {
     glm::vec3 max {0.0F};
 
     auto operator==(const ShipBounds&) const -> bool = default;
+};
+
+struct ShipClimbContact {
+    // Je fournis toutes les donnees en coordonnees monde pour que le controleur
+    // puisse s'accrocher au filet sans connaitre l'origine locale du navire.
+    ShipBounds bounds {};
+    glm::vec3 outward_normal {0.0F};
+    glm::vec3 deck_exit {0.0F};
 };
 
 struct ShipAnchors {
@@ -208,6 +217,9 @@ public:
     [[nodiscard]] auto support_height_in_range(const glm::vec3& feet_position,
                                                float min_height,
                                                float max_height) const noexcept -> std::optional<float>;
+    [[nodiscard]] auto climb_contact(const glm::vec3& min_corner,
+                                     const glm::vec3& max_corner) const noexcept
+        -> std::optional<ShipClimbContact>;
     [[nodiscard]] auto intersects_aabb(const glm::vec3& min_corner, const glm::vec3& max_corner) const noexcept -> bool;
     [[nodiscard]] auto raycast_collidable_distance(const glm::vec3& origin,
                                                    const glm::vec3& direction,
@@ -273,6 +285,10 @@ public:
                                        float max_distance,
                                        float damage) noexcept -> ShipCrewDamageResult;
     void cancel_fishing() noexcept;
+
+    // Le respawn conserve la progression du voyage et les stocks, mais retire
+    // les etats transitoires capables de provoquer une nouvelle mort immediate.
+    void on_player_respawn() noexcept;
 
 private:
     [[nodiscard]] auto player_should_ride_ship(const PlayerController& player) const noexcept -> bool;

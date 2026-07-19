@@ -1103,6 +1103,128 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
     CHECK_FALSE(ship.intersects_aabb(collidable_center, collidable_center));
 }
 
+TEST_CASE("L'Amelie exposes two mirrored boarding nets without changing ship collisions") {
+    const auto& blueprint = amelie_ship_blueprint();
+    std::array<const ShipPart*, 2> nets {{nullptr, nullptr}};
+    auto net_index = std::size_t {0U};
+
+    for (const auto& part : blueprint.parts) {
+        if (part.shape != ShipPartShape::ClimbableNet) {
+            continue;
+        }
+        REQUIRE(net_index < nets.size());
+        nets[net_index++] = &part;
+    }
+
+    REQUIRE(net_index == nets.size());
+    std::sort(nets.begin(), nets.end(), [](const ShipPart* lhs, const ShipPart* rhs) {
+        return lhs->local_start.x < rhs->local_start.x;
+    });
+
+    for (std::size_t index = 0; index < nets.size(); ++index) {
+        const auto& net = *nets[index];
+        const auto side = index == 0U ? -1.0F : 1.0F;
+        CAPTURE(side);
+        CHECK(net.material == ShipMaterial::Rope);
+        CHECK_FALSE(net.collidable);
+        CHECK_FALSE(net.supports_player);
+        CHECK(std::min(net.local_start.x, net.local_end.x) == doctest::Approx(side * 8.92F));
+        CHECK(std::max(net.local_start.x, net.local_end.x) == doctest::Approx(side * 8.92F));
+        CHECK(std::min(net.local_start.y, net.local_end.y) == doctest::Approx(-1.30F));
+        CHECK(std::max(net.local_start.y, net.local_end.y) == doctest::Approx(4.48F));
+        CHECK(std::min(net.local_start.z, net.local_end.z) == doctest::Approx(-9.0F));
+        CHECK(std::max(net.local_start.z, net.local_end.z) == doctest::Approx(-6.0F));
+        CHECK(net.orientation.x == doctest::Approx(side));
+        CHECK(net.orientation.y == doctest::Approx(0.0F));
+        CHECK(net.orientation.z == doctest::Approx(0.0F));
+    }
+
+    // Je garde l'ouverture de la passerelle a babord et je la reproduis a
+    // tribord, sans laisser une lisse ou un montant invisible dans le passage.
+    const auto boarding_rail_count = std::count_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) {
+            const auto min_x = std::min(part.local_start.x, part.local_end.x);
+            const auto max_x = std::max(part.local_start.x, part.local_end.x);
+            const auto min_y = std::min(part.local_start.y, part.local_end.y);
+            const auto min_z = std::min(part.local_start.z, part.local_end.z);
+            const auto max_z = std::max(part.local_start.z, part.local_end.z);
+            return part.material == ShipMaterial::CleanBeam && part.collidable &&
+                   std::max(std::abs(min_x), std::abs(max_x)) > 7.0F &&
+                   min_y >= 4.0F && min_z < -6.0F && max_z > -9.0F;
+        });
+    CHECK(boarding_rail_count == 0);
+
+    for (const auto side : {-1.0F, 1.0F}) {
+        const auto lip = std::find_if(
+            blueprint.parts.begin(),
+            blueprint.parts.end(),
+            [side](const ShipPart& part) {
+                const auto min_x = std::min(part.local_start.x, part.local_end.x);
+                const auto max_x = std::max(part.local_start.x, part.local_end.x);
+                const auto min_z = std::min(part.local_start.z, part.local_end.z);
+                const auto max_z = std::max(part.local_start.z, part.local_end.z);
+                const auto reaches_side = side < 0.0F ? min_x <= -8.99F : max_x >= 8.99F;
+                return part.shape == ShipPartShape::Slab &&
+                       part.material == ShipMaterial::LightDeck &&
+                       part.collidable && part.supports_player && reaches_side &&
+                       std::abs(min_z + 9.0F) < 0.001F &&
+                       std::abs(max_z + 6.0F) < 0.001F;
+            });
+        REQUIRE(lip != blueprint.parts.end());
+    }
+
+    ShipEntity ship {};
+    const auto origin = ship.world_origin();
+    for (const auto side : {-1.0F, 1.0F}) {
+        const auto feet = origin + glm::vec3 {side * 9.28F, -1.0F, -7.5F};
+        const auto contact = ship.climb_contact(
+            feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
+            feet + glm::vec3 {0.30F, 1.80F, 0.30F});
+        REQUIRE(contact.has_value());
+        CHECK(contact->outward_normal.x == doctest::Approx(side));
+        CHECK(contact->deck_exit.x == doctest::Approx(origin.x + side * 7.45F));
+        CHECK(contact->deck_exit.y == doctest::Approx(origin.y + 4.01F));
+        CHECK(contact->deck_exit.z == doctest::Approx(origin.z - 7.5F));
+        const auto exit_support = ship.support_height(contact->deck_exit);
+        REQUIRE(exit_support.has_value());
+        CHECK(contact->deck_exit.y == doctest::Approx(*exit_support + 0.01F));
+
+        const auto net_center = origin + glm::vec3 {side * 8.92F, 2.0F, -7.5F};
+        CHECK_FALSE(ship.intersects_aabb(
+            net_center - glm::vec3 {0.02F},
+            net_center + glm::vec3 {0.02F}));
+        CHECK_FALSE(ship.support_height(net_center).has_value());
+        CHECK_FALSE(ship.raycast_collidable_distance(
+            origin + glm::vec3 {side * 9.05F, 2.0F, -7.5F},
+            glm::vec3 {-side, 0.0F, 0.0F},
+            0.25F).has_value());
+
+        const auto outside_z = origin + glm::vec3 {side * 9.28F, -1.0F, -5.5F};
+        CHECK_FALSE(ship.climb_contact(
+            outside_z + glm::vec3 {-0.30F, 0.0F, -0.30F},
+            outside_z + glm::vec3 {0.30F, 1.80F, 0.30F}).has_value());
+    }
+
+    const auto rope = std::find_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) {
+            return part.shape == ShipPartShape::Segment && part.material == ShipMaterial::Rope;
+        });
+    REQUIRE(rope != blueprint.parts.end());
+    const auto rope_center = origin + (rope->local_start + rope->local_end) * 0.5F;
+    CHECK_FALSE(ship.climb_contact(
+        rope_center - glm::vec3 {0.05F},
+        rope_center + glm::vec3 {0.05F}).has_value());
+
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(ship.climb_contact(
+        {nan, origin.y, origin.z},
+        {origin.x + 1.0F, origin.y + 1.0F, origin.z + 1.0F}).has_value());
+}
+
 TEST_CASE("loaded Amelie occupants are reconciled only when the new layout requires it") {
     SeaAdventureSystem sea_adventure {};
     sea_adventure.reset(5522);
@@ -1613,6 +1735,302 @@ TEST_CASE("sea adventure resource counters saturate instead of wrapping") {
     CHECK(sea_adventure.save_state().food_rations == std::numeric_limits<std::uint32_t>::max());
 }
 
+TEST_CASE(
+    "sea adventure sanitizes non finite weather without corrupting the voyage") {
+
+    World world(
+        5515,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+
+    place_sea_adventure_underway(
+        sea_adventure,
+        world.seed());
+
+    PlayerController player(
+        sea_adventure.deck_spawn_position());
+
+    EnvironmentState environment {};
+
+    const auto nan =
+        std::numeric_limits<float>::quiet_NaN();
+
+    environment.time_of_day = nan;
+
+    environment.precipitation_intensity =
+        std::numeric_limits<float>::infinity();
+
+    environment.storm_intensity = nan;
+
+    environment.wind_strength =
+        -std::numeric_limits<float>::infinity();
+
+    const auto position_before =
+        sea_adventure.ship_position();
+
+    const auto result =
+        sea_adventure.update(
+            world,
+            player,
+            environment,
+            0.25F,
+            true);
+
+    const auto& state =
+        sea_adventure.save_state();
+
+    REQUIRE(result.fishing_started);
+
+    CHECK(std::isfinite(result.ship_speed));
+    CHECK(std::isfinite(result.ship_distance));
+    CHECK(std::isfinite(state.ship_position.z));
+    CHECK(std::isfinite(state.route_distance));
+    CHECK(std::isfinite(state.hunger));
+    CHECK(std::isfinite(state.thirst));
+    CHECK(std::isfinite(state.stamina));
+    CHECK(std::isfinite(state.fishing_progress));
+    CHECK(std::isfinite(state.fishing_target_seconds));
+
+    CHECK(
+        state.ship_position.z >
+        position_before.z);
+
+    CHECK(
+        state.ship_position.z <
+        position_before.z + 1.0F);
+
+    CHECK(state.hunger > 99.0F);
+    CHECK(state.thirst > 99.0F);
+}
+
+TEST_CASE(
+    "sea adventure stranded defeat ignores armor and invulnerability") {
+
+    World world(
+        5516,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+
+    place_sea_adventure_underway(
+        sea_adventure,
+        world.seed());
+
+    PlayerController player(
+        sea_adventure.ship_position() +
+        glm::vec3 {
+            250.0F,
+            4.10F,
+            0.0F,
+        });
+
+    auto protected_state = player.state();
+    protected_state.damage_cooldown = 0.55F;
+    player.load_state(protected_state);
+
+    player.set_damage_resistance_percent(99.0F);
+
+    const auto result =
+        sea_adventure.update(
+            world,
+            player,
+            EnvironmentState {},
+            0.0F,
+            false);
+
+    REQUIRE(result.stranded);
+    REQUIRE(player.is_dead());
+
+    CHECK(
+        player.state().health ==
+        doctest::Approx(0.0F));
+
+    CHECK(
+        player.state().death_cause ==
+        PlayerDeathCause::Stranded);
+}
+
+TEST_CASE(
+    "sea adventure respawn restores a safe survival floor without refilling stocks") {
+
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase =
+        SeaVoyagePhase::Underway;
+
+    state.hunger = 0.0F;
+    state.thirst = 0.0F;
+    state.stamina = 0.0F;
+    state.survival_damage_timer = 1.25F;
+    state.stranded_warning_timer = 2.0F;
+
+    state.food_rations = 2U;
+    state.water_flasks = 3U;
+    state.fish = 4U;
+
+    state.fishing_active = true;
+    state.fishing_progress = 4.0F;
+    state.fishing_target_seconds = 10.0F;
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(state, 5517);
+
+    sea_adventure.on_player_respawn();
+
+    const auto& respawned =
+        sea_adventure.save_state();
+
+    CHECK(
+        respawned.hunger ==
+        doctest::Approx(35.0F));
+
+    CHECK(
+        respawned.thirst ==
+        doctest::Approx(35.0F));
+
+    CHECK(
+        respawned.stamina ==
+        doctest::Approx(100.0F));
+
+    CHECK(
+        respawned.survival_damage_timer ==
+        doctest::Approx(0.0F));
+
+    CHECK(
+        respawned.stranded_warning_timer ==
+        doctest::Approx(0.0F));
+
+    CHECK_FALSE(respawned.fishing_active);
+
+    CHECK(
+        respawned.fishing_progress ==
+        doctest::Approx(0.0F));
+
+    CHECK(
+        respawned.fishing_target_seconds ==
+        doctest::Approx(0.0F));
+
+    CHECK(respawned.food_rations == 2U);
+    CHECK(respawned.water_flasks == 3U);
+    CHECK(respawned.fish == 4U);
+}
+
+TEST_CASE(
+    "inactive sea adventure rejects resource mutations") {
+
+    SeaAdventureSystem sea_adventure {};
+
+    REQUIRE_FALSE(sea_adventure.active());
+
+    CHECK_FALSE(
+        sea_adventure.collect_resource(
+            to_block_id(BlockType::Wood)));
+
+    CHECK_FALSE(
+        sea_adventure.record_hunt(
+            CreatureSpecies::Cow));
+
+    CHECK(
+        sea_adventure.save_state().wood ==
+        0U);
+
+    CHECK(
+        sea_adventure.save_state().food_rations ==
+        6U);
+}
+
+TEST_CASE(
+    "sea adventure reports empty survival gauges on every frame") {
+
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase =
+        SeaVoyagePhase::Underway;
+
+    state.hunger = 0.0F;
+    state.thirst = 0.0F;
+    state.food_rations = 0U;
+    state.water_flasks = 0U;
+    state.fish = 0U;
+
+    World world(
+        5518,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(
+        state,
+        world.seed());
+
+    PlayerController player(
+        sea_adventure.deck_spawn_position());
+
+    const auto result =
+        sea_adventure.update(
+            world,
+            player,
+            EnvironmentState {},
+            0.0F,
+            false);
+
+    CHECK(result.starving);
+    CHECK(result.dehydrating);
+    CHECK_FALSE(player.is_dead());
+}
+
+TEST_CASE(
+    "sea survival damage keeps its cadence during attack invulnerability") {
+
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase =
+        SeaVoyagePhase::Underway;
+
+    state.hunger = 0.0F;
+    state.food_rations = 0U;
+    state.fish = 0U;
+    state.survival_damage_timer = 1.70F;
+
+    World world(
+        5519,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(
+        state,
+        world.seed());
+
+    PlayerController player(
+        sea_adventure.deck_spawn_position());
+
+    auto protected_state = player.state();
+    protected_state.damage_cooldown = 0.55F;
+    player.load_state(protected_state);
+
+    const auto result =
+        sea_adventure.update(
+            world,
+            player,
+            EnvironmentState {},
+            0.10F,
+            false);
+
+    REQUIRE(result.starving);
+
+    CHECK(
+        player.state().health ==
+        doctest::Approx(18.0F));
+
+    CHECK_FALSE(player.is_dead());
+}
+
 TEST_CASE("player physics uses the dynamic ship as floor and obstacle") {
     World world(5505, 1, WorldGenerationProfile::OceanAdventure);
     SeaAdventureSystem sea_adventure {};
@@ -1659,6 +2077,301 @@ TEST_CASE("player physics uses the dynamic ship as floor and obstacle") {
     CHECK(hull_player.position().x < hull_initial_x);
     CHECK(hull_player.position().x >= origin.x + starboard_hull->local_end.x + 0.299F);
     CHECK_FALSE(hull_player.overlaps_dynamic_obstacle(ship));
+}
+
+TEST_CASE("player climbs both Amelie boarding nets from the water without jumping off the deck") {
+    World world(5534, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+
+    for (const auto side : {-1.0F, 1.0F}) {
+        CAPTURE(side);
+        PlayerController player(origin + glm::vec3 {side * 9.40F, -1.10F, -7.50F});
+        PlayerInput climb {};
+        climb.move_up = 1.0F;
+        climb.jump = true;
+        auto grabbed_net = false;
+        auto reached_deck = false;
+
+        for (int frame = 0; frame < 240; ++frame) {
+            player.update(climb, 1.0F / 60.0F, world, &ship);
+            grabbed_net = grabbed_net || player.is_climbing_dynamic_obstacle();
+            if (!player.is_climbing_dynamic_obstacle() && player.state().on_ground &&
+                player.position().y >= origin.y + 3.99F) {
+                reached_deck = true;
+                break;
+            }
+        }
+
+        REQUIRE(grabbed_net);
+        REQUIRE(reached_deck);
+        CHECK(player.position().x == doctest::Approx(origin.x + side * 7.45F).epsilon(0.001F));
+        CHECK(player.position().z == doctest::Approx(origin.z - 7.50F).epsilon(0.001F));
+        CHECK(player.position().y == doctest::Approx(origin.y + 4.001F).epsilon(0.02F));
+        CHECK(player.state().health == doctest::Approx(player.max_health()));
+        CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+        const auto support = ship.support_height(player.position());
+        REQUIRE(support.has_value());
+
+        // Je garde Espace appuye plusieurs frames apres la sortie : le verrou
+        // de saut doit poser le joueur sur le pont au lieu de le relancer en l'air.
+        for (int frame = 0; frame < 12; ++frame) {
+            player.update(climb, 1.0F / 60.0F, world, &ship);
+            CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+            CHECK(player.state().on_ground);
+        }
+        CHECK(player.position().y == doctest::Approx(*support + 0.001F).epsilon(0.002F));
+        CHECK(player.state().velocity.y == doctest::Approx(0.0F));
+    }
+}
+
+TEST_CASE("Amelie boarding net holds descends and releases the player predictably") {
+    World world(5535, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+
+    PlayerInput climb {};
+    climb.move_up = 1.0F;
+    climb.jump = true;
+    PlayerController held_player(origin + glm::vec3 {9.40F, 1.25F, -7.50F});
+    held_player.update(climb, 1.0F / 60.0F, world, &ship);
+    REQUIRE(held_player.is_climbing_dynamic_obstacle());
+    const auto held_height = held_player.position().y;
+
+    for (int frame = 0; frame < 30; ++frame) {
+        held_player.update(PlayerInput {}, 1.0F / 60.0F, world, &ship);
+        REQUIRE(held_player.is_climbing_dynamic_obstacle());
+    }
+    CHECK(held_player.position().y == doctest::Approx(held_height).epsilon(0.001F));
+    CHECK(held_player.state().airborne_time == doctest::Approx(0.0F));
+
+    PlayerInput descend {};
+    descend.move_up = -1.0F;
+    auto returned_to_water = false;
+    for (int frame = 0; frame < 120; ++frame) {
+        held_player.update(descend, 1.0F / 60.0F, world, &ship);
+        if (!held_player.is_climbing_dynamic_obstacle()) {
+            returned_to_water = true;
+            break;
+        }
+    }
+    REQUIRE(returned_to_water);
+    CHECK(held_player.position().y <= origin.y - 1.29F);
+    CHECK(held_player.state().swimming);
+    CHECK(held_player.state().health == doctest::Approx(held_player.max_health()));
+
+    // Je sors ensuite par un bord lateral sans transformer la zone de prise en
+    // mur invisible. Le deplacement ordinaire reprend des la perte de contact.
+    PlayerController lateral_player(origin + glm::vec3 {9.40F, 1.25F, -6.15F});
+    lateral_player.update(climb, 1.0F / 60.0F, world, &ship);
+    REQUIRE(lateral_player.is_climbing_dynamic_obstacle());
+    PlayerInput move_past_edge {};
+    move_past_edge.move_forward = -1.0F;
+    auto left_lateral_edge = false;
+    for (int frame = 0; frame < 40; ++frame) {
+        lateral_player.update(move_past_edge, 1.0F / 60.0F, world, &ship);
+        if (!lateral_player.is_climbing_dynamic_obstacle()) {
+            left_lateral_edge = true;
+            break;
+        }
+    }
+    REQUIRE(left_lateral_edge);
+    CHECK(lateral_player.position().z > origin.z - 6.0F);
+
+    PlayerController outward_player(origin + glm::vec3 {-9.40F, 1.25F, -7.50F});
+    outward_player.update(climb, 1.0F / 60.0F, world, &ship);
+    REQUIRE(outward_player.is_climbing_dynamic_obstacle());
+    PlayerInput move_outward {};
+    move_outward.move_right = -1.0F;
+    outward_player.update(move_outward, 1.0F / 60.0F, world, &ship);
+    CHECK_FALSE(outward_player.is_climbing_dynamic_obstacle());
+
+    PlayerController distant_player(origin + glm::vec3 {0.0F, -1.10F, -7.50F});
+    distant_player.update(climb, 1.0F / 60.0F, world, &ship);
+    CHECK_FALSE(distant_player.is_climbing_dynamic_obstacle());
+
+    PlayerController flying_player(origin + glm::vec3 {9.40F, -1.10F, -7.50F});
+    flying_player.set_fly_mode_enabled(true);
+    flying_player.update(climb, 1.0F / 60.0F, world, &ship);
+    CHECK_FALSE(flying_player.is_climbing_dynamic_obstacle());
+
+    PlayerController dead_player(origin + glm::vec3 {9.40F, -1.10F, -7.50F});
+    dead_player.force_death(PlayerDeathCause::Drowning);
+    dead_player.update(climb, 1.0F / 60.0F, world, &ship);
+    CHECK_FALSE(dead_player.is_climbing_dynamic_obstacle());
+}
+
+TEST_CASE("active Amelie net climbing resets across every discontinuous player transition") {
+    World world(5538, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto start = ship.world_origin() + glm::vec3 {9.40F, 1.25F, -7.50F};
+
+    const auto attach_to_net = [&](PlayerController& player) {
+        PlayerInput climb {};
+        climb.move_up = 1.0F;
+        climb.jump = true;
+        player.update(climb, 1.0F / 60.0F, world, &ship);
+        REQUIRE(player.is_climbing_dynamic_obstacle());
+    };
+
+    // Je repars d'une vraie prise active pour chaque transition afin de verifier
+    // que l'etat transitoire ne peut survivre a aucune rupture de simulation.
+    SUBCASE("loading a player state") {
+        PlayerController player(start);
+        attach_to_net(player);
+        const auto saved_state = player.state();
+        player.load_state(saved_state);
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+    }
+
+    SUBCASE("forcing a new position") {
+        PlayerController player(start);
+        attach_to_net(player);
+        player.set_position(ship.world_origin() + glm::vec3 {0.0F, 4.01F, 0.0F});
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+    }
+
+    SUBCASE("respawning") {
+        PlayerController player(start);
+        attach_to_net(player);
+        player.respawn(sea_adventure.deck_spawn_position());
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+    }
+
+    SUBCASE("dying") {
+        PlayerController player(start);
+        attach_to_net(player);
+        player.force_death(PlayerDeathCause::Drowning);
+        CHECK(player.is_dead());
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+    }
+
+    SUBCASE("entering flight mode") {
+        PlayerController player(start);
+        attach_to_net(player);
+        PlayerInput toggle_flight {};
+        toggle_flight.toggle_fly = true;
+        player.update(toggle_flight, 1.0F / 60.0F, world, &ship);
+        CHECK(player.state().fly_mode);
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+    }
+
+    SUBCASE("losing the dynamic ship") {
+        PlayerController player(start);
+        attach_to_net(player);
+        player.update(PlayerInput {}, 1.0F / 60.0F, world, nullptr);
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+    }
+}
+
+TEST_CASE("blocked Amelie net exit keeps the climber outside until the deck is clear") {
+    World world(5536, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+    const auto feet = origin + glm::vec3 {9.28F, -1.10F, -7.50F};
+    const auto contact = ship.climb_contact(
+        feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
+        feet + glm::vec3 {0.30F, 1.80F, 0.30F});
+    REQUIRE(contact.has_value());
+
+    const BlockCoord blocker {
+        static_cast<int>(std::floor(contact->deck_exit.x)),
+        static_cast<int>(std::floor(contact->deck_exit.y)),
+        static_cast<int>(std::floor(contact->deck_exit.z)),
+    };
+    world.set_block(blocker.x, blocker.y, blocker.z, to_block_id(BlockType::Stone));
+
+    PlayerController player(feet);
+    PlayerInput climb {};
+    climb.move_up = 1.0F;
+    climb.jump = true;
+    for (int frame = 0; frame < 180; ++frame) {
+        player.update(climb, 1.0F / 60.0F, world, &ship);
+    }
+    REQUIRE(player.is_climbing_dynamic_obstacle());
+    CHECK(player.position().x > origin.x + 9.0F);
+    CHECK(player.position().y <= contact->deck_exit.y - 0.019F);
+    CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+
+    world.set_block(blocker.x, blocker.y, blocker.z, to_block_id(BlockType::Air));
+    auto reached_deck = false;
+    for (int frame = 0; frame < 30; ++frame) {
+        player.update(climb, 1.0F / 60.0F, world, &ship);
+        if (!player.is_climbing_dynamic_obstacle() && player.state().on_ground) {
+            reached_deck = true;
+            break;
+        }
+    }
+    REQUIRE(reached_deck);
+    CHECK(player.position().x == doctest::Approx(contact->deck_exit.x).epsilon(0.001F));
+}
+
+TEST_CASE("climber follows a moving Amelie without becoming on ship before the deck") {
+    EnvironmentState environment {};
+    World world(5537, 1, WorldGenerationProfile::OceanAdventure);
+
+    for (const auto side : {-1.0F, 1.0F}) {
+        CAPTURE(side);
+        SeaAdventureSystem sea_adventure {};
+        sea_adventure.reset(world.seed());
+        place_sea_adventure_underway(sea_adventure, world.seed());
+        const auto& ship = sea_adventure.ship_entity();
+        PlayerController player(ship.world_origin() + glm::vec3 {side * 9.40F, 1.25F, -7.50F});
+        PlayerInput climb {};
+        climb.move_up = 1.0F;
+        climb.jump = true;
+        player.update(climb, 1.0F / 60.0F, world, &ship);
+        REQUIRE(player.is_climbing_dynamic_obstacle());
+
+        const auto initial_relative = player.position() - sea_adventure.ship_position();
+        for (int frame = 0; frame < 8; ++frame) {
+            player.update(PlayerInput {}, 1.0F / 60.0F, world, &ship);
+            const auto result = sea_adventure.update(
+                world,
+                player,
+                environment,
+                0.10F,
+                frame == 0);
+            CHECK(result.ship_moved_player);
+            CHECK_FALSE(result.on_ship);
+            CHECK_FALSE(sea_adventure.save_state().fishing_active);
+            if (frame == 0) {
+                CHECK(result.fishing_failed);
+            }
+            const auto relative = player.position() - sea_adventure.ship_position();
+            CHECK(relative.x == doctest::Approx(initial_relative.x).epsilon(0.001F));
+            CHECK(relative.y == doctest::Approx(initial_relative.y).epsilon(0.001F));
+            CHECK(relative.z == doctest::Approx(initial_relative.z).epsilon(0.001F));
+        }
+
+        auto reached_deck = false;
+        for (int frame = 0; frame < 240; ++frame) {
+            player.update(climb, 1.0F / 60.0F, world, &ship);
+            const auto result = sea_adventure.update(
+                world,
+                player,
+                environment,
+                1.0F / 60.0F,
+                false);
+            if (result.on_ship) {
+                CHECK(result.ship_moved_player);
+                reached_deck = true;
+                break;
+            }
+        }
+        REQUIRE(reached_deck);
+        CHECK_FALSE(player.is_climbing_dynamic_obstacle());
+        CHECK(player.position().x == doctest::Approx(ship.world_origin().x + side * 7.45F).epsilon(0.002F));
+        CHECK(ship.support_height(player.position()).has_value());
+    }
 }
 
 TEST_CASE("player walks up and down an Amelie half step without losing deck contact") {

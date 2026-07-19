@@ -130,6 +130,7 @@ public:
     [[nodiscard]] auto movement_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto block_break_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto is_dead() const noexcept -> bool;
+    [[nodiscard]] auto is_climbing_dynamic_obstacle() const noexcept -> bool;
 
     void load_state(const PlayerState& state) noexcept;
     void set_position(const glm::vec3& position) noexcept;
@@ -147,6 +148,14 @@ public:
     void trigger_secondary_action() noexcept;
     void respawn(const glm::vec3& position) noexcept;
     void apply_external_damage(float amount, PlayerDeathCause cause) noexcept;
+
+    // Les dangers continus possedent leur propre cadence et ne doivent pas etre
+    // annules par la fenetre d'invulnerabilite d'une attaque precedente.
+    void apply_environmental_damage(float amount, PlayerDeathCause cause) noexcept;
+
+    // Cette transition represente un echec de scenario absolu. Elle ignore
+    // volontairement l'armure et la fenetre d'invulnerabilite des degats ordinaires.
+    void force_death(PlayerDeathCause cause) noexcept;
 
     [[nodiscard]] auto current_target(const World& world, float max_distance = 8.0F) const -> RaycastHit;
     auto update_block_breaking(World& world,
@@ -180,8 +189,10 @@ private:
     void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
     void move_axis(float delta, int axis, const World& world, const ShipEntity* dynamic_obstacle);
     void apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown = false) noexcept;
+    void enter_death_state(PlayerDeathCause cause) noexcept;
     void heal(float amount) noexcept;
     void reset_jump_assist_state() noexcept;
+    void reset_dynamic_climb_state() noexcept;
     [[nodiscard]] auto block_overlaps_player(const BlockCoord& block_coord) const noexcept -> bool;
     [[nodiscard]] auto point_block(const World& world, const glm::vec3& point) const noexcept -> BlockId;
     [[nodiscard]] auto is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool;
@@ -197,6 +208,11 @@ private:
     float block_break_speed_multiplier_ = 1.0F;
     float ground_coyote_timer_ = 0.0F;
     float jump_buffer_timer_ = 0.0F;
+    // Je garde l'accroche hors de PlayerState : elle depend d'une entite
+    // runtime et ne doit jamais fuiter dans le format de sauvegarde.
+    const ShipEntity* climbed_dynamic_obstacle_ = nullptr;
+    bool dynamic_climb_regrab_locked_ = false;
+    bool dynamic_climb_jump_locked_ = false;
     static constexpr float kPlayerWidth = 0.6F;
     static constexpr float kPlayerHeight = 1.8F;
     static constexpr float kEyeHeight = 1.62F;

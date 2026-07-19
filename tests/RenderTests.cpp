@@ -12,6 +12,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace valcraft {
 
@@ -470,6 +472,145 @@ TEST_CASE("ship canvas keeps repeated detail across a large trapezoidal sail") {
     CHECK(canvas_tiles > 20U);
 }
 
+TEST_CASE("climbable ship net is an open rope grid with reinforced borders") {
+    const std::array<ShipPart, 1> parts {{
+        {
+            ShipPartShape::ClimbableNet,
+            ShipMaterial::Rope,
+            {-8.92F, -1.30F, -9.0F},
+            {-8.92F, 4.48F, -6.0F},
+            {-1.0F, 0.0F, 0.0F},
+            0.04F,
+            false,
+            false,
+        },
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+
+    // Je verrouille ici les sept montants et treize traverses produits par
+    // l'espacement de 50 cm, y compris leurs subdivisions de texture.
+    CHECK(mesh.face_count == 228U);
+    CHECK(mesh.vertices.size() == mesh.face_count * 4U);
+    CHECK(mesh.indices.size() == mesh.face_count * 6U);
+    CHECK(mesh.water_vertices.empty());
+    CHECK(mesh.water_indices.empty());
+
+    const auto rope_uv = atlas_uv_rect(ship_atlas_tile(ShipAtlasMaterial::Rope));
+    auto minimum = glm::vec3 {std::numeric_limits<float>::max()};
+    auto maximum = glm::vec3 {std::numeric_limits<float>::lowest()};
+    for (const auto& vertex : mesh.vertices) {
+        CHECK(std::isfinite(vertex.x));
+        CHECK(std::isfinite(vertex.y));
+        CHECK(std::isfinite(vertex.z));
+        CHECK(std::isfinite(vertex.nx));
+        CHECK(std::isfinite(vertex.ny));
+        CHECK(std::isfinite(vertex.nz));
+        CHECK(vertex.material_class == doctest::Approx(static_cast<float>(BlockVisualMaterial::Wood)));
+        CHECK(vertex.u >= rope_uv[0]);
+        CHECK(vertex.u <= rope_uv[2]);
+        CHECK(vertex.v >= rope_uv[1]);
+        CHECK(vertex.v <= rope_uv[3]);
+        minimum = glm::min(minimum, glm::vec3 {vertex.x, vertex.y, vertex.z});
+        maximum = glm::max(maximum, glm::vec3 {vertex.x, vertex.y, vertex.z});
+    }
+    for (const auto index : mesh.indices) {
+        CHECK(index < mesh.vertices.size());
+    }
+
+    constexpr auto reinforced_half_width = 0.04F * 1.65F * 0.5F;
+    CHECK(minimum.x == doctest::Approx(-8.92F - reinforced_half_width));
+    CHECK(maximum.x == doctest::Approx(-8.92F + reinforced_half_width));
+    CHECK(minimum.y == doctest::Approx(-1.30F - reinforced_half_width));
+    CHECK(maximum.y == doctest::Approx(4.48F + reinforced_half_width));
+    CHECK(minimum.z == doctest::Approx(-9.0F - reinforced_half_width));
+    CHECK(maximum.z == doctest::Approx(-6.0F + reinforced_half_width));
+
+    for (std::size_t face = 0; face < mesh.vertices.size(); face += 4U) {
+        auto face_minimum = glm::vec3 {std::numeric_limits<float>::max()};
+        auto face_maximum = glm::vec3 {std::numeric_limits<float>::lowest()};
+        for (std::size_t corner = 0; corner < 4U; ++corner) {
+            const auto& vertex = mesh.vertices[face + corner];
+            const auto point = glm::vec3 {vertex.x, vertex.y, vertex.z};
+            face_minimum = glm::min(face_minimum, point);
+            face_maximum = glm::max(face_maximum, point);
+        }
+        const auto extent = face_maximum - face_minimum;
+        const auto broad_axes = static_cast<int>(extent.x > 0.10F) +
+                                static_cast<int>(extent.y > 0.10F) +
+                                static_cast<int>(extent.z > 0.10F);
+        // Je refuse toute face qui remplirait deux dimensions du filet : une
+        // telle face transformerait le treillis en panneau opaque.
+        CHECK(broad_axes <= 1);
+    }
+}
+
+TEST_CASE("climbable ship nets mirror across X and also support Z-facing planes") {
+    const ShipPart port {
+        ShipPartShape::ClimbableNet,
+        ShipMaterial::Rope,
+        {-8.92F, -1.30F, -9.0F},
+        {-8.92F, 4.48F, -6.0F},
+        {-1.0F, 0.0F, 0.0F},
+        0.04F,
+        false,
+        false,
+    };
+    auto starboard = port;
+    starboard.local_start.x = 8.92F;
+    starboard.local_end.x = 8.92F;
+    starboard.orientation = {1.0F, 0.0F, 0.0F};
+
+    const auto port_mesh = build_ship_mesh_data(std::span<const ShipPart>(&port, 1U));
+    const auto starboard_mesh = build_ship_mesh_data(std::span<const ShipPart>(&starboard, 1U));
+    REQUIRE(port_mesh.face_count == starboard_mesh.face_count);
+    REQUIRE(port_mesh.vertices.size() == starboard_mesh.vertices.size());
+
+    auto port_min_x = std::numeric_limits<float>::max();
+    auto port_max_x = std::numeric_limits<float>::lowest();
+    auto starboard_min_x = std::numeric_limits<float>::max();
+    auto starboard_max_x = std::numeric_limits<float>::lowest();
+    for (std::size_t index = 0; index < port_mesh.vertices.size(); ++index) {
+        const auto& port_vertex = port_mesh.vertices[index];
+        const auto& starboard_vertex = starboard_mesh.vertices[index];
+        port_min_x = std::min(port_min_x, port_vertex.x);
+        port_max_x = std::max(port_max_x, port_vertex.x);
+        starboard_min_x = std::min(starboard_min_x, starboard_vertex.x);
+        starboard_max_x = std::max(starboard_max_x, starboard_vertex.x);
+        CHECK(port_vertex.y == doctest::Approx(starboard_vertex.y));
+        CHECK(port_vertex.z == doctest::Approx(starboard_vertex.z));
+    }
+    CHECK(port_min_x == doctest::Approx(-starboard_max_x));
+    CHECK(port_max_x == doctest::Approx(-starboard_min_x));
+
+    const std::array<ShipPart, 2> z_facing {{
+        {
+            ShipPartShape::ClimbableNet,
+            ShipMaterial::Rope,
+            {-1.5F, 0.0F, 2.0F},
+            {1.5F, 2.0F, 2.0F},
+            {0.0F, 0.0F, 1.0F},
+            0.04F,
+            false,
+            false,
+        },
+        {
+            ShipPartShape::ClimbableNet,
+            ShipMaterial::Rope,
+            {-1.5F, 0.0F, -2.0F},
+            {1.5F, 2.0F, -2.0F},
+            {0.0F, 0.0F, -1.0F},
+            0.04F,
+            false,
+            false,
+        },
+    }};
+    const auto positive_z_mesh = build_ship_mesh_data(std::span<const ShipPart>(&z_facing[0], 1U));
+    const auto negative_z_mesh = build_ship_mesh_data(std::span<const ShipPart>(&z_facing[1], 1U));
+    CHECK(positive_z_mesh.face_count == 92U);
+    CHECK(positive_z_mesh.face_count == negative_z_mesh.face_count);
+    CHECK(positive_z_mesh.face_count < 128U);
+}
+
 TEST_CASE("stern glyph bitmap follows the outward face orientation") {
     const std::array<ShipPart, 1> parts {{
         {
@@ -500,6 +641,19 @@ TEST_CASE("stern glyph bitmap follows the outward face orientation") {
 
 TEST_CASE("L'Amelie mesh renders every maritime family with interior and lantern lighting") {
     const auto& blueprint = amelie_ship_blueprint();
+    std::vector<ShipPart> climbable_nets;
+    for (const auto& part : blueprint.parts) {
+        if (part.shape == ShipPartShape::ClimbableNet) {
+            climbable_nets.push_back(part);
+        }
+    }
+    REQUIRE(climbable_nets.size() == 2U);
+    const auto net_mesh = build_ship_mesh_data(climbable_nets);
+    CHECK(net_mesh.face_count == 456U);
+    CHECK(net_mesh.face_count < 512U);
+    CHECK(net_mesh.vertices.size() == net_mesh.face_count * 4U);
+    CHECK(net_mesh.indices.size() == net_mesh.face_count * 6U);
+
     const auto mesh = build_ship_mesh_data(blueprint.parts);
 
     REQUIRE_FALSE(mesh.empty());
@@ -508,6 +662,10 @@ TEST_CASE("L'Amelie mesh renders every maritime family with interior and lantern
     CHECK(mesh.indices.size() == mesh.face_count * 6U);
     CHECK(mesh.water_vertices.empty());
     CHECK(mesh.water_indices.empty());
+    CHECK(mesh.face_count < blueprint.parts.size() * 80U);
+    for (const auto index : mesh.indices) {
+        CHECK(index < mesh.vertices.size());
+    }
 
     std::set<int> materials;
     auto minimum_sky = 1.0F;

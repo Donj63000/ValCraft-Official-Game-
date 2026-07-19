@@ -40,6 +40,9 @@ constexpr float kFishingStormPenalty = 4.0F;
 constexpr float kFishingNightBonus = 1.2F;
 constexpr float kSurvivalDamageInterval = 1.75F;
 constexpr float kStrandedWarningInterval = 8.0F;
+constexpr float kRespawnMinimumHunger = 35.0F;
+constexpr float kRespawnMinimumThirst = 35.0F;
+constexpr float kRespawnStamina = 100.0F;
 constexpr float kShipCoordinateLimit = 1'000'000.0F;
 constexpr std::int64_t kLegacyShipOriginTolerance = 1;
 constexpr std::size_t kLegacyShipV7VoxelCount = 2814U;
@@ -65,6 +68,41 @@ auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept 
         finite_or(value.y, fallback.y),
         finite_or(value.z, fallback.z),
     };
+}
+
+auto sanitize_sea_environment(
+    const EnvironmentState& environment) noexcept -> EnvironmentState {
+
+    const EnvironmentState defaults {};
+    auto sanitized = environment;
+
+    // EnvironmentClock produit deja des valeurs valides, mais cette frontiere
+    // publique doit aussi resister aux tests, mods et futurs chargeurs externes.
+    sanitized.time_of_day =
+        EnvironmentClock::normalize_time_of_day(environment.time_of_day);
+
+    sanitized.precipitation_intensity = std::clamp(
+        finite_or(
+            environment.precipitation_intensity,
+            defaults.precipitation_intensity),
+        0.0F,
+        1.0F);
+
+    sanitized.storm_intensity = std::clamp(
+        finite_or(
+            environment.storm_intensity,
+            defaults.storm_intensity),
+        0.0F,
+        1.0F);
+
+    sanitized.wind_strength = std::clamp(
+        finite_or(
+            environment.wind_strength,
+            defaults.wind_strength),
+        0.0F,
+        1.0F);
+
+    return sanitized;
 }
 
 auto smoothstep_primitive(float ratio) noexcept -> float {
@@ -430,15 +468,37 @@ constexpr float kAmelieBowZ = 36.0F;
 constexpr float kAmelieMaximumHalfWidth = 8.60F;
 constexpr float kAmelieMainDeckUnderside = 3.65F;
 constexpr float kAmelieMainDeckTop = 4.0F;
-constexpr int kAmeliePortBoardingMinRowZ = -9;
-constexpr int kAmeliePortBoardingMaxRowZ = -7;
-constexpr float kAmeliePortBoardingOuterX = -9.0F;
+constexpr int kAmelieBoardingMinRowZ = -9;
+constexpr int kAmelieBoardingMaxRowZ = -7;
+constexpr float kAmelieBoardingOuterX = 9.0F;
+constexpr float kAmelieBoardingNetX = 8.92F;
+constexpr float kAmelieBoardingNetMinY = -1.30F;
+constexpr float kAmelieBoardingNetMaxY = 4.48F;
+constexpr float kAmelieBoardingNetMinZ = -9.0F;
+constexpr float kAmelieBoardingNetMaxZ = -6.0F;
+constexpr float kAmelieBoardingNetThickness = 0.06F;
+constexpr float kAmelieBoardingNetGrabHalfDepth = 0.18F;
+constexpr float kAmelieBoardingDeckExitX = 7.45F;
 constexpr std::array<glm::vec3, 4> kAmelieInteriorLanterns {{
     {1.25F, 3.025F, -30.5F},
     {-1.55F, 3.025F, -6.0F},
     {1.45F, 3.025F, 5.0F},
     {-2.40F, 3.025F, 24.0F},
 }};
+
+void add_climbable_net(std::vector<ShipPart>& parts, float x, const glm::vec3& outward_normal) {
+    parts.push_back({
+        ShipPartShape::ClimbableNet,
+        ShipMaterial::Rope,
+        {x, kAmelieBoardingNetMinY, kAmelieBoardingNetMinZ},
+        {x, kAmelieBoardingNetMaxY, kAmelieBoardingNetMaxZ},
+        outward_normal,
+        kAmelieBoardingNetThickness,
+        false,
+        false,
+        U'\0',
+    });
+}
 
 auto amelie_crew_navigation_nodes() -> const std::array<ShipCrewNavigationNode, 42>& {
     // Je place les stations dans les axes réellement dégagés du blueprint :
@@ -695,51 +755,66 @@ void add_hull_and_decks(std::vector<ShipPart>& parts) {
         const auto raised_deck = z <= -25 || z >= 25;
         if (!raised_deck) {
             const auto rail_x = std::max(0.6F, half_width - 0.10F);
-            const auto port_boarding_row =
-                z >= kAmeliePortBoardingMinRowZ && z <= kAmeliePortBoardingMaxRowZ;
-            if (!port_boarding_row) {
+            const auto boarding_row =
+                z >= kAmelieBoardingMinRowZ && z <= kAmelieBoardingMaxRowZ;
+            if (!boarding_row) {
                 add_box(parts,
                         ShipMaterial::CleanBeam,
                         {-rail_x, 4.46F, row_min_z},
                         {-rail_x + 0.14F, 4.66F, row_max_z},
                         true);
+                add_box(parts,
+                        ShipMaterial::CleanBeam,
+                        {rail_x - 0.14F, 4.46F, row_min_z},
+                        {rail_x, 4.66F, row_max_z},
+                        true);
             }
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {rail_x - 0.14F, 4.46F, row_min_z},
-                    {rail_x, 4.66F, row_max_z},
-                    true);
             if ((z + 35) % 3 == 0) {
-                if (!port_boarding_row) {
+                if (!boarding_row) {
                     add_box(parts,
                             ShipMaterial::CleanBeam,
                             {-rail_x, 4.0F, row_min_z},
                             {-rail_x + 0.16F, 5.02F, row_min_z + 0.16F},
                             true);
+                    add_box(parts,
+                            ShipMaterial::CleanBeam,
+                            {rail_x - 0.16F, 4.0F, row_min_z},
+                            {rail_x, 5.02F, row_min_z + 0.16F},
+                            true);
                 }
-                add_box(parts,
-                        ShipMaterial::CleanBeam,
-                        {rail_x - 0.16F, 4.0F, row_min_z},
-                        {rail_x, 5.02F, row_min_z + 0.16F},
-                        true);
             }
         }
     }
 
-    // Je prolonge le pont jusqu'au bord exact de la passerelle fixe. Cette
-    // levre voyage avec le navire : elle ferme la jonction sans laisser un
-    // override du port dans le volume balaye pendant le depart.
+    // Je prolonge le pont jusqu'aux deux filets. La levre babord conserve sa
+    // jonction avec la passerelle et sa jumelle tribord securise la remontee.
     add_box(parts,
             ShipMaterial::LightDeck,
-            {kAmeliePortBoardingOuterX,
+            {-kAmelieBoardingOuterX,
              kAmelieMainDeckUnderside,
-             static_cast<float>(kAmeliePortBoardingMinRowZ)},
+             static_cast<float>(kAmelieBoardingMinRowZ)},
             {-7.75F,
              kAmelieMainDeckTop,
-             static_cast<float>(kAmeliePortBoardingMaxRowZ + 1)},
+             static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
             true,
             true,
             ShipPartShape::Slab);
+    add_box(parts,
+            ShipMaterial::LightDeck,
+            {7.75F,
+             kAmelieMainDeckUnderside,
+             static_cast<float>(kAmelieBoardingMinRowZ)},
+            {kAmelieBoardingOuterX,
+             kAmelieMainDeckTop,
+             static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
+            true,
+            true,
+            ShipPartShape::Slab);
+
+    // Je garde une seule piece logique par cote : le rendu la decompose en
+    // mailles, tandis que la physique conserve une surface de prise continue.
+    add_climbable_net(parts, -kAmelieBoardingNetX, {-1.0F, 0.0F, 0.0F});
+    add_climbable_net(parts, kAmelieBoardingNetX, {1.0F, 0.0F, 0.0F});
 
     // Je ferme l'etrave avec un taille-mer et je compose le tableau arriere en
     // plusieurs bandes. Les vitrages ferment reellement la cabine et remplacent
@@ -1347,8 +1422,14 @@ auto part_bounds(const ShipPart& part) noexcept -> ShipBounds {
         glm::min(part.local_start, part.local_end),
         glm::max(part.local_start, part.local_end),
     };
-    if (part.shape == ShipPartShape::Segment || part.shape == ShipPartShape::Panel) {
-        const auto padding = glm::vec3 {std::max(0.0F, part.thickness) * 0.5F};
+    if (part.shape == ShipPartShape::Segment ||
+        part.shape == ShipPartShape::Panel ||
+        part.shape == ShipPartShape::ClimbableNet) {
+        // La bordure renforcee du filet atteint 1,65 fois le diametre nominal;
+        // je l'inclus donc entierement dans les limites partagees avec le rendu.
+        const auto padding_factor =
+            part.shape == ShipPartShape::ClimbableNet ? 0.825F : 0.5F;
+        const auto padding = glm::vec3 {std::max(0.0F, part.thickness) * padding_factor};
         bounds.min -= padding;
         bounds.max += padding;
     }
@@ -1764,6 +1845,59 @@ auto ShipEntity::support_height_in_range(const glm::vec3& feet_position,
     return best_height;
 }
 
+auto ShipEntity::climb_contact(const glm::vec3& min_corner,
+                               const glm::vec3& max_corner) const noexcept
+    -> std::optional<ShipClimbContact> {
+    if (!std::isfinite(min_corner.x) || !std::isfinite(min_corner.y) || !std::isfinite(min_corner.z) ||
+        !std::isfinite(max_corner.x) || !std::isfinite(max_corner.y) || !std::isfinite(max_corner.z) ||
+        min_corner.x >= max_corner.x || min_corner.y >= max_corner.y || min_corner.z >= max_corner.z) {
+        return std::nullopt;
+    }
+
+    const auto origin = world_origin();
+    const ShipBounds local_query {
+        min_corner - origin,
+        max_corner - origin,
+    };
+
+    for (const auto& part : amelie_ship_blueprint().parts) {
+        if (part.shape != ShipPartShape::ClimbableNet) {
+            continue;
+        }
+
+        auto local_bounds = ShipBounds {
+            glm::min(part.local_start, part.local_end),
+            glm::max(part.local_start, part.local_end),
+        };
+        const auto outward_normal = glm::normalize(part.orientation);
+
+        // Je rends la prise legerement plus genereuse que l'epaisseur visuelle
+        // de la corde, sans etendre la zone au-dessus ou a cote du filet.
+        const auto grab_padding = glm::abs(outward_normal) *
+                                  std::max(kAmelieBoardingNetGrabHalfDepth, part.thickness * 0.5F);
+        local_bounds.min -= grab_padding;
+        local_bounds.max += grab_padding;
+
+        if (!aabbs_overlap(local_query, local_bounds)) {
+            continue;
+        }
+
+        const auto deck_exit = glm::vec3 {
+            outward_normal.x * kAmelieBoardingDeckExitX,
+            kAmelieMainDeckTop + 0.01F,
+            (kAmelieBoardingNetMinZ + kAmelieBoardingNetMaxZ) * 0.5F,
+        } + origin;
+
+        return ShipClimbContact {
+            {local_bounds.min + origin, local_bounds.max + origin},
+            outward_normal,
+            deck_exit,
+        };
+    }
+
+    return std::nullopt;
+}
+
 auto ShipEntity::intersects_aabb(const glm::vec3& min_corner, const glm::vec3& max_corner) const noexcept -> bool {
     if (!std::isfinite(min_corner.x) || !std::isfinite(min_corner.y) || !std::isfinite(min_corner.z) ||
         !std::isfinite(max_corner.x) || !std::isfinite(max_corner.y) || !std::isfinite(max_corner.z) ||
@@ -2110,134 +2244,368 @@ auto SeaAdventureSystem::legacy_ship_migration_progress() const noexcept -> floa
                      1.0F);
 }
 
-auto SeaAdventureSystem::update(World& world,
-                                PlayerController& player,
-                                const EnvironmentState& environment,
-                                float dt,
-                                bool request_fishing) -> SeaAdventureFrameResult {
+auto SeaAdventureSystem::update(
+    World& world,
+    PlayerController& player,
+    const EnvironmentState& environment,
+    float dt,
+    bool request_fishing) -> SeaAdventureFrameResult {
+
     // Je garde temporairement le parametre pour la compatibilite de l'appel Game;
     // la simulation de l'entite ne consulte plus et ne modifie plus le monde.
     (void)world;
+
     SeaAdventureFrameResult result {};
     if (!state_.active) {
         return result;
     }
 
+    const auto safe_environment = sanitize_sea_environment(environment);
     dt = std::clamp(finite_or(dt, 0.0F), 0.0F, 0.25F);
-    const auto support_height_before_move = ship_.support_height(player.position());
-    const auto player_was_on_ship = player_should_ride_ship(player);
-    const auto player_intersected_ship_before_move = player.overlaps_dynamic_obstacle(ship_);
-    const auto requested_speed = kShipBaseSpeed * std::clamp(0.92F + environment.wind_strength * 0.24F - environment.storm_intensity * 0.16F, 0.72F, 1.28F);
-    const auto motion_seconds = advance_voyage_phase(state_, dt, player_was_on_ship, result);
+
+    // Je repare aussi les invariants purement runtime. Une valeur invalide ne
+    // doit jamais survivre assez longtemps pour contaminer une sauvegarde.
+    state_.hunger = std::clamp(
+        finite_or(state_.hunger, 100.0F),
+        0.0F,
+        100.0F);
+
+    state_.thirst = std::clamp(
+        finite_or(state_.thirst, 100.0F),
+        0.0F,
+        100.0F);
+
+    state_.stamina = std::clamp(
+        finite_or(state_.stamina, 100.0F),
+        0.0F,
+        100.0F);
+
+    if (!std::isfinite(state_.fishing_progress) ||
+        !std::isfinite(state_.fishing_target_seconds) ||
+        (state_.fishing_active &&
+         state_.fishing_target_seconds <= 0.0F)) {
+        cancel_fishing();
+    }
+
+    const auto support_height_before_move =
+        ship_.support_height(player.position());
+
+    const auto player_was_on_ship =
+        player_should_ride_ship(player);
+
+    const auto player_was_climbing_ship =
+        !player_was_on_ship &&
+        !player.is_dead() &&
+        !player.state().fly_mode &&
+        player.is_climbing_dynamic_obstacle();
+
+    const auto player_intersected_ship_before_move =
+        player.overlaps_dynamic_obstacle(ship_);
+
+    const auto requested_speed =
+        kShipBaseSpeed *
+        std::clamp(
+            0.92F +
+                safe_environment.wind_strength * 0.24F -
+                safe_environment.storm_intensity * 0.16F,
+            0.72F,
+            1.28F);
+
+    const auto motion_seconds =
+        advance_voyage_phase(
+            state_,
+            dt,
+            player_was_on_ship,
+            result);
+
     const auto previous_ship_position = ship_.position();
+    const auto maximum_position_z =
+        static_cast<double>(maximum_ship_position_z());
+
+    // Les doubles prives conservent les fractions de mouvement a grande
+    // distance. Je les recale sur l'etat public si une ancienne execution les
+    // a contamines avec NaN ou l'infini.
+    precise_ship_position_z_ = std::clamp(
+        std::isfinite(precise_ship_position_z_)
+            ? precise_ship_position_z_
+            : static_cast<double>(previous_ship_position.z),
+        0.5,
+        maximum_position_z);
+
     const auto previous_precise_z = precise_ship_position_z_;
-    precise_ship_position_z_ = std::min(
-        static_cast<double>(maximum_ship_position_z()),
-        previous_precise_z + static_cast<double>(requested_speed) * static_cast<double>(motion_seconds));
+
+    const auto requested_position_z =
+        previous_precise_z +
+        static_cast<double>(requested_speed) *
+            static_cast<double>(motion_seconds);
+
+    precise_ship_position_z_ = std::clamp(
+        std::isfinite(requested_position_z)
+            ? requested_position_z
+            : previous_precise_z,
+        0.5,
+        maximum_position_z);
+
     auto next_ship_position = previous_ship_position;
-    next_ship_position.z = static_cast<float>(precise_ship_position_z_);
-    result.ship_delta = next_ship_position - previous_ship_position;
-    const auto precise_delta_z = precise_ship_position_z_ - previous_precise_z;
-    result.ship_speed = dt > 0.0F
-                            ? static_cast<float>(std::abs(precise_delta_z) / static_cast<double>(dt))
-                            : 0.0F;
-    ship_.set_velocity({0.0F, 0.0F, result.ship_speed});
+    next_ship_position.z =
+        static_cast<float>(precise_ship_position_z_);
+
+    result.ship_delta =
+        next_ship_position - previous_ship_position;
+
+    const auto precise_delta_z =
+        precise_ship_position_z_ - previous_precise_z;
+
+    result.ship_speed =
+        dt > 0.0F
+            ? static_cast<float>(
+                  std::abs(precise_delta_z) /
+                  static_cast<double>(dt))
+            : 0.0F;
+
+    ship_.set_velocity({
+        0.0F,
+        0.0F,
+        result.ship_speed,
+    });
+
     ship_.set_position(next_ship_position);
     state_.ship_position = ship_.position();
-    precise_route_distance_ = std::min(
-        static_cast<double>(kShipCoordinateLimit),
-        precise_route_distance_ + std::abs(precise_delta_z));
-    state_.route_distance = static_cast<float>(precise_route_distance_);
+
+    precise_route_distance_ = std::clamp(
+        std::isfinite(precise_route_distance_)
+            ? precise_route_distance_
+            : static_cast<double>(state_.route_distance),
+        0.0,
+        static_cast<double>(kShipCoordinateLimit));
+
+    const auto requested_route_distance =
+        precise_route_distance_ +
+        std::abs(precise_delta_z);
+
+    precise_route_distance_ = std::clamp(
+        std::isfinite(requested_route_distance)
+            ? requested_route_distance
+            : precise_route_distance_,
+        0.0,
+        static_cast<double>(kShipCoordinateLimit));
+
+    state_.route_distance =
+        static_cast<float>(precise_route_distance_);
 
     // Je distingue un deplacement reel d'une simple vitesse demandee : meme un
     // petit delta representable doit suivre le joueur, tandis qu'au bord du
     // monde un delta nul ne doit jamais annoncer un transport fictif.
-    const auto ship_translated = glm::dot(result.ship_delta, result.ship_delta) > 0.0F;
+    const auto ship_translated =
+        glm::dot(result.ship_delta, result.ship_delta) > 0.0F;
 
     if (player_was_on_ship) {
         player.translate_platform_delta(result.ship_delta);
         result.ship_moved_player = ship_translated;
+
         if (support_height_before_move.has_value()) {
-            player.resolve_dynamic_platform_support(*support_height_before_move + result.ship_delta.y);
+            player.resolve_dynamic_platform_support(
+                *support_height_before_move +
+                result.ship_delta.y);
         }
-    } else if (!player_intersected_ship_before_move && player.overlaps_dynamic_obstacle(ship_)) {
+    } else if (player_was_climbing_ship) {
+        // Je transporte le grimpeur avec le filet sans le declarer embarque :
+        // seuls les pieds poses sur un support de pont activent on_ship.
+        player.translate_platform_delta(result.ship_delta);
+        result.ship_moved_player = ship_translated;
+    } else if (
+        !player_intersected_ship_before_move &&
+        player.overlaps_dynamic_obstacle(ship_)) {
+
         // Je pousse le joueur avec la coque lorsqu'elle entre dans son volume,
         // sans pour autant le declarer embarque ou le coller au pont.
         player.translate_platform_delta(result.ship_delta);
         result.ship_moved_player = ship_translated;
     }
+
     state_.stamped_ship_x = ship_origin_x(state_);
     state_.stamped_ship_z = ship_origin_z(state_);
     state_.has_stamped_ship = false;
 
-    const auto player_now_on_ship = player_should_ride_ship(player);
+    const auto player_now_on_ship =
+        player_should_ride_ship(player);
+
     result.on_ship = player_now_on_ship;
-    result.ship_distance = player_ship_distance(player.position());
+    result.ship_distance =
+        player_ship_distance(player.position());
 
     const auto swimming = player.state().swimming;
-    const auto weather_pressure = 1.0F + environment.precipitation_intensity * 0.20F + environment.storm_intensity * 0.35F;
-    state_.hunger = std::max(0.0F, state_.hunger - dt * (player_now_on_ship ? 0.75F : 1.08F) * weather_pressure);
-    state_.thirst = std::max(0.0F, state_.thirst - dt * (player_now_on_ship ? 0.95F : 1.34F) * weather_pressure);
+
+    const auto weather_pressure =
+        1.0F +
+        safe_environment.precipitation_intensity * 0.20F +
+        safe_environment.storm_intensity * 0.35F;
+
+    state_.hunger = std::max(
+        0.0F,
+        state_.hunger -
+            dt *
+                (player_now_on_ship ? 0.75F : 1.08F) *
+                weather_pressure);
+
+    state_.thirst = std::max(
+        0.0F,
+        state_.thirst -
+            dt *
+                (player_now_on_ship ? 0.95F : 1.34F) *
+                weather_pressure);
+
     if (swimming) {
-        state_.stamina = std::max(0.0F, state_.stamina - dt * (7.0F + environment.storm_intensity * 9.0F));
+        state_.stamina = std::max(
+            0.0F,
+            state_.stamina -
+                dt *
+                    (7.0F +
+                     safe_environment.storm_intensity * 9.0F));
     } else {
-        state_.stamina = std::min(100.0F, state_.stamina + dt * (player_now_on_ship ? 8.5F : 5.2F));
+        state_.stamina = std::min(
+            100.0F,
+            state_.stamina +
+                dt *
+                    (player_now_on_ship ? 8.5F : 5.2F));
     }
+
     consume_automatic_supplies(result);
 
-    if (state_.hunger <= 0.0F || state_.thirst <= 0.0F || (swimming && state_.stamina <= 0.0F)) {
+    // Ces drapeaux decrivent l'etat de la frame, pas seulement la frame exacte
+    // ou un tick de degat est applique.
+    result.starving = state_.hunger <= 0.0F;
+    result.dehydrating = state_.thirst <= 0.0F;
+
+    const auto exhausted_at_sea =
+        swimming && state_.stamina <= 0.0F;
+
+    if (result.starving ||
+        result.dehydrating ||
+        exhausted_at_sea) {
+
         state_.survival_damage_timer += dt;
-        while (state_.survival_damage_timer >= kSurvivalDamageInterval && !player.is_dead()) {
-            const auto exhausted_at_sea = swimming && state_.stamina <= 0.0F;
-            const auto cause = exhausted_at_sea
-                                   ? PlayerDeathCause::Drowning
-                                   : (state_.thirst <= 0.0F ? PlayerDeathCause::Thirst : PlayerDeathCause::Starvation);
-            player.apply_external_damage(swimming && state_.stamina <= 0.0F ? 3.0F : 2.0F, cause);
-            state_.survival_damage_timer -= kSurvivalDamageInterval;
-            result.starving = state_.hunger <= 0.0F;
-            result.dehydrating = state_.thirst <= 0.0F;
+
+        while (
+            state_.survival_damage_timer >=
+                kSurvivalDamageInterval &&
+            !player.is_dead()) {
+
+            const auto cause =
+                exhausted_at_sea
+                    ? PlayerDeathCause::Drowning
+                    : (result.dehydrating
+                           ? PlayerDeathCause::Thirst
+                           : PlayerDeathCause::Starvation);
+
+            player.apply_environmental_damage(
+                exhausted_at_sea ? 3.0F : 2.0F,
+                cause);
+
+            state_.survival_damage_timer -=
+                kSurvivalDamageInterval;
         }
     } else {
         state_.survival_damage_timer = 0.0F;
     }
 
-    if (state_.fishing_active && !player_now_on_ship) {
+    if (state_.fishing_active &&
+        !player_now_on_ship) {
+
         // Je coupe la partie de peche des que je quitte le pont : sa progression
         // ne doit jamais continuer a distance pendant que le navire s'eloigne.
         cancel_fishing();
         result.fishing_failed = true;
     }
 
-    if (request_fishing && player_now_on_ship && !state_.fishing_active) {
+    if (request_fishing &&
+        player_now_on_ship &&
+        !state_.fishing_active &&
+        !player.is_dead()) {
+
         state_.fishing_active = true;
         state_.fishing_progress = 0.0F;
-        const auto night_factor = (environment.time_of_day >= 19.0F || environment.time_of_day < 5.0F) ? kFishingNightBonus : 0.0F;
-        const auto route_roll = static_cast<float>(hash_u32(route_seed_ ^ route_roll_key(state_.route_distance)) % 120U) / 120.0F;
+
+        const auto night_factor =
+            (safe_environment.time_of_day >= 19.0F ||
+             safe_environment.time_of_day < 5.0F)
+                ? kFishingNightBonus
+                : 0.0F;
+
+        const auto route_roll =
+            static_cast<float>(
+                hash_u32(
+                    route_seed_ ^
+                    route_roll_key(state_.route_distance)) %
+                120U) /
+            120.0F;
+
         state_.fishing_target_seconds =
-            kFishingBaseSeconds + environment.storm_intensity * kFishingStormPenalty - night_factor + route_roll * 2.0F;
+            kFishingBaseSeconds +
+            safe_environment.storm_intensity *
+                kFishingStormPenalty -
+            night_factor +
+            route_roll * 2.0F;
+
         result.fishing_started = true;
-    } else if (request_fishing && !player_now_on_ship) {
+    } else if (
+        request_fishing &&
+        (!player_now_on_ship || player.is_dead())) {
+
         result.fishing_failed = true;
     }
 
-    if (state_.fishing_active) {
-        state_.fishing_progress += dt * std::clamp(1.0F - environment.storm_intensity * 0.22F, 0.42F, 1.0F);
-        if (state_.fishing_progress >= state_.fishing_target_seconds) {
+    if (state_.fishing_active &&
+        !player.is_dead()) {
+
+        state_.fishing_progress +=
+            dt *
+            std::clamp(
+                1.0F -
+                    safe_environment.storm_intensity *
+                        0.22F,
+                0.42F,
+                1.0F);
+
+        if (state_.fishing_progress >=
+            state_.fishing_target_seconds) {
+
             state_.fishing_active = false;
             state_.fishing_progress = 0.0F;
             state_.fishing_target_seconds = 0.0F;
+
             saturating_add(state_.fish, 1U);
-            state_.hunger = std::min(100.0F, state_.hunger + 18.0F);
+
+            state_.hunger = std::min(
+                100.0F,
+                state_.hunger + 18.0F);
+
             result.fish_caught = true;
         }
     }
 
-    if (result.ship_distance >= kStrandedLossDistance) {
-        result.stranded = true;
-        player.apply_external_damage(200.0F, PlayerDeathCause::Stranded);
-    } else if (result.ship_distance >= kStrandedWarningDistance) {
+    if (result.ship_distance >=
+        kStrandedLossDistance) {
+
+        state_.stranded_warning_timer = 0.0F;
+
+        if (!player.is_dead()) {
+            // "Perdu en mer" est une condition de defaite, pas une attaque :
+            // aucune armure ni invulnerabilite ne doit pouvoir l'annuler.
+            player.force_death(
+                PlayerDeathCause::Stranded);
+
+            result.stranded = true;
+        }
+    } else if (
+        result.ship_distance >=
+        kStrandedWarningDistance) {
+
         state_.stranded_warning_timer += dt;
-        if (state_.stranded_warning_timer >= kStrandedWarningInterval) {
+
+        if (state_.stranded_warning_timer >=
+            kStrandedWarningInterval) {
+
             state_.stranded_warning_timer = 0.0F;
             result.stranded_warning = true;
         }
@@ -2245,28 +2613,47 @@ auto SeaAdventureSystem::update(World& world,
         state_.stranded_warning_timer = 0.0F;
     }
 
-    const auto crew_result = crew_.update(ship_, environment, dt, state_.fish, state_.water_flasks);
-    result.crew_fish_delivered = crew_result.fish_delivered;
-    result.crew_water_delivered = crew_result.water_delivered;
+    const auto crew_result =
+        crew_.update(
+            ship_,
+            safe_environment,
+            dt,
+            state_.fish,
+            state_.water_flasks);
+
+    result.crew_fish_delivered =
+        crew_result.fish_delivered;
+
+    result.crew_water_delivered =
+        crew_result.water_delivered;
+
     state_.crew = crew_.save_state();
 
     return result;
 }
+auto SeaAdventureSystem::collect_resource(
+    BlockId block_id) noexcept -> bool {
 
-auto SeaAdventureSystem::collect_resource(BlockId block_id) noexcept -> bool {
+    if (!state_.active) {
+        return false;
+    }
+
     block_id = block_item_id(block_id);
+
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Wood:
     case BlockType::PineWood:
     case BlockType::Planks:
         saturating_add(state_.wood, 1U);
         return true;
+
     case BlockType::Stone:
     case BlockType::Cobblestone:
     case BlockType::MossyStone:
     case BlockType::Gravel:
         saturating_add(state_.stone, 1U);
         return true;
+
     case BlockType::Leaves:
     case BlockType::PineLeaves:
     case BlockType::TallGrass:
@@ -2274,25 +2661,47 @@ auto SeaAdventureSystem::collect_resource(BlockId block_id) noexcept -> bool {
     case BlockType::YellowFlower:
     case BlockType::Cactus:
         saturating_add(state_.fiber, 1U);
-        state_.hunger = std::min(100.0F, state_.hunger + 4.0F);
+        state_.hunger = std::min(
+            100.0F,
+            state_.hunger + 4.0F);
         return true;
+
     case BlockType::Water:
         saturating_add(state_.water_flasks, 1U);
-        state_.thirst = std::min(100.0F, state_.thirst + 10.0F);
+        state_.thirst = std::min(
+            100.0F,
+            state_.thirst + 10.0F);
         return true;
+
     default:
         return false;
     }
 }
 
-auto SeaAdventureSystem::record_hunt(CreatureSpecies species) noexcept -> bool {
+auto SeaAdventureSystem::record_hunt(
+    CreatureSpecies species) noexcept -> bool {
+
+    if (!state_.active) {
+        return false;
+    }
+
     switch (species) {
     case CreatureSpecies::Pig:
     case CreatureSpecies::Cow:
     case CreatureSpecies::Sheep:
-        saturating_add(state_.food_rations, species == CreatureSpecies::Cow ? 3U : 2U);
-        state_.hunger = std::min(100.0F, state_.hunger + (species == CreatureSpecies::Cow ? 22.0F : 16.0F));
+        saturating_add(
+            state_.food_rations,
+            species == CreatureSpecies::Cow ? 3U : 2U);
+
+        state_.hunger = std::min(
+            100.0F,
+            state_.hunger +
+                (species == CreatureSpecies::Cow
+                     ? 22.0F
+                     : 16.0F));
+
         return true;
+
     case CreatureSpecies::Villager:
     default:
         return false;
@@ -2317,6 +2726,35 @@ void SeaAdventureSystem::cancel_fishing() noexcept {
     state_.fishing_active = false;
     state_.fishing_progress = 0.0F;
     state_.fishing_target_seconds = 0.0F;
+}
+
+void SeaAdventureSystem::on_player_respawn() noexcept {
+    if (!state_.active) {
+        return;
+    }
+
+    // Le voyage, l'equipage et les stocks restent inchanges. Seuls les etats
+    // transitoires pouvant tuer a nouveau le joueur sont remis en securite.
+    cancel_fishing();
+
+    state_.survival_damage_timer = 0.0F;
+    state_.stranded_warning_timer = 0.0F;
+
+    state_.hunger = std::clamp(
+        finite_or(
+            state_.hunger,
+            kRespawnMinimumHunger),
+        kRespawnMinimumHunger,
+        100.0F);
+
+    state_.thirst = std::clamp(
+        finite_or(
+            state_.thirst,
+            kRespawnMinimumThirst),
+        kRespawnMinimumThirst,
+        100.0F);
+
+    state_.stamina = kRespawnStamina;
 }
 
 auto SeaAdventureSystem::player_should_ride_ship(const PlayerController& player) const noexcept -> bool {

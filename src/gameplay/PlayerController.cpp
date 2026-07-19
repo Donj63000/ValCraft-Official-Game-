@@ -35,6 +35,14 @@ constexpr float kSwimVerticalDamping = 6.0F;
 constexpr float kSwimSinkSpeed = 3.8F;
 constexpr float kSwimRiseSpeed = 4.6F;
 constexpr float kSwimSurfaceJumpVelocity = 5.2F;
+constexpr float kDynamicClimbSpeed = 3.2F;
+constexpr float kDynamicClimbContactPadding = 0.08F;
+constexpr float kDynamicClimbRetentionPadding = 0.14F;
+constexpr float kDynamicClimbAlignmentEpsilon = 0.01F;
+constexpr float kDynamicClimbInputThreshold = 1.0e-3F;
+constexpr float kDynamicClimbOutwardDetachThreshold = 0.20F;
+constexpr float kDynamicClimbExitTolerance = 0.02F;
+constexpr float kDynamicClimbDeckSupportTolerance = 0.15F;
 constexpr float kWaterFeetSampleHeight = 0.08F;
 constexpr float kWaterBodySampleHeight = 1.05F;
 constexpr float kMouseSensitivity = 0.08F;
@@ -175,9 +183,15 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     const auto look_delta_x = finite_or(input.look_delta_x, 0.0F);
     const auto look_delta_y = finite_or(input.look_delta_y, 0.0F);
 
+    if (dynamic_obstacle == nullptr ||
+        (climbed_dynamic_obstacle_ != nullptr && climbed_dynamic_obstacle_ != dynamic_obstacle)) {
+        reset_dynamic_climb_state();
+    }
+
     if (state_.dead) {
         state_.velocity = {};
         reset_jump_assist_state();
+        reset_dynamic_climb_state();
         state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
         state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
         state_.look_sway_yaw = damp_towards(state_.look_sway_yaw, 0.0F, kLookSwayReturnSharpness, clamped_dt);
@@ -194,7 +208,15 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     state_.damage_cooldown = std::max(0.0F, state_.damage_cooldown - clamped_dt);
     state_.regen_delay = std::max(0.0F, state_.regen_delay - clamped_dt);
     state_.landing_impact = std::max(0.0F, state_.landing_impact - clamped_dt / kLandingAnimationDuration);
-    jump_buffer_timer_ = input.jump ? kJumpBufferSeconds : std::max(0.0F, jump_buffer_timer_ - clamped_dt);
+    if (std::abs(move_up) <= kDynamicClimbInputThreshold) {
+        dynamic_climb_regrab_locked_ = false;
+    }
+    if (!input.jump) {
+        dynamic_climb_jump_locked_ = false;
+    }
+    jump_buffer_timer_ = input.jump && !dynamic_climb_jump_locked_
+                             ? kJumpBufferSeconds
+                             : std::max(0.0F, jump_buffer_timer_ - clamped_dt);
     ground_coyote_timer_ = std::max(0.0F, ground_coyote_timer_ - clamped_dt);
 
     const auto advance_action_progress = [clamped_dt](float& progress, bool& active, float duration) {
@@ -216,9 +238,14 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     if (input.toggle_fly) {
         state_.fly_mode = !state_.fly_mode;
         reset_jump_assist_state();
+        reset_dynamic_climb_state();
         if (state_.fly_mode) {
             state_.velocity = {};
         }
+    }
+
+    if (state_.fly_mode) {
+        reset_dynamic_climb_state();
     }
 
     state_.yaw_degrees = wrap_degrees(finite_or(state_.yaw_degrees, -90.0F) + look_delta_x * kMouseSensitivity);
@@ -242,6 +269,98 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     auto wish = forward * move_forward + right * move_right;
     if (glm::dot(wish, wish) > 1.0e-5F) {
         wish = glm::normalize(wish);
+    }
+
+    const auto climb_contact_at = [dynamic_obstacle](const glm::vec3& feet_position, float padding)
+        -> std::optional<ShipClimbContact> {
+        if (dynamic_obstacle == nullptr) {
+            return std::nullopt;
+        }
+
+        constexpr float half_width = kPlayerWidth * 0.5F;
+        const auto horizontal_extent = half_width + padding;
+        return dynamic_obstacle->climb_contact(
+            {
+                feet_position.x - horizontal_extent,
+                feet_position.y - padding,
+                feet_position.z - horizontal_extent,
+            },
+            {
+                feet_position.x + horizontal_extent,
+                feet_position.y + kPlayerHeight + padding,
+                feet_position.z + horizontal_extent,
+            });
+    };
+
+    const auto climb_normal = [](const ShipClimbContact& contact) noexcept {
+        auto normal = glm::vec3 {contact.outward_normal.x, 0.0F, contact.outward_normal.z};
+        const auto length = glm::length(normal);
+        return length > 1.0e-5F ? normal / length : glm::vec3 {0.0F};
+    };
+
+    const auto align_outside_climb_contact = [&climb_normal](
+                                                  glm::vec3& feet_position,
+                                                  const ShipClimbContact& contact) noexcept {
+        constexpr float half_width = kPlayerWidth * 0.5F;
+        const auto normal = climb_normal(contact);
+        if (glm::dot(normal, normal) <= 1.0e-5F) {
+            return false;
+        }
+
+        // Je garde le volume du joueur juste a l'exterieur du filet : la coque
+        // reste ainsi bloquante et aucun ajustement ne teleporte a travers elle.
+        if (std::abs(normal.x) >= std::abs(normal.z)) {
+            feet_position.x = normal.x > 0.0F
+                                  ? contact.bounds.max.x + half_width + kDynamicClimbAlignmentEpsilon
+                                  : contact.bounds.min.x - half_width - kDynamicClimbAlignmentEpsilon;
+        } else {
+            feet_position.z = normal.z > 0.0F
+                                  ? contact.bounds.max.z + half_width + kDynamicClimbAlignmentEpsilon
+                                  : contact.bounds.min.z - half_width - kDynamicClimbAlignmentEpsilon;
+        }
+        return true;
+    };
+
+    auto active_climb_contact = std::optional<ShipClimbContact> {};
+    if (climbed_dynamic_obstacle_ != nullptr) {
+        active_climb_contact = climb_contact_at(state_.position, kDynamicClimbRetentionPadding);
+        if (!active_climb_contact.has_value()) {
+            climbed_dynamic_obstacle_ = nullptr;
+            dynamic_climb_regrab_locked_ = true;
+        }
+    }
+
+    if (climbed_dynamic_obstacle_ == nullptr &&
+        !state_.fly_mode &&
+        !dynamic_climb_regrab_locked_ &&
+        std::abs(move_up) > kDynamicClimbInputThreshold) {
+        active_climb_contact = climb_contact_at(state_.position, kDynamicClimbContactPadding);
+        if (active_climb_contact.has_value() &&
+            align_outside_climb_contact(state_.position, *active_climb_contact)) {
+            // Je n'entre dans l'etat d'escalade qu'avec une intention verticale
+            // explicite. Une collision passive avec le greement ne colle jamais.
+            climbed_dynamic_obstacle_ = dynamic_obstacle;
+            state_.velocity = {};
+            state_.on_ground = false;
+            state_.fall_start_y = state_.position.y;
+            state_.airborne_time = 0.0F;
+            state_.landing_impact = 0.0F;
+            reset_jump_assist_state();
+        } else {
+            active_climb_contact.reset();
+        }
+    }
+
+    if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value()) {
+        reset_jump_assist_state();
+        const auto normal = climb_normal(*active_climb_contact);
+        if (glm::dot(wish, normal) > kDynamicClimbOutwardDetachThreshold) {
+            // Je laisse un mouvement volontaire vers la mer detacher le joueur
+            // au lieu de le retenir artificiellement au filet.
+            climbed_dynamic_obstacle_ = nullptr;
+            dynamic_climb_regrab_locked_ = true;
+            active_climb_contact.reset();
+        }
     }
 
     const auto standing_on_dynamic_obstacle = [dynamic_obstacle](const glm::vec3& feet_position) noexcept {
@@ -268,7 +387,22 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     };
     const auto sprinting = input.sprint && move_forward > 0.0F && glm::dot(wish, wish) > 1.0e-5F;
 
-    if (state_.fly_mode) {
+    if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value()) {
+        const auto normal = climb_normal(*active_climb_contact);
+        auto tangential_wish = wish - normal * glm::dot(wish, normal);
+        if (glm::dot(tangential_wish, tangential_wish) > 1.0F) {
+            tangential_wish = glm::normalize(tangential_wish);
+        }
+
+        const auto climb_speed = kDynamicClimbSpeed * movement_speed_multiplier_;
+        state_.velocity = tangential_wish * climb_speed;
+        state_.velocity.y = move_up * climb_speed;
+        state_.on_ground = false;
+        state_.fall_start_y = state_.position.y;
+        state_.airborne_time = 0.0F;
+        state_.landing_impact = 0.0F;
+        reset_jump_assist_state();
+    } else if (state_.fly_mode) {
         reset_jump_assist_state();
         auto fly_velocity = wish + glm::vec3 {0.0F, move_up, 0.0F};
         if (glm::dot(fly_velocity, fly_velocity) > 1.0e-5F) {
@@ -327,9 +461,97 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     };
 
     const auto start_position = state_.position;
-    move_axis_safely(state_.velocity.x * clamped_dt, 0);
-    move_axis_safely(state_.velocity.y * clamped_dt, 1);
-    move_axis_safely(state_.velocity.z * clamped_dt, 2);
+    auto exited_dynamic_climb_at_top = false;
+    auto exited_dynamic_climb_at_bottom = false;
+
+    if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value() &&
+        state_.velocity.y > 0.0F &&
+        state_.position.y + state_.velocity.y * clamped_dt >=
+            active_climb_contact->deck_exit.y - kDynamicClimbExitTolerance) {
+        constexpr float half_width = kPlayerWidth * 0.5F;
+        const auto deck_exit = finite_vec3_or(active_climb_contact->deck_exit, state_.position);
+        const auto deck_exit_min = glm::vec3 {
+            deck_exit.x - half_width,
+            deck_exit.y,
+            deck_exit.z - half_width,
+        };
+        const auto deck_exit_max = glm::vec3 {
+            deck_exit.x + half_width,
+            deck_exit.y + kPlayerHeight,
+            deck_exit.z + half_width,
+        };
+        const auto deck_support = dynamic_obstacle->support_height(deck_exit);
+        const auto has_safe_deck_support =
+            deck_support.has_value() &&
+            std::abs(deck_exit.y - *deck_support) <= kDynamicClimbDeckSupportTolerance;
+        const auto deck_exit_blocked =
+            collides_at(world, deck_exit) ||
+            dynamic_obstacle->intersects_aabb(deck_exit_min, deck_exit_max);
+
+        if (has_safe_deck_support && !deck_exit_blocked) {
+            // Je termine la montee uniquement apres avoir revalide le point
+            // interieur : une future evolution du pont ne doit jamais faire
+            // traverser une cloison ou deposer le joueur sans support.
+            state_.position = deck_exit;
+            state_.velocity = {};
+            state_.on_ground = false;
+            state_.fall_start_y = state_.position.y;
+            state_.airborne_time = 0.0F;
+            state_.landing_impact = 0.0F;
+            climbed_dynamic_obstacle_ = nullptr;
+            dynamic_climb_regrab_locked_ = true;
+            dynamic_climb_jump_locked_ = input.jump;
+            reset_jump_assist_state();
+            exited_dynamic_climb_at_top = true;
+        } else {
+            // Si la sortie est obstruee, je reste au dernier barreau sans
+            // accumuler de vitesse verticale ni de distance de chute.
+            state_.position.y = std::min(
+                state_.position.y,
+                active_climb_contact->deck_exit.y - kDynamicClimbExitTolerance);
+            state_.velocity = {};
+            state_.fall_start_y = state_.position.y;
+            state_.airborne_time = 0.0F;
+            reset_jump_assist_state();
+        }
+    } else {
+        move_axis_safely(state_.velocity.x * clamped_dt, 0);
+        move_axis_safely(state_.velocity.y * clamped_dt, 1);
+        move_axis_safely(state_.velocity.z * clamped_dt, 2);
+
+        if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value()) {
+            if (state_.velocity.y < 0.0F &&
+                state_.position.y <= active_climb_contact->bounds.min.y + kDynamicClimbExitTolerance) {
+                // Au dernier barreau je rends la main a la nage ou a la chute;
+                // le verrou evite une re-accroche chaque frame si Ctrl reste tenu.
+                state_.position.y = std::min(
+                    state_.position.y,
+                    active_climb_contact->bounds.min.y - kCollisionEpsilon);
+                state_.velocity.y = 0.0F;
+                state_.fall_start_y = state_.position.y;
+                climbed_dynamic_obstacle_ = nullptr;
+                dynamic_climb_regrab_locked_ = true;
+                reset_jump_assist_state();
+                exited_dynamic_climb_at_bottom = true;
+            } else {
+                auto contact_after_move = climb_contact_at(
+                    state_.position,
+                    kDynamicClimbRetentionPadding);
+                if (!contact_after_move.has_value() ||
+                    !align_outside_climb_contact(state_.position, *contact_after_move)) {
+                    // Je ne borne pas artificiellement le deplacement le long du
+                    // filet : depasser un bord constitue une vraie sortie laterale.
+                    climbed_dynamic_obstacle_ = nullptr;
+                    dynamic_climb_regrab_locked_ = true;
+                    reset_jump_assist_state();
+                } else {
+                    active_climb_contact = contact_after_move;
+                    state_.fall_start_y = state_.position.y;
+                    state_.airborne_time = 0.0F;
+                }
+            }
+        }
+    }
     const auto horizontal_displacement = glm::vec2 {
         state_.position.x - start_position.x,
         state_.position.z - start_position.z,
@@ -344,7 +566,7 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         if (state_.on_ground) {
             ground_coyote_timer_ = kJumpCoyoteSeconds;
         }
-        if (state_.on_ground && !was_on_ground) {
+        if (state_.on_ground && !was_on_ground && !exited_dynamic_climb_at_top) {
             landed_in_water =
                 water_contact_after_move.feet_in_water || water_contact_after_move.body_in_water || water_contact_after_move.head_in_water;
             const auto fall_distance = state_.fall_start_y - state_.position.y;
@@ -353,16 +575,20 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
                 apply_damage(std::ceil(fall_distance - safe_fall_distance), PlayerDeathCause::Fall, true);
             }
             state_.landing_impact = landed_in_water ? 0.0F : 1.0F;
+        } else if (exited_dynamic_climb_at_top) {
+            state_.landing_impact = 0.0F;
         }
         if (state_.on_ground && state_.velocity.y < 0.0F) {
             state_.velocity.y = 0.0F;
         }
-        if (state_.on_ground || water_contact_after_move.swimming) {
+        if (state_.on_ground || water_contact_after_move.swimming ||
+            climbed_dynamic_obstacle_ != nullptr || exited_dynamic_climb_at_bottom) {
             state_.fall_start_y = state_.position.y;
         } else {
             state_.fall_start_y = std::max(state_.fall_start_y, state_.position.y);
         }
-        if (state_.on_ground && has_buffered_jump() && !water_contact_after_move.swimming) {
+        if (state_.on_ground && has_buffered_jump() && !water_contact_after_move.swimming &&
+            !dynamic_climb_jump_locked_) {
             state_.velocity.y = water_contact_after_move.feet_in_water ? kWadeJumpVelocity : kJumpVelocity;
             state_.on_ground = false;
             state_.fall_start_y = state_.position.y;
@@ -383,7 +609,8 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.step_phase += kTwoPi;
     }
 
-    if (!state_.fly_mode && !state_.on_ground && !water_contact_after_move.swimming) {
+    if (!state_.fly_mode && !state_.on_ground && !water_contact_after_move.swimming &&
+        climbed_dynamic_obstacle_ == nullptr) {
         state_.airborne_time += clamped_dt;
     } else {
         state_.airborne_time = 0.0F;
@@ -457,11 +684,16 @@ auto PlayerController::is_dead() const noexcept -> bool {
     return state_.dead;
 }
 
+auto PlayerController::is_climbing_dynamic_obstacle() const noexcept -> bool {
+    return climbed_dynamic_obstacle_ != nullptr && !state_.dead && !state_.fly_mode;
+}
+
 void PlayerController::load_state(const PlayerState& state) noexcept {
     const PlayerState defaults {};
     state_ = state;
     block_break_progress_ = {};
     reset_jump_assist_state();
+    reset_dynamic_climb_state();
     state_.position = finite_vec3_or(state_.position, defaults.position);
     state_.velocity = finite_vec3_or(state_.velocity, {});
     state_.yaw_degrees = wrap_degrees(finite_or(state_.yaw_degrees, defaults.yaw_degrees));
@@ -496,6 +728,7 @@ void PlayerController::set_position(const glm::vec3& position) noexcept {
     state_.fall_start_y = state_.position.y;
     block_break_progress_ = {};
     reset_jump_assist_state();
+    reset_dynamic_climb_state();
 }
 
 void PlayerController::translate_platform_delta(const glm::vec3& delta) noexcept {
@@ -534,6 +767,9 @@ void PlayerController::set_velocity(const glm::vec3& velocity) noexcept {
 }
 
 void PlayerController::set_fly_mode_enabled(bool enabled) noexcept {
+    if (enabled) {
+        reset_dynamic_climb_state();
+    }
     if (state_.fly_mode == enabled) {
         return;
     }
@@ -542,6 +778,7 @@ void PlayerController::set_fly_mode_enabled(bool enabled) noexcept {
     state_.velocity = {};
     state_.fall_start_y = state_.position.y;
     reset_jump_assist_state();
+    reset_dynamic_climb_state();
 }
 
 void PlayerController::set_selected_block(BlockId block_id) noexcept {
@@ -590,6 +827,7 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
     state_ = {};
     block_break_progress_ = {};
     reset_jump_assist_state();
+    reset_dynamic_climb_state();
     state_.position = finite_vec3_or(position, state_.position);
     state_.fall_start_y = state_.position.y;
     state_.body_yaw_degrees = state_.yaw_degrees;
@@ -597,6 +835,26 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
 
 void PlayerController::apply_external_damage(float amount, PlayerDeathCause cause) noexcept {
     apply_damage(amount, cause, false);
+}
+
+void PlayerController::apply_environmental_damage(float amount, PlayerDeathCause cause) noexcept {
+    // La resistance d'armure reste appliquee ; seule l'invulnerabilite commune
+    // aux impacts est contournee, comme pour la chute, la noyade et le vide.
+    apply_damage(amount, cause, true);
+}
+
+void PlayerController::force_death(PlayerDeathCause cause) noexcept {
+    if (state_.dead) {
+        return;
+    }
+
+    // Un echec de scenario n'est pas un coup classique : il doit rester fatal
+    // meme pendant l'invulnerabilite temporaire ou avec 99 % de resistance.
+    state_.hurt_timer = kHurtFlashDuration;
+    state_.damage_cooldown = kInvulnerabilityDuration;
+    state_.regen_delay = kRegenerationDelay;
+    state_.regen_tick_timer = 0.0F;
+    enter_death_state(cause);
 }
 
 auto PlayerController::current_target(const World& world, float max_distance) const -> RaycastHit {
@@ -1050,15 +1308,22 @@ auto PlayerController::block_overlaps_player(const BlockCoord& block_coord) cons
            player_min.z < block_max.z && player_max.z > block_min.z;
 }
 
-void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown) noexcept {
+void PlayerController::apply_damage(
+    float amount,
+    PlayerDeathCause cause,
+    bool bypass_cooldown) noexcept {
+
     if (!std::isfinite(amount) || amount <= 0.0F || state_.dead) {
         return;
     }
+
     if (!bypass_cooldown && state_.damage_cooldown > 0.0F) {
         return;
     }
 
-    const auto mitigated_amount = amount * (1.0F - damage_resistance_percent_ / 100.0F);
+    const auto mitigated_amount =
+        amount * (1.0F - damage_resistance_percent_ / 100.0F);
+
     if (mitigated_amount <= 0.0F) {
         return;
     }
@@ -1068,20 +1333,29 @@ void PlayerController::apply_damage(float amount, PlayerDeathCause cause, bool b
     state_.damage_cooldown = kInvulnerabilityDuration;
     state_.regen_delay = kRegenerationDelay;
     state_.regen_tick_timer = 0.0F;
+
     if (state_.health <= 0.0F) {
-        state_.dead = true;
-        state_.death_cause = cause;
-        state_.velocity = {};
-        block_break_progress_ = {};
-        state_.head_underwater = false;
-        state_.swimming = false;
-        state_.primary_action_active = false;
-        state_.secondary_action_active = false;
-        state_.primary_action_progress = 0.0F;
-        state_.secondary_action_progress = 0.0F;
-        state_.landing_impact = 0.0F;
-        reset_jump_assist_state();
+        enter_death_state(cause);
     }
+}
+
+void PlayerController::enter_death_state(PlayerDeathCause cause) noexcept {
+    // Je centralise tous les invariants de mort afin que les degats ordinaires
+    // et les echecs de scenario ne divergent jamais au fil des evolutions.
+    state_.health = 0.0F;
+    state_.dead = true;
+    state_.death_cause = cause;
+    state_.velocity = {};
+    block_break_progress_ = {};
+    state_.head_underwater = false;
+    state_.swimming = false;
+    state_.primary_action_active = false;
+    state_.secondary_action_active = false;
+    state_.primary_action_progress = 0.0F;
+    state_.secondary_action_progress = 0.0F;
+    state_.landing_impact = 0.0F;
+    reset_jump_assist_state();
+    reset_dynamic_climb_state();
 }
 
 void PlayerController::heal(float amount) noexcept {
@@ -1094,6 +1368,12 @@ void PlayerController::heal(float amount) noexcept {
 void PlayerController::reset_jump_assist_state() noexcept {
     ground_coyote_timer_ = 0.0F;
     jump_buffer_timer_ = 0.0F;
+}
+
+void PlayerController::reset_dynamic_climb_state() noexcept {
+    climbed_dynamic_obstacle_ = nullptr;
+    dynamic_climb_regrab_locked_ = false;
+    dynamic_climb_jump_locked_ = false;
 }
 
 auto PlayerController::is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool {

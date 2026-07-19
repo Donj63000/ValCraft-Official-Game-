@@ -22,6 +22,10 @@ namespace valcraft {
 namespace ship_mesh_detail {
 
 constexpr float kGeometryEpsilon = 1.0e-4F;
+constexpr float kClimbableNetSpacing = 0.50F;
+constexpr float kClimbableNetMinimumDiameter = 0.025F;
+constexpr float kClimbableNetBorderScale = 1.65F;
+constexpr int kClimbableNetMaximumSections = 128;
 
 struct LocalBounds {
     glm::vec3 min {0.0F};
@@ -110,8 +114,25 @@ struct MaterialVisual {
            bounds.max.z - bounds.min.z > kGeometryEpsilon;
 }
 
+[[nodiscard]] inline auto climbable_net_diameter(const ShipPart& part) noexcept -> float {
+    if (!std::isfinite(part.thickness)) {
+        return kClimbableNetMinimumDiameter;
+    }
+    return std::clamp(std::abs(part.thickness), kClimbableNetMinimumDiameter, 0.12F);
+}
+
 [[nodiscard]] inline auto render_bounds(const ShipPart& part) noexcept -> LocalBounds {
     auto bounds = LocalBounds {glm::min(part.local_start, part.local_end), glm::max(part.local_start, part.local_end)};
+    if (part.shape == ShipPartShape::ClimbableNet) {
+        // J'inclus la bordure renforcee dans les limites de rendu afin que le
+        // maillage ne depasse jamais silencieusement l'enveloppe annoncee.
+        const auto padding = std::max(
+            climbable_net_diameter(part) * kClimbableNetBorderScale * 0.5F,
+            0.01F);
+        bounds.min -= glm::vec3 {padding};
+        bounds.max += glm::vec3 {padding};
+        return bounds;
+    }
     if (part.shape != ShipPartShape::Panel) {
         return bounds;
     }
@@ -526,6 +547,91 @@ inline void append_segment(ChunkMeshData& mesh,
     append_tiled_quad(mesh, {{corners[1], corners[5], corners[6], corners[2]}}, side, material, lighting, source_index);
 }
 
+[[nodiscard]] inline auto climbable_net_normal_axis(const ShipPart& part) noexcept -> int {
+    const auto absolute_normal = glm::abs(part.orientation);
+    if (absolute_normal.x > kGeometryEpsilon || absolute_normal.z > kGeometryEpsilon) {
+        return absolute_normal.x >= absolute_normal.z ? 0 : 2;
+    }
+
+    // Je deduis aussi le plan depuis son axe aplati pour garder un rendu sain
+    // si une donnee ancienne ne fournit pas encore de normale explicite.
+    const auto extent = glm::abs(part.local_end - part.local_start);
+    return extent.x <= extent.z ? 0 : 2;
+}
+
+[[nodiscard]] inline auto climbable_net_section_count(float span) noexcept -> int {
+    if (!std::isfinite(span) || span <= kGeometryEpsilon) {
+        return 0;
+    }
+    const auto requested = std::ceil(span / kClimbableNetSpacing);
+    return std::max(1, static_cast<int>(std::min(requested, static_cast<float>(kClimbableNetMaximumSections))));
+}
+
+inline void append_climbable_net(ChunkMeshData& mesh,
+                                 const ShipPart& part,
+                                 const LightingContext& lighting,
+                                 std::size_t source_index) {
+    const auto bounds = LocalBounds {
+        glm::min(part.local_start, part.local_end),
+        glm::max(part.local_start, part.local_end),
+    };
+    const auto normal_axis = climbable_net_normal_axis(part);
+    const auto tangent_axis = normal_axis == 0 ? 2 : 0;
+    const auto vertical_span = bounds.max.y - bounds.min.y;
+    const auto tangent_span = bounds.max[tangent_axis] - bounds.min[tangent_axis];
+    const auto vertical_sections = climbable_net_section_count(vertical_span);
+    const auto tangent_sections = climbable_net_section_count(tangent_span);
+    if (vertical_sections == 0 || tangent_sections == 0 ||
+        !std::isfinite(bounds.min[normal_axis]) || !std::isfinite(bounds.max[normal_axis])) {
+        return;
+    }
+
+    const auto plane = (bounds.min[normal_axis] + bounds.max[normal_axis]) * 0.5F;
+    if (!std::isfinite(plane)) {
+        return;
+    }
+    const auto diameter = climbable_net_diameter(part);
+    const auto point = [&](float tangent, float vertical) {
+        auto result = glm::vec3 {0.0F};
+        result[normal_axis] = plane;
+        result[tangent_axis] = tangent;
+        result.y = vertical;
+        return result;
+    };
+    const auto line_diameter = [&](int section, int section_count) {
+        return section == 0 || section == section_count
+                   ? diameter * kClimbableNetBorderScale
+                   : diameter;
+    };
+
+    // Je dessine des cordes distinctes : les espaces entre elles restent donc
+    // vraiment ouverts et ne peuvent ni masquer le ciel ni simuler un panneau.
+    for (int section = 0; section <= tangent_sections; ++section) {
+        const auto ratio = static_cast<float>(section) / static_cast<float>(tangent_sections);
+        const auto tangent = std::lerp(bounds.min[tangent_axis], bounds.max[tangent_axis], ratio);
+        append_segment(
+            mesh,
+            point(tangent, bounds.min.y),
+            point(tangent, bounds.max.y),
+            line_diameter(section, tangent_sections),
+            ShipMaterial::Rope,
+            lighting,
+            source_index);
+    }
+    for (int section = 0; section <= vertical_sections; ++section) {
+        const auto ratio = static_cast<float>(section) / static_cast<float>(vertical_sections);
+        const auto vertical = std::lerp(bounds.min.y, bounds.max.y, ratio);
+        append_segment(
+            mesh,
+            point(bounds.min[tangent_axis], vertical),
+            point(bounds.max[tangent_axis], vertical),
+            line_diameter(section, vertical_sections),
+            ShipMaterial::Rope,
+            lighting,
+            source_index);
+    }
+}
+
 [[nodiscard]] inline auto glyph_rows(char32_t glyph) noexcept -> std::array<std::uint8_t, 7> {
     switch (glyph) {
     case U'L': return {{0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}};
@@ -651,6 +757,9 @@ inline void append_wheel(ChunkMeshData& mesh,
                 part.material,
                 lighting,
                 index);
+            break;
+        case ShipPartShape::ClimbableNet:
+            ship_mesh_detail::append_climbable_net(mesh, part, lighting, index);
             break;
         case ShipPartShape::Wheel:
             ship_mesh_detail::append_wheel(mesh, part, lighting, index);
