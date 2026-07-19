@@ -42,6 +42,7 @@ constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
 constexpr int kWaterSurfaceSubdivisions = 4;
 constexpr int kWaterSideVerticalSubdivisions = 2;
 constexpr int kWaterSideHorizontalSubdivisions = 4;
+constexpr float kBlockAtlasHalfTexelUv = 0.5F / static_cast<float>(kBlockAtlasSize);
 
 using Float2 = std::array<float, 2>;
 using Float3 = std::array<float, 3>;
@@ -358,9 +359,16 @@ auto repeating_water_surface_uv(const BlockAtlasTile& tile,
     const auto surface_v = std::min(block_v + local_z / kWaterSurfaceRepeatBlocks, 1.0F);
 
     return {
-        u0 + surface_u * uv_step,
-        v0 + surface_v * uv_step,
+        std::clamp(u0 + surface_u * uv_step, u0 + kBlockAtlasHalfTexelUv, u0 + uv_step - kBlockAtlasHalfTexelUv),
+        std::clamp(v0 + surface_v * uv_step, v0 + kBlockAtlasHalfTexelUv, v0 + uv_step - kBlockAtlasHalfTexelUv),
     };
+}
+
+auto inset_atlas_interval(float min_value, float max_value) noexcept -> std::pair<float, float> {
+    if (max_value - min_value <= kBlockAtlasHalfTexelUv * 2.0F) {
+        return {min_value, max_value};
+    }
+    return {min_value + kBlockAtlasHalfTexelUv, max_value - kBlockAtlasHalfTexelUv};
 }
 
 auto sample_vertex_light(const Neighborhood& neighborhood,
@@ -454,10 +462,8 @@ auto tile_uvs(const BlockAtlasTile& tile, float min_u, float min_v, float max_u,
     const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
     const auto tile_u0 = static_cast<float>(tile.x) * uv_step;
     const auto tile_v0 = static_cast<float>(tile.y) * uv_step;
-    const auto u0 = tile_u0 + min_u * uv_step;
-    const auto v0 = tile_v0 + min_v * uv_step;
-    const auto u1 = tile_u0 + max_u * uv_step;
-    const auto v1 = tile_v0 + max_v * uv_step;
+    const auto [u0, u1] = inset_atlas_interval(tile_u0 + min_u * uv_step, tile_u0 + max_u * uv_step);
+    const auto [v0, v1] = inset_atlas_interval(tile_v0 + min_v * uv_step, tile_v0 + max_v * uv_step);
 
     return {{
         {u1, v0},
@@ -520,6 +526,19 @@ void append_cube_face(ChunkMeshData& mesh,
     }
 
     append_face_geometry(mesh, definition, tile, positions, ao_values, sky_values, block_values, material_class);
+}
+
+auto should_emit_cube_face(BlockId block_id, BlockId neighbor_block_id) noexcept -> bool {
+    if (is_block_opaque(neighbor_block_id)) {
+        return false;
+    }
+    if (block_item_id(block_id) != block_item_id(neighbor_block_id)) {
+        return true;
+    }
+    if (block_visual_material(block_id) != BlockVisualMaterial::Glass) {
+        return true;
+    }
+    return block_mesh_type(neighbor_block_id) != BlockMeshType::FullCube;
 }
 
 void append_torch_mesh(ChunkMeshData& mesh,
@@ -794,11 +813,6 @@ void append_water_face(ChunkMeshData& mesh,
                        float bottom_height,
                        bool surface_block) {
     const auto tile = block_atlas_tile(to_block_id(BlockType::Water), to_visual_face(face));
-    const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
-    const auto u0 = static_cast<float>(tile.x) * uv_step;
-    const auto v0 = static_cast<float>(tile.y) * uv_step;
-    const auto u1 = u0 + uv_step;
-    const auto v1 = v0 + uv_step;
     const auto is_horizontal_water_face = face == Face::PositiveY || face == Face::NegativeY;
     const auto subdivisions = water_face_subdivisions(face);
     const auto material_class = block_visual_material_value(to_block_id(BlockType::Water));
@@ -807,7 +821,7 @@ void append_water_face(ChunkMeshData& mesh,
     std::array<Float3, 4> corner_positions {};
     std::array<float, 4> corner_sky_values {};
     std::array<float, 4> corner_block_values {};
-    const std::array<Float2, 4> corner_uvs {{{u1, v0}, {u1, v1}, {u0, v1}, {u0, v0}}};
+    const auto corner_uvs = tile_uvs(tile, 0.0F, 0.0F, 1.0F, 1.0F);
 
     const auto corner_index_for_vertex = [](const VertexPattern& vertex) noexcept -> std::size_t {
         if (vertex.position[0] > 0.5F) {
@@ -1116,7 +1130,7 @@ auto ChunkMesher::build_mesh_range(const World& world,
                         local_coord.y + definition.neighbor_offset.y,
                         local_coord.z + definition.neighbor_offset.z,
                     };
-                    if (!is_block_opaque(neighborhood.block_at(neighbor.x, neighbor.y, neighbor.z))) {
+                    if (should_emit_cube_face(block_id, neighborhood.block_at(neighbor.x, neighbor.y, neighbor.z))) {
                         append_cube_face(mesh, neighborhood, block_id, face, local_coord, chunk_world_x, chunk_world_z);
                     }
                 }

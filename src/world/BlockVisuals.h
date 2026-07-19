@@ -11,6 +11,8 @@ constexpr int kBlockAtlasSize = 128;
 constexpr int kBlockAtlasTileSize = 16;
 constexpr float kBlockAtlasTilesPerAxis = 8.0F;
 constexpr int kBlockBreakCrackAtlasRow = 5;
+constexpr int kShipAtlasRow = 7;
+constexpr int kShipAtlasMaterialCount = 8;
 constexpr int kAccentAtlasSize = 64;
 constexpr int kAccentAtlasTileSize = 16;
 constexpr float kAccentAtlasTilesPerAxis = 4.0F;
@@ -58,8 +60,63 @@ enum class BlockVisualMaterial : std::uint8_t {
     Water = 6,
     Emissive = 7,
     Snow = 8,
+    Fabric = 9,
     Glass = 10,
+    Metal = 11,
+    Brass = 12,
 };
+
+enum class ShipAtlasMaterial : std::uint8_t {
+    DarkHull = 0,
+    LightDeck = 1,
+    CleanBeam = 2,
+    CreamCanvas = 3,
+    Rope = 4,
+    Iron = 5,
+    Brass = 6,
+    Lantern = 7,
+};
+
+[[nodiscard]] constexpr auto ship_atlas_tile(ShipAtlasMaterial material) noexcept -> BlockAtlasTile {
+    switch (material) {
+    case ShipAtlasMaterial::DarkHull:
+        return {0, kShipAtlasRow};
+    case ShipAtlasMaterial::LightDeck:
+        return {1, kShipAtlasRow};
+    case ShipAtlasMaterial::CleanBeam:
+        return {2, kShipAtlasRow};
+    case ShipAtlasMaterial::CreamCanvas:
+        return {3, kShipAtlasRow};
+    case ShipAtlasMaterial::Rope:
+        return {4, kShipAtlasRow};
+    case ShipAtlasMaterial::Iron:
+        return {5, kShipAtlasRow};
+    case ShipAtlasMaterial::Brass:
+        return {6, kShipAtlasRow};
+    case ShipAtlasMaterial::Lantern:
+    default:
+        return {7, kShipAtlasRow};
+    }
+}
+
+[[nodiscard]] constexpr auto ship_visual_material(ShipAtlasMaterial material) noexcept -> BlockVisualMaterial {
+    switch (material) {
+    case ShipAtlasMaterial::DarkHull:
+    case ShipAtlasMaterial::LightDeck:
+    case ShipAtlasMaterial::CleanBeam:
+    case ShipAtlasMaterial::Rope:
+        return BlockVisualMaterial::Wood;
+    case ShipAtlasMaterial::CreamCanvas:
+        return BlockVisualMaterial::Fabric;
+    case ShipAtlasMaterial::Iron:
+        return BlockVisualMaterial::Metal;
+    case ShipAtlasMaterial::Brass:
+        return BlockVisualMaterial::Brass;
+    case ShipAtlasMaterial::Lantern:
+    default:
+        return BlockVisualMaterial::Emissive;
+    }
+}
 
 [[nodiscard]] constexpr auto accent_atlas_tile(AccentAtlasSprite sprite) noexcept -> AccentAtlasTile {
     switch (sprite) {
@@ -176,6 +233,12 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {3, 6};
     case BlockType::MetallicAlloyOre:
         return {4, 6};
+    case BlockType::Pickaxe:
+        return {5, 6};
+    case BlockType::Axe:
+        return {6, 6};
+    case BlockType::Shovel:
+        return {7, 6};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -219,6 +282,12 @@ enum class BlockVisualMaterial : std::uint8_t {
         return {3, 6};
     case BlockType::MetallicAlloyOre:
         return {4, 6};
+    case BlockType::Pickaxe:
+        return {5, 6};
+    case BlockType::Axe:
+        return {6, 6};
+    case BlockType::Shovel:
+        return {7, 6};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }
@@ -273,9 +342,12 @@ enum class BlockVisualMaterial : std::uint8_t {
     case BlockType::RoundShield:
     case BlockType::Sword:
     case BlockType::Spear:
+    case BlockType::Pickaxe:
+    case BlockType::Shovel:
         return BlockVisualMaterial::Rock;
     case BlockType::Shoes:
     case BlockType::Pants:
+    case BlockType::Axe:
         return BlockVisualMaterial::Wood;
     case BlockType::Air:
     default:

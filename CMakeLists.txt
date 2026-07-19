@@ -22,6 +22,7 @@ include(CheckIPOSupported)
 enable_testing()
 option(VALCRAFT_STRICT_WARNINGS "Enable strict warnings on project targets" ON)
 option(VALCRAFT_ENABLE_COVERAGE "Enable gcov coverage for critical modules" OFF)
+option(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS "Register SDL/OpenGL smoke tests in the default CTest suite" ON)
 
 check_ipo_supported(RESULT VALCRAFT_IPO_SUPPORTED OUTPUT VALCRAFT_IPO_ERROR)
 if(NOT VALCRAFT_IPO_SUPPORTED AND VALCRAFT_IPO_ERROR)
@@ -171,6 +172,7 @@ add_library(valcraft_core
     src/app/Audit.cpp
     src/app/GameBranding.cpp
     src/app/GameOptions.cpp
+    src/app/ProcessMemory.cpp
     src/app/SaveGame.cpp
     src/audio/ProceduralMusic.cpp
     src/creatures/CreatureGeometry.cpp
@@ -183,6 +185,9 @@ add_library(valcraft_core
     src/world/Environment.cpp
     src/gameplay/PlayerController.cpp
     src/gameplay/PlayerProgression.cpp
+    src/gameplay/SeaAdventure.cpp
+    src/gameplay/ShipCrew.cpp
+    src/gameplay/StartingPort.cpp
     src/gameplay/StartingVillage.cpp
     src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp
@@ -199,6 +204,10 @@ target_link_libraries(valcraft_core
         ${VALCRAFT_GLM_TARGET}
         FastNoiseLite
 )
+
+if(WIN32)
+    target_link_libraries(valcraft_core PUBLIC psapi)
+endif()
 
 target_compile_definitions(valcraft_core
     PUBLIC
@@ -250,6 +259,8 @@ add_executable(valcraft_tests
     tests/AudioTests.cpp
     tests/CreatureTests.cpp
     tests/RenderTests.cpp
+    tests/ShipCrewTests.cpp
+    tests/StartingPortTests.cpp
     tests/WorldSchedulingTests.cpp
     tests/WorldTests.cpp
     tests/PlayerTests.cpp
@@ -305,6 +316,51 @@ add_custom_target(valcraft_check_smoke
     USES_TERMINAL
 )
 
+add_custom_target(valcraft_check_sea_loading_smoke
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test
+        --smoke-session=sea-new
+        --smoke-frames=240
+        --hidden-window
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test
+        --smoke-session=sea-legacy
+        --smoke-frames=240
+        --hidden-window
+    DEPENDS ValCraft
+    USES_TERMINAL
+)
+
+# Je permets aux runners sans display ni pilote OpenGL de desactiver ces tests;
+# la cible valcraft_check_sea_loading_smoke reste toujours disponible sur un
+# poste equipe pour valider le vrai chemin SDL/GPU.
+if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
+    add_test(
+        NAME valcraft_sea_new_loading_smoke
+        COMMAND $<TARGET_FILE:ValCraft>
+            --smoke-test
+            --smoke-session=sea-new
+            --smoke-frames=240
+            --hidden-window
+    )
+    add_test(
+        NAME valcraft_sea_legacy_loading_smoke
+        COMMAND $<TARGET_FILE:ValCraft>
+            --smoke-test
+            --smoke-session=sea-legacy
+            --smoke-frames=240
+            --hidden-window
+    )
+    set_tests_properties(
+        valcraft_sea_new_loading_smoke
+        valcraft_sea_legacy_loading_smoke
+        PROPERTIES
+            LABELS "gpu;integration;loading"
+            TIMEOUT 60
+            RESOURCE_LOCK valcraft_gpu
+    )
+endif()
+
 add_custom_target(valcraft_check_perf_smoke
     COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
@@ -312,7 +368,10 @@ add_custom_target(valcraft_check_perf_smoke
         -NoConfigure
         -NoBuild
         -SmokeFrames 180
+        -WarmupFrames 60
+        -Repetitions 1
         -Scenarios baseline
+        -EnforceThresholds
     DEPENDS ValCraft
     USES_TERMINAL
 )
@@ -336,6 +395,7 @@ add_custom_target(valcraft_perf_suite
         -BuildDir ${CMAKE_BINARY_DIR}
         -NoConfigure
         -NoBuild
+        -EnforceThresholds
     DEPENDS ValCraft
     USES_TERMINAL
 )

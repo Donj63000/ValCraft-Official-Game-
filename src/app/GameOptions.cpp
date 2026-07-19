@@ -59,6 +59,10 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             result.options.performance.post_process_enabled = false;
             continue;
         }
+        if (argument == "--fixed-render-quality") {
+            result.options.performance.adaptive_quality = false;
+            continue;
+        }
         if (argument == "--perf-report") {
             result.options.performance.report_frame_stats = true;
             result.options.audit.enabled = true;
@@ -86,6 +90,68 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 return make_error("Invalid value for --smoke-frames");
             }
             result.options.smoke_frames = parsed_value;
+            continue;
+        }
+        if (argument.starts_with("--smoke-session=")) {
+            const auto mode = argument.substr(16);
+            if (mode == "menu") {
+                result.options.smoke_session = SmokeSessionMode::Menu;
+            } else if (mode == "sea-new") {
+                result.options.smoke_session = SmokeSessionMode::SeaNew;
+            } else if (mode == "sea-legacy") {
+                result.options.smoke_session = SmokeSessionMode::SeaLegacy;
+            } else {
+                return make_error("Invalid value for --smoke-session");
+            }
+            continue;
+        }
+        if (argument.starts_with("--smoke-ship-view=")) {
+            const auto view = argument.substr(std::string_view("--smoke-ship-view=").size());
+            if (view == "deck") {
+                result.options.smoke_ship_view = SmokeShipView::Deck;
+            } else if (view == "bow") {
+                result.options.smoke_ship_view = SmokeShipView::Bow;
+            } else if (view == "stern") {
+                result.options.smoke_ship_view = SmokeShipView::Stern;
+            } else if (view == "port") {
+                result.options.smoke_ship_view = SmokeShipView::Port;
+            } else if (view == "starboard") {
+                result.options.smoke_ship_view = SmokeShipView::Starboard;
+            } else if (view == "interior") {
+                result.options.smoke_ship_view = SmokeShipView::Interior;
+            } else if (view == "cabin") {
+                result.options.smoke_ship_view = SmokeShipView::CaptainCabin;
+            } else if (view == "cargo") {
+                result.options.smoke_ship_view = SmokeShipView::CargoHold;
+            } else if (view == "crew") {
+                result.options.smoke_ship_view = SmokeShipView::CrewDeck;
+            } else {
+                return make_error("Invalid value for --smoke-ship-view");
+            }
+            continue;
+        }
+        if (argument.starts_with("--window-width=")) {
+            int parsed_value = 0;
+            if (!parse_number(argument.substr(15), parsed_value) || parsed_value < 640 || parsed_value > 7680) {
+                return make_error("Invalid value for --window-width");
+            }
+            result.options.window_width = parsed_value;
+            continue;
+        }
+        if (argument.starts_with("--window-height=")) {
+            int parsed_value = 0;
+            if (!parse_number(argument.substr(16), parsed_value) || parsed_value < 360 || parsed_value > 4320) {
+                return make_error("Invalid value for --window-height");
+            }
+            result.options.window_height = parsed_value;
+            continue;
+        }
+        if (argument.starts_with("--perf-warmup-frames=")) {
+            int parsed_value = 0;
+            if (!parse_number(argument.substr(21), parsed_value) || parsed_value < 0) {
+                return make_error("Invalid value for --perf-warmup-frames");
+            }
+            result.options.performance.perf_warmup_frames = static_cast<std::size_t>(parsed_value);
             continue;
         }
         if (argument.starts_with("--initial-time=")) {

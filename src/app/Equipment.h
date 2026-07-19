@@ -90,6 +90,14 @@ inline constexpr auto item_equipment_slot(BlockId block_id) noexcept -> std::opt
     case BlockType::TorchWallPositiveZ:
     case BlockType::TorchWallNegativeZ:
     case BlockType::Glass:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
+    case BlockType::Pickaxe:
+    case BlockType::Axe:
+    case BlockType::Shovel:
     default:
         return std::nullopt;
     }
@@ -141,8 +149,16 @@ inline constexpr auto armor_resistance_percent(BlockId block_id) noexcept -> flo
     case BlockType::TorchWallPositiveZ:
     case BlockType::TorchWallNegativeZ:
     case BlockType::Glass:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     case BlockType::Sword:
     case BlockType::Spear:
+    case BlockType::Pickaxe:
+    case BlockType::Axe:
+    case BlockType::Shovel:
     default:
         return 0.0F;
     }
@@ -180,10 +196,18 @@ inline constexpr auto weapon_stats(BlockId block_id) noexcept -> std::optional<W
     case BlockType::TorchWallPositiveZ:
     case BlockType::TorchWallNegativeZ:
     case BlockType::Glass:
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
     case BlockType::Pastron:
     case BlockType::RoundShield:
     case BlockType::Shoes:
     case BlockType::Pants:
+    case BlockType::Pickaxe:
+    case BlockType::Axe:
+    case BlockType::Shovel:
     default:
         return std::nullopt;
     }

@@ -8,6 +8,7 @@
 #include <glm/vec4.hpp>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 
 namespace valcraft {
@@ -104,6 +105,17 @@ inline auto chunk_horizontal_distance_sq(const glm::vec3& center, const glm::vec
     return glm::dot(horizontal, horizontal);
 }
 
+inline auto bounds_horizontal_distance_sq(const ChunkBounds& bounds, const glm::vec3& reference_position) -> float {
+    const auto closest_x = std::clamp(reference_position.x, bounds.min_corner.x, bounds.max_corner.x);
+    const auto closest_z = std::clamp(reference_position.z, bounds.min_corner.z, bounds.max_corner.z);
+    const glm::vec3 horizontal {
+        closest_x - reference_position.x,
+        0.0F,
+        closest_z - reference_position.z,
+    };
+    return glm::dot(horizontal, horizontal);
+}
+
 inline auto should_render_chunk_in_camera_pass(const ChunkBounds& bounds,
                                                const std::array<FrustumPlane, 6>& camera_frustum,
                                                const glm::vec3& eye,
@@ -174,6 +186,25 @@ inline auto classify_chunk_visibility(const ChunkBounds& bounds,
             shadow_context.frustum,
             shadow_context.focus,
             shadow_context.max_distance_sq);
+    return visibility;
+}
+
+inline auto classify_large_bounds_visibility(const ChunkBounds& bounds,
+                                             const std::array<FrustumPlane, 6>& camera_frustum,
+                                             const glm::vec3& eye,
+                                             float draw_distance_sq,
+                                             const ShadowPassContext& shadow_context,
+                                             bool shadow_candidate) -> ChunkPassVisibility {
+    ChunkPassVisibility visibility {};
+    // Je mesure un grand objet depuis le point de son AABB le plus proche : son
+    // centre peut etre derriere la camera alors que sa poupe reste juste devant moi.
+    visibility.distance_squared = bounds_horizontal_distance_sq(bounds, eye);
+    visibility.camera = visibility.distance_squared <= draw_distance_sq &&
+                        intersects_frustum(camera_frustum, bounds.min_corner, bounds.max_corner);
+    visibility.shadow = shadow_context.enabled &&
+                        shadow_candidate &&
+                        bounds_horizontal_distance_sq(bounds, shadow_context.focus) <= shadow_context.max_distance_sq &&
+                        intersects_frustum(shadow_context.frustum, bounds.min_corner, bounds.max_corner);
     return visibility;
 }
 

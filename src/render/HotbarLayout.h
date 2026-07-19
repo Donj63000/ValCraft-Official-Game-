@@ -121,6 +121,35 @@ struct GameplayHudLayout {
     std::array<VitalGlyphLayout, kHudVitalGlyphCount> bubbles {};
 };
 
+struct MaritimeHudBarLayout {
+    float x = 0.0F;
+    float y = 0.0F;
+    float width = 0.0F;
+    float height = 0.0F;
+    float fill_width = 0.0F;
+};
+
+struct MaritimeHudLayout {
+    bool visible = false;
+    bool compact = false;
+    float panel_x = 0.0F;
+    float panel_y = 0.0F;
+    float panel_width = 0.0F;
+    float panel_height = 0.0F;
+    float title_x = 0.0F;
+    float title_y = 0.0F;
+    float text_pixel_size = 0.0F;
+    float body_pixel_size = 0.0F;
+    float status_x = 0.0F;
+    float status_y = 0.0F;
+    float cargo_x = 0.0F;
+    float cargo_y = 0.0F;
+    MaritimeHudBarLayout hunger_bar {};
+    MaritimeHudBarLayout thirst_bar {};
+    MaritimeHudBarLayout stamina_bar {};
+    MaritimeHudBarLayout fishing_bar {};
+};
+
 inline constexpr auto hotbar_slot_has_icon(const HotbarSlot& slot) noexcept -> bool {
     return hotbar_slot_has_item(slot);
 }
@@ -357,6 +386,65 @@ inline auto build_gameplay_hud_layout(int viewport_width,
         bubble.fill = bubble_fills[index];
     }
 
+    return layout;
+}
+
+inline auto build_maritime_hud_layout(int viewport_width,
+                                      int viewport_height,
+                                      bool visible,
+                                      float hunger_ratio,
+                                      float thirst_ratio,
+                                      float stamina_ratio,
+                                      bool fishing_active,
+                                      float fishing_ratio) -> MaritimeHudLayout {
+    const auto width = static_cast<float>(std::max(viewport_width, 1));
+    const auto height = static_cast<float>(std::max(viewport_height, 1));
+    const auto min_dimension = std::min(width, height);
+    const auto safe_margin = std::max(14.0F, min_dimension * 0.018F);
+    const auto compact = width < 720.0F || height < 420.0F;
+    const auto panel_width = std::clamp(width * (compact ? 0.48F : 0.28F), compact ? 214.0F : 260.0F, compact ? 320.0F : 380.0F);
+    const auto panel_height = fishing_active ? (compact ? 118.0F : 140.0F) : (compact ? 94.0F : 114.0F);
+    const auto panel_x = safe_margin;
+    const auto panel_y = safe_margin;
+    const auto padding_x = compact ? 12.0F : 16.0F;
+    const auto title_pixel_size = compact ? 2.0F : 3.0F;
+    const auto body_pixel_size = 2.0F;
+    const auto bar_x = panel_x + padding_x;
+    const auto bar_width = std::max(20.0F, panel_width - padding_x * 2.0F);
+    const auto bar_height = compact ? 6.0F : 8.0F;
+    const auto first_bar_y = panel_y + (compact ? 34.0F : 42.0F);
+    const auto row_gap = compact ? 13.0F : 16.0F;
+
+    MaritimeHudLayout layout {};
+    layout.visible = visible;
+    layout.compact = compact;
+    layout.panel_x = panel_x;
+    layout.panel_y = panel_y;
+    layout.panel_width = panel_width;
+    layout.panel_height = panel_height;
+    layout.title_x = panel_x + padding_x;
+    layout.title_y = panel_y + (compact ? 11.0F : 13.0F);
+    layout.text_pixel_size = title_pixel_size;
+    layout.body_pixel_size = body_pixel_size;
+    layout.status_x = panel_x + padding_x;
+    layout.status_y = first_bar_y + row_gap * 3.0F + (compact ? 6.0F : 8.0F);
+    layout.cargo_x = panel_x + padding_x;
+    layout.cargo_y = layout.status_y + (compact ? 15.0F : 18.0F);
+
+    const auto make_bar = [&](float y, float ratio) {
+        MaritimeHudBarLayout bar {};
+        bar.x = bar_x;
+        bar.y = y;
+        bar.width = bar_width;
+        bar.height = bar_height;
+        bar.fill_width = bar_width * std::clamp(ratio, 0.0F, 1.0F);
+        return bar;
+    };
+
+    layout.hunger_bar = make_bar(first_bar_y, hunger_ratio);
+    layout.thirst_bar = make_bar(first_bar_y + row_gap, thirst_ratio);
+    layout.stamina_bar = make_bar(first_bar_y + row_gap * 2.0F, stamina_ratio);
+    layout.fishing_bar = make_bar(layout.cargo_y + (compact ? 15.0F : 18.0F), fishing_ratio);
     return layout;
 }
 

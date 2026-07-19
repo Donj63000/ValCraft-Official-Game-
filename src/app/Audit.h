@@ -129,13 +129,25 @@ struct AuditSecondSample {
     double frame_ms_avg = 0.0;
     double frame_ms_p95 = 0.0;
     double frame_ms_max = 0.0;
+    double event_processing_ms_avg = 0.0;
+    double simulation_ms_avg = 0.0;
+    double audio_ms_avg = 0.0;
+    double render_preparation_ms_avg = 0.0;
     double streaming_ms_avg = 0.0;
     double generation_ms_avg = 0.0;
+    double fluid_ms_avg = 0.0;
     double lighting_ms_avg = 0.0;
     double meshing_ms_avg = 0.0;
     double upload_ms_avg = 0.0;
     double shadow_ms_avg = 0.0;
     double world_ms_avg = 0.0;
+    double render_cpu_ms_avg = 0.0;
+    double render_overhead_ms_avg = 0.0;
+    double present_ms_avg = 0.0;
+    double telemetry_ms_avg = 0.0;
+    double residual_ms_avg = 0.0;
+    double gpu_frame_ms_avg = 0.0;
+    std::size_t gpu_timing_samples = 0;
     std::size_t input_raw_events = 0;
     std::size_t input_action_events = 0;
     std::size_t ui_events = 0;
@@ -157,6 +169,9 @@ struct AuditSecondSample {
     std::size_t pending_generation_max = 0;
     std::size_t pending_mesh_max = 0;
     std::size_t pending_lighting_max = 0;
+    std::size_t pending_fluid_max = 0;
+    std::uint64_t process_working_set_bytes_max = 0;
+    std::uint64_t process_private_bytes_max = 0;
     std::size_t creature_spawns = 0;
     std::size_t creature_despawns = 0;
     std::size_t creature_attacks = 0;
@@ -186,8 +201,10 @@ struct AuditManifest {
     std::array<std::size_t, kAuditCategoryCount> written_event_counts {};
     std::array<std::size_t, kAuditCategoryCount> dropped_event_counts {};
     std::size_t second_samples = 0;
+    std::size_t dropped_second_samples = 0;
     std::size_t recorded_frames = 0;
     std::size_t written_frames = 0;
+    std::size_t dropped_frames = 0;
     std::vector<std::string> errors {};
     std::vector<std::string> produced_files {};
 };
@@ -210,6 +227,15 @@ struct AuditJsonField {
     std::string value_json {};
 };
 
+struct AuditWriterCounters {
+    std::array<std::size_t, kAuditCategoryCount> written_event_counts {};
+    std::array<std::size_t, kAuditCategoryCount> dropped_event_counts {};
+    std::size_t written_second_samples = 0;
+    std::size_t dropped_second_samples = 0;
+    std::size_t written_frames = 0;
+    std::size_t dropped_frames = 0;
+};
+
 class AuditWriter {
 public:
     AuditWriter();
@@ -226,6 +252,7 @@ public:
     [[nodiscard]] auto enqueue_second(std::string line, AuditPriority priority) -> bool;
     [[nodiscard]] auto enqueue_frame(std::string line, AuditPriority priority) -> bool;
     [[nodiscard]] auto active() const noexcept -> bool;
+    [[nodiscard]] auto counters() const -> AuditWriterCounters;
     [[nodiscard]] auto dropped_event_counts() const -> std::array<std::size_t, kAuditCategoryCount>;
 
 private:

@@ -2,6 +2,7 @@
 #include "render/Renderer.h"
 #include "render/ItemDropGeometry.h"
 #include "render/SceneSamplerBindings.h"
+#include "render/ShipMesh.h"
 #include "render/ShadowCulling.h"
 #include "render/SkyShaderSource.h"
 #include "creatures/CreatureGeometry.h"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -22,6 +24,7 @@
 #include <cstdint>
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -41,7 +44,9 @@ constexpr std::size_t kCreatureNightBoxBudget = 96U;
 constexpr std::size_t kCreatureMaxBoxBudget = kCreatureDayBoxBudget > kCreatureNightBoxBudget ? kCreatureDayBoxBudget : kCreatureNightBoxBudget;
 constexpr std::size_t kCreatureMaxRenderedCount = 12U;
 constexpr auto kInitialCreatureInstanceBufferBytes =
-    static_cast<GLsizeiptr>(sizeof(CreaturePartInstance) * kCreatureMaxBoxBudget * kCreatureMaxRenderedCount);
+    static_cast<GLsizeiptr>(sizeof(CreaturePartInstance) *
+                           (kCreatureMaxBoxBudget * kCreatureMaxRenderedCount +
+                            kCrewVisualPartBudget * kCrewVisualRenderCapacity));
 constexpr auto kInitialItemDropInstanceBufferBytes =
     static_cast<GLsizeiptr>(sizeof(ItemDropGpuInstance) * 512U);
 constexpr auto kInitialHudBufferBytes = static_cast<GLsizeiptr>(sizeof(float) * 9U * 6U * 32U);
@@ -115,6 +120,75 @@ auto grow_buffer_capacity(GLsizeiptr current_bytes, GLsizeiptr required_bytes, G
     return capacity;
 }
 
+struct ColorTargetFormat {
+    GLint internal_format = GL_RGBA16F;
+    GLenum pixel_format = GL_RGBA;
+    GLenum pixel_type = GL_FLOAT;
+};
+
+auto color_target_format(const RendererQualitySettings& quality_settings) noexcept -> ColorTargetFormat {
+    if (quality_settings.high_precision_hdr) {
+        return {};
+    }
+    return {GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV};
+}
+
+void orphan_bound_buffer(GLenum target, GLsizeiptr capacity, GLenum usage = GL_STREAM_DRAW) {
+    if (capacity > 0) {
+        // Je donne un nouveau stockage au pilote avant chaque écriture dynamique pour éviter d'attendre le GPU.
+        glBufferData(target, capacity, nullptr, usage);
+    }
+}
+
+void merge_chunk_mesh_sections_into(
+    const std::array<ChunkMeshData, kChunkSectionCount>& sections,
+    ChunkMeshData& merged) {
+    merged.vertices.clear();
+    merged.indices.clear();
+    merged.water_vertices.clear();
+    merged.water_indices.clear();
+    merged.face_count = 0U;
+    merged.water_face_count = 0U;
+
+    std::size_t vertex_count = 0U;
+    std::size_t index_count = 0U;
+    std::size_t water_vertex_count = 0U;
+    std::size_t water_index_count = 0U;
+    for (const auto& section : sections) {
+        vertex_count += section.vertices.size();
+        index_count += section.indices.size();
+        water_vertex_count += section.water_vertices.size();
+        water_index_count += section.water_indices.size();
+    }
+    merged.vertices.reserve(vertex_count);
+    merged.indices.reserve(index_count);
+    merged.water_vertices.reserve(water_vertex_count);
+    merged.water_indices.reserve(water_index_count);
+
+    for (const auto& section : sections) {
+        const auto vertex_offset = static_cast<std::uint32_t>(merged.vertices.size());
+        merged.vertices.insert(merged.vertices.end(), section.vertices.begin(), section.vertices.end());
+        for (const auto index : section.indices) {
+            merged.indices.push_back(index + vertex_offset);
+        }
+
+        const auto water_vertex_offset = static_cast<std::uint32_t>(merged.water_vertices.size());
+        merged.water_vertices.insert(
+            merged.water_vertices.end(),
+            section.water_vertices.begin(),
+            section.water_vertices.end());
+        for (const auto index : section.water_indices) {
+            merged.water_indices.push_back(index + water_vertex_offset);
+        }
+        merged.face_count += section.face_count;
+        merged.water_face_count += section.water_face_count;
+    }
+}
+
+[[nodiscard]] constexpr auto color_target_bytes_per_pixel(GLint internal_format) noexcept -> std::uint64_t {
+    return internal_format == GL_RGBA16F ? 8U : 4U;
+}
+
 void configure_box_template_attributes(GLuint vao, GLuint vbo, GLuint ebo) {
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -167,7 +241,7 @@ void configure_creature_instance_attributes(GLuint vao, GLuint instance_vbo) {
     glVertexAttribDivisor(14, 1);
 
     glEnableVertexAttribArray(15);
-    glVertexAttribPointer(15, 1, GL_FLOAT, GL_FALSE, sizeof(CreaturePartInstance), reinterpret_cast<void*>(offsetof(CreaturePartInstance, emissive_strength)));
+    glVertexAttribPointer(15, 4, GL_FLOAT, GL_FALSE, sizeof(CreaturePartInstance), reinterpret_cast<void*>(offsetof(CreaturePartInstance, emissive_strength)));
     glVertexAttribDivisor(15, 1);
 }
 
@@ -202,6 +276,18 @@ void configure_item_drop_instance_attributes(GLuint vao, GLuint instance_vbo) {
     glEnableVertexAttribArray(10);
     glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, material_class)));
     glVertexAttribDivisor(10, 1);
+
+    glEnableVertexAttribArray(11);
+    glVertexAttribPointer(11, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_0_1)));
+    glVertexAttribDivisor(11, 1);
+
+    glEnableVertexAttribArray(12);
+    glVertexAttribPointer(12, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_2_3)));
+    glVertexAttribDivisor(12, 1);
+
+    glEnableVertexAttribArray(13);
+    glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_4_5)));
+    glVertexAttribDivisor(13, 1);
 }
 
 auto quantize_hud_value(float value, float steps_per_unit) -> int {
@@ -243,6 +329,10 @@ auto format_save_slot_time(float time_of_day) -> std::string {
            << ":"
            << std::setfill('0') << std::setw(2) << (minutes % 60);
     return stream.str();
+}
+
+auto format_save_slot_mode(GameMode mode) -> std::string {
+    return std::string(game_mode_label(mode));
 }
 
 auto pixel_to_ndc_x(float x, float viewport_width) -> float {
@@ -517,6 +607,11 @@ auto glyph_rows(char character) -> std::array<std::uint8_t, 7> {
     case ')': return {{0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18}};
     case '+': return {{0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00}};
     case '%': return {{0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03}};
+    case '\'': return {{0x06, 0x06, 0x04, 0x08, 0x00, 0x00, 0x00}};
+    case ',': return {{0x00, 0x00, 0x00, 0x00, 0x06, 0x06, 0x04}};
+    case ':': return {{0x00, 0x06, 0x06, 0x00, 0x06, 0x06, 0x00}};
+    case '!': return {{0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}};
+    case '?': return {{0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}};
     case '.': return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}};
     case '-': return {{0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}};
     default: return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
@@ -707,6 +802,9 @@ auto ui_material_accent(BlockId block_id) -> HudColor {
     if (is_weapon_item(block_id)) {
         return {0.82F, 0.80F, 0.74F, 1.0F};
     }
+    if (is_tool_item(block_id)) {
+        return {0.72F, 0.76F, 0.74F, 1.0F};
+    }
     if (is_inventory_only_item(block_id)) {
         switch (static_cast<BlockType>(block_item_id(block_id))) {
         case BlockType::Pastron:
@@ -755,6 +853,9 @@ auto item_material_label(BlockId block_id) -> std::string_view {
     }
     if (is_weapon_item(block_id)) {
         return "ARME";
+    }
+    if (is_tool_item(block_id)) {
+        return "OUTIL";
     }
     if (is_inventory_only_item(block_id)) {
         return "EQUIPEMENT";
@@ -1451,12 +1552,16 @@ auto resolve_inventory_focus_item(const InventoryMenuState& inventory, const Hot
 }
 
 auto resolve_viewmodel_held_item(const InventoryMenuState& inventory, const HotbarState& hotbar) noexcept -> BlockId {
+    const auto& selected_slot = hotbar.selected_slot();
+    if (hotbar_slot_has_item(selected_slot) && is_tool_item(selected_slot.block_id)) {
+        return to_block_id(BlockType::Air);
+    }
+
     const auto& equipped_weapon = inventory.equipment_slots[equipment_slot_index(EquipmentSlot::Weapon)];
     if (hotbar_slot_has_item(equipped_weapon) && is_weapon_item(equipped_weapon.block_id)) {
         return block_item_id(equipped_weapon.block_id);
     }
 
-    const auto& selected_slot = hotbar.selected_slot();
     if (hotbar_slot_has_item(selected_slot) && is_weapon_item(selected_slot.block_id)) {
         return block_item_id(selected_slot.block_id);
     }
@@ -2059,10 +2164,21 @@ void append_block_break_torch_mesh(std::vector<ChunkVertex>& vertices,
         1.0F);
 }
 
-auto build_block_break_overlay_mesh_data(const BlockBreakProgress& break_progress) -> ChunkMeshData {
-    ChunkMeshData mesh {};
+void build_block_break_overlay_mesh_data_into(const BlockBreakProgress& break_progress, ChunkMeshData& mesh) {
+    mesh.vertices.clear();
+    mesh.indices.clear();
+    mesh.water_vertices.clear();
+    mesh.water_indices.clear();
+    mesh.face_count = 0;
+    mesh.water_face_count = 0;
+    if (mesh.vertices.capacity() < 64U) {
+        mesh.vertices.reserve(64U);
+    }
+    if (mesh.indices.capacity() < 96U) {
+        mesh.indices.reserve(96U);
+    }
     if (!break_progress.active || !is_block_breakable_at(break_progress.block, break_progress.block_id)) {
-        return mesh;
+        return;
     }
 
     const auto tile = block_break_crack_tile(break_progress.crack_stage);
@@ -2095,7 +2211,6 @@ auto build_block_break_overlay_mesh_data(const BlockBreakProgress& break_progres
     }
 
     mesh.face_count = mesh.indices.size() / 6U;
-    return mesh;
 }
 
 } // namespace
@@ -2105,42 +2220,72 @@ Renderer::~Renderer() {
 }
 
 auto Renderer::initialize(const RendererOptions& options) -> bool {
-    if (initialized_ &&
-        options_.shadows_enabled == options.shadows_enabled &&
-        options_.shadow_map_size == options.shadow_map_size &&
-        options_.post_process_enabled == options.post_process_enabled &&
-        std::abs(options_.viewmodel_fov_degrees - options.viewmodel_fov_degrees) <= 1.0e-4F) {
+    auto normalized_options = options;
+    normalized_options.shadow_map_size = std::max(normalized_options.shadow_map_size, 1);
+    normalized_options.viewmodel_fov_degrees = glm::clamp(normalized_options.viewmodel_fov_degrees, 35.0F, 100.0F);
+
+    if (initialized_) {
+        const auto shadow_resource_changed =
+            options_.shadows_enabled != normalized_options.shadows_enabled ||
+            options_.shadow_map_size != normalized_options.shadow_map_size;
+        const auto target_format_changed = options_.quality != normalized_options.quality;
+        const auto post_process_disabled = options_.post_process_enabled && !normalized_options.post_process_enabled;
+        options_ = normalized_options;
+        if (target_format_changed) {
+            adaptive_quality_controller_.reset(options_.quality, 1, 1);
+            active_quality_settings_ = adaptive_quality_controller_.settings(options_.quality, 1, 1);
+            adaptive_gpu_sample_consumed_ = false;
+        }
+
+        try {
+            // Je ne reconstruis que les ressources réellement dépendantes des options.
+            if (shadow_resource_changed) {
+                destroy_shadow_map();
+                create_shadow_map();
+            }
+            if (target_format_changed) {
+                destroy_water_scene_targets();
+                destroy_post_process_targets();
+            } else if (post_process_disabled) {
+                destroy_glow_targets();
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    options_ = normalized_options;
+    try {
+        adaptive_quality_controller_.reset(options_.quality, 1, 1);
+        active_quality_settings_ = adaptive_quality_controller_.settings(options_.quality, 1, 1);
+        gl_api_ready_ = true;
+        create_programs();
+        create_atlas_texture();
+        create_accent_texture();
+        create_creature_atlas_texture();
+        create_player_atlas_texture();
+        create_shadow_map();
+        create_scene_sampler_fallback_textures();
+        create_creature_geometry();
+        create_item_drop_geometry();
+        create_hud_geometry();
+        create_screen_quad_geometry();
+        create_crosshair_geometry();
+        create_gpu_timers();
+        initialized_ = true;
         return true;
-    }
-
-    options_ = options;
-    if (gl_api_ready_) {
+    } catch (...) {
         shutdown();
+        return false;
     }
-
-    gl_api_ready_ = true;
-    create_programs();
-    create_atlas_texture();
-    create_accent_texture();
-    create_creature_atlas_texture();
-    create_player_atlas_texture();
-    create_shadow_map();
-    create_scene_sampler_fallback_textures();
-    create_creature_geometry();
-    create_item_drop_geometry();
-    create_hud_geometry();
-    create_screen_quad_geometry();
-    create_crosshair_geometry();
-    initialized_ = true;
-    return true;
 }
 
 void Renderer::shutdown() {
     if (gl_api_ready_) {
-        for (auto& entry : gpu_meshes_) {
-            destroy_gpu_mesh(entry.second);
-        }
-        destroy_gpu_mesh(block_break_overlay_mesh_);
+        destroy_gpu_timers();
+        reset_world_resources();
+        destroy_gpu_mesh(ship_gpu_mesh_);
 
         destroy_water_scene_targets();
         destroy_post_process_targets();
@@ -2173,12 +2318,7 @@ void Renderer::shutdown() {
         if (player_atlas_texture_ != 0) {
             glDeleteTextures(1, &player_atlas_texture_);
         }
-        if (shadow_map_ != 0) {
-            glDeleteTextures(1, &shadow_map_);
-        }
-        if (shadow_framebuffer_ != 0) {
-            glDeleteFramebuffers(1, &shadow_framebuffer_);
-        }
+        destroy_shadow_map();
         if (scene_fallback_depth_texture_ != 0) {
             glDeleteTextures(1, &scene_fallback_depth_texture_);
         }
@@ -2224,6 +2364,9 @@ void Renderer::shutdown() {
         if (creature_program_ != 0) {
             glDeleteProgram(creature_program_);
         }
+        if (creature_shadow_program_ != 0) {
+            glDeleteProgram(creature_shadow_program_);
+        }
         if (shadow_program_ != 0) {
             glDeleteProgram(shadow_program_);
         }
@@ -2251,9 +2394,13 @@ void Renderer::shutdown() {
     }
 
     gpu_meshes_.clear();
+    world_resource_reset_queue_.clear();
     block_break_overlay_mesh_ = {};
+    ship_gpu_mesh_ = {};
     visible_chunks_cache_.clear();
     shadow_chunks_cache_.clear();
+    visible_creatures_cache_.clear();
+    visible_crew_cache_.clear();
     screen_quad_vao_ = 0;
     crosshair_vbo_ = 0;
     crosshair_vao_ = 0;
@@ -2283,6 +2430,7 @@ void Renderer::shutdown() {
     world_program_ = 0;
     item_drop_program_ = 0;
     creature_program_ = 0;
+    creature_shadow_program_ = 0;
     shadow_program_ = 0;
     hud_program_ = 0;
     crosshair_program_ = 0;
@@ -2293,6 +2441,7 @@ void Renderer::shutdown() {
     menu_background_program_ = 0;
     world_uniforms_ = {};
     creature_uniforms_ = {};
+    creature_shadow_light_view_projection_ = -1;
     item_drop_uniforms_ = {};
     shadow_uniforms_ = {};
     hud_uniforms_ = {};
@@ -2304,6 +2453,7 @@ void Renderer::shutdown() {
     creature_instance_buffer_bytes_ = 0;
     viewmodel_instance_buffer_bytes_ = 0;
     item_drop_instance_buffer_bytes_ = 0;
+    hud_vertex_buffer_bytes_ = 0;
     last_frame_stats_ = {};
     water_scene_target_width_ = 0;
     water_scene_target_height_ = 0;
@@ -2311,6 +2461,28 @@ void Renderer::shutdown() {
     scene_target_height_ = 0;
     glow_target_width_ = 0;
     glow_target_height_ = 0;
+    water_scene_color_internal_format_ = 0;
+    scene_color_internal_format_ = 0;
+    glow_color_internal_format_ = 0;
+    translated_water_indices_scratch_.clear();
+    chunk_upload_scratch_ = {};
+    block_break_overlay_scratch_ = {};
+    loading_vertices_scratch_.clear();
+    gameplay_announcement_vertices_scratch_.clear();
+    last_gpu_timings_ = {};
+    gpu_frame_index_ = 0;
+    adaptive_last_gpu_source_frame_ = 0;
+    frame_draw_calls_ = 0U;
+    frame_triangles_ = 0U;
+    frame_uploaded_bytes_ = 0U;
+    world_resource_reset_progress_.finish();
+    ship_mesh_cache_.reset();
+    active_gpu_query_frame_ = -1;
+    active_gpu_pass_ = -1;
+    gpu_timers_supported_ = false;
+    adaptive_gpu_sample_consumed_ = false;
+    adaptive_quality_controller_.reset(options_.quality, 1, 1);
+    active_quality_settings_ = resolve_renderer_quality_settings(options_.quality, 1, 1);
     gl_api_ready_ = false;
     initialized_ = false;
 }
@@ -2327,9 +2499,56 @@ void Renderer::render_frame(World& world,
                             const ConfirmDialogState& confirm_dialog,
                             std::span<const CreatureRenderInstance> creatures,
                             std::span<const ItemDropRenderInstance> item_drops,
+                            const ShipRenderState& ship,
                             const PlayerProgressionState& progression,
                             bool super_vision_active,
                             const GameplayHudAnnouncementView& gameplay_announcement,
+                            const MaritimeHudView& maritime_hud,
+                            const EnvironmentState& environment,
+                            int width,
+                            int height) {
+    render_frame(
+        world,
+        player,
+        hotbar,
+        inventory_menu,
+        death_screen,
+        pause_menu,
+        main_menu,
+        save_slot_menu,
+        options_menu,
+        confirm_dialog,
+        creatures,
+        std::span<const CrewRenderInstance> {},
+        item_drops,
+        ship,
+        progression,
+        super_vision_active,
+        gameplay_announcement,
+        maritime_hud,
+        environment,
+        width,
+        height);
+}
+
+void Renderer::render_frame(World& world,
+                            const PlayerController& player,
+                            const HotbarState& hotbar,
+                            const InventoryMenuState& inventory_menu,
+                            const DeathScreenState& death_screen,
+                            const PauseMenuState& pause_menu,
+                            const MainMenuState& main_menu,
+                            const SaveSlotMenuState& save_slot_menu,
+                            const OptionsMenuState& options_menu,
+                            const ConfirmDialogState& confirm_dialog,
+                            std::span<const CreatureRenderInstance> creatures,
+                            std::span<const CrewRenderInstance> crew,
+                            std::span<const ItemDropRenderInstance> item_drops,
+                            const ShipRenderState& ship,
+                            const PlayerProgressionState& progression,
+                            bool super_vision_active,
+                            const GameplayHudAnnouncementView& gameplay_announcement,
+                            const MaritimeHudView& maritime_hud,
                             const EnvironmentState& environment,
                             int width,
                             int height) {
@@ -2339,19 +2558,67 @@ void Renderer::render_frame(World& world,
 
     using clock = std::chrono::steady_clock;
     RendererFrameStats frame_stats {};
+    frame_draw_calls_ = 0U;
+    frame_triangles_ = 0U;
+    frame_uploaded_bytes_ = 0U;
+    begin_gpu_frame(frame_stats);
+    const auto render_width = std::max(width, 1);
+    const auto render_height = std::max(height, 1);
+    auto adaptive_sample_ms = 0.0;
+    auto adaptive_sample_valid = false;
+    if (frame_stats.gpu.valid &&
+        (!adaptive_gpu_sample_consumed_ || frame_stats.gpu.source_frame != adaptive_last_gpu_source_frame_)) {
+        adaptive_sample_ms = frame_stats.gpu.total_ms();
+        adaptive_sample_valid = adaptive_sample_ms > 0.0;
+        adaptive_last_gpu_source_frame_ = frame_stats.gpu.source_frame;
+        adaptive_gpu_sample_consumed_ = true;
+    } else if (!gpu_timers_supported_) {
+        adaptive_sample_ms = last_frame_stats_.upload_ms + last_frame_stats_.world_ms;
+        adaptive_sample_valid = adaptive_sample_ms > 0.0;
+    }
+
+    const auto previous_quality_settings = active_quality_settings_;
+    active_quality_settings_ = adaptive_sample_valid
+                                   ? adaptive_quality_controller_.update(
+                                         options_.quality,
+                                         render_width,
+                                         render_height,
+                                         adaptive_sample_ms)
+                                   : adaptive_quality_controller_.settings(options_.quality, render_width, render_height);
+    if (active_quality_settings_ != previous_quality_settings) {
+        if (active_quality_settings_.high_precision_hdr != previous_quality_settings.high_precision_hdr) {
+            destroy_water_scene_targets();
+            destroy_post_process_targets();
+        } else if (active_quality_settings_.glow_downsample != previous_quality_settings.glow_downsample) {
+            destroy_glow_targets();
+        }
+    }
+    const auto quality_settings = active_quality_settings_;
+    const auto adaptive_state = adaptive_quality_controller_.state();
+    frame_stats.resolved_quality = quality_settings.resolved_quality;
+    frame_stats.adaptive_frame_ema_ms = adaptive_state.frame_time_ema_ms;
+    frame_stats.adaptive_frame_p95_ms = adaptive_state.frame_time_p95_ms;
 
     const auto upload_start = clock::now();
+    if (ship.visible) {
+        ensure_ship_mesh(ship);
+    }
     sync_gpu_meshes(world, frame_stats, kMaxGpuMeshEventsPerFrame, kMaxGpuMeshSyncMsPerFrame);
     frame_stats.upload_ms = std::chrono::duration<double, std::milli>(clock::now() - upload_start).count();
 
-    const auto aspect = static_cast<float>(width) / static_cast<float>(std::max(height, 1));
+    const auto aspect = static_cast<float>(render_width) / static_cast<float>(render_height);
     const auto projection = glm::perspective(glm::radians(75.0F), aspect, 0.1F, 320.0F);
     const auto viewmodel_projection = glm::perspective(
         glm::radians(glm::clamp(options_.viewmodel_fov_degrees, 35.0F, 100.0F)),
         aspect,
         0.02F,
         8.0F);
-    const auto view_projection = projection * player.view_matrix();
+    const auto view = player.view_matrix();
+    const auto view_projection = projection * view;
+    const glm::mat4 identity_model {1.0F};
+    auto sky_view = view;
+    sky_view[3] = glm::vec4 {0.0F, 0.0F, 0.0F, 1.0F};
+    const auto inverse_sky_view_projection = glm::inverse(projection * sky_view);
     const auto frustum_planes = extract_frustum_planes(view_projection);
     const auto eye = player.eye_position();
     auto forward = player.look_direction();
@@ -2436,6 +2703,24 @@ void Renderer::render_frame(World& world,
             shadow_chunks.push_back({&gpu_mesh});
         }
     }
+
+    ChunkPassVisibility ship_visibility {};
+    if (ship.visible && ship_mesh_ready(ship)) {
+        // Je transforme les limites exactes du plan en espace monde pour ne
+        // conserver le navire que dans les passes camera et ombre utiles.
+        const ChunkBounds ship_world_bounds {
+            ship.local_bounds.min + ship.world_origin,
+            ship.local_bounds.max + ship.world_origin,
+            (ship.local_bounds.min + ship.local_bounds.max) * 0.5F + ship.world_origin,
+        };
+        ship_visibility = classify_large_bounds_visibility(
+            ship_world_bounds,
+            frustum_planes,
+            eye,
+            draw_distance_sq,
+            shadow_context,
+            ship_gpu_mesh_.opaque_index_count > 0);
+    }
     std::sort(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& lhs, const VisibleChunk& rhs) {
         return lhs.distance_squared < rhs.distance_squared;
     });
@@ -2443,6 +2728,7 @@ void Renderer::render_frame(World& world,
 
     if (shadow_context.enabled) {
         const auto shadow_start = clock::now();
+        begin_gpu_pass(GpuTimedPass::Shadow);
         glViewport(0, 0, shadow_map_size, shadow_map_size);
         glBindFramebuffer(GL_FRAMEBUFFER, shadow_framebuffer_);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -2453,6 +2739,7 @@ void Renderer::render_frame(World& world,
         glPolygonOffset(2.0F, 4.0F);
 
         glUseProgram(shadow_program_);
+        glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
         glUniformMatrix4fv(shadow_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
         glUniform1f(shadow_uniforms_.time_of_day, environment.time_of_day);
         glUniform1f(shadow_uniforms_.wind_strength, environment.wind_strength);
@@ -2463,19 +2750,28 @@ void Renderer::render_frame(World& world,
         for (const auto& shadow_chunk : shadow_chunks) {
             glBindVertexArray(shadow_chunk.mesh->vao);
             glDrawElements(GL_TRIANGLES, shadow_chunk.mesh->opaque_index_count, GL_UNSIGNED_INT, nullptr);
+            record_triangle_draw(shadow_chunk.mesh->opaque_index_count);
             ++frame_stats.shadow_chunks;
         }
+        if (ship_visibility.shadow) {
+            const auto ship_model = glm::translate(identity_model, ship.world_origin);
+            glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(ship_model));
+            glBindVertexArray(ship_gpu_mesh_.vao);
+            glDrawElements(GL_TRIANGLES, ship_gpu_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
+            record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
+            glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
+        }
+        draw_creature_shadows(creatures, crew, light_view_projection, shadow_context.focus);
 
         glDisable(GL_POLYGON_OFFSET_FILL);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glActiveTexture(GL_TEXTURE0);
+        end_gpu_pass(GpuTimedPass::Shadow);
         frame_stats.shadow_ms =
             std::chrono::duration<double, std::milli>(clock::now() - shadow_start).count();
     }
 
     const auto world_start = clock::now();
-    const auto render_width = std::max(width, 1);
-    const auto render_height = std::max(height, 1);
     const auto use_post_process = options_.post_process_enabled && width > 0 && height > 0;
     const auto menu_preview_visible =
         main_menu.visible ||
@@ -2489,7 +2785,7 @@ void Renderer::render_frame(World& world,
         ensure_water_scene_targets(render_width, render_height);
     }
     if (use_post_process || has_visible_water || menu_preview_visible) {
-        ensure_post_process_targets(render_width, render_height);
+        ensure_post_process_targets(render_width, render_height, use_post_process || menu_preview_visible);
     }
 
     const auto final_target_framebuffer = (use_post_process || has_visible_water || menu_preview_visible) ? scene_framebuffer_ : 0U;
@@ -2504,9 +2800,10 @@ void Renderer::render_frame(World& world,
     glDisable(GL_BLEND);
     glClearColor(environment.sky_zenith_color.r, environment.sky_zenith_color.g, environment.sky_zenith_color.b, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    draw_sky(player, environment);
+    begin_gpu_pass(GpuTimedPass::Opaque);
 
     glUseProgram(world_program_);
+    glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
     glUniformMatrix4fv(world_uniforms_.inverse_view_projection, 1, GL_FALSE, glm::value_ptr(inverse_view_projection));
@@ -2560,9 +2857,20 @@ void Renderer::render_frame(World& world,
         }
         glBindVertexArray(visible_chunk.mesh->vao);
         glDrawElements(GL_TRIANGLES, visible_chunk.mesh->opaque_index_count, GL_UNSIGNED_INT, nullptr);
+        record_triangle_draw(visible_chunk.mesh->opaque_index_count);
         ++frame_stats.world_chunks;
     }
+    if (ship_visibility.camera) {
+        const auto ship_model = glm::translate(identity_model, ship.world_origin);
+        glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(ship_model));
+        glBindVertexArray(ship_gpu_mesh_.vao);
+        glDrawElements(GL_TRIANGLES, ship_gpu_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
+        record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
+        glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
+    }
+    end_gpu_pass(GpuTimedPass::Opaque);
 
+    begin_gpu_pass(GpuTimedPass::Entities);
     draw_item_drops(
         item_drops,
         view_projection,
@@ -2573,14 +2881,21 @@ void Renderer::render_frame(World& world,
         sun_visible);
     draw_creatures(
         creatures,
+        crew,
         view_projection,
         light_view_projection,
         eye,
         environment,
         selected_hotbar_emits_local_light(hotbar),
         super_vision_strength);
+    end_gpu_pass(GpuTimedPass::Entities);
+
+    begin_gpu_pass(GpuTimedPass::Sky);
+    draw_sky(inverse_sky_view_projection, environment, quality_settings);
+    end_gpu_pass(GpuTimedPass::Sky);
 
     if (has_visible_water) {
+        begin_gpu_pass(GpuTimedPass::Water);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, final_target_framebuffer);
         glBlitFramebuffer(
@@ -2627,10 +2942,12 @@ void Renderer::render_frame(World& world,
                 visible_chunk.mesh->water_index_count,
                 GL_UNSIGNED_INT,
                 reinterpret_cast<const void*>(static_cast<std::uintptr_t>(visible_chunk.mesh->water_index_offset_bytes)));
+            record_triangle_draw(visible_chunk.mesh->water_index_count);
         }
 
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
+        end_gpu_pass(GpuTimedPass::Water);
     }
 
     draw_block_break_overlay(player);
@@ -2639,12 +2956,13 @@ void Renderer::render_frame(World& world,
         draw_player_viewmodel(
             player,
             resolve_viewmodel_held_item(inventory_menu, hotbar),
-            viewmodel_projection * player.view_matrix(),
+            viewmodel_projection * view,
             light_view_projection,
             eye,
             environment);
     }
 
+    begin_gpu_pass(GpuTimedPass::PostProcess);
     if (menu_preview_visible) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         run_menu_background_pass(render_width, render_height);
@@ -2669,7 +2987,9 @@ void Renderer::render_frame(World& world,
     } else {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
+    end_gpu_pass(GpuTimedPass::PostProcess);
 
+    begin_gpu_pass(GpuTimedPass::Ui);
     if (main_menu.visible) {
         draw_main_menu(main_menu, width, height);
     } else if (save_slot_menu.visible) {
@@ -2684,13 +3004,23 @@ void Renderer::render_frame(World& world,
         draw_inventory_menu(inventory_menu, hotbar, width, height);
     } else {
         draw_hotbar(player, hotbar, progression, environment, width, height);
+        draw_maritime_hud(maritime_hud, width, height);
         draw_crosshair();
         draw_gameplay_announcement(gameplay_announcement, width, height);
     }
     if (confirm_dialog.visible) {
         draw_confirm_dialog(confirm_dialog, width, height);
     }
+    end_gpu_pass(GpuTimedPass::Ui);
+    end_gpu_frame();
     frame_stats.world_ms = std::chrono::duration<double, std::milli>(clock::now() - world_start).count();
+    frame_stats.draw_calls = frame_draw_calls_;
+    frame_stats.triangles = frame_triangles_;
+    frame_stats.uploaded_bytes = frame_uploaded_bytes_;
+    if (options_.collect_detailed_stats) {
+        frame_stats.gpu_buffer_bytes = estimate_gpu_buffer_bytes();
+        frame_stats.gpu_texture_bytes = estimate_gpu_texture_bytes();
+    }
     last_frame_stats_ = frame_stats;
 }
 
@@ -2699,26 +3029,53 @@ void Renderer::render_loading_screen(std::string_view title,
                                      float progress,
                                      int width,
                                      int height) {
+    LoadingScreenView view {};
+    view.title = title;
+    view.detail = detail;
+    view.progress = progress;
+    render_loading_screen(view, width, height);
+}
+
+void Renderer::render_loading_screen(const LoadingScreenView& view, int width, int height) {
     if (!initialized_ || width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
         return;
     }
 
-    const auto viewport_width = static_cast<float>(width);
-    const auto viewport_height = static_cast<float>(height);
-    const auto clamped_progress = std::clamp(progress, 0.0F, 1.0F);
-    const auto panel_width = std::clamp(viewport_width * 0.44F, 420.0F, 760.0F);
-    const auto panel_height = std::clamp(viewport_height * 0.27F, 190.0F, 280.0F);
-    const auto panel_x = (viewport_width - panel_width) * 0.5F;
-    const auto panel_y = (viewport_height - panel_height) * 0.5F;
-    const auto padding = std::clamp(panel_width * 0.06F, 24.0F, 42.0F);
-    const auto title_pixel_size = std::floor(std::clamp(viewport_width * 0.0050F, 5.0F, 8.0F));
-    const auto detail_pixel_size = std::floor(std::clamp(viewport_width * 0.0020F, 2.0F, 4.0F));
-    const auto percent_pixel_size = std::max(3.0F, detail_pixel_size);
+    const auto layout = make_loading_screen_layout(view.theme, width, height);
+    const auto viewport_width = layout.viewport_width;
+    const auto viewport_height = layout.viewport_height;
+    const auto clamped_progress = std::isfinite(view.progress) ? std::clamp(view.progress, 0.0F, 1.0F) : 0.0F;
+    const auto animation_phase = std::isfinite(view.animation_phase)
+                                     ? view.animation_phase - std::floor(view.animation_phase)
+                                     : 0.0F;
+    const auto title_text = view.title.empty() ? std::string_view("VALCRAFT") : view.title;
+    const auto detail_text = view.detail.empty() ? std::string_view("CHARGEMENT DU MONDE") : view.detail;
+    auto& vertices = loading_vertices_scratch_;
+    vertices.clear();
+    if (vertices.capacity() < 32768U) {
+        vertices.reserve(32768U);
+    }
 
-    std::vector<HudVertex> vertices {};
-    vertices.reserve(8192U);
+    const auto fitted_pixel_size = [](std::string_view text, float preferred, float maximum_width) {
+        const auto unit_width = measure_pixel_text(text, 1.0F);
+        if (unit_width <= 0.0F) {
+            return std::max(1.0F, preferred);
+        }
+        return std::max(1.0F, std::floor(std::min(preferred, maximum_width / unit_width)));
+    };
+    const auto title_pixel_size = fitted_pixel_size(title_text, layout.title_pixel_size, layout.content_width - 24.0F);
+    const auto detail_pixel_size = fitted_pixel_size(detail_text, layout.detail_pixel_size, layout.content_width - 24.0F);
+    const auto percent_pixel_size = std::max(2.0F, layout.detail_pixel_size);
 
-    const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+    const auto draw_text = [&](float x,
+                               float y,
+                               float pixel_size,
+                               std::string_view text,
+                               const HudColor& color,
+                               bool centered = false) {
+        if (text.empty() || color[3] <= 0.0F) {
+            return;
+        }
         append_pixel_text(
             vertices,
             viewport_width,
@@ -2727,7 +3084,7 @@ void Renderer::render_loading_screen(std::string_view title,
             y + pixel_size,
             pixel_size,
             text,
-            {0.0F, 0.0F, 0.0F, 0.45F},
+            {0.0F, 0.0F, 0.0F, color[3] * 0.48F},
             centered);
         append_pixel_text(
             vertices,
@@ -2741,101 +3098,189 @@ void Renderer::render_loading_screen(std::string_view title,
             centered);
     };
 
-    append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.04F, 0.05F, 0.06F, 1.0F});
-    append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height * 0.36F, {0.07F, 0.08F, 0.09F, 0.72F});
-    append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, viewport_height * 0.64F, viewport_width, viewport_height * 0.36F, {0.02F, 0.03F, 0.04F, 0.84F});
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        viewport_width * 0.16F,
-        panel_y - 36.0F,
-        viewport_width * 0.68F,
-        panel_height + 72.0F,
-        {0.88F, 0.70F, 0.32F, 0.05F});
+    if (view.theme == LoadingScreenTheme::Maritime) {
+        // Je construis le decor maritime avec des primitives deja presentes dans le HUD.
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.024F, 0.094F, 0.153F, 1.0F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, viewport_height * 0.18F, viewport_width, viewport_height * 0.34F, {0.035F, 0.176F, 0.250F, 0.52F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, layout.horizon_y - viewport_height * 0.06F, viewport_width, viewport_height * 0.12F, {0.36F, 0.53F, 0.55F, 0.12F});
 
-    append_hud_shadow_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        panel_x,
-        panel_y,
-        panel_width,
-        panel_height,
-        28.0F,
-        {0.0F, 0.0F, 0.0F, 0.28F});
+        constexpr std::array<std::array<float, 2>, 14> kStars {{
+            {{0.08F, 0.13F}}, {{0.16F, 0.24F}}, {{0.24F, 0.09F}}, {{0.32F, 0.19F}},
+            {{0.41F, 0.12F}}, {{0.49F, 0.27F}}, {{0.57F, 0.08F}}, {{0.64F, 0.22F}},
+            {{0.72F, 0.14F}}, {{0.79F, 0.28F}}, {{0.86F, 0.10F}}, {{0.92F, 0.21F}},
+            {{0.37F, 0.30F}}, {{0.68F, 0.32F}},
+        }};
+        for (std::size_t index = 0; index < kStars.size(); ++index) {
+            const auto twinkle = 0.38F + 0.30F * std::sin(
+                animation_phase * 6.2831853F + static_cast<float>(index) * 1.73F);
+            const auto star_size = index % 3U == 0U ? 2.0F : 1.0F;
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                kStars[index][0] * viewport_width,
+                kStars[index][1] * viewport_height,
+                star_size,
+                star_size,
+                {0.90F, 0.90F, 0.78F, std::clamp(twinkle, 0.10F, 0.72F)});
+        }
+
+        const auto moon_size = std::clamp(std::min(viewport_width, viewport_height) * 0.036F, 14.0F, 44.0F);
+        const auto moon_x = viewport_width * 0.80F;
+        const auto moon_y = viewport_height * 0.13F;
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, moon_x, moon_y + moon_size * 0.18F, moon_size, moon_size * 0.64F, {0.88F, 0.79F, 0.58F, 0.32F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, moon_x + moon_size * 0.18F, moon_y, moon_size * 0.64F, moon_size, {0.94F, 0.86F, 0.64F, 0.32F});
+
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, layout.horizon_y, viewport_width, viewport_height - layout.horizon_y, {0.025F, 0.225F, 0.290F, 1.0F});
+
+        const auto ship_unit = std::clamp(std::min(viewport_width, viewport_height) * 0.012F, 3.0F, 12.0F);
+        const auto ship_center_x = viewport_width * 0.5F;
+        const auto ship_hull_y = layout.horizon_y - ship_unit * 0.25F;
+        const auto silhouette = HudColor {0.015F, 0.050F, 0.070F, 0.98F};
+        const auto sail_color = HudColor {0.035F, 0.090F, 0.105F, 0.94F};
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 6.8F, ship_hull_y, ship_unit * 13.6F, ship_unit, silhouette);
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 5.9F, ship_hull_y + ship_unit, ship_unit * 11.8F, ship_unit, silhouette);
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 4.6F, ship_hull_y + ship_unit * 2.0F, ship_unit * 9.2F, ship_unit * 0.8F, silhouette);
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x + ship_unit * 6.5F, ship_hull_y - ship_unit * 0.42F, ship_unit * 2.0F, ship_unit * 0.24F, silhouette);
+
+        // Je sépare nettement les trois gréements pour garder la silhouette lisible même en petite résolution.
+        const auto append_square_rig = [&](float mast_offset,
+                                           float mast_height,
+                                           float yard_height,
+                                           float sail_width,
+                                           int sail_steps) {
+            const auto mast_x = ship_center_x + ship_unit * mast_offset;
+            const auto mast_width = std::max(1.0F, ship_unit * 0.28F);
+            const auto yard_thickness = std::max(1.0F, ship_unit * 0.22F);
+            for (int step = 0; step < sail_steps; ++step) {
+                const auto progress = sail_steps > 1
+                                          ? static_cast<float>(step) / static_cast<float>(sail_steps - 1)
+                                          : 1.0F;
+                const auto row_width = ship_unit * sail_width * (0.30F + progress * 0.70F);
+                append_hud_rect_top_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    mast_x - row_width * 0.5F,
+                    ship_hull_y - ship_unit * yard_height + ship_unit * (0.45F + static_cast<float>(step) * 0.68F),
+                    row_width,
+                    ship_unit * 0.62F,
+                    sail_color);
+            }
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                mast_x - mast_width * 0.5F,
+                ship_hull_y - ship_unit * mast_height,
+                mast_width,
+                ship_unit * (mast_height + 0.2F),
+                silhouette);
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                mast_x - ship_unit * sail_width * 0.58F,
+                ship_hull_y - ship_unit * yard_height,
+                ship_unit * sail_width * 1.16F,
+                yard_thickness,
+                silhouette);
+        };
+        append_square_rig(-3.8F, 7.1F, 6.2F, 3.0F, 6);
+        append_square_rig(0.0F, 9.2F, 8.0F, 3.7F, 8);
+        append_square_rig(3.8F, 7.5F, 6.5F, 2.8F, 6);
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 0.14F, ship_hull_y - ship_unit * 9.7F, ship_unit * 2.4F, ship_unit * 0.55F, {0.72F, 0.51F, 0.21F, 0.82F});
+
+        const auto append_wave_layer = [&](float baseline, float amplitude, float segment_width, float phase_offset, const HudColor& color) {
+            const auto segment_count = static_cast<int>(std::ceil(viewport_width / segment_width)) + 2;
+            for (int segment = -1; segment < segment_count; ++segment) {
+                const auto segment_value = static_cast<float>(segment);
+                const auto wave = std::sin(segment_value * 0.72F + animation_phase * 6.2831853F + phase_offset);
+                const auto y = baseline + wave * amplitude;
+                append_hud_rect_top_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    segment_value * segment_width,
+                    y,
+                    segment_width + 1.0F,
+                    std::max(0.0F, viewport_height - y),
+                    color);
+            }
+        };
+        append_wave_layer(layout.horizon_y + ship_unit * 1.2F, ship_unit * 0.65F, ship_unit * 2.4F, 1.8F, {0.025F, 0.300F, 0.355F, 0.96F});
+        append_wave_layer(layout.horizon_y + ship_unit * 2.2F, ship_unit * 0.85F, ship_unit * 2.8F, 3.9F, {0.018F, 0.235F, 0.310F, 0.98F});
+    } else {
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.04F, 0.05F, 0.06F, 1.0F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height * 0.36F, {0.07F, 0.08F, 0.09F, 0.72F});
+        append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, viewport_height * 0.64F, viewport_width, viewport_height * 0.36F, {0.02F, 0.03F, 0.04F, 0.84F});
+    }
+
+    const auto panel_palette = view.theme == LoadingScreenTheme::Maritime
+                                   ? HudPanelPalette {
+                                         {0.025F, 0.145F, 0.195F, 0.98F},
+                                         {0.018F, 0.075F, 0.110F, 0.91F},
+                                         {0.29F, 0.62F, 0.68F, 0.20F},
+                                         {0.005F, 0.020F, 0.035F, 0.72F},
+                                         {0.84F, 0.68F, 0.36F, 0.28F},
+                                     }
+                                   : make_stone_panel_palette();
     append_stylized_panel_top_left(
         vertices,
         viewport_width,
         viewport_height,
-        panel_x,
-        panel_y,
-        panel_width,
-        panel_height,
-        5.0F,
-        make_stone_panel_palette(),
+        layout.content_x,
+        layout.panel_y,
+        layout.content_width,
+        layout.panel_height,
+        view.theme == LoadingScreenTheme::Maritime ? 3.0F : 5.0F,
+        panel_palette,
         false);
 
-    const auto header_height = std::clamp(panel_height * 0.34F, 58.0F, 84.0F);
-    append_stylized_panel_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        panel_x + 12.0F,
-        panel_y + 12.0F,
-        panel_width - 24.0F,
-        header_height,
-        4.0F,
-        make_header_panel_palette(),
-        false);
-
-    const auto title_text = title.empty() ? std::string_view("VALCRAFT") : title;
     draw_text(
-        panel_x + panel_width * 0.5F,
-        panel_y + 24.0F,
+        viewport_width * 0.5F,
+        layout.title_y,
         title_pixel_size,
         title_text,
-        {0.98F, 0.95F, 0.88F, 1.0F},
+        view.theme == LoadingScreenTheme::Maritime
+            ? HudColor {0.96F, 0.92F, 0.80F, 1.0F}
+            : HudColor {0.98F, 0.95F, 0.88F, 1.0F},
         true);
     draw_text(
-        panel_x + panel_width * 0.5F,
-        panel_y + 24.0F + title_pixel_size * 7.0F + 6.0F,
+        viewport_width * 0.5F,
+        layout.detail_y,
         detail_pixel_size,
-        detail.empty() ? std::string_view("CHARGEMENT DU MONDE") : detail,
-        {0.84F, 0.86F, 0.90F, 0.96F},
+        detail_text,
+        view.theme == LoadingScreenTheme::Maritime
+            ? HudColor {0.67F, 0.84F, 0.85F, 0.96F}
+            : HudColor {0.84F, 0.86F, 0.90F, 0.96F},
         true);
 
-    const auto track_x = panel_x + padding;
-    const auto track_y = panel_y + header_height + 34.0F;
-    const auto track_width = panel_width - padding * 2.0F;
-    const auto track_height = std::clamp(panel_height * 0.19F, 24.0F, 36.0F);
-    const auto track_inner_x = track_x + 10.0F;
-    const auto track_inner_y = track_y + 10.0F;
-    const auto track_inner_width = std::max(0.0F, track_width - 20.0F);
-    const auto track_inner_height = std::max(0.0F, track_height - 20.0F);
+    const auto track_border = std::clamp(layout.track_height * 0.22F, 3.0F, 7.0F);
+    const auto track_inner_x = layout.track_x + track_border;
+    const auto track_inner_y = layout.track_y + track_border;
+    const auto track_inner_width = std::max(0.0F, layout.track_width - track_border * 2.0F);
+    const auto track_inner_height = std::max(0.0F, layout.track_height - track_border * 2.0F);
     const auto fill_width = track_inner_width * clamped_progress;
-    const auto accent = HudColor {0.94F, 0.76F, 0.32F, 1.0F};
+    const auto accent = view.theme == LoadingScreenTheme::Maritime
+                            ? HudColor {0.84F, 0.68F, 0.36F, 1.0F}
+                            : HudColor {0.94F, 0.76F, 0.32F, 1.0F};
 
-    append_stylized_panel_top_left(
+    append_hud_frame_top_left(
         vertices,
         viewport_width,
         viewport_height,
-        track_x,
-        track_y,
-        track_width,
-        track_height,
-        3.0F,
-        make_slate_panel_palette(),
-        true);
-    append_hud_rect_top_left(
-        vertices,
-        viewport_width,
-        viewport_height,
-        track_inner_x,
-        track_inner_y,
-        track_inner_width,
-        track_inner_height,
-        {0.08F, 0.10F, 0.12F, 0.88F});
+        layout.track_x,
+        layout.track_y,
+        layout.track_width,
+        layout.track_height,
+        track_border,
+        view.theme == LoadingScreenTheme::Maritime
+            ? HudColor {0.52F, 0.43F, 0.26F, 0.88F}
+            : HudColor {0.08F, 0.09F, 0.10F, 0.98F},
+        view.theme == LoadingScreenTheme::Maritime
+            ? HudColor {0.012F, 0.055F, 0.078F, 0.96F}
+            : HudColor {0.08F, 0.10F, 0.12F, 0.88F});
     if (fill_width > 0.0F) {
         append_hud_rect_top_left(
             vertices,
@@ -2855,39 +3300,106 @@ void Renderer::render_loading_screen(std::string_view title,
             fill_width,
             std::max(2.0F, track_inner_height * 0.36F),
             hud_with_alpha(hud_scale_rgb(accent, 1.18F), 0.42F));
-        append_hud_rect_top_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            track_inner_x + std::max(0.0F, fill_width - 6.0F),
-            track_inner_y,
-            6.0F,
-            track_inner_height,
-            hud_with_alpha(hud_scale_rgb(accent, 1.24F), 0.76F));
+
+        const auto shine_width = std::clamp(track_inner_width * 0.08F, 10.0F, 42.0F);
+        const auto desired_shine_x = track_inner_x - shine_width +
+                                     (track_inner_width + shine_width) * animation_phase;
+        const auto shine_x = std::max(track_inner_x, desired_shine_x);
+        const auto shine_right = std::min(track_inner_x + fill_width, desired_shine_x + shine_width);
+        if (shine_right > shine_x) {
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                shine_x,
+                track_inner_y,
+                shine_right - shine_x,
+                track_inner_height,
+                hud_with_alpha(hud_scale_rgb(accent, 1.28F), 0.42F));
+        }
     }
 
-    std::string percent_text = std::to_string(static_cast<int>(std::lround(clamped_progress * 100.0F)));
-    percent_text += " %";
+    std::array<char, 8> percent_buffer {};
+    const auto percent = static_cast<int>(std::lround(clamped_progress * 100.0F));
+    const auto percent_result = std::to_chars(percent_buffer.data(), percent_buffer.data() + percent_buffer.size() - 2, percent);
+    auto percent_end = percent_result.ptr;
+    if (percent_result.ec == std::errc {} && percent_end + 2 <= percent_buffer.data() + percent_buffer.size()) {
+        *percent_end = ' ';
+        ++percent_end;
+        *percent_end = '%';
+        ++percent_end;
+    }
+    const auto percent_text = std::string_view(
+        percent_buffer.data(),
+        static_cast<std::size_t>(percent_end - percent_buffer.data()));
     draw_text(
-        panel_x + panel_width * 0.5F,
-        track_y + track_height + 18.0F,
+        viewport_width * 0.5F,
+        layout.track_y + std::max(1.0F, (layout.track_height - percent_pixel_size * 7.0F) * 0.5F),
         percent_pixel_size,
         percent_text,
         {0.96F, 0.97F, 0.99F, 0.98F},
         true);
-    draw_text(
-        panel_x + panel_width * 0.5F,
-        track_y + track_height + 18.0F + percent_pixel_size * 7.0F + 6.0F,
-        detail_pixel_size,
-        "PREPARATION EN COURS",
-        {0.76F, 0.79F, 0.84F, 0.90F},
-        true);
+
+    if (view.theme == LoadingScreenTheme::Maritime) {
+        auto current_quote = view.current_quote;
+        auto next_quote = view.next_quote;
+        if (current_quote.line1.empty() && current_quote.line2.empty()) {
+            const auto quotes = maritime_loading_quotes();
+            if (!quotes.empty()) {
+                current_quote = quotes.front();
+            }
+        }
+        if (next_quote.line1.empty() && next_quote.line2.empty()) {
+            next_quote = current_quote;
+        }
+        const auto quote_blend = std::isfinite(view.quote_blend)
+                                     ? std::clamp(view.quote_blend, 0.0F, 1.0F)
+                                     : 0.0F;
+        const auto quote_pixel_size = std::min(
+            fitted_pixel_size(current_quote.line1, layout.quote_pixel_size, layout.content_width - 36.0F),
+            fitted_pixel_size(current_quote.line2, layout.quote_pixel_size, layout.content_width - 36.0F));
+        const auto draw_quote = [&](const LoadingQuoteView& quote, float alpha) {
+            if (alpha <= 0.0F) {
+                return;
+            }
+            const auto quote_color = HudColor {0.89F, 0.91F, 0.86F, 0.88F * alpha};
+            draw_text(viewport_width * 0.5F, layout.quote_y, quote_pixel_size, quote.line1, quote_color, true);
+            draw_text(viewport_width * 0.5F, layout.quote_y + quote_pixel_size * 9.0F, quote_pixel_size, quote.line2, quote_color, true);
+            const auto author_pixel_size = fitted_pixel_size(
+                quote.author,
+                std::max(1.0F, quote_pixel_size),
+                layout.content_width - 36.0F);
+            draw_text(
+                viewport_width * 0.5F,
+                layout.author_y,
+                author_pixel_size,
+                quote.author,
+                {0.84F, 0.68F, 0.36F, 0.92F * alpha},
+                true);
+        };
+        draw_quote(current_quote, 1.0F - quote_blend);
+        if (next_quote != current_quote) {
+            draw_quote(next_quote, quote_blend);
+        }
+    } else {
+        draw_text(
+            viewport_width * 0.5F,
+            layout.quote_y,
+            detail_pixel_size,
+            "PREPARATION EN COURS",
+            {0.76F, 0.79F, 0.84F, 0.90F},
+            true);
+    }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, std::max(width, 1), std::max(height, 1));
     glDisable(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
-    glClearColor(0.04F, 0.05F, 0.06F, 1.0F);
+    if (view.theme == LoadingScreenTheme::Maritime) {
+        glClearColor(0.024F, 0.094F, 0.153F, 1.0F);
+    } else {
+        glClearColor(0.04F, 0.05F, 0.06F, 1.0F);
+    }
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glEnable(GL_BLEND);
@@ -2907,15 +3419,396 @@ auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
     return last_frame_stats_;
 }
 
+void Renderer::create_gpu_timers() {
+    gpu_timers_supported_ = GLAD_GL_VERSION_3_3 != 0 &&
+                            glGenQueries != nullptr &&
+                            glDeleteQueries != nullptr &&
+                            glBeginQuery != nullptr &&
+                            glEndQuery != nullptr &&
+                            glGetQueryObjectiv != nullptr &&
+                            glGetQueryObjectui64v != nullptr;
+    if (!gpu_timers_supported_) {
+        return;
+    }
+
+    for (auto& frame : gpu_query_frames_) {
+        glGenQueries(static_cast<GLsizei>(frame.queries.size()), frame.queries.data());
+        frame.issued.fill(false);
+        frame.pending = false;
+    }
+}
+
+void Renderer::destroy_gpu_timers() {
+    if (gpu_timers_supported_ && glDeleteQueries != nullptr) {
+        for (auto& frame : gpu_query_frames_) {
+            glDeleteQueries(static_cast<GLsizei>(frame.queries.size()), frame.queries.data());
+        }
+    }
+    gpu_query_frames_ = {};
+    active_gpu_query_frame_ = -1;
+    active_gpu_pass_ = -1;
+    gpu_timers_supported_ = false;
+}
+
+void Renderer::begin_gpu_frame(RendererFrameStats& frame_stats) {
+    active_gpu_query_frame_ = -1;
+    active_gpu_pass_ = -1;
+    if (!gpu_timers_supported_) {
+        frame_stats.gpu = {};
+        return;
+    }
+
+    RendererGpuTimings newest_resolved {};
+    for (auto& query_frame : gpu_query_frames_) {
+        if (!query_frame.pending) {
+            continue;
+        }
+
+        auto all_available = true;
+        for (std::size_t pass_index = 0; pass_index < kGpuTimedPassCount; ++pass_index) {
+            if (!query_frame.issued[pass_index]) {
+                continue;
+            }
+            GLint available = GL_FALSE;
+            glGetQueryObjectiv(query_frame.queries[pass_index], GL_QUERY_RESULT_AVAILABLE, &available);
+            if (available != GL_TRUE) {
+                all_available = false;
+                break;
+            }
+        }
+        if (!all_available) {
+            continue;
+        }
+
+        RendererGpuTimings resolved {};
+        resolved.valid = true;
+        resolved.source_frame = query_frame.frame_index;
+        const auto latency = gpu_frame_index_ >= query_frame.frame_index ? gpu_frame_index_ - query_frame.frame_index : 0U;
+        resolved.latency_frames = static_cast<std::uint32_t>(std::min<std::uint64_t>(latency, UINT32_MAX));
+        for (std::size_t pass_index = 0; pass_index < kGpuTimedPassCount; ++pass_index) {
+            if (!query_frame.issued[pass_index]) {
+                continue;
+            }
+
+            GLuint64 elapsed_nanoseconds = 0;
+            glGetQueryObjectui64v(query_frame.queries[pass_index], GL_QUERY_RESULT, &elapsed_nanoseconds);
+            const auto elapsed_ms = gpu_elapsed_nanoseconds_to_milliseconds(elapsed_nanoseconds);
+            switch (static_cast<GpuTimedPass>(pass_index)) {
+            case GpuTimedPass::Shadow:
+                resolved.shadow_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::Opaque:
+                resolved.opaque_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::Sky:
+                resolved.sky_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::Entities:
+                resolved.entities_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::Water:
+                resolved.water_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::PostProcess:
+                resolved.post_process_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::Ui:
+                resolved.ui_ms = elapsed_ms;
+                break;
+            case GpuTimedPass::Count:
+                break;
+            }
+        }
+
+        if (!last_gpu_timings_.valid || resolved.source_frame >= last_gpu_timings_.source_frame) {
+            last_gpu_timings_ = resolved;
+        }
+        if (!newest_resolved.valid || resolved.source_frame >= newest_resolved.source_frame) {
+            newest_resolved = resolved;
+        }
+        query_frame.pending = false;
+        query_frame.issued.fill(false);
+    }
+
+    // Je publie uniquement un résultat fraîchement résolu pour ne pas biaiser les agrégats de télémétrie.
+    frame_stats.gpu = newest_resolved;
+    for (std::size_t frame_index = 0; frame_index < gpu_query_frames_.size(); ++frame_index) {
+        if (!gpu_query_frames_[frame_index].pending) {
+            active_gpu_query_frame_ = static_cast<int>(frame_index);
+            auto& query_frame = gpu_query_frames_[frame_index];
+            query_frame.frame_index = gpu_frame_index_;
+            query_frame.issued.fill(false);
+            break;
+        }
+    }
+}
+
+void Renderer::end_gpu_frame() {
+    if (active_gpu_pass_ >= 0) {
+        glEndQuery(GL_TIME_ELAPSED);
+        active_gpu_pass_ = -1;
+    }
+    if (active_gpu_query_frame_ >= 0) {
+        auto& query_frame = gpu_query_frames_[static_cast<std::size_t>(active_gpu_query_frame_)];
+        query_frame.pending = std::any_of(query_frame.issued.begin(), query_frame.issued.end(), [](bool issued) {
+            return issued;
+        });
+    }
+    active_gpu_query_frame_ = -1;
+    ++gpu_frame_index_;
+}
+
+void Renderer::begin_gpu_pass(GpuTimedPass pass) {
+    if (active_gpu_query_frame_ < 0 || active_gpu_pass_ >= 0) {
+        return;
+    }
+    const auto pass_index = static_cast<std::size_t>(pass);
+    auto& query_frame = gpu_query_frames_[static_cast<std::size_t>(active_gpu_query_frame_)];
+    glBeginQuery(GL_TIME_ELAPSED, query_frame.queries[pass_index]);
+    query_frame.issued[pass_index] = true;
+    active_gpu_pass_ = static_cast<int>(pass_index);
+}
+
+void Renderer::end_gpu_pass(GpuTimedPass pass) {
+    if (active_gpu_pass_ != static_cast<int>(pass)) {
+        return;
+    }
+    glEndQuery(GL_TIME_ELAPSED);
+    active_gpu_pass_ = -1;
+}
+
+void Renderer::record_triangle_draw(GLsizei index_or_vertex_count, GLsizei instance_count) noexcept {
+    ++frame_draw_calls_;
+    if (index_or_vertex_count <= 0 || instance_count <= 0) {
+        return;
+    }
+    const auto triangle_count = static_cast<std::uint64_t>(index_or_vertex_count / 3);
+    frame_triangles_ += triangle_count * static_cast<std::uint64_t>(instance_count);
+}
+
+void Renderer::record_draw_call() noexcept {
+    ++frame_draw_calls_;
+}
+
+auto Renderer::estimate_gpu_buffer_bytes() const noexcept -> std::uint64_t {
+    auto total = std::uint64_t {0};
+    const auto add_mesh = [&total](const GpuMesh& mesh) {
+        total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(mesh.vertex_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(mesh.index_buffer_bytes, 0));
+    };
+    for (const auto& [coord, mesh] : gpu_meshes_) {
+        static_cast<void>(coord);
+        add_mesh(mesh);
+    }
+    add_mesh(block_break_overlay_mesh_);
+    add_mesh(ship_gpu_mesh_);
+
+    if (creature_vbo_ != 0) {
+        total += sizeof(BoxTemplateVertex) * kCreatureVerticesPerBox;
+    }
+    if (creature_ebo_ != 0) {
+        total += sizeof(std::uint32_t) * kCreatureIndicesPerBox;
+    }
+    if (item_drop_vbo_ != 0) {
+        total += sizeof(BoxTemplateVertex) * kCreatureVerticesPerBox;
+    }
+    if (item_drop_ebo_ != 0) {
+        total += sizeof(std::uint32_t) * kCreatureIndicesPerBox;
+    }
+    if (creature_instance_vbo_ != 0) {
+        total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(creature_instance_buffer_bytes_, 0));
+    }
+    if (viewmodel_instance_vbo_ != 0) {
+        total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(viewmodel_instance_buffer_bytes_, 0));
+    }
+    if (item_drop_instance_vbo_ != 0) {
+        total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(item_drop_instance_buffer_bytes_, 0));
+    }
+    if (hud_vbo_ != 0) {
+        total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(hud_vertex_buffer_bytes_, 0));
+    }
+    if (crosshair_vbo_ != 0) {
+        total += sizeof(float) * 8U;
+    }
+    return total;
+}
+
+auto Renderer::estimate_gpu_texture_bytes() const noexcept -> std::uint64_t {
+    auto total = std::uint64_t {0};
+    const auto image_bytes = [](int width, int height, std::uint64_t bytes_per_pixel) {
+        return static_cast<std::uint64_t>(std::max(width, 0)) *
+               static_cast<std::uint64_t>(std::max(height, 0)) * bytes_per_pixel;
+    };
+    if (atlas_texture_ != 0) {
+        total += image_bytes(kBlockAtlasSize, kBlockAtlasSize, 4U);
+    }
+    if (accent_texture_ != 0) {
+        total += image_bytes(kAccentAtlasSize, kAccentAtlasSize, 4U);
+    }
+    if (creature_atlas_texture_ != 0) {
+        total += image_bytes(kCreatureAtlasSize, kCreatureAtlasSize, 4U);
+    }
+    if (player_atlas_texture_ != 0) {
+        total += image_bytes(kPlayerAtlasSize, kPlayerAtlasSize, 4U);
+    }
+    if (shadow_map_ != 0) {
+        const auto size = options_.shadows_enabled ? std::max(options_.shadow_map_size, 1) : 1;
+        total += image_bytes(size, size, 4U);
+    }
+    if (scene_fallback_color_texture_ != 0) {
+        total += 4U;
+    }
+    if (scene_fallback_depth_texture_ != 0) {
+        total += 4U;
+    }
+    if (water_scene_color_texture_ != 0) {
+        total += image_bytes(
+            water_scene_target_width_,
+            water_scene_target_height_,
+            color_target_bytes_per_pixel(water_scene_color_internal_format_));
+    }
+    if (water_scene_depth_texture_ != 0) {
+        total += image_bytes(water_scene_target_width_, water_scene_target_height_, 4U);
+    }
+    if (scene_color_texture_ != 0) {
+        total += image_bytes(
+            scene_target_width_,
+            scene_target_height_,
+            color_target_bytes_per_pixel(scene_color_internal_format_));
+    }
+    if (scene_depth_texture_ != 0) {
+        total += image_bytes(scene_target_width_, scene_target_height_, 4U);
+    }
+    if (glow_extract_texture_ != 0) {
+        total += image_bytes(
+            glow_target_width_,
+            glow_target_height_,
+            color_target_bytes_per_pixel(glow_color_internal_format_));
+    }
+    if (glow_ping_texture_ != 0) {
+        total += image_bytes(
+            glow_target_width_,
+            glow_target_height_,
+            color_target_bytes_per_pixel(glow_color_internal_format_));
+    }
+    return total;
+}
+
 void Renderer::drain_pending_world_meshes(World& world, std::size_t max_events, double max_ms) {
     RendererFrameStats ignored_stats {};
     sync_gpu_meshes(world, ignored_stats, max_events, max_ms);
 }
 
+void Renderer::begin_world_resource_reset() {
+    if (world_resource_reset_progress_.active()) {
+        return;
+    }
+
+    // Je rends immediatement l'ancien monde invisible, puis je libere ses objets GPU par tranches.
+    const auto overlay_has_resources = block_break_overlay_mesh_.vao != 0U ||
+                                       block_break_overlay_mesh_.vbo != 0U ||
+                                       block_break_overlay_mesh_.ebo != 0U ||
+                                       block_break_overlay_mesh_.revision != 0U ||
+                                       block_break_overlay_mesh_.opaque_index_count > 0 ||
+                                       block_break_overlay_mesh_.water_index_count > 0;
+    const auto required_queue_capacity = gpu_meshes_.size() + (overlay_has_resources ? 1U : 0U);
+    world_resource_reset_queue_.clear();
+    if (world_resource_reset_queue_.capacity() < required_queue_capacity) {
+        world_resource_reset_queue_.reserve(required_queue_capacity);
+    }
+    for (auto& [coord, mesh] : gpu_meshes_) {
+        static_cast<void>(coord);
+        world_resource_reset_queue_.push_back(mesh);
+        mesh = {};
+    }
+    gpu_meshes_.clear();
+    visible_chunks_cache_.clear();
+    shadow_chunks_cache_.clear();
+    chunk_upload_scratch_.vertices.clear();
+    chunk_upload_scratch_.indices.clear();
+    chunk_upload_scratch_.water_vertices.clear();
+    chunk_upload_scratch_.water_indices.clear();
+    chunk_upload_scratch_.face_count = 0U;
+    chunk_upload_scratch_.water_face_count = 0U;
+    block_break_overlay_scratch_.vertices.clear();
+    block_break_overlay_scratch_.indices.clear();
+    block_break_overlay_scratch_.water_vertices.clear();
+    block_break_overlay_scratch_.water_indices.clear();
+    block_break_overlay_scratch_.face_count = 0U;
+    block_break_overlay_scratch_.water_face_count = 0U;
+    translated_water_indices_scratch_.clear();
+    last_frame_stats_.uploaded_meshes = 0U;
+    last_frame_stats_.visible_chunks = 0U;
+    last_frame_stats_.shadow_chunks = 0U;
+    last_frame_stats_.world_chunks = 0U;
+
+    if (overlay_has_resources) {
+        world_resource_reset_queue_.push_back(block_break_overlay_mesh_);
+    }
+    block_break_overlay_mesh_ = {};
+    world_resource_reset_progress_.begin(world_resource_reset_queue_.size(), false);
+}
+
+auto Renderer::process_world_resource_reset(std::size_t max_events, double max_ms) -> bool {
+    using clock = std::chrono::steady_clock;
+
+    if (!world_resource_reset_progress_.active()) {
+        return true;
+    }
+    if (max_events == 0U) {
+        return false;
+    }
+
+    const auto time_limited = std::isfinite(max_ms);
+    const auto deadline = time_limited
+                              ? clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms))
+                              : clock::time_point::max();
+    std::size_t processed_events = 0U;
+    while (processed_events < max_events && clock::now() < deadline) {
+        if (!world_resource_reset_queue_.empty()) {
+            auto& mesh = world_resource_reset_queue_.back();
+            if (gl_api_ready_) {
+                destroy_gpu_mesh(mesh);
+            }
+            world_resource_reset_queue_.pop_back();
+            world_resource_reset_progress_.consume_one();
+            ++processed_events;
+            continue;
+        }
+
+        break;
+    }
+
+    if (world_resource_reset_queue_.empty()) {
+        world_resource_reset_progress_.finish();
+    }
+    return world_resource_reset_progress_.complete();
+}
+
+auto Renderer::pending_world_resource_reset_count() const noexcept -> std::size_t {
+    return world_resource_reset_progress_.remaining();
+}
+
+void Renderer::reset_world_resources() {
+    begin_world_resource_reset();
+    while (!process_world_resource_reset(std::numeric_limits<std::size_t>::max(),
+                                         std::numeric_limits<double>::infinity())) {
+        // Je draine sans limite uniquement pendant l'arret complet du renderer.
+    }
+}
+
+auto Renderer::world_mesh_uploaded(const ChunkCoord& coord, std::uint64_t revision) const noexcept -> bool {
+    if (revision == 0U || world_resource_reset_progress_.active()) {
+        return false;
+    }
+    const auto iterator = gpu_meshes_.find(coord);
+    return iterator != gpu_meshes_.end() && iterator->second.revision == revision;
+}
+
 void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, std::size_t max_events, double max_ms) {
     using clock = std::chrono::steady_clock;
 
-    if (max_events == 0) {
+    if (max_events == 0 || world_resource_reset_progress_.active()) {
         return;
     }
 
@@ -2940,14 +3833,24 @@ void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, st
             break;
         }
 
-        const auto& records = world.chunk_records();
-        const auto record_iterator = records.find(uploads.front());
-        if (record_iterator == records.end() || record_iterator->second.mesh_revision == 0) {
+        const auto coord = uploads.front();
+        const auto revision = world.mesh_revision(coord);
+        const auto* section_meshes = world.section_meshes_for(coord);
+        if (revision == 0 || section_meshes == nullptr) {
             ++processed_events;
             continue;
         }
 
-        upload_mesh(record_iterator->first, record_iterator->second.mesh, record_iterator->second.mesh_revision);
+        const auto existing_gpu_mesh = gpu_meshes_.find(coord);
+        if (existing_gpu_mesh != gpu_meshes_.end() &&
+            existing_gpu_mesh->second.revision == revision) {
+            // Je conserve les meshes lors d'une reconfiguration et j'ignore les ré-enqueues identiques.
+            ++processed_events;
+            continue;
+        }
+
+        merge_chunk_mesh_sections_into(*section_meshes, chunk_upload_scratch_);
+        upload_mesh(coord, chunk_upload_scratch_, revision);
         ++frame_stats.uploaded_meshes;
         ++processed_events;
     }
@@ -2955,8 +3858,16 @@ void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, st
 
 void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision) {
     auto& gpu_mesh = gpu_meshes_[coord];
+    upload_mesh_data(gpu_mesh, mesh, revision, make_chunk_bounds(coord));
+}
+
+void Renderer::upload_mesh_data(
+    GpuMesh& gpu_mesh,
+    const ChunkMeshData& mesh,
+    std::uint64_t revision,
+    const ChunkBounds& bounds) {
     gpu_mesh.revision = revision;
-    gpu_mesh.bounds = make_chunk_bounds(coord);
+    gpu_mesh.bounds = bounds;
     gpu_mesh.opaque_index_count = 0;
     gpu_mesh.water_index_count = 0;
     gpu_mesh.water_index_offset_bytes = 0;
@@ -3010,15 +3921,16 @@ void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, s
             gpu_mesh.vertex_buffer_bytes,
             vertex_bytes,
             kInitialVertexBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
     }
     if (gpu_mesh.index_buffer_bytes < index_bytes) {
         gpu_mesh.index_buffer_bytes = grow_buffer_capacity(
             gpu_mesh.index_buffer_bytes,
             index_bytes,
             kInitialIndexBufferBytes);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
     }
+
+    orphan_bound_buffer(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, GL_DYNAMIC_DRAW);
+    orphan_bound_buffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, GL_DYNAMIC_DRAW);
 
     if (opaque_vertex_bytes > 0) {
         glBufferSubData(GL_ARRAY_BUFFER, 0, opaque_vertex_bytes, mesh.vertices.data());
@@ -3043,10 +3955,67 @@ void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, s
     gpu_mesh.opaque_index_count = static_cast<GLsizei>(mesh.indices.size());
     gpu_mesh.water_index_count = static_cast<GLsizei>(mesh.water_indices.size());
     gpu_mesh.water_index_offset_bytes = opaque_index_bytes;
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(vertex_bytes, 0));
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(index_bytes, 0));
+}
+
+void Renderer::ensure_ship_mesh(const ShipRenderState& ship) {
+    if (!ship.visible || ship.parts.empty() || ship.geometry_revision == 0U) {
+        return;
+    }
+    if (ship_mesh_ready(ship)) {
+        return;
+    }
+
+    const auto mesh = build_ship_mesh_data(ship.parts);
+    (void)upload_prepared_ship_mesh(ship, mesh);
+}
+
+auto Renderer::upload_prepared_ship_mesh(const ShipRenderState& ship, const ChunkMeshData& mesh) -> bool {
+    if (!initialized_ || !ship.visible || ship.parts.empty() || ship.geometry_revision == 0U ||
+        mesh.vertices.empty() || mesh.indices.empty()) {
+        return false;
+    }
+    if (ship_mesh_ready(ship)) {
+        return true;
+    }
+
+    // Je garde exclusivement l'upload OpenGL sur le thread du renderer. La
+    // construction CPU peut ainsi etre preparee ailleurs sans partager d'etat GL.
+    const ChunkBounds local_bounds {
+        ship.local_bounds.min,
+        ship.local_bounds.max,
+        (ship.local_bounds.min + ship.local_bounds.max) * 0.5F,
+    };
+    upload_mesh_data(ship_gpu_mesh_, mesh, ship.geometry_revision, local_bounds);
+    ship_mesh_cache_.remember(ship.geometry_revision, ship.parts.size());
+    return ship_mesh_ready(ship);
+}
+
+auto Renderer::prepare_ship_mesh(const ShipRenderState& ship) -> bool {
+    if (!initialized_ || !ship.visible || ship.parts.empty() || ship.geometry_revision == 0U) {
+        return false;
+    }
+    ensure_ship_mesh(ship);
+    return ship_mesh_ready(ship);
+}
+
+auto Renderer::ship_mesh_ready(const ShipRenderState& ship) const noexcept -> bool {
+    const auto gpu_ready = ship_gpu_mesh_.vao != 0U &&
+                           ship_gpu_mesh_.vbo != 0U &&
+                           ship_gpu_mesh_.ebo != 0U &&
+                           ship_gpu_mesh_.opaque_index_count > 0 &&
+                           ship_gpu_mesh_.revision == ship.geometry_revision;
+    return ship_mesh_cache_.ready(
+        ship.geometry_revision,
+        ship.parts.size(),
+        initialized_,
+        gpu_ready);
 }
 
 void Renderer::upload_block_break_overlay_mesh(const BlockBreakProgress& break_progress) {
-    const auto mesh = build_block_break_overlay_mesh_data(break_progress);
+    auto& mesh = block_break_overlay_scratch_;
+    build_block_break_overlay_mesh_data_into(break_progress, mesh);
     auto& gpu_mesh = block_break_overlay_mesh_;
     gpu_mesh.opaque_index_count = 0;
     gpu_mesh.water_index_count = 0;
@@ -3097,18 +4066,20 @@ void Renderer::upload_block_break_overlay_mesh(const BlockBreakProgress& break_p
             gpu_mesh.vertex_buffer_bytes,
             vertex_bytes,
             kInitialVertexBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
     }
     if (gpu_mesh.index_buffer_bytes < index_bytes) {
         gpu_mesh.index_buffer_bytes = grow_buffer_capacity(
             gpu_mesh.index_buffer_bytes,
             index_bytes,
             kInitialIndexBufferBytes);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, nullptr, GL_DYNAMIC_DRAW);
     }
 
+    orphan_bound_buffer(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes);
+    orphan_bound_buffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes);
     glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, mesh.vertices.data());
     glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, mesh.indices.data());
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(vertex_bytes, 0));
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(index_bytes, 0));
     gpu_mesh.opaque_index_count = static_cast<GLsizei>(mesh.indices.size());
 }
 
@@ -3190,6 +4161,7 @@ layout(location = 6) in float a_block_light;
 layout(location = 7) in float a_material_class;
 layout(location = 8) in float a_wave_weight;
 
+uniform mat4 u_model;
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
@@ -3237,7 +4209,7 @@ vec2 vegetation_wind_offset(vec3 world_position, float material_class, float tim
 }
 
 void main() {
-    vec4 world_position = vec4(a_position, 1.0);
+    vec4 world_position = u_model * vec4(a_position, 1.0);
     world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
 
     float water_mask = material_mask(a_material_class, 6.0);
@@ -3274,6 +4246,9 @@ layout(location = 7) in uint i_block_id;
 layout(location = 8) in float i_sky_light;
 layout(location = 9) in float i_block_light;
 layout(location = 10) in float i_material_class;
+layout(location = 11) in vec4 i_face_tiles_0_1;
+layout(location = 12) in vec4 i_face_tiles_2_3;
+layout(location = 13) in vec4 i_face_tiles_4_5;
 
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
@@ -3291,126 +4266,30 @@ out float v_distance;
 out vec3 v_world_position;
 out vec4 v_light_position;
 
-vec4 atlas_uv_rect(int tile_x, int tile_y) {
+vec4 atlas_uv_rect(vec2 tile) {
     float uv_step = 1.0 / 8.0;
-    float u0 = float(tile_x) * uv_step;
-    float v0 = float(tile_y) * uv_step;
+    float u0 = tile.x * uv_step;
+    float v0 = tile.y * uv_step;
     return vec4(u0, v0, u0 + uv_step, v0 + uv_step);
 }
 
-vec4 block_uv_rect(uint block_id, uint face_index) {
-    bool top_face = face_index == 2u;
-    bool bottom_face = face_index == 3u;
-
-    switch (block_id) {
-    case 1u:
-        if (top_face) {
-            return atlas_uv_rect(0, 0);
-        }
-        if (bottom_face) {
-            return atlas_uv_rect(2, 0);
-        }
-        return atlas_uv_rect(1, 0);
-    case 2u:
-        return atlas_uv_rect(2, 0);
-    case 3u:
-        return atlas_uv_rect(3, 0);
-    case 4u:
-        return atlas_uv_rect(4, 0);
-    case 5u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(1, 1);
-        }
-        return atlas_uv_rect(0, 1);
-    case 6u:
-        return atlas_uv_rect(3, 1);
-    case 7u:
-        if (top_face) {
-            return atlas_uv_rect(7, 3);
-        }
-        if (bottom_face) {
-            return atlas_uv_rect(0, 4);
-        }
-        return atlas_uv_rect(6, 3);
-    case 8u:
-        return atlas_uv_rect(5, 0);
-    case 9u:
-        return atlas_uv_rect(2, 1);
-    case 10u:
-        return atlas_uv_rect(6, 0);
-    case 11u:
-        return atlas_uv_rect(7, 0);
-    case 12u:
-        if (top_face) {
-            return atlas_uv_rect(0, 2);
-        }
-        if (bottom_face) {
-            return atlas_uv_rect(2, 0);
-        }
-        return atlas_uv_rect(1, 2);
-    case 13u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(5, 1);
-        }
-        return atlas_uv_rect(4, 1);
-    case 14u:
-        return atlas_uv_rect(6, 1);
-    case 15u:
-        return atlas_uv_rect(1, 3);
-    case 16u:
-        return atlas_uv_rect(2, 3);
-    case 17u:
-        return atlas_uv_rect(3, 3);
-    case 18u:
-        return atlas_uv_rect(4, 3);
-    case 19u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(6, 2);
-        }
-        return atlas_uv_rect(5, 2);
-    case 20u:
-        if (top_face || bottom_face) {
-            return atlas_uv_rect(5, 3);
-        }
-        return atlas_uv_rect(7, 2);
-    case 21u:
-    case 22u:
-    case 23u:
-    case 24u:
-        if (top_face) {
-            return atlas_uv_rect(7, 3);
-        }
-        if (bottom_face) {
-            return atlas_uv_rect(0, 4);
-        }
-        return atlas_uv_rect(6, 3);
-    case 25u:
-        return atlas_uv_rect(1, 4);
-    case 26u:
-        return atlas_uv_rect(2, 4);
-    case 27u:
-        return atlas_uv_rect(3, 4);
-    case 28u:
-        return atlas_uv_rect(4, 4);
-    case 29u:
-        return atlas_uv_rect(5, 4);
-    case 30u:
-        return atlas_uv_rect(6, 4);
-    case 31u:
-        return atlas_uv_rect(7, 4);
-    case 32u:
-        return atlas_uv_rect(0, 6);
-    case 33u:
-        return atlas_uv_rect(1, 6);
-    case 34u:
-        return atlas_uv_rect(2, 6);
-    case 35u:
-        return atlas_uv_rect(3, 6);
-    case 36u:
-        return atlas_uv_rect(4, 6);
-    default:
-        return atlas_uv_rect(0, 0);
+vec4 block_uv_rect(uint face_index) {
+    if (face_index == 0u) {
+        return atlas_uv_rect(i_face_tiles_0_1.xy);
     }
+    if (face_index == 1u) {
+        return atlas_uv_rect(i_face_tiles_0_1.zw);
+    }
+    if (face_index == 2u) {
+        return atlas_uv_rect(i_face_tiles_2_3.xy);
+    }
+    if (face_index == 3u) {
+        return atlas_uv_rect(i_face_tiles_2_3.zw);
+    }
+    if (face_index == 4u) {
+        return atlas_uv_rect(i_face_tiles_4_5.xy);
+    }
+    return atlas_uv_rect(i_face_tiles_4_5.zw);
 }
 
 float face_shade(float face_index) {
@@ -3439,7 +4318,7 @@ void main() {
     float sin_rotation = sin(i_rotation);
     vec3 world_position3 = i_center + rotate_y(a_position * i_size, cos_rotation, sin_rotation);
     vec3 world_normal = normalize(rotate_y(a_normal, cos_rotation, sin_rotation));
-    vec4 uv_rect = block_uv_rect(i_block_id, uint(a_face_index + 0.5));
+    vec4 uv_rect = block_uv_rect(uint(a_face_index + 0.5));
     vec2 uv = mix(uv_rect.xy, uv_rect.zw, a_face_uv);
     vec4 world_position = vec4(world_position3, 1.0);
 
@@ -3614,6 +4493,17 @@ float material_grain(vec3 world_position, float material_class) {
     return coarse * 0.66 + fine * 0.34 - 0.5;
 }
 
+float ordered_alpha_threshold(vec2 pixel_position) {
+    const float pattern[16] = float[](
+         0.0,  8.0,  2.0, 10.0,
+        12.0,  4.0, 14.0,  6.0,
+         3.0, 11.0,  1.0,  9.0,
+        15.0,  7.0, 13.0,  5.0);
+    ivec2 cell = ivec2(mod(floor(pixel_position), 4.0));
+    return (pattern[cell.x + cell.y * 4] + 0.5) / 16.0;
+}
+)" R"(
+
 void main() {
     float water_mask = material_mask(v_material_class, 6.0);
     float water_surface_mask = water_mask * clamp(v_wave_weight * max(v_normal.y, 0.0), 0.0, 1.0);
@@ -3623,7 +4513,14 @@ void main() {
     vec2 animated_uv = v_uv;
 
     vec4 sampled = texture(u_atlas, animated_uv);
-    if (sampled.a < 0.1) {
+    float early_glass_mask = material_mask(v_material_class, 10.0);
+    if (early_glass_mask > 0.5) {
+        // Je ne paie le motif Bayer que pour le verre; les fragments opaques
+        // du monde conservent le test alpha simple et peu couteux.
+        if (sampled.a < ordered_alpha_threshold(gl_FragCoord.xy)) {
+            discard;
+        }
+    } else if (sampled.a < 0.1) {
         discard;
     }
 
@@ -3656,7 +4553,11 @@ void main() {
     float flora_mask = material_mask(v_material_class, 5.0);
     float emissive_mask = material_mask(v_material_class, 7.0);
     float snow_mask = material_mask(v_material_class, 8.0);
+    float fabric_mask = material_mask(v_material_class, 9.0);
     float glass_mask = material_mask(v_material_class, 10.0);
+    float iron_mask = material_mask(v_material_class, 11.0);
+    float brass_mask = material_mask(v_material_class, 12.0);
+    float metal_mask = clamp(iron_mask + brass_mask, 0.0, 1.0);
 
     float view_alignment = mix(max(dot(view_direction, normal), 0.0), abs(dot(view_direction, normal)), water_mask);
     float sun_alignment = mix(max(dot(normal, sun_direction), 0.0), abs(dot(normal, sun_direction)), water_mask);
@@ -3672,45 +4573,52 @@ void main() {
     vec3 bounce_light = mix(u_fog_color, u_distant_fog_color, 0.42) * bounce_factor * (0.12 + 0.12 * daylight);
     vec3 torch_light = vec3(1.14, 0.70, 0.32) * block_light * (1.18 + emissive_mask * 0.55);
 
-    float rim = pow(1.0 - view_alignment, mix(3.0, 1.7, water_mask + foliage_mask * 0.35 + flora_mask * 0.45 + glass_mask * 0.55));
+    float rim = pow(1.0 - view_alignment, mix(3.0, 1.7, water_mask + foliage_mask * 0.35 + flora_mask * 0.45 + fabric_mask * 0.40 + glass_mask * 0.55));
     vec3 rim_color =
-        mix(u_fog_color, u_sun_color, 0.55) * rim * (0.02 + 0.08 * daylight + 0.04 * foliage_mask + 0.05 * flora_mask + 0.10 * glass_mask);
+        mix(u_fog_color, u_sun_color, 0.55) * rim * (0.02 + 0.08 * daylight + 0.04 * foliage_mask + 0.05 * flora_mask + 0.04 * fabric_mask + 0.10 * glass_mask);
 
     vec3 reflected = reflect(-sun_direction, normal);
     float specular_power = mix(11.0, 34.0, rock_mask + snow_mask * 0.3 + sand_mask * 0.1 + glass_mask * 0.55);
     specular_power = mix(specular_power, 18.0, wood_mask);
     specular_power = mix(specular_power, 42.0, glass_mask);
+    specular_power = mix(specular_power, 72.0, metal_mask);
     float specular = pow(max(dot(reflected, view_direction), 0.0), specular_power);
     vec3 specular_color =
-        u_sun_color * specular * shadow * cloud_shadow * (0.12 * rock_mask + 0.08 * wood_mask + 0.05 * snow_mask + 0.22 * glass_mask);
+        u_sun_color * specular * shadow * cloud_shadow *
+        (0.12 * rock_mask + 0.08 * wood_mask + 0.05 * snow_mask + 0.22 * glass_mask + 0.34 * iron_mask + 0.48 * brass_mask);
 
     float leaf_backlight = pow(max(dot(-normal, sun_direction), 0.0), 1.8);
     vec3 leaf_translucency =
         albedo * u_sun_color * leaf_backlight * mix(0.0, 0.06, foliage_mask) * u_sun_visibility * daylight * (0.35 + 0.65 * sky_light);
     leaf_translucency +=
         albedo * u_sun_color * leaf_backlight * mix(0.0, 0.10, flora_mask) * u_sun_visibility * daylight * (0.40 + 0.60 * sky_light);
+    leaf_translucency +=
+        albedo * u_sun_color * leaf_backlight * mix(0.0, 0.07, fabric_mask) * u_sun_visibility * daylight * (0.42 + 0.58 * sky_light);
     leaf_translucency *= mix(0.75, 1.0, cloud_shadow);
 
     vec3 material_tint = vec3(1.0);
     material_tint = mix(material_tint, vec3(0.70, 0.82, 0.58), terrain_mask * smoothstep(0.15, 1.0, normal.y) * 0.52);
     material_tint = mix(material_tint, vec3(1.03, 0.99, 0.92), sand_mask);
     material_tint = mix(material_tint, vec3(0.94, 0.98, 1.06), snow_mask);
+    material_tint = mix(material_tint, vec3(1.06, 1.00, 0.84), fabric_mask);
     material_tint = mix(material_tint, vec3(0.84, 0.94, 1.08), glass_mask);
+    material_tint = mix(material_tint, vec3(0.72, 0.78, 0.84), iron_mask);
+    material_tint = mix(material_tint, vec3(1.16, 0.83, 0.38), brass_mask);
     material_tint = mix(material_tint, vec3(0.58, 0.72, 0.44), foliage_mask * 0.84);
     material_tint = mix(material_tint, vec3(0.90, 1.00, 0.84), flora_mask * 0.54);
     material_tint = mix(material_tint, vec3(1.02, 0.98, 0.94), wood_mask * 0.45);
 
-    float natural_material_mask = clamp(terrain_mask + rock_mask + sand_mask + wood_mask + foliage_mask + flora_mask + snow_mask, 0.0, 1.0);
+    float natural_material_mask = clamp(terrain_mask + rock_mask + sand_mask + wood_mask + foliage_mask + flora_mask + snow_mask + fabric_mask, 0.0, 1.0);
     float grain = material_grain(v_world_position, v_material_class);
     float grain_strength =
         terrain_mask * 0.032 + rock_mask * 0.045 + sand_mask * 0.030 + wood_mask * 0.038 +
-        foliage_mask * 0.034 + flora_mask * 0.026 + snow_mask * 0.020;
+        foliage_mask * 0.034 + flora_mask * 0.026 + snow_mask * 0.020 + fabric_mask * 0.018;
     albedo *= 1.0 + grain * grain_strength * (0.55 + 0.45 * sky_light);
 
     vec3 grain_tint = mix(vec3(0.97, 1.02, 0.98), vec3(1.04, 0.98, 0.92), smoothstep(-0.22, 0.26, grain));
     material_tint = mix(material_tint, material_tint * grain_tint, natural_material_mask * 0.22);
 
-    float solid_edge_mask = clamp(terrain_mask + rock_mask + sand_mask + wood_mask + snow_mask + glass_mask * 0.35, 0.0, 1.0);
+    float solid_edge_mask = clamp(terrain_mask + rock_mask + sand_mask + wood_mask + snow_mask + fabric_mask * 0.25 + glass_mask * 0.35 + metal_mask, 0.0, 1.0);
     float tile_edge = atlas_tile_edge_factor(v_uv) * solid_edge_mask;
     float bevel_shadow = tile_edge * (0.020 + 0.030 * (1.0 - smoothstep(-0.25, 0.85, normal.y)));
     material_tint *= 1.0 - bevel_shadow;
@@ -3830,7 +4738,7 @@ layout(location = 11) in vec4 i_uv_neg_y;
 layout(location = 12) in vec4 i_uv_pos_z;
 layout(location = 13) in vec4 i_uv_neg_z;
 layout(location = 14) in vec4 i_surface;
-layout(location = 15) in float i_emissive_strength;
+layout(location = 15) in vec4 i_lighting;
 
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
@@ -3845,6 +4753,9 @@ out float v_tension;
 out float v_material_class;
 out float v_cavity_mask;
 out float v_emissive_strength;
+out float v_sky_light;
+out float v_block_light;
+out float v_precipitation_exposure;
 out vec4 v_light_position;
 
 vec4 face_uv_rect(float face_index) {
@@ -3881,7 +4792,10 @@ void main() {
     v_tension = i_surface.y;
     v_material_class = i_surface.z;
     v_cavity_mask = i_surface.w;
-    v_emissive_strength = i_emissive_strength;
+    v_emissive_strength = i_lighting.x;
+    v_sky_light = i_lighting.y;
+    v_block_light = i_lighting.z;
+    v_precipitation_exposure = i_lighting.w;
     v_light_position = u_light_view_projection * world_position;
 }
 )";
@@ -3896,6 +4810,9 @@ in float v_tension;
 in float v_material_class;
 in float v_cavity_mask;
 in float v_emissive_strength;
+in float v_sky_light;
+in float v_block_light;
+in float v_precipitation_exposure;
 in vec4 v_light_position;
 
 uniform sampler2D u_atlas;
@@ -3997,7 +4914,9 @@ void main() {
 
     float shadow = sample_shadow(normal);
     float cloud_shadow = sample_cloud_shadow(v_world_position + normal * 0.50, sun_direction);
-    float sky_mix = clamp(u_daylight_factor, 0.0, 1.0);
+    float instance_sky_light = clamp(v_sky_light, 0.0, 1.0);
+    float instance_block_light = clamp(v_block_light, 0.0, 1.0);
+    float sky_mix = clamp(u_daylight_factor, 0.0, 1.0) * instance_sky_light;
     float super_vision = clamp(u_super_vision_strength, 0.0, 1.0) * (1.0 - sky_mix);
     float cavity = clamp(v_cavity_mask, 0.0, 1.0);
     float hard_material = smoothstep(0.44, 0.90, v_material_class);
@@ -4021,6 +4940,8 @@ void main() {
     float player_light_night_boost = mix(0.18, 1.0, 1.0 - sky_mix);
     vec3 player_light =
         vec3(1.18, 0.78, 0.36) * u_player_light_strength * player_light_falloff * player_light_facing * player_light_night_boost;
+    float local_light_facing = 0.62 + 0.38 * max(dot(normal, view_direction), 0.0);
+    vec3 local_light = vec3(1.16, 0.73, 0.34) * instance_block_light * local_light_facing * (0.34 + 0.42 * albedo);
 
     float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), 2.45);
     vec3 rim_light = mix(vec3(0.12, 0.10, 0.08), vec3(0.34, 0.50, 0.60), 1.0 - sky_mix);
@@ -4037,14 +4958,17 @@ void main() {
     vec3 nightmare_glow =
         vec3(1.00, 0.18, 0.12) * emissive_mask * v_emissive_strength * v_nightmare_factor * (0.24 + v_tension * 0.30) * pulse;
 
-    vec3 lit_color = albedo * (ambient + sunlight + translucency + player_light);
+    vec3 lit_color = albedo * (ambient + sunlight + translucency + player_light) + local_light;
     lit_color *= cavity_occlusion;
     lit_color += rim_light + specular_color;
     lit_color = mix(lit_color, max(lit_color, albedo * vec3(0.62, 0.82, 0.88)), super_vision * 0.72);
     lit_color += u_night_tint_color * (0.09 + 0.08 * v_nightmare_factor) * (1.0 - sky_mix);
-    float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) * (0.40 + 0.60 * smoothstep(-0.10, 1.0, normal.y));
+    float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) * clamp(v_precipitation_exposure, 0.0, 1.0) *
+                    (0.40 + 0.60 * smoothstep(-0.10, 1.0, normal.y));
     lit_color = mix(lit_color, lit_color * vec3(0.74, 0.80, 0.88), wetness * (0.12 + 0.12 * clamp(u_storm_intensity, 0.0, 1.0)));
-    float lightning_surface = clamp(u_lightning_intensity, 0.0, 1.0) * (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
+    float lightning_surface = clamp(u_lightning_intensity, 0.0, 1.0) * instance_sky_light *
+                              clamp(v_precipitation_exposure, 0.0, 1.0) *
+                              (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
     lit_color += albedo * vec3(0.62, 0.72, 1.00) * lightning_surface * (0.18 + 0.22 * clamp(u_storm_intensity, 0.0, 1.0));
     vec3 view_ray = normalize(v_world_position - u_camera_position);
     float weather_fog = 1.0 + clamp(u_precipitation_intensity, 0.0, 1.0) * 0.38 + clamp(u_storm_intensity, 0.0, 1.0) * 0.34;
@@ -4064,16 +4988,34 @@ void main() {
 }
 )";
 
+    static constexpr auto* creature_shadow_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec3 a_position;
+layout(location = 4) in mat4 i_transform;
+
+uniform mat4 u_light_view_projection;
+
+void main() {
+    gl_Position = u_light_view_projection * i_transform * vec4(a_position, 1.0);
+}
+)";
+
+    static constexpr auto* creature_shadow_fragment_shader = R"(#version 330 core
+void main() {
+}
+)";
+
     static constexpr auto* shadow_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
 layout(location = 7) in float a_material_class;
 
+uniform mat4 u_model;
 uniform mat4 u_light_view_projection;
 uniform float u_time_of_day;
 uniform float u_wind_strength;
 
 out vec2 v_uv;
+flat out float v_material_class;
 
 float material_mask(float material, float expected) {
     return 1.0 - step(0.25, abs(material - expected));
@@ -4097,20 +5039,39 @@ vec2 vegetation_wind_offset(vec3 world_position, float material_class, float tim
 }
 
 void main() {
-    vec4 world_position = vec4(a_position, 1.0);
+    vec4 world_position = u_model * vec4(a_position, 1.0);
     world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
     gl_Position = u_light_view_projection * world_position;
     v_uv = a_uv;
+    v_material_class = a_material_class;
 }
 )";
 
     static constexpr auto* shadow_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
+flat in float v_material_class;
 
 uniform sampler2D u_atlas;
 
+float material_mask(float material, float expected) {
+    return 1.0 - step(0.25, abs(material - expected));
+}
+
+float ordered_alpha_threshold(vec2 pixel_position) {
+    const float pattern[16] = float[](
+         0.0,  8.0,  2.0, 10.0,
+        12.0,  4.0, 14.0,  6.0,
+         3.0, 11.0,  1.0,  9.0,
+        15.0,  7.0, 13.0,  5.0);
+    ivec2 cell = ivec2(mod(floor(pixel_position), 4.0));
+    return (pattern[cell.x + cell.y * 4] + 0.5) / 16.0;
+}
+
 void main() {
-    if (texture(u_atlas, v_uv).a < 0.1) {
+    float alpha = texture(u_atlas, v_uv).a;
+    float glass_mask = material_mask(v_material_class, 10.0);
+    float threshold = glass_mask > 0.5 ? ordered_alpha_threshold(gl_FragCoord.xy) : 0.1;
+    if (alpha < threshold) {
         discard;
     }
 }
@@ -4290,46 +5251,54 @@ void main() {
     float depth_edge = 0.0;
     float geometry_mask = 0.0;
 
-    float center_depth_sample = texture(u_scene_depth, v_uv).r;
-    if (depth_sample_is_usable(center_depth_sample)) {
-        float center_depth = linearize_depth(center_depth_sample);
-        float left_depth_sample = texture(u_scene_depth, v_uv + vec2(-texel.x, 0.0)).r;
-        float right_depth_sample = texture(u_scene_depth, v_uv + vec2(texel.x, 0.0)).r;
-        float down_depth_sample = texture(u_scene_depth, v_uv + vec2(0.0, -texel.y)).r;
-        float up_depth_sample = texture(u_scene_depth, v_uv + vec2(0.0, texel.y)).r;
-
-        float left_weight = depth_sample_is_usable(left_depth_sample) ? 1.0 : 0.0;
-        float right_weight = depth_sample_is_usable(right_depth_sample) ? 1.0 : 0.0;
-        float down_weight = depth_sample_is_usable(down_depth_sample) ? 1.0 : 0.0;
-        float up_weight = depth_sample_is_usable(up_depth_sample) ? 1.0 : 0.0;
-        float neighbor_count = left_weight + right_weight + down_weight + up_weight;
-
-        if (neighbor_count > 0.0) {
-            float left_depth = linearize_depth(left_depth_sample);
-            float right_depth = linearize_depth(right_depth_sample);
-            float down_depth = linearize_depth(down_depth_sample);
-            float up_depth = linearize_depth(up_depth_sample);
-
-            depth_edge = abs(left_depth - center_depth) * left_weight +
-                         abs(right_depth - center_depth) * right_weight +
-                         abs(down_depth - center_depth) * down_weight +
-                         abs(up_depth - center_depth) * up_weight;
-            depth_edge = (depth_edge / neighbor_count) / max(center_depth * 0.75, 1.0);
-            depth_edge = smoothstep(0.002, 0.035, depth_edge);
+    // Je coupe réellement les lectures voisines quand le profil désactive les détails.
+    if (max(u_edge_strength, u_sharpen_strength) > 0.001) {
+        float center_depth_sample = texture(u_scene_depth, v_uv).r;
+        if (depth_sample_is_usable(center_depth_sample)) {
+            float center_depth = linearize_depth(center_depth_sample);
             geometry_mask = 1.0 - smoothstep(120.0, 280.0, center_depth);
+
+            if (u_edge_strength > 0.001) {
+                float left_depth_sample = texture(u_scene_depth, v_uv + vec2(-texel.x, 0.0)).r;
+                float right_depth_sample = texture(u_scene_depth, v_uv + vec2(texel.x, 0.0)).r;
+                float down_depth_sample = texture(u_scene_depth, v_uv + vec2(0.0, -texel.y)).r;
+                float up_depth_sample = texture(u_scene_depth, v_uv + vec2(0.0, texel.y)).r;
+
+                float left_weight = depth_sample_is_usable(left_depth_sample) ? 1.0 : 0.0;
+                float right_weight = depth_sample_is_usable(right_depth_sample) ? 1.0 : 0.0;
+                float down_weight = depth_sample_is_usable(down_depth_sample) ? 1.0 : 0.0;
+                float up_weight = depth_sample_is_usable(up_depth_sample) ? 1.0 : 0.0;
+                float neighbor_count = left_weight + right_weight + down_weight + up_weight;
+
+                if (neighbor_count > 0.0) {
+                    float left_depth = linearize_depth(left_depth_sample);
+                    float right_depth = linearize_depth(right_depth_sample);
+                    float down_depth = linearize_depth(down_depth_sample);
+                    float up_depth = linearize_depth(up_depth_sample);
+
+                    depth_edge = abs(left_depth - center_depth) * left_weight +
+                                 abs(right_depth - center_depth) * right_weight +
+                                 abs(down_depth - center_depth) * down_weight +
+                                 abs(up_depth - center_depth) * up_weight;
+                    depth_edge = (depth_edge / neighbor_count) / max(center_depth * 0.75, 1.0);
+                    depth_edge = smoothstep(0.002, 0.035, depth_edge);
+                }
+            }
         }
     }
     scene *= 1.0 - depth_edge * u_edge_strength * geometry_mask;
 
-    vec3 blur = scene * 0.50;
-    blur += sample_scene(v_uv + vec2(texel.x, 0.0)) * 0.125;
-    blur += sample_scene(v_uv + vec2(-texel.x, 0.0)) * 0.125;
-    blur += sample_scene(v_uv + vec2(0.0, texel.y)) * 0.125;
-    blur += sample_scene(v_uv + vec2(0.0, -texel.y)) * 0.125;
+    if (u_sharpen_strength > 0.001) {
+        vec3 blur = scene * 0.50;
+        blur += sample_scene(v_uv + vec2(texel.x, 0.0)) * 0.125;
+        blur += sample_scene(v_uv + vec2(-texel.x, 0.0)) * 0.125;
+        blur += sample_scene(v_uv + vec2(0.0, texel.y)) * 0.125;
+        blur += sample_scene(v_uv + vec2(0.0, -texel.y)) * 0.125;
 
-    vec3 detail = scene - blur;
-    float sharpen_mask = geometry_mask * (1.0 - depth_edge * 0.85);
-    scene += detail * u_sharpen_strength * sharpen_mask;
+        vec3 detail = scene - blur;
+        float sharpen_mask = geometry_mask * (1.0 - depth_edge * 0.85);
+        scene += detail * u_sharpen_strength * sharpen_mask;
+    }
 
     vec3 glow = texture(u_glow_texture, v_uv).rgb * u_glow_strength;
     vec3 color = scene + glow;
@@ -4388,6 +5357,9 @@ void main() {
     creature_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, creature_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, creature_fragment_shader));
+    creature_shadow_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, creature_shadow_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, creature_shadow_fragment_shader));
     shadow_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, shadow_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, shadow_fragment_shader));
@@ -4398,7 +5370,7 @@ void main() {
         compile_shader(GL_VERTEX_SHADER, crosshair_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, crosshair_fragment_shader));
     sky_program_ = link_program(
-        compile_shader(GL_VERTEX_SHADER, screen_vertex_shader),
+        compile_shader(GL_VERTEX_SHADER, kSkyVertexShaderSource),
         compile_shader(GL_FRAGMENT_SHADER, sky_fragment_shader));
     glow_extract_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, screen_vertex_shader),
@@ -4413,6 +5385,7 @@ void main() {
         compile_shader(GL_VERTEX_SHADER, screen_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, menu_background_fragment_shader));
 
+    world_uniforms_.model = glGetUniformLocation(world_program_, "u_model");
     world_uniforms_.view_projection = glGetUniformLocation(world_program_, "u_view_projection");
     world_uniforms_.light_view_projection = glGetUniformLocation(world_program_, "u_light_view_projection");
     world_uniforms_.camera_position = glGetUniformLocation(world_program_, "u_camera_position");
@@ -4495,7 +5468,10 @@ void main() {
     creature_uniforms_.time_of_day = glGetUniformLocation(creature_program_, "u_time_of_day");
     creature_uniforms_.player_light_strength = glGetUniformLocation(creature_program_, "u_player_light_strength");
     creature_uniforms_.super_vision_strength = glGetUniformLocation(creature_program_, "u_super_vision_strength");
+    creature_shadow_light_view_projection_ =
+        glGetUniformLocation(creature_shadow_program_, "u_light_view_projection");
 
+    shadow_uniforms_.model = glGetUniformLocation(shadow_program_, "u_model");
     shadow_uniforms_.light_view_projection = glGetUniformLocation(shadow_program_, "u_light_view_projection");
     shadow_uniforms_.time_of_day = glGetUniformLocation(shadow_program_, "u_time_of_day");
     shadow_uniforms_.wind_strength = glGetUniformLocation(shadow_program_, "u_wind_strength");
@@ -4517,6 +5493,8 @@ void main() {
     sky_uniforms_.storm_intensity = glGetUniformLocation(sky_program_, "u_storm_intensity");
     sky_uniforms_.lightning_intensity = glGetUniformLocation(sky_program_, "u_lightning_intensity");
     sky_uniforms_.weather_time = glGetUniformLocation(sky_program_, "u_weather_time");
+    sky_uniforms_.cloud_steps = glGetUniformLocation(sky_program_, "u_cloud_steps");
+    sky_uniforms_.cloud_detail = glGetUniformLocation(sky_program_, "u_cloud_detail");
     sky_uniforms_.accent_atlas = glGetUniformLocation(sky_program_, "u_accent_atlas");
     glow_extract_uniforms_.scene_texture = glGetUniformLocation(glow_extract_program_, "u_scene_texture");
     glow_extract_uniforms_.threshold = glGetUniformLocation(glow_extract_program_, "u_threshold");
@@ -4564,8 +5542,8 @@ void Renderer::create_accent_texture() {
     glBindTexture(GL_TEXTURE_2D, accent_texture_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kAccentAtlasSize, kAccentAtlasSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
@@ -4657,6 +5635,17 @@ void Renderer::create_shadow_map() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void Renderer::destroy_shadow_map() {
+    if (shadow_framebuffer_ != 0) {
+        glDeleteFramebuffers(1, &shadow_framebuffer_);
+        shadow_framebuffer_ = 0;
+    }
+    if (shadow_map_ != 0) {
+        glDeleteTextures(1, &shadow_map_);
+        shadow_map_ = 0;
+    }
+}
+
 void Renderer::create_scene_sampler_fallback_textures() {
     glGenTextures(1, &scene_fallback_color_texture_);
     glBindTexture(GL_TEXTURE_2D, scene_fallback_color_texture_);
@@ -4699,14 +5688,14 @@ void Renderer::create_creature_geometry() {
     glGenBuffers(1, &creature_instance_vbo_);
     configure_box_template_attributes(creature_vao_, creature_vbo_, creature_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureInstanceBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureInstanceBufferBytes, nullptr, GL_STREAM_DRAW);
     configure_creature_instance_attributes(creature_vao_, creature_instance_vbo_);
 
     glGenVertexArrays(1, &viewmodel_vao_);
     glGenBuffers(1, &viewmodel_instance_vbo_);
     configure_box_template_attributes(viewmodel_vao_, creature_vbo_, creature_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, viewmodel_instance_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureInstanceBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, kInitialCreatureInstanceBufferBytes, nullptr, GL_STREAM_DRAW);
     configure_creature_instance_attributes(viewmodel_vao_, viewmodel_instance_vbo_);
 
     creature_instance_buffer_bytes_ = kInitialCreatureInstanceBufferBytes;
@@ -4735,7 +5724,7 @@ void Renderer::create_item_drop_geometry() {
     glGenBuffers(1, &item_drop_instance_vbo_);
     configure_box_template_attributes(item_drop_vao_, item_drop_vbo_, item_drop_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, item_drop_instance_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, kInitialItemDropInstanceBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, kInitialItemDropInstanceBufferBytes, nullptr, GL_STREAM_DRAW);
     configure_item_drop_instance_attributes(item_drop_vao_, item_drop_instance_vbo_);
 
     item_drop_instance_buffer_bytes_ = kInitialItemDropInstanceBufferBytes;
@@ -4750,7 +5739,7 @@ void Renderer::create_hud_geometry() {
     glGenBuffers(1, &hud_vbo_);
     glBindVertexArray(hud_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, kInitialHudBufferBytes, nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, kInitialHudBufferBytes, nullptr, GL_STREAM_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(HudVertex), reinterpret_cast<void*>(offsetof(HudVertex, x)));
     glEnableVertexAttribArray(1);
@@ -4772,19 +5761,21 @@ void Renderer::ensure_hud_buffer_capacity(std::size_t vertex_count) {
         hud_vertex_buffer_bytes_,
         required_bytes,
         kInitialHudBufferBytes);
-    glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, hud_vertex_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
 }
 
 void Renderer::upload_hud_vertices(std::span<const HudVertex> vertices) {
     glBindVertexArray(hud_vao_);
     glBindBuffer(GL_ARRAY_BUFFER, hud_vbo_);
     ensure_hud_buffer_capacity(vertices.size());
+    orphan_bound_buffer(GL_ARRAY_BUFFER, hud_vertex_buffer_bytes_);
+    const auto upload_bytes = static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex));
     glBufferSubData(
         GL_ARRAY_BUFFER,
         0,
-        static_cast<GLsizeiptr>(vertices.size() * sizeof(HudVertex)),
+        upload_bytes,
         vertices.data());
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(upload_bytes, 0));
+    record_triangle_draw(static_cast<GLsizei>(vertices.size()));
 }
 
 void Renderer::create_crosshair_geometry() {
@@ -4807,9 +5798,12 @@ void Renderer::create_crosshair_geometry() {
 void Renderer::ensure_water_scene_targets(int width, int height) {
     const auto target_width = std::max(width, 1);
     const auto target_height = std::max(height, 1);
+    const auto quality_settings = active_quality_settings_;
+    const auto color_format = color_target_format(quality_settings);
     const auto targets_match =
         water_scene_framebuffer_ != 0 && water_scene_color_texture_ != 0 && water_scene_depth_texture_ != 0 &&
-        water_scene_target_width_ == target_width && water_scene_target_height_ == target_height;
+        water_scene_target_width_ == target_width && water_scene_target_height_ == target_height &&
+        water_scene_color_internal_format_ == color_format.internal_format;
     if (targets_match) {
         return;
     }
@@ -4821,7 +5815,16 @@ void Renderer::ensure_water_scene_targets(int width, int height) {
 
     glGenTextures(1, &water_scene_color_texture_);
     glBindTexture(GL_TEXTURE_2D, water_scene_color_texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, target_width, target_height, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        color_format.internal_format,
+        target_width,
+        target_height,
+        0,
+        color_format.pixel_format,
+        color_format.pixel_type,
+        nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -4844,6 +5847,7 @@ void Renderer::ensure_water_scene_targets(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     water_scene_target_width_ = target_width;
     water_scene_target_height_ = target_height;
+    water_scene_color_internal_format_ = color_format.internal_format;
 }
 
 void Renderer::destroy_water_scene_targets() {
@@ -4861,85 +5865,140 @@ void Renderer::destroy_water_scene_targets() {
     }
     water_scene_target_width_ = 0;
     water_scene_target_height_ = 0;
+    water_scene_color_internal_format_ = 0;
 }
 
-void Renderer::ensure_post_process_targets(int width, int height) {
+void Renderer::ensure_post_process_targets(int width, int height, bool require_glow_targets) {
     const auto target_width = std::max(width, 1);
     const auto target_height = std::max(height, 1);
-    const auto glow_width = std::max(target_width / 2, 1);
-    const auto glow_height = std::max(target_height / 2, 1);
+    const auto quality_settings = active_quality_settings_;
+    const auto color_format = color_target_format(quality_settings);
 
     const auto scene_matches = scene_framebuffer_ != 0 && scene_color_texture_ != 0 && scene_depth_texture_ != 0 &&
-                               scene_target_width_ == target_width && scene_target_height_ == target_height;
-    const auto glow_matches = glow_extract_framebuffer_ != 0 && glow_extract_texture_ != 0 && glow_ping_framebuffer_ != 0 &&
-                              glow_ping_texture_ != 0 && glow_target_width_ == glow_width && glow_target_height_ == glow_height;
-    if (scene_matches && glow_matches) {
-        return;
+                                scene_target_width_ == target_width && scene_target_height_ == target_height &&
+                                scene_color_internal_format_ == color_format.internal_format;
+    if (!scene_matches) {
+        destroy_scene_targets();
+
+        glGenFramebuffers(1, &scene_framebuffer_);
+        glBindFramebuffer(GL_FRAMEBUFFER, scene_framebuffer_);
+
+        glGenTextures(1, &scene_color_texture_);
+        glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            color_format.internal_format,
+            target_width,
+            target_height,
+            0,
+            color_format.pixel_format,
+            color_format.pixel_type,
+            nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene_color_texture_, 0);
+
+        glGenTextures(1, &scene_depth_texture_);
+        glBindTexture(GL_TEXTURE_2D, scene_depth_texture_);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_DEPTH_COMPONENT24,
+            target_width,
+            target_height,
+            0,
+            GL_DEPTH_COMPONENT,
+            GL_UNSIGNED_INT,
+            nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene_depth_texture_, 0);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            throw std::runtime_error("Scene framebuffer is incomplete");
+        }
+        scene_target_width_ = target_width;
+        scene_target_height_ = target_height;
+        scene_color_internal_format_ = color_format.internal_format;
     }
 
-    destroy_post_process_targets();
+    if (require_glow_targets) {
+        const auto glow_divisor = std::max(quality_settings.glow_downsample, 1);
+        const auto glow_width = std::max(target_width / glow_divisor, 1);
+        const auto glow_height = std::max(target_height / glow_divisor, 1);
+        const auto glow_matches =
+            glow_extract_framebuffer_ != 0 && glow_extract_texture_ != 0 && glow_ping_framebuffer_ != 0 &&
+            glow_ping_texture_ != 0 && glow_target_width_ == glow_width && glow_target_height_ == glow_height &&
+            glow_color_internal_format_ == color_format.internal_format;
+        if (!glow_matches) {
+            destroy_glow_targets();
 
-    glGenFramebuffers(1, &scene_framebuffer_);
-    glBindFramebuffer(GL_FRAMEBUFFER, scene_framebuffer_);
+            glGenFramebuffers(1, &glow_extract_framebuffer_);
+            glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
+            glGenTextures(1, &glow_extract_texture_);
+            glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                color_format.internal_format,
+                glow_width,
+                glow_height,
+                0,
+                color_format.pixel_format,
+                color_format.pixel_type,
+                nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glow_extract_texture_, 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                throw std::runtime_error("Glow extract framebuffer is incomplete");
+            }
 
-    glGenTextures(1, &scene_color_texture_);
-    glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, target_width, target_height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene_color_texture_, 0);
+            glGenFramebuffers(1, &glow_ping_framebuffer_);
+            glBindFramebuffer(GL_FRAMEBUFFER, glow_ping_framebuffer_);
+            glGenTextures(1, &glow_ping_texture_);
+            glBindTexture(GL_TEXTURE_2D, glow_ping_texture_);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                color_format.internal_format,
+                glow_width,
+                glow_height,
+                0,
+                color_format.pixel_format,
+                color_format.pixel_type,
+                nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glow_ping_texture_, 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                throw std::runtime_error("Glow blur framebuffer is incomplete");
+            }
 
-    glGenTextures(1, &scene_depth_texture_);
-    glBindTexture(GL_TEXTURE_2D, scene_depth_texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, target_width, target_height, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene_depth_texture_, 0);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        throw std::runtime_error("Scene framebuffer is incomplete");
-    }
-
-    glGenFramebuffers(1, &glow_extract_framebuffer_);
-    glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
-    glGenTextures(1, &glow_extract_texture_);
-    glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, glow_width, glow_height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glow_extract_texture_, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        throw std::runtime_error("Glow extract framebuffer is incomplete");
-    }
-
-    glGenFramebuffers(1, &glow_ping_framebuffer_);
-    glBindFramebuffer(GL_FRAMEBUFFER, glow_ping_framebuffer_);
-    glGenTextures(1, &glow_ping_texture_);
-    glBindTexture(GL_TEXTURE_2D, glow_ping_texture_);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, glow_width, glow_height, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glow_ping_texture_, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        throw std::runtime_error("Glow blur framebuffer is incomplete");
+            glow_target_width_ = glow_width;
+            glow_target_height_ = glow_height;
+            glow_color_internal_format_ = color_format.internal_format;
+        }
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    scene_target_width_ = target_width;
-    scene_target_height_ = target_height;
-    glow_target_width_ = glow_width;
-    glow_target_height_ = glow_height;
 }
 
 void Renderer::destroy_post_process_targets() {
+    destroy_scene_targets();
+    destroy_glow_targets();
+}
+
+void Renderer::destroy_scene_targets() {
     if (scene_depth_texture_ != 0) {
         glDeleteTextures(1, &scene_depth_texture_);
         scene_depth_texture_ = 0;
@@ -4952,6 +6011,12 @@ void Renderer::destroy_post_process_targets() {
         glDeleteFramebuffers(1, &scene_framebuffer_);
         scene_framebuffer_ = 0;
     }
+    scene_target_width_ = 0;
+    scene_target_height_ = 0;
+    scene_color_internal_format_ = 0;
+}
+
+void Renderer::destroy_glow_targets() {
     if (glow_extract_texture_ != 0) {
         glDeleteTextures(1, &glow_extract_texture_);
         glow_extract_texture_ = 0;
@@ -4968,28 +6033,20 @@ void Renderer::destroy_post_process_targets() {
         glDeleteFramebuffers(1, &glow_ping_framebuffer_);
         glow_ping_framebuffer_ = 0;
     }
-    scene_target_width_ = 0;
-    scene_target_height_ = 0;
     glow_target_width_ = 0;
     glow_target_height_ = 0;
+    glow_color_internal_format_ = 0;
 }
 
-void Renderer::draw_sky(const PlayerController& player, const EnvironmentState& environment) {
+void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
+                        const EnvironmentState& environment,
+                        const RendererQualitySettings& quality_settings) {
     if (sky_program_ == 0 || screen_quad_vao_ == 0 || accent_texture_ == 0) {
         return;
     }
 
-    std::array<GLint, 4> viewport {};
-    glGetIntegerv(GL_VIEWPORT, viewport.data());
-    const auto viewport_width = std::max(viewport[2], 1);
-    const auto viewport_height = std::max(viewport[3], 1);
-    const auto aspect = static_cast<float>(viewport_width) / static_cast<float>(viewport_height);
-    const auto projection = glm::perspective(glm::radians(75.0F), aspect, 0.1F, 320.0F);
-    auto view = player.view_matrix();
-    view[3] = glm::vec4 {0.0F, 0.0F, 0.0F, 1.0F};
-    const auto inverse_view_projection = glm::inverse(projection * view);
-
-    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
     glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
     glUseProgram(sky_program_);
@@ -5009,12 +6066,16 @@ void Renderer::draw_sky(const PlayerController& player, const EnvironmentState& 
     glUniform1f(sky_uniforms_.storm_intensity, environment.storm_intensity);
     glUniform1f(sky_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1f(sky_uniforms_.weather_time, environment.weather_time_seconds);
+    glUniform1i(sky_uniforms_.cloud_steps, quality_settings.cloud_steps);
+    glUniform1f(sky_uniforms_.cloud_detail, quality_settings.cloud_detail);
     glUniform1i(sky_uniforms_.accent_atlas, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, accent_texture_);
     glBindVertexArray(screen_quad_vao_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
     glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
 }
@@ -5024,6 +6085,7 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
         scene_color_texture_ == 0 || scene_depth_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
         return;
     }
+    const auto quality_settings = active_quality_settings_;
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -5040,6 +6102,7 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, glow_ping_framebuffer_);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -5048,12 +6111,14 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glUniform2f(glow_blur_uniforms_.texel_direction, 1.0F / static_cast<float>(glow_target_width_), 0.0F);
     glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
     glClear(GL_COLOR_BUFFER_BIT);
     glUniform2f(glow_blur_uniforms_.texel_direction, 0.0F, 1.0F / static_cast<float>(glow_target_height_));
     glBindTexture(GL_TEXTURE_2D, glow_ping_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, width, std::max(height, 1));
@@ -5067,8 +6132,12 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glUniform1f(post_process_uniforms_.vignette_strength, environment.vignette_strength);
     glUniform3fv(post_process_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
     glUniform1f(post_process_uniforms_.glow_strength, environment.glow_strength);
-    glUniform1f(post_process_uniforms_.sharpen_strength, environment.post_sharpen_strength);
-    glUniform1f(post_process_uniforms_.edge_strength, environment.post_edge_strength);
+    glUniform1f(
+        post_process_uniforms_.sharpen_strength,
+        environment.post_sharpen_strength * quality_settings.post_detail_scale);
+    glUniform1f(
+        post_process_uniforms_.edge_strength,
+        environment.post_edge_strength * quality_settings.post_detail_scale);
     glUniform1f(post_process_uniforms_.precipitation_intensity, environment.precipitation_intensity);
     glUniform1f(post_process_uniforms_.storm_intensity, environment.storm_intensity);
     glUniform1f(post_process_uniforms_.lightning_intensity, environment.lightning_intensity);
@@ -5080,6 +6149,7 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, scene_depth_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -5104,12 +6174,14 @@ void Renderer::run_menu_background_pass(int width, int height) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
     glClear(GL_COLOR_BUFFER_BIT);
     glUniform2f(glow_blur_uniforms_.texel_direction, 0.0F, 1.0F / static_cast<float>(glow_target_height_));
     glBindTexture(GL_TEXTURE_2D, glow_ping_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, width, std::max(height, 1));
@@ -5125,6 +6197,7 @@ void Renderer::run_menu_background_pass(int width, int height) {
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    record_triangle_draw(3);
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -5153,15 +6226,16 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
             item_drop_instance_buffer_bytes_,
             instance_bytes,
             kInitialItemDropInstanceBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, item_drop_instance_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
     }
+    orphan_bound_buffer(GL_ARRAY_BUFFER, item_drop_instance_buffer_bytes_);
     glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, instances.data());
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
 
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glDisable(GL_BLEND);
 
     glUseProgram(item_drop_program_);
     glUniformMatrix4fv(item_drop_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
@@ -5213,60 +6287,82 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
         GL_UNSIGNED_INT,
         nullptr,
         static_cast<GLsizei>(instances.size()));
-    glDisable(GL_BLEND);
+    record_triangle_draw(
+        static_cast<GLsizei>(box_template_indices().size()),
+        static_cast<GLsizei>(instances.size()));
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
-                              const glm::mat4& view_projection,
-                              const glm::mat4& light_view_projection,
-                              const glm::vec3& camera_position,
-                              const EnvironmentState& environment,
-                              bool player_light_active,
-                              float super_vision_strength) {
-    if (creatures.empty() || creature_program_ == 0 || creature_vao_ == 0 || creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
-        return;
+auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInstance> creatures,
+                                              std::span<const CrewRenderInstance> crew,
+                                              const glm::vec3& focus,
+                                              float creature_draw_distance,
+                                              float crew_draw_distance)
+    -> std::span<const CreaturePartInstance> {
+    auto& visible_creatures = visible_creatures_cache_;
+    auto& visible_crew = visible_crew_cache_;
+    auto& parts = creature_parts_scratch_;
+    visible_creatures.clear();
+    visible_crew.clear();
+    parts.clear();
+    const auto safe_creature_distance =
+        std::isfinite(creature_draw_distance) ? std::max(creature_draw_distance, 0.0F) : 0.0F;
+    const auto safe_crew_distance =
+        std::isfinite(crew_draw_distance) ? std::max(crew_draw_distance, 0.0F) : 0.0F;
+    const auto creature_draw_distance_sq = safe_creature_distance * safe_creature_distance;
+    const auto crew_draw_distance_sq = safe_crew_distance * safe_crew_distance;
+
+    if (visible_creatures.capacity() < creatures.size()) {
+        visible_creatures.reserve(creatures.size());
     }
-
-    constexpr float kCreatureDrawDistance = 64.0F;
-    constexpr std::size_t kMaxRenderedCreatures = kCreatureMaxRenderedCount;
-    const auto draw_distance_sq = kCreatureDrawDistance * kCreatureDrawDistance;
-
-    struct VisibleCreature {
-        const CreatureRenderInstance* creature = nullptr;
-        float distance_squared = 0.0F;
-    };
-
-    std::vector<VisibleCreature> visible_creatures;
-    visible_creatures.reserve(std::min(creatures.size(), kMaxRenderedCreatures));
-
     for (const auto& creature : creatures) {
-        const auto dx = creature.position.x - camera_position.x;
-        const auto dz = creature.position.z - camera_position.z;
+        const auto dx = creature.position.x - focus.x;
+        const auto dz = creature.position.z - focus.z;
         const auto distance_squared = dx * dx + dz * dz;
-        if (distance_squared > draw_distance_sq) {
+        if (!std::isfinite(distance_squared) || distance_squared > creature_draw_distance_sq) {
             continue;
         }
 
         visible_creatures.push_back({&creature, distance_squared});
     }
 
-    if (visible_creatures.empty()) {
-        return;
-    }
-
     std::sort(visible_creatures.begin(), visible_creatures.end(), [](const VisibleCreature& lhs, const VisibleCreature& rhs) {
         return lhs.distance_squared < rhs.distance_squared;
     });
-    if (visible_creatures.size() > kMaxRenderedCreatures) {
-        visible_creatures.resize(kMaxRenderedCreatures);
+    if (visible_creatures.size() > kCreatureMaxRenderedCount) {
+        visible_creatures.resize(kCreatureMaxRenderedCount);
     }
 
-    auto& parts = creature_parts_scratch_;
-    parts.clear();
-    parts.reserve(visible_creatures.size() * kCreatureMaxBoxBudget);
+    if (visible_crew.capacity() < crew.size()) {
+        visible_crew.reserve(crew.size());
+    }
+    for (const auto& crew_member : crew) {
+        const auto dx = crew_member.position.x - focus.x;
+        const auto dz = crew_member.position.z - focus.z;
+        const auto distance_squared = dx * dx + dz * dz;
+        if (!std::isfinite(distance_squared) || distance_squared > crew_draw_distance_sq) {
+            continue;
+        }
+        visible_crew.push_back({&crew_member, distance_squared});
+    }
+    std::sort(visible_crew.begin(), visible_crew.end(), [](const VisibleCrewMember& lhs, const VisibleCrewMember& rhs) {
+        return lhs.distance_squared < rhs.distance_squared;
+    });
+    if (visible_crew.size() > kCrewVisualRenderCapacity) {
+        visible_crew.resize(kCrewVisualRenderCapacity);
+    }
+
+    if (visible_creatures.empty() && visible_crew.empty()) {
+        return {};
+    }
+
+    const auto required_part_capacity =
+        visible_creatures.size() * kCreatureMaxBoxBudget + visible_crew.size() * kCrewVisualPartBudget;
+    if (parts.capacity() < required_part_capacity) {
+        parts.reserve(required_part_capacity);
+    }
 
     for (const auto& visible_creature : visible_creatures) {
         const auto creature_parts = build_creature_parts(*visible_creature.creature);
@@ -5276,6 +6372,79 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
 
         parts.insert(parts.end(), creature_parts.begin(), creature_parts.end());
     }
+    for (const auto& visible_member : visible_crew) {
+        append_crew_parts(parts, *visible_member.crew);
+    }
+    return parts;
+}
+
+void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> creatures,
+                                     std::span<const CrewRenderInstance> crew,
+                                     const glm::mat4& light_view_projection,
+                                     const glm::vec3& shadow_focus) {
+    if ((creatures.empty() && crew.empty()) || creature_shadow_program_ == 0 || creature_vao_ == 0 ||
+        creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
+        return;
+    }
+
+    const auto parts = collect_visible_creature_parts(
+        creatures,
+        crew,
+        shadow_focus,
+        kShadowDistance + static_cast<float>(kChunkSizeX),
+        kCrewVisualDrawDistance);
+    if (parts.empty()) {
+        return;
+    }
+
+    glBindVertexArray(creature_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
+    const auto instance_bytes = static_cast<GLsizeiptr>(parts.size_bytes());
+    if (creature_instance_buffer_bytes_ < instance_bytes) {
+        creature_instance_buffer_bytes_ = grow_buffer_capacity(
+            creature_instance_buffer_bytes_,
+            instance_bytes,
+            kInitialCreatureInstanceBufferBytes);
+    }
+    orphan_bound_buffer(GL_ARRAY_BUFFER, creature_instance_buffer_bytes_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, parts.data());
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
+
+    glUseProgram(creature_shadow_program_);
+    glUniformMatrix4fv(
+        creature_shadow_light_view_projection_,
+        1,
+        GL_FALSE,
+        glm::value_ptr(light_view_projection));
+    glDrawElementsInstanced(
+        GL_TRIANGLES,
+        static_cast<GLsizei>(box_template_indices().size()),
+        GL_UNSIGNED_INT,
+        nullptr,
+        static_cast<GLsizei>(parts.size()));
+    record_triangle_draw(
+        static_cast<GLsizei>(box_template_indices().size()),
+        static_cast<GLsizei>(parts.size()));
+}
+
+void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
+                              std::span<const CrewRenderInstance> crew,
+                              const glm::mat4& view_projection,
+                              const glm::mat4& light_view_projection,
+                              const glm::vec3& camera_position,
+                              const EnvironmentState& environment,
+                              bool player_light_active,
+                              float super_vision_strength) {
+    if ((creatures.empty() && crew.empty()) || creature_program_ == 0 || creature_vao_ == 0 || creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
+        return;
+    }
+
+    const auto parts = collect_visible_creature_parts(
+        creatures,
+        crew,
+        camera_position,
+        64.0F,
+        kCrewVisualDrawDistance);
 
     if (parts.empty()) {
         return;
@@ -5290,9 +6459,10 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
             creature_instance_buffer_bytes_,
             instance_bytes,
             kInitialCreatureInstanceBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, creature_instance_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
     }
+    orphan_bound_buffer(GL_ARRAY_BUFFER, creature_instance_buffer_bytes_);
     glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, parts.data());
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
 
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
@@ -5335,6 +6505,9 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
         GL_UNSIGNED_INT,
         nullptr,
         static_cast<GLsizei>(parts.size()));
+    record_triangle_draw(
+        static_cast<GLsizei>(box_template_indices().size()),
+        static_cast<GLsizei>(parts.size()));
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -5362,9 +6535,10 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
             viewmodel_instance_buffer_bytes_,
             instance_bytes,
             kInitialCreatureInstanceBufferBytes);
-        glBufferData(GL_ARRAY_BUFFER, viewmodel_instance_buffer_bytes_, nullptr, GL_DYNAMIC_DRAW);
     }
+    orphan_bound_buffer(GL_ARRAY_BUFFER, viewmodel_instance_buffer_bytes_);
     glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, viewmodel.parts.data());
+    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
 
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
@@ -5409,6 +6583,9 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
         GL_UNSIGNED_INT,
         nullptr,
         static_cast<GLsizei>(viewmodel.parts.size()));
+    record_triangle_draw(
+        static_cast<GLsizei>(box_template_indices().size()),
+        static_cast<GLsizei>(viewmodel.parts.size()));
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -5436,6 +6613,7 @@ void Renderer::draw_block_break_overlay(const PlayerController& player) {
     glUseProgram(world_program_);
     glBindVertexArray(block_break_overlay_mesh_.vao);
     glDrawElements(GL_TRIANGLES, block_break_overlay_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
+    record_triangle_draw(block_break_overlay_mesh_.opaque_index_count);
     glDepthMask(GL_TRUE);
 }
 
@@ -5798,6 +6976,159 @@ void Renderer::draw_hotbar(const PlayerController& player,
     glEnable(GL_DEPTH_TEST);
 }
 
+void Renderer::draw_maritime_hud(const MaritimeHudView& maritime_hud, int width, int height) {
+    if (!maritime_hud.visible || width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto viewport_width = static_cast<float>(width);
+    const auto viewport_height = static_cast<float>(height);
+    const auto layout = build_maritime_hud_layout(
+        width,
+        height,
+        maritime_hud.visible,
+        maritime_hud.hunger_ratio,
+        maritime_hud.thirst_ratio,
+        maritime_hud.stamina_ratio,
+        maritime_hud.fishing_active,
+        maritime_hud.fishing_ratio);
+
+    MaritimeHudCacheKey cache_key {};
+    cache_key.width = width;
+    cache_key.height = height;
+    cache_key.visible = maritime_hud.visible;
+    cache_key.on_ship = maritime_hud.on_ship;
+    cache_key.fishing_active = maritime_hud.fishing_active;
+    cache_key.danger = maritime_hud.danger;
+    cache_key.moored = maritime_hud.moored;
+    cache_key.departing = maritime_hud.departing;
+    cache_key.hunger_step = quantize_hud_value(maritime_hud.hunger_ratio, 100.0F);
+    cache_key.thirst_step = quantize_hud_value(maritime_hud.thirst_ratio, 100.0F);
+    cache_key.stamina_step = quantize_hud_value(maritime_hud.stamina_ratio, 100.0F);
+    cache_key.fishing_step = quantize_hud_value(maritime_hud.fishing_ratio, 100.0F);
+    cache_key.ship_distance_step = quantize_hud_value(maritime_hud.ship_distance, 0.2F);
+    cache_key.ship_speed_step = quantize_hud_value(maritime_hud.ship_speed, 10.0F);
+    cache_key.departure_seconds_step = static_cast<int>(std::ceil(
+        std::max(0.0F, maritime_hud.departure_seconds_remaining)));
+    cache_key.food_rations = maritime_hud.food_rations;
+    cache_key.water_flasks = maritime_hud.water_flasks;
+    cache_key.fish = maritime_hud.fish;
+
+    auto& cache = maritime_cache_;
+    auto& vertices = cache.vertices;
+    const auto needs_rebuild = !cache.valid || cache.key != cache_key;
+    if (needs_rebuild) {
+        cache.valid = true;
+        cache.key = cache_key;
+        vertices.clear();
+        vertices.reserve(4096U);
+
+        const auto accent = maritime_hud.danger ? HudColor {0.96F, 0.38F, 0.28F, 1.0F} : HudColor {0.38F, 0.78F, 1.0F, 1.0F};
+        auto palette = make_warm_panel_palette(accent);
+        palette.fill = {0.04F, 0.08F, 0.10F, 0.84F};
+        palette.frame = {0.04F, 0.12F, 0.16F, 0.94F};
+        palette.trim = hud_with_alpha(accent, 0.34F);
+
+        const auto draw_text = [&](float x, float y, float pixel_size, std::string_view text, const HudColor& color, bool centered = false) {
+            append_pixel_text(vertices, viewport_width, viewport_height, x + pixel_size, y + pixel_size, pixel_size, text, {0.0F, 0.0F, 0.0F, 0.45F}, centered);
+            append_pixel_text(vertices, viewport_width, viewport_height, x, y, pixel_size, text, color, centered);
+        };
+        const auto draw_bar = [&](const MaritimeHudBarLayout& bar, const HudColor& fill_color) {
+            append_hud_frame_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                bar.x,
+                bar.y,
+                bar.width,
+                bar.height,
+                1.5F,
+                {0.0F, 0.0F, 0.0F, 0.72F},
+                {0.02F, 0.03F, 0.04F, 0.72F});
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                bar.x + 2.0F,
+                bar.y + 2.0F,
+                std::max(0.0F, bar.fill_width - 4.0F),
+                std::max(1.0F, bar.height - 4.0F),
+                fill_color);
+        };
+
+        append_stylized_panel_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_width,
+            layout.panel_height,
+            3.0F,
+            palette,
+            true);
+
+        draw_text(layout.title_x, layout.title_y, layout.text_pixel_size, "AVENTURE EN MER", {0.94F, 0.98F, 1.0F, 0.98F});
+        draw_bar(layout.hunger_bar, {0.86F, 0.48F, 0.22F, 0.92F});
+        draw_bar(layout.thirst_bar, {0.30F, 0.70F, 1.0F, 0.92F});
+        draw_bar(layout.stamina_bar, {0.40F, 0.92F, 0.52F, 0.92F});
+        draw_text(layout.hunger_bar.x, layout.hunger_bar.y - 10.0F, layout.body_pixel_size, "FAIM", {0.88F, 0.88F, 0.84F, 0.92F});
+        draw_text(layout.thirst_bar.x, layout.thirst_bar.y - 10.0F, layout.body_pixel_size, "SOIF", {0.88F, 0.88F, 0.84F, 0.92F});
+        draw_text(layout.stamina_bar.x, layout.stamina_bar.y - 10.0F, layout.body_pixel_size, "ENDURANCE", {0.88F, 0.88F, 0.84F, 0.92F});
+
+        auto status_text = std::string {};
+        if (maritime_hud.moored) {
+            status_text = layout.compact ? "QUAI " : "A QUAI - DEPART ";
+            status_text += std::to_string(cache_key.departure_seconds_step) + "S";
+        } else if (maritime_hud.departing) {
+            status_text = layout.compact ? "DEPART " : "DEPART EN COURS ";
+            status_text += std::to_string(cache_key.departure_seconds_step) + "S";
+        } else {
+            status_text = maritime_hud.on_ship
+                              ? (layout.compact ? std::string("BORD  ") : std::string("A BORD  "))
+                              : (layout.compact ? std::string("MER  ") : std::string("A LA MER  "));
+            status_text += std::to_string(static_cast<int>(std::round(maritime_hud.ship_distance))) + "M";
+        }
+        draw_text(
+            layout.status_x,
+            layout.status_y,
+            layout.body_pixel_size,
+            status_text,
+            maritime_hud.danger ? HudColor {1.0F, 0.62F, 0.48F, 0.96F} : HudColor {0.72F, 0.88F, 0.96F, 0.94F});
+
+        const auto cargo_text = layout.compact
+                                    ? std::string("V ") + std::to_string(maritime_hud.food_rations) +
+                                          "  E " + std::to_string(maritime_hud.water_flasks) +
+                                          "  P " + std::to_string(maritime_hud.fish)
+                                    : std::string("VIVRES ") + std::to_string(maritime_hud.food_rations) +
+                                          "  EAU " + std::to_string(maritime_hud.water_flasks) +
+                                          "  POISSONS " + std::to_string(maritime_hud.fish);
+        draw_text(layout.cargo_x, layout.cargo_y, layout.body_pixel_size, cargo_text, {0.82F, 0.86F, 0.90F, 0.94F});
+
+        if (maritime_hud.fishing_active) {
+            draw_bar(layout.fishing_bar, {0.94F, 0.84F, 0.38F, 0.94F});
+            draw_text(layout.fishing_bar.x, layout.fishing_bar.y - 10.0F, layout.body_pixel_size, "PECHE", {0.94F, 0.90F, 0.72F, 0.94F});
+        }
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+
+    upload_hud_vertices(vertices);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
 void Renderer::draw_gameplay_announcement(const GameplayHudAnnouncementView& announcement, int width, int height) {
     if (!announcement.visible || width <= 0 || height <= 0 || hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0) {
         return;
@@ -5840,8 +7171,11 @@ void Renderer::draw_gameplay_announcement(const GameplayHudAnnouncementView& ann
     palette.shadow = hud_with_alpha(palette.shadow, palette.shadow[3] * alpha);
     palette.trim = hud_with_alpha(palette.trim, palette.trim[3] * alpha);
 
-    std::vector<HudVertex> vertices {};
-    vertices.reserve(1536U);
+    auto& vertices = gameplay_announcement_vertices_scratch_;
+    vertices.clear();
+    if (vertices.capacity() < 1536U) {
+        vertices.reserve(1536U);
+    }
     append_stylized_panel_top_left(
         vertices,
         viewport_width,
@@ -6367,6 +7701,7 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
             pile_line += " SUR ";
             pile_line += std::to_string(static_cast<int>(max_item_stack_count(focus_item.slot.block_id)));
 
+            const auto tool_material_count = inventory_available_tool_crafting_material(inventory_menu, hotbar);
             std::string material_line = "MATIERE ";
             material_line += item_material_label(focus_item.slot.block_id);
             if (const auto stats = weapon_stats(focus_item.slot.block_id); stats.has_value()) {
@@ -6378,6 +7713,10 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
                 material_line = "RESISTANCE +";
                 material_line += std::to_string(static_cast<int>(std::round(resistance)));
                 material_line += "%";
+            } else if (is_tool_item(focus_item.slot.block_id)) {
+                material_line = "OUTIL MINAGE";
+            } else if (inventory_is_tool_crafting_material(focus_item.slot.block_id)) {
+                material_line = "MATERIAU OUTILS";
             }
 
             std::string source_line = "SOURCE ";
@@ -6389,6 +7728,11 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
                 source_line += "EQUIP";
             } else {
                 source_line += inventory_slot_group_label(focus_item.group);
+            }
+            if (is_tool_item(focus_item.slot.block_id) ||
+                inventory_is_tool_crafting_material(focus_item.slot.block_id)) {
+                source_line = "STOCK BOIS ";
+                source_line += std::to_string(static_cast<int>(tool_material_count));
             }
 
             const auto info_y = detail_rule_y + 8.0F;
@@ -7218,8 +8562,8 @@ void Renderer::draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int 
 
         const auto title_pixel_size = std::floor(std::clamp(viewport_width * 0.0038F, 4.0F, 6.0F));
         const auto subtitle_pixel_size = std::floor(std::clamp(viewport_width * 0.0018F, 2.0F, 3.0F));
-        draw_text(layout.title_center_x, layout.title_y, title_pixel_size, save_slot_menu_mode_title(save_slot_menu.mode), {0.98F, 0.97F, 0.94F, 1.0F}, true);
-        draw_text(layout.subtitle_center_x, layout.subtitle_y, subtitle_pixel_size, save_slot_menu_mode_subtitle(save_slot_menu.mode), {0.82F, 0.84F, 0.88F, 0.94F}, true);
+        draw_text(layout.title_center_x, layout.title_y, title_pixel_size, save_slot_menu_title(save_slot_menu), {0.98F, 0.97F, 0.94F, 1.0F}, true);
+        draw_text(layout.subtitle_center_x, layout.subtitle_y, subtitle_pixel_size, save_slot_menu_subtitle(save_slot_menu), {0.82F, 0.84F, 0.88F, 0.94F}, true);
 
         for (const auto& card : layout.cards) {
             auto palette = card.selected
@@ -7273,6 +8617,10 @@ void Renderer::draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int 
 
             if (!card.occupied) {
                 draw_text(card.x + padding, card.y + 34.0F, body_size, "VIDE", {0.74F, 0.78F, 0.84F, 0.90F});
+                if (save_slot_menu.mode == SaveSlotMenuMode::NewGame) {
+                    const auto mode_text = format_save_slot_mode(save_slot_menu.new_game_mode);
+                    draw_text(card.x + padding, card.y + 52.0F, body_size, mode_text, {0.62F, 0.78F, 0.90F, 0.90F});
+                }
                 if (card.active_slot) {
                     draw_text(card.x + card.width - 50.0F, card.y + 10.0F, body_size, "ACTIF", {1.0F, 0.88F, 0.56F, 0.94F});
                 }
@@ -7282,9 +8630,12 @@ void Renderer::draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int 
             const auto timestamp = format_save_slot_timestamp(card.metadata.saved_at_unix_seconds);
             const auto seed_text = format_save_slot_seed(card.metadata.seed);
             const auto time_text = format_save_slot_time(card.metadata.time_of_day);
+            const auto mode_text = format_save_slot_mode(card.metadata.game_mode);
             draw_text(card.x + padding, card.y + 34.0F, body_size, timestamp, {0.86F, 0.88F, 0.92F, 0.96F});
             draw_text(card.x + padding, card.y + 52.0F, body_size, seed_text, {0.80F, 0.83F, 0.88F, 0.94F});
             draw_text(card.x + padding, card.y + 70.0F, body_size, time_text, {0.80F, 0.83F, 0.88F, 0.94F});
+            const auto mode_x = std::max(card.x + padding, card.x + card.width - padding - measure_pixel_text(mode_text, body_size));
+            draw_text(mode_x, card.y + 70.0F, body_size, mode_text, {0.64F, 0.82F, 0.94F, 0.90F});
             if (card.active_slot) {
                 const auto active_x = card.delete_visible ? card.delete_x - 52.0F : card.x + card.width - 50.0F;
                 draw_text(active_x, card.y + 10.0F, body_size, "ACTIF", {1.0F, 0.88F, 0.56F, 0.94F});
@@ -7505,6 +8856,7 @@ void Renderer::draw_crosshair() {
     glUseProgram(crosshair_program_);
     glBindVertexArray(crosshair_vao_);
     glDrawArrays(GL_LINES, 0, 4);
+    record_draw_call();
     glEnable(GL_DEPTH_TEST);
 }
 

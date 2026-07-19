@@ -112,6 +112,15 @@ struct CreatureInstance {
     float health = creature_max_health(CreatureSpecies::Pig);
     glm::vec3 hit_direction {0.0F, 0.0F, 1.0F};
     std::uint8_t resident_target_index = 0;
+
+    // Je garde ces donnees comme cache d'execution uniquement : elles ne font
+    // pas partie du format de sauvegarde et sont reconstruites au chargement.
+    glm::vec3 resident_cached_target {0.0F};
+    float resident_target_refresh_timer = 0.0F;
+    float resident_cached_heading = 0.0F;
+    std::uint8_t resident_cached_phase = 0;
+    bool resident_target_valid = false;
+    bool resident_heading_valid = false;
 };
 
 struct CreatureRenderInstance {

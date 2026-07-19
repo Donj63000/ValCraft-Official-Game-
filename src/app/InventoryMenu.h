@@ -19,6 +19,8 @@ constexpr std::size_t kInventoryColumns = 9;
 constexpr std::size_t kInventoryRows = 3;
 constexpr std::size_t kInventoryStorageSlotCount = kInventoryColumns * kInventoryRows;
 constexpr std::size_t kInventoryVisibleSlotCount = kInventoryStorageSlotCount + kHotbarSlotCount + kEquipmentSlotCount;
+constexpr std::size_t kInventoryFooterHintCount = 4;
+constexpr std::uint8_t kToolCraftingMaterialCost = 3;
 
 enum class InventorySlotGroup : std::uint8_t {
     Storage = 0,
@@ -141,7 +143,7 @@ struct InventoryMenuLayout {
     float slot_gap = 0.0F;
     float icon_inset = 0.0F;
     std::array<InventoryKeycapLayout, kHotbarSlotCount> hotbar_keycaps {};
-    std::array<InventoryFooterHintLayout, 3> footer_hints {};
+    std::array<InventoryFooterHintLayout, kInventoryFooterHintCount> footer_hints {};
     std::array<InventorySlotLayout, kInventoryVisibleSlotCount> slots {};
 };
 
@@ -236,6 +238,12 @@ inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::st
         return "DIAMANT";
     case BlockType::MetallicAlloyOre:
         return "ALLIAGE METALIQUE";
+    case BlockType::Pickaxe:
+        return "PIOCHE";
+    case BlockType::Axe:
+        return "HACHE";
+    case BlockType::Shovel:
+        return "PELLE";
     case BlockType::Air:
     default:
         return "";
@@ -289,6 +297,10 @@ inline constexpr auto inventory_equipment_resistance_percent(const InventoryMenu
 
 inline constexpr auto inventory_active_weapon_stats(const InventoryMenuState& inventory,
                                                     const HotbarState& hotbar) noexcept -> std::optional<WeaponStats> {
+    const auto& selected_slot = hotbar.selected_slot();
+    if (hotbar_slot_has_item(selected_slot) && is_tool_item(selected_slot.block_id)) {
+        return std::nullopt;
+    }
     return equipped_weapon_stats(inventory.equipment_slots, hotbar);
 }
 
@@ -446,6 +458,90 @@ inline auto inventory_try_store_stack(InventoryMenuState& inventory,
     return stack;
 }
 
+inline constexpr auto inventory_is_tool_crafting_material(BlockId block_id) noexcept -> bool {
+    block_id = block_item_id(block_id);
+    return block_id == to_block_id(BlockType::Wood) ||
+           block_id == to_block_id(BlockType::PineWood) ||
+           block_id == to_block_id(BlockType::Planks);
+}
+
+inline constexpr auto inventory_crafted_tool_material_cost(BlockId block_id) noexcept -> std::uint8_t {
+    return is_tool_item(block_id) ? kToolCraftingMaterialCost : static_cast<std::uint8_t>(0U);
+}
+
+inline constexpr auto inventory_tool_crafting_material_count_in_slot(const HotbarSlot& slot) noexcept -> std::uint16_t {
+    return hotbar_slot_has_item(slot) && inventory_is_tool_crafting_material(slot.block_id)
+               ? static_cast<std::uint16_t>(slot.count)
+               : static_cast<std::uint16_t>(0U);
+}
+
+inline constexpr auto inventory_available_tool_crafting_material(const InventoryMenuState& inventory,
+                                                                 const HotbarState& hotbar) noexcept -> std::uint16_t {
+    std::uint16_t total = 0;
+    for (const auto& slot : inventory.storage_slots) {
+        total = static_cast<std::uint16_t>(total + inventory_tool_crafting_material_count_in_slot(slot));
+    }
+    for (const auto& slot : hotbar.slots) {
+        total = static_cast<std::uint16_t>(total + inventory_tool_crafting_material_count_in_slot(slot));
+    }
+    total = static_cast<std::uint16_t>(total + inventory_tool_crafting_material_count_in_slot(inventory.carried_slot));
+    return total;
+}
+
+inline constexpr void inventory_consume_tool_crafting_material_from_slot(HotbarSlot& slot,
+                                                                         std::uint8_t& remaining) noexcept {
+    if (remaining == 0 || !hotbar_slot_has_item(slot) || !inventory_is_tool_crafting_material(slot.block_id)) {
+        return;
+    }
+
+    const auto consumed = static_cast<std::uint8_t>(std::min<std::uint8_t>(slot.count, remaining));
+    slot.count = static_cast<std::uint8_t>(slot.count - consumed);
+    remaining = static_cast<std::uint8_t>(remaining - consumed);
+    normalize_item_stack(slot);
+}
+
+inline void inventory_consume_tool_crafting_material(InventoryMenuState& inventory,
+                                                     HotbarState& hotbar,
+                                                     std::uint8_t count) noexcept {
+    auto remaining = count;
+    for (auto& slot : inventory.storage_slots) {
+        inventory_consume_tool_crafting_material_from_slot(slot, remaining);
+    }
+    for (auto& slot : hotbar.slots) {
+        inventory_consume_tool_crafting_material_from_slot(slot, remaining);
+    }
+    inventory_consume_tool_crafting_material_from_slot(inventory.carried_slot, remaining);
+    normalize_inventory_state(inventory, hotbar);
+}
+
+inline auto inventory_craft_tool(InventoryMenuState& inventory,
+                                 HotbarState& hotbar,
+                                 BlockId tool_id) noexcept -> bool {
+    tool_id = block_item_id(tool_id);
+    const auto material_cost = inventory_crafted_tool_material_cost(tool_id);
+    if (material_cost == 0) {
+        return false;
+    }
+
+    auto next_inventory = inventory;
+    auto next_hotbar = hotbar;
+    normalize_inventory_state(next_inventory, next_hotbar);
+    if (inventory_available_tool_crafting_material(next_inventory, next_hotbar) < material_cost) {
+        return false;
+    }
+
+    // Je travaille sur une copie pour ne jamais consommer les materiaux si l'outil ne peut pas etre range.
+    inventory_consume_tool_crafting_material(next_inventory, next_hotbar, material_cost);
+    const auto leftover = inventory_try_store_stack(next_inventory, next_hotbar, inventory_make_slot(tool_id, 1));
+    if (inventory_slot_has_item(leftover)) {
+        return false;
+    }
+
+    inventory = next_inventory;
+    hotbar = next_hotbar;
+    return true;
+}
+
 inline constexpr void inventory_primary_click(InventoryMenuState& inventory,
                                               HotbarState& hotbar,
                                               InventorySlotRef ref) noexcept {
@@ -587,11 +683,9 @@ inline auto build_inventory_menu_layout(int viewport_width,
                                         const HotbarState& hotbar) -> InventoryMenuLayout {
     const auto layout_width = static_cast<float>(std::max(viewport_width, 1));
     const auto layout_height = static_cast<float>(std::max(viewport_height, 1));
-    const auto safe_width = static_cast<float>(std::max(viewport_width, 640));
-    const auto safe_height = static_cast<float>(std::max(viewport_height, 360));
-    const auto min_dimension = std::min(safe_width, safe_height);
+    const auto min_dimension = std::min(layout_width, layout_height);
 
-    float slot_size = std::clamp(min_dimension * 0.067F, 30.0F, 50.0F);
+    float slot_size = std::clamp(min_dimension * 0.067F, 17.0F, 50.0F);
     float slot_gap = 0.0F;
     float icon_inset = 0.0F;
     float panel_padding_x = 0.0F;
@@ -615,19 +709,19 @@ inline auto build_inventory_menu_layout(int viewport_width,
     float panel_height = 0.0F;
     bool compact_detail = false;
 
-    for (int pass = 0; pass < 10; ++pass) {
-        slot_gap = std::max(4.0F, slot_size * 0.16F);
-        icon_inset = std::max(4.0F, slot_size * 0.16F);
-        panel_padding_x = std::max(18.0F, slot_size * 0.50F);
-        panel_padding_y = std::max(16.0F, slot_size * 0.42F);
-        section_gap = std::max(14.0F, slot_size * 0.34F);
-        section_padding = std::max(10.0F, slot_size * 0.24F);
-        section_label_height = std::max(10.0F, slot_size * 0.24F);
-        keycap_band_height = std::max(16.0F, slot_size * 0.46F);
-        header_height = std::clamp(slot_size * 1.55F, 64.0F, 84.0F);
-        footer_height = std::clamp(slot_size * 0.98F, 40.0F, 56.0F);
-        preview_column_width = std::clamp(slot_size * 4.50F, 150.0F, 224.0F);
-        detail_width = std::clamp(slot_size * 3.35F, 150.0F, 184.0F);
+    for (int pass = 0; pass < 24; ++pass) {
+        slot_gap = std::clamp(slot_size * 0.14F, 2.0F, 8.0F);
+        icon_inset = std::clamp(slot_size * 0.14F, 2.0F, 8.0F);
+        panel_padding_x = std::clamp(slot_size * 0.34F, 6.0F, 24.0F);
+        panel_padding_y = std::clamp(slot_size * 0.30F, 6.0F, 20.0F);
+        section_gap = std::clamp(slot_size * 0.22F, 4.0F, 16.0F);
+        section_padding = std::clamp(slot_size * 0.22F, 5.0F, 12.0F);
+        section_label_height = std::clamp(slot_size * 0.70F, 18.0F, 24.0F);
+        keycap_band_height = std::clamp(slot_size * 0.36F, 8.0F, 18.0F);
+        header_height = std::clamp(slot_size * 1.42F, 50.0F, 84.0F);
+        footer_height = std::clamp(slot_size * 0.82F, 24.0F, 56.0F);
+        preview_column_width = std::clamp(slot_size * 3.70F, 70.0F, 224.0F);
+        detail_width = std::clamp(slot_size * 2.90F, 70.0F, 184.0F);
         storage_slots_width =
             static_cast<float>(kInventoryColumns) * slot_size +
             static_cast<float>(kInventoryColumns - 1U) * slot_gap;
@@ -638,16 +732,16 @@ inline auto build_inventory_menu_layout(int viewport_width,
         hotbar_panel_height = section_padding * 2.0F + section_label_height + keycap_band_height + slot_size;
         grid_column_height = storage_panel_height + section_gap + hotbar_panel_height;
 
-        const auto compact_preview_min = slot_size * 3.70F;
-        const auto compact_detail_min = slot_size * 2.45F;
+        const auto compact_preview_min = slot_size * 2.80F;
+        const auto compact_detail_min = slot_size * 1.75F;
         compact_preview_height = std::clamp(
             grid_column_height * 0.56F,
             compact_preview_min,
             std::max(compact_preview_min, grid_column_height - section_gap - compact_detail_min));
         compact_detail_height = std::max(compact_detail_min, grid_column_height - compact_preview_height - section_gap);
 
-        const auto header_gap = std::max(10.0F, slot_size * 0.26F);
-        const auto footer_gap = std::max(10.0F, slot_size * 0.22F);
+        const auto header_gap = std::clamp(slot_size * 0.16F, 3.0F, 12.0F);
+        const auto footer_gap = std::clamp(slot_size * 0.14F, 3.0F, 10.0F);
         const auto wide_width =
             panel_padding_x * 2.0F +
             preview_column_width +
@@ -663,7 +757,7 @@ inline auto build_inventory_menu_layout(int viewport_width,
             storage_slots_width +
             section_padding * 2.0F;
 
-        compact_detail = wide_width > layout_width - 24.0F;
+        compact_detail = wide_width > layout_width - 8.0F;
         panel_width = compact_detail ? compact_width : wide_width;
         panel_height =
             panel_padding_y * 2.0F +
@@ -673,18 +767,16 @@ inline auto build_inventory_menu_layout(int viewport_width,
             footer_gap +
             footer_height;
 
-        if ((panel_width <= layout_width - 20.0F && panel_height <= layout_height - 20.0F) || slot_size <= 30.0F) {
+        if ((panel_width <= layout_width - 4.0F && panel_height <= layout_height - 4.0F) || slot_size <= 17.0F) {
             break;
         }
-        slot_size = std::max(30.0F, slot_size - 2.0F);
+        slot_size = std::max(17.0F, slot_size - 1.5F);
     }
 
-    const auto header_gap = std::max(10.0F, slot_size * 0.26F);
-    const auto footer_gap = std::max(10.0F, slot_size * 0.22F);
-    const auto panel_x = (layout_width - panel_width) * 0.5F;
-    const auto panel_y = layout_height >= panel_height + 28.0F
-                             ? std::max(14.0F, (layout_height - panel_height) * 0.5F)
-                             : std::max(8.0F, (layout_height - panel_height) * 0.5F);
+    const auto header_gap = std::clamp(slot_size * 0.16F, 3.0F, 12.0F);
+    const auto footer_gap = std::clamp(slot_size * 0.14F, 3.0F, 10.0F);
+    const auto panel_x = std::clamp((layout_width - panel_width) * 0.5F, 0.0F, std::max(0.0F, layout_width - panel_width));
+    const auto panel_y = std::clamp((layout_height - panel_height) * 0.5F, 0.0F, std::max(0.0F, layout_height - panel_height));
     const auto header_panel_x = panel_x + 8.0F;
     const auto header_panel_y = panel_y + 8.0F;
     const auto header_panel_width = std::max(0.0F, panel_width - 16.0F);
@@ -697,17 +789,21 @@ inline auto build_inventory_menu_layout(int viewport_width,
     const auto footer_panel_y = body_y + body_height + footer_gap;
     const auto footer_panel_width = std::max(0.0F, panel_width - 20.0F);
     const auto footer_panel_height = footer_height;
-    const auto footer_hint_gap = std::max(6.0F, slot_size * 0.16F);
-    const auto footer_hint_padding = std::max(8.0F, slot_size * 0.22F);
-    const auto footer_hint_height = std::max(18.0F, footer_panel_height - footer_hint_padding * 1.20F);
+    const auto footer_hint_gap = std::clamp(slot_size * 0.16F, 3.0F, 8.0F);
+    const auto footer_hint_padding = std::clamp(slot_size * 0.18F, 4.0F, 10.0F);
+    const auto footer_hint_height = std::max(16.0F, footer_panel_height - footer_hint_padding * 1.20F);
     const auto footer_hint_y = footer_panel_y + (footer_panel_height - footer_hint_height) * 0.5F;
     const auto footer_hint_available_width =
-        std::max(0.0F, footer_panel_width - footer_hint_padding * 2.0F - footer_hint_gap * 2.0F);
-    const auto close_hint_width = std::max(0.0F, footer_hint_available_width * 0.34F);
-    const auto action_hint_width = std::max(0.0F, (footer_hint_available_width - close_hint_width) * 0.5F);
+        std::max(0.0F,
+                 footer_panel_width -
+                     footer_hint_padding * 2.0F -
+                     footer_hint_gap * static_cast<float>(kInventoryFooterHintCount - 1U));
+    const auto footer_hint_width =
+        footer_hint_available_width / static_cast<float>(kInventoryFooterHintCount);
     const auto close_hint_x = footer_panel_x + footer_hint_padding;
-    const auto primary_hint_x = close_hint_x + close_hint_width + footer_hint_gap;
-    const auto secondary_hint_x = primary_hint_x + action_hint_width + footer_hint_gap;
+    const auto primary_hint_x = close_hint_x + footer_hint_width + footer_hint_gap;
+    const auto secondary_hint_x = primary_hint_x + footer_hint_width + footer_hint_gap;
+    const auto craft_hint_x = secondary_hint_x + footer_hint_width + footer_hint_gap;
 
     const auto preview_panel_x = body_x;
     const auto preview_panel_y = body_y;
@@ -730,15 +826,15 @@ inline auto build_inventory_menu_layout(int viewport_width,
     const auto grid_y = storage_panel_y + section_padding + section_label_height;
     const auto hotbar_slots_x = hotbar_panel_x + section_padding;
     const auto hotbar_slots_y = hotbar_panel_y + section_padding + section_label_height + keycap_band_height;
-    const auto keycap_width = std::clamp(slot_size * 0.38F, 14.0F, 20.0F);
-    const auto keycap_height = std::clamp(slot_size * 0.30F, 10.0F, 16.0F);
+    const auto keycap_width = std::clamp(slot_size * 0.38F, 10.0F, 20.0F);
+    const auto keycap_height = std::clamp(slot_size * 0.30F, 7.0F, 16.0F);
     const auto keycap_y = hotbar_panel_y + section_padding + section_label_height + (keycap_band_height - keycap_height) * 0.5F;
 
-    const auto preview_inner_padding = std::max(12.0F, slot_size * 0.28F);
+    const auto preview_inner_padding = std::clamp(slot_size * 0.28F, 4.0F, 12.0F);
     const auto preview_inner_height = std::max(0.0F, preview_panel_height - preview_inner_padding * 2.0F);
     const auto preview_inner_y = preview_panel_y + preview_inner_padding;
-    const auto equipment_slot_size = std::clamp(slot_size * 0.72F, 24.0F, 36.0F);
-    const auto equipment_gap = std::max(4.0F, equipment_slot_size * 0.18F);
+    const auto equipment_slot_size = std::clamp(slot_size * 0.72F, 14.0F, 36.0F);
+    const auto equipment_gap = std::clamp(equipment_slot_size * 0.18F, 2.0F, 7.0F);
     const auto equipment_columns = 3U;
     const auto equipment_grid_width =
         static_cast<float>(equipment_columns) * equipment_slot_size +
@@ -746,9 +842,9 @@ inline auto build_inventory_menu_layout(int viewport_width,
     const auto equipment_grid_height = equipment_slot_size * 2.0F + equipment_gap;
     const auto equipment_grid_x = preview_panel_x + (preview_panel_width - equipment_grid_width) * 0.5F;
     const auto equipment_grid_y =
-        preview_panel_y + preview_panel_height - equipment_grid_height - std::max(26.0F, slot_size * 0.70F);
+        preview_panel_y + preview_panel_height - equipment_grid_height - std::clamp(slot_size * 0.70F, 10.0F, 26.0F);
     const auto equipment_reserved_height =
-        equipment_grid_height + section_label_height + std::max(34.0F, slot_size * 0.92F);
+        equipment_grid_height + section_label_height + std::clamp(slot_size * 0.92F, 12.0F, 34.0F);
 
     InventoryMenuLayout layout {};
     layout.panel_x = panel_x;
@@ -796,8 +892,8 @@ inline auto build_inventory_menu_layout(int viewport_width,
     layout.preview_base_y =
         preview_inner_y +
         std::max(0.0F, preview_inner_height - equipment_reserved_height) -
-        std::max(10.0F, slot_size * 0.22F);
-    layout.silhouette_scale = std::clamp(preview_panel_width * 0.078F, 9.0F, 15.0F);
+        std::clamp(slot_size * 0.22F, 4.0F, 10.0F);
+    layout.silhouette_scale = std::clamp(preview_panel_width * 0.078F, 5.0F, 15.0F);
     layout.grid_x = grid_x;
     layout.grid_y = grid_y;
     layout.grid_width = storage_slots_width;
@@ -818,25 +914,33 @@ inline auto build_inventory_menu_layout(int viewport_width,
     layout.footer_hints[0] = {
         close_hint_x,
         footer_hint_y,
-        close_hint_width,
+        footer_hint_width,
         footer_hint_height,
-        "E OU ECHAP FERMER",
+        footer_hint_width < 76.0F ? "FERMER" : "E OU ECHAP FERMER",
         true,
     };
     layout.footer_hints[1] = {
         primary_hint_x,
         footer_hint_y,
-        action_hint_width,
+        footer_hint_width,
         footer_hint_height,
-        "CLIC GAUCHE DEPLACER",
+        footer_hint_width < 76.0F ? "DEPLACER" : "CLIC DEPLACER",
         false,
     };
     layout.footer_hints[2] = {
         secondary_hint_x,
         footer_hint_y,
-        action_hint_width,
+        footer_hint_width,
         footer_hint_height,
-        "CLIC DROIT DIVISER",
+        footer_hint_width < 76.0F ? "DIVISER" : "DROIT DIVISER",
+        false,
+    };
+    layout.footer_hints[3] = {
+        craft_hint_x,
+        footer_hint_y,
+        footer_hint_width,
+        footer_hint_height,
+        footer_hint_width < 76.0F ? "CRAFT" : "F1/2/3 CRAFT",
         false,
     };
 

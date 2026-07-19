@@ -304,6 +304,139 @@ void overwrite_antique_theme_tiles(std::vector<std::uint8_t>& pixels) {
     });
 }
 
+template <typename ColorFn>
+void fill_ship_tile(std::vector<std::uint8_t>& pixels, ShipAtlasMaterial material, const ColorFn& color_fn) {
+    const auto tile = ship_atlas_tile(material);
+    fill_tile(pixels, tile.x, tile.y, color_fn);
+}
+
+void fill_ship_atlas_tiles(std::vector<std::uint8_t>& pixels) {
+    // Je consacre la derniere rangee aux materiaux de L'Amelie sans modifier les tuiles des blocs.
+    fill_ship_tile(pixels, ShipAtlasMaterial::DarkHull, [](int x, int y) {
+        const auto plank_seam = y % 4 == 0;
+        const auto staggered_joint = y % 8 < 4 ? x == 0 : x == 8;
+        const auto seam = plank_seam || staggered_joint;
+        const auto grain = tile_noise(x, y, 401);
+        const auto lengthwise_grain = std::sin(static_cast<float>(x) * 0.92F + grain * 3.4F) * 5.0F;
+        const auto nail = !seam && (x == 1 || x == 9) && y % 4 == 2;
+        const auto shadow = seam ? 19.0F : 0.0F;
+        const auto nail_shadow = nail ? 20.0F : 0.0F;
+        return make_rgba(
+            64.0F + grain * 19.0F + lengthwise_grain - shadow - nail_shadow,
+            34.0F + grain * 10.0F + lengthwise_grain * 0.42F - shadow * 0.60F - nail_shadow * 0.68F,
+            24.0F + grain * 7.0F + lengthwise_grain * 0.24F - shadow * 0.36F - nail_shadow * 0.42F,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::LightDeck, [](int x, int y) {
+        const auto board = x / 4;
+        const auto seam = x % 4 == 0 || (y == 0 && board % 2 == 0) || (y == 8 && board % 2 != 0);
+        const auto grain = tile_noise(x, y, 419);
+        const auto long_wave = std::sin(static_cast<float>(y) * 0.78F + grain * 2.6F) * 4.5F;
+        const auto board_tone = static_cast<float>((board * 7) % 11) - 5.0F;
+        const auto peg = !seam && (y == 1 || y == 9) && x % 4 == 2;
+        const auto shadow = seam ? 23.0F : 0.0F;
+        const auto peg_shadow = peg ? 14.0F : 0.0F;
+        return make_rgba(
+            178.0F + grain * 24.0F + long_wave + board_tone - shadow - peg_shadow,
+            126.0F + grain * 17.0F + long_wave * 0.55F + board_tone * 0.62F - shadow * 0.75F - peg_shadow,
+            72.0F + grain * 11.0F + long_wave * 0.30F + board_tone * 0.34F - shadow * 0.48F - peg_shadow * 0.60F,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::CleanBeam, [](int x, int y) {
+        const auto edge = x == 0 || x == 15;
+        const auto grain = tile_noise(x, y, 431);
+        const auto straight_grain = std::sin(static_cast<float>(y) * 0.82F + grain * 3.0F) * 6.0F;
+        const auto growth_line = (x == 5 || x == 11) && tile_noise(x + 3, y, 433) > 0.48F;
+        const auto knot = radial_falloff(static_cast<float>(x), static_cast<float>(y), 8.0F, 10.0F, 2.1F);
+        const auto shadow = edge ? 15.0F : 0.0F;
+        const auto line_shadow = growth_line ? 9.0F : 0.0F;
+        return make_rgba(
+            126.0F + grain * 20.0F + straight_grain - knot * 17.0F - shadow - line_shadow,
+            79.0F + grain * 13.0F + straight_grain * 0.52F - knot * 11.0F - shadow * 0.62F - line_shadow * 0.72F,
+            42.0F + grain * 8.0F + straight_grain * 0.28F - knot * 6.0F - shadow * 0.34F - line_shadow * 0.42F,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::CreamCanvas, [](int x, int y) {
+        const auto weave = ((x + y) & 1) == 0 ? 4.0F : -3.0F;
+        const auto warp = x % 4 == 0 ? -2.0F : 0.0F;
+        const auto fold = std::sin((static_cast<float>(x) / 15.0F) * kFullTurnRadians) * 9.0F;
+        const auto weathering = tile_noise(x, y, 449) * 7.0F;
+        const auto reinforced_seam = x == 0 || x == 15;
+        const auto stitch = (x == 1 || x == 14) && y % 4 == 1;
+        const auto seam_shadow = reinforced_seam ? 15.0F : 0.0F;
+        const auto stitch_shadow = stitch ? 12.0F : 0.0F;
+        return make_rgba(
+            224.0F + weave + warp + fold + weathering - seam_shadow - stitch_shadow,
+            210.0F + weave * 0.72F + warp * 0.72F + fold * 0.68F + weathering * 0.62F - seam_shadow * 0.72F - stitch_shadow,
+            169.0F + weave * 0.45F + warp * 0.45F + fold * 0.38F + weathering * 0.35F - seam_shadow * 0.44F - stitch_shadow * 0.65F,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::Rope, [](int x, int y) {
+        const auto braid_phase = (x + y * 2) % 6;
+        const auto braid_highlight = braid_phase <= 1 ? 18.0F : (braid_phase >= 4 ? -13.0F : 0.0F);
+        const auto fiber = tile_noise(x, y, 461) * 12.0F;
+        const auto strand = x % 4 == 0 ? -10.0F : 0.0F;
+        return make_rgba(
+            152.0F + fiber + braid_highlight + strand,
+            103.0F + fiber * 0.68F + braid_highlight * 0.72F + strand * 0.72F,
+            52.0F + fiber * 0.36F + braid_highlight * 0.38F + strand * 0.42F,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::Iron, [](int x, int y) {
+        const auto panel_edge = x == 0 || x == 15 || y == 0 || y == 15;
+        const auto rivet = (x == 2 || x == 13) && (y == 2 || y == 13);
+        const auto forge = tile_noise(x, y, 479);
+        const auto brushing = static_cast<float>((x + y * 3) % 5) - 2.0F;
+        const auto highlight = rivet ? 35.0F : 0.0F;
+        const auto shadow = panel_edge ? 18.0F : 0.0F;
+        return make_rgba(
+            61.0F + forge * 31.0F + brushing - shadow + highlight,
+            66.0F + forge * 33.0F + brushing - shadow + highlight,
+            68.0F + forge * 35.0F + brushing * 0.72F - shadow + highlight,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::Brass, [](int x, int y) {
+        const auto hammer = tile_noise(x * 2, y * 2, 491);
+        const auto diagonal = ((x + y) % 7 == 0) ? 13.0F : 0.0F;
+        const auto border = x == 0 || x == 15 || y == 0 || y == 15;
+        const auto rivet = (x == 2 || x == 13) && (y == 2 || y == 13);
+        const auto patina = tile_noise(x + 7, y + 11, 499) > 0.88F ? 18.0F : 0.0F;
+        const auto shadow = border ? 21.0F : 0.0F;
+        const auto shine = rivet ? 31.0F : 0.0F;
+        return make_rgba(
+            169.0F + hammer * 45.0F + diagonal - shadow + shine - patina * 0.62F,
+            112.0F + hammer * 35.0F + diagonal * 0.68F - shadow * 0.72F + shine * 0.72F + patina * 0.42F,
+            36.0F + hammer * 20.0F + diagonal * 0.28F - shadow * 0.38F + shine * 0.34F + patina * 0.32F,
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::Lantern, [](int x, int y) {
+        const auto frame = x <= 1 || x >= 14 || y <= 1 || y >= 14 || x == 7 || x == 8;
+        const auto corner = (x <= 3 || x >= 12) && (y <= 3 || y >= 12);
+        const auto glow = radial_falloff(static_cast<float>(x), static_cast<float>(y), 7.5F, 7.5F, 8.6F);
+        const auto flicker = tile_noise(x, y, 509) * 10.0F;
+        if (frame || corner) {
+            const auto brass_edge = (x + y) % 5 == 0 ? 14.0F : 0.0F;
+            return make_rgba(
+                82.0F + brass_edge,
+                52.0F + brass_edge * 0.62F,
+                23.0F + brass_edge * 0.28F,
+                255.0F);
+        }
+        return make_rgba(
+            236.0F + glow * 19.0F,
+            157.0F + glow * 72.0F + flicker,
+            45.0F + glow * 92.0F + flicker * 0.42F,
+            255.0F);
+    });
+}
+
 } // namespace
 
 auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
@@ -574,6 +707,58 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
     fill_ore_tile(pixels, 3, {94.0F, 218.0F, 226.0F}, 293, 0.23F);
     fill_ore_tile(pixels, 4, {192.0F, 178.0F, 226.0F}, 307, 0.18F);
 
+    fill_tile(pixels, 5, 6, [](int x, int y) {
+        const auto px = static_cast<float>(x);
+        const auto py = static_cast<float>(y);
+        const auto handle = distance_to_segment(px, py, 4.0F, 14.0F, 10.0F, 5.0F);
+        const auto head = distance_to_segment(px, py, 3.0F, 5.0F, 13.0F, 2.0F);
+        const auto hook = distance_to_segment(px, py, 10.0F, 3.0F, 13.0F, 6.0F);
+        if (head < 1.10F || hook < 0.95F) {
+            const auto shine = x >= 8 && y <= 4 ? 26.0F : 0.0F;
+            return make_rgba(166.0F + shine, 174.0F + shine, 178.0F + shine, 255.0F);
+        }
+        if (handle < 0.95F || (x >= 3 && x <= 5 && y >= 12)) {
+            return make_rgba(112.0F, 70.0F, 34.0F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 6, 6, [](int x, int y) {
+        const auto px = static_cast<float>(x);
+        const auto py = static_cast<float>(y);
+        const auto handle = distance_to_segment(px, py, 4.0F, 14.0F, 10.0F, 4.0F);
+        const auto blade_core = radial_falloff(px, py, 11.0F, 4.8F, 4.5F);
+        const auto blade_cut = radial_falloff(px, py, 8.4F, 5.0F, 2.3F);
+        const auto blade = blade_core > 0.22F && blade_cut < 0.54F && x >= 8 && y <= 9;
+        if (blade) {
+            const auto edge = x >= 12 || y <= 2 ? 26.0F : 0.0F;
+            return make_rgba(164.0F + edge, 170.0F + edge, 172.0F + edge, 255.0F);
+        }
+        if (handle < 0.95F || (x >= 3 && x <= 5 && y >= 12)) {
+            return make_rgba(126.0F, 78.0F, 36.0F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+    fill_tile(pixels, 7, 6, [](int x, int y) {
+        const auto px = static_cast<float>(x);
+        const auto py = static_cast<float>(y);
+        const auto handle = distance_to_segment(px, py, 7.0F, 2.0F, 7.0F, 10.5F);
+        const auto grip = y <= 3 && x >= 5 && x <= 9;
+        const auto socket = y >= 9 && y <= 11 && x >= 6 && x <= 8;
+        const auto blade = y >= 10 && y <= 15 && x >= 4 && x <= 11 &&
+                           std::abs(static_cast<float>(x) - 7.5F) <= static_cast<float>(15 - y) * 0.58F + 2.0F;
+        if (blade) {
+            const auto edge = y >= 14 || x <= 4 || x >= 11 ? 22.0F : 0.0F;
+            return make_rgba(158.0F + edge, 166.0F + edge, 170.0F + edge, 255.0F);
+        }
+        if (socket) {
+            return make_rgba(138.0F, 142.0F, 144.0F, 255.0F);
+        }
+        if (handle < 0.85F || grip) {
+            return make_rgba(116.0F, 72.0F, 34.0F, 255.0F);
+        }
+        return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+    });
+
     fill_tile(pixels, 1, 3, [](int x, int y) {
         const auto stem = ((x == 7) || (x == 8)) && y > 5;
         const auto blade_a = y > 4 && x >= 3 && x <= 6 && x <= y;
@@ -659,6 +844,8 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
             return make_rgba(soot + rim * 0.20F, soot + 3.0F + rim * 0.14F, soot + 6.0F + rim * 0.08F, 255.0F);
         });
     }
+
+    fill_ship_atlas_tiles(pixels);
 
     return pixels;
 }

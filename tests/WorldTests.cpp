@@ -1,4 +1,5 @@
 #include "app/PerformanceReport.h"
+#include "gameplay/SeaAdventure.h"
 #include "gameplay/StartingVillage.h"
 #include "world/World.h"
 #include "world/BlockVisuals.h"
@@ -47,6 +48,77 @@ auto density_percent(int count, int total) noexcept -> float {
         return 0.0F;
     }
     return static_cast<float>(count) * 100.0F / static_cast<float>(total);
+}
+
+constexpr std::uint64_t kGenerationGoldenFnvOffset = 14695981039346656037ULL;
+constexpr std::uint64_t kGenerationGoldenFnvPrime = 1099511628211ULL;
+
+void hash_generation_golden_byte(std::uint64_t& hash, std::uint8_t value) noexcept {
+    hash ^= value;
+    hash *= kGenerationGoldenFnvPrime;
+}
+
+void hash_generation_golden_u32(std::uint64_t& hash, std::uint32_t value) noexcept {
+    for (int shift = 0; shift < 32; shift += 8) {
+        hash_generation_golden_byte(
+            hash,
+            static_cast<std::uint8_t>((value >> static_cast<unsigned>(shift)) & 0xFFU));
+    }
+}
+
+auto legacy_ocean_generation_golden_checksum() -> std::uint64_t {
+    struct GoldenChunkCase {
+        int seed = 0;
+        ChunkCoord coord {};
+    };
+    constexpr std::array<GoldenChunkCase, 4> chunk_cases {{
+        {424242, {0, 0}},
+        {424242, {7, 34}},
+        {-9081, {-6, 19}},
+        {17, {13, -11}},
+    }};
+    constexpr std::array<std::pair<int, int>, 6> sample_columns {{
+        {0, 0},
+        {-73, 41},
+        {112, 544},
+        {-96, 1199},
+        {31, -207},
+        {255, 4096},
+    }};
+    constexpr std::array<int, 9> sample_heights {{0, 7, 19, 31, 42, 51, 52, 63, 91}};
+
+    auto hash = kGenerationGoldenFnvOffset;
+    for (const auto& chunk_case : chunk_cases) {
+        WorldGenerator generator(
+            chunk_case.seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LegacyV1);
+        hash_generation_golden_u32(hash, static_cast<std::uint32_t>(chunk_case.seed));
+        hash_generation_golden_u32(hash, static_cast<std::uint32_t>(chunk_case.coord.x));
+        hash_generation_golden_u32(hash, static_cast<std::uint32_t>(chunk_case.coord.z));
+
+        Chunk chunk(chunk_case.coord);
+        generator.generate_chunk(chunk);
+        for (const auto block : chunk.blocks()) {
+            hash_generation_golden_byte(hash, block);
+        }
+        for (const auto water : chunk.water_state()) {
+            hash_generation_golden_byte(hash, water);
+        }
+
+        for (const auto& [world_x, world_z] : sample_columns) {
+            const auto surface = generator.sample_surface(world_x, world_z);
+            hash_generation_golden_byte(hash, static_cast<std::uint8_t>(surface.biome));
+            hash_generation_golden_u32(hash, static_cast<std::uint32_t>(surface.surface_height));
+            hash_generation_golden_u32(hash, static_cast<std::uint32_t>(surface.water_level));
+            hash_generation_golden_byte(hash, surface.surface_block);
+            for (const auto y : sample_heights) {
+                hash_generation_golden_byte(hash, generator.sample_block(world_x, y, world_z));
+                hash_generation_golden_byte(hash, generator.sample_water_state(world_x, y, world_z));
+            }
+        }
+    }
+    return hash;
 }
 
 constexpr std::array<BlockType, 5> kResourceOreTypes {{
@@ -239,6 +311,346 @@ TEST_CASE("terrain surface sampling matches block and water generation") {
     }
 }
 
+TEST_CASE("ocean adventure profile generates broad water routes with reachable islands") {
+    WorldGenerator generator(424242, WorldGenerationProfile::OceanAdventure);
+    int ocean_columns = 0;
+    int island_columns = 0;
+    int beach_columns = 0;
+
+    for (int world_z = -384; world_z <= 384; world_z += 16) {
+        for (int world_x = -384; world_x <= 384; world_x += 16) {
+            const auto surface = generator.sample_surface(world_x, world_z);
+            if (surface.water_level > surface.surface_height) {
+                ++ocean_columns;
+                CHECK(generator.sample_water_state(world_x, surface.water_level, world_z) != 0);
+                continue;
+            }
+
+            ++island_columns;
+            if (surface.surface_height <= kSeaLevel + 2) {
+                ++beach_columns;
+                CHECK(surface.surface_block == to_block_id(BlockType::Sand));
+            }
+            CHECK(surface.surface_block == generator.sample_block(world_x, surface.surface_height, world_z));
+        }
+    }
+
+    CHECK(generator.profile() == WorldGenerationProfile::OceanAdventure);
+    CHECK(ocean_columns > island_columns * 2);
+    CHECK(island_columns > 0);
+    CHECK(beach_columns > 0);
+}
+
+TEST_CASE("world generation versions resolve explicitly and keep legacy ocean terrain available") {
+    CHECK(resolve_world_generation_version(WorldGenerationProfile::Continental) ==
+          WorldGenerationVersion::LegacyV1);
+    CHECK(resolve_world_generation_version(WorldGenerationProfile::OceanAdventure) ==
+          WorldGenerationVersion::SparseArchipelagoV2);
+
+    constexpr auto seed = 424242;
+    WorldGenerator latest(
+        seed,
+        WorldGenerationProfile::OceanAdventure,
+        WorldGenerationVersion::Latest);
+    WorldGenerator legacy(
+        seed,
+        WorldGenerationProfile::OceanAdventure,
+        WorldGenerationVersion::LegacyV1);
+    WorldGenerator sparse(
+        seed,
+        WorldGenerationProfile::OceanAdventure,
+        WorldGenerationVersion::SparseArchipelagoV2);
+
+    CHECK(latest.generation_version() == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(legacy.generation_version() == WorldGenerationVersion::LegacyV1);
+    CHECK(sparse.generation_version() == WorldGenerationVersion::SparseArchipelagoV2);
+
+    auto found_distinct_column = false;
+    for (int world_z = 480; world_z <= 720 && !found_distinct_column; world_z += 8) {
+        for (int world_x = -112; world_x <= 112; world_x += 8) {
+            const auto legacy_surface = legacy.sample_surface(world_x, world_z);
+            const auto sparse_surface = sparse.sample_surface(world_x, world_z);
+            if (legacy_surface.surface_height != sparse_surface.surface_height ||
+                legacy_surface.water_level != sparse_surface.water_level ||
+                legacy_surface.surface_block != sparse_surface.surface_block) {
+                found_distinct_column = true;
+                break;
+            }
+        }
+    }
+    CHECK(found_distinct_column);
+
+    World ocean_world(seed, 0, WorldGenerationProfile::OceanAdventure);
+    CHECK(ocean_world.generation_version() == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(ocean_world.capture_save_plan().generation_version ==
+          WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK_THROWS_AS(
+        WorldGenerator(
+            seed,
+            WorldGenerationProfile::Continental,
+            WorldGenerationVersion::SparseArchipelagoV2),
+        std::invalid_argument);
+}
+
+TEST_CASE("legacy ocean generation V1 keeps its exact historical output") {
+    const auto checksum = legacy_ocean_generation_golden_checksum();
+    // Je fige ici blocs, eau, biomes et decorations de plusieurs zones V1 afin
+    // qu'une optimisation future ne transforme jamais les anciennes parties.
+    CHECK_MESSAGE(
+        checksum == 0xD31C813857218B8BULL,
+        "Legacy ocean V1 checksum: ",
+        checksum);
+}
+
+TEST_CASE("sparse ocean route schedules one island window every five to seven hundred blocks") {
+    constexpr std::array<int, 4> seeds {{17, 424242, -9081, 1337}};
+    for (const auto seed : seeds) {
+        auto previous_start = std::int64_t {0};
+        for (int sector = 0; sector < 16; ++sector) {
+            const auto start = ocean_route_island_window_start_z(seed, sector);
+            const auto sector_min = static_cast<std::int64_t>(sector) * kOceanRouteMacroSectorLength +
+                                    kOceanRouteFirstIslandWindowMinZ;
+            CAPTURE(seed);
+            CAPTURE(sector);
+            CAPTURE(start);
+            CHECK(start >= sector_min);
+            CHECK(start <= sector_min + kOceanRouteIslandWindowJitter);
+            if (sector > 0) {
+                const auto spacing = start - previous_start;
+                CAPTURE(spacing);
+                CHECK(spacing >= 500);
+                CHECK(spacing <= 700);
+            }
+            previous_start = start;
+        }
+
+        WorldGenerator generator(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::SparseArchipelagoV2);
+        for (int sector = 0; sector < 6; ++sector) {
+            const auto window_start = ocean_route_island_window_start_z(seed, sector);
+            auto found_land = false;
+            for (int dz = 0; dz < kOceanRouteIslandWindowLength && !found_land; dz += 2) {
+                for (int world_x = -120; world_x <= 120; world_x += 2) {
+                    const auto surface = generator.sample_surface(
+                        world_x,
+                        static_cast<int>(window_start) + dz);
+                    if (surface.water_level <= surface.surface_height) {
+                        found_land = true;
+                        break;
+                    }
+                }
+            }
+            CAPTURE(seed);
+            CAPTURE(sector);
+            CHECK(found_land);
+
+            const auto next_window_start = ocean_route_island_window_start_z(seed, sector + 1);
+            auto unexpected_gap_land = false;
+            const auto gap_min_z = static_cast<int>(window_start) + kOceanRouteIslandWindowLength + 16;
+            const auto gap_max_z = static_cast<int>(next_window_start) - 16;
+            for (int world_z = gap_min_z; world_z <= gap_max_z && !unexpected_gap_land; world_z += 16) {
+                for (int world_x = -120; world_x <= 120; world_x += 4) {
+                    const auto surface = generator.sample_surface(world_x, world_z);
+                    if (surface.water_level <= surface.surface_height) {
+                        unexpected_gap_land = true;
+                        break;
+                    }
+                }
+            }
+            CHECK_FALSE(unexpected_gap_land);
+        }
+    }
+}
+
+TEST_CASE("sparse ocean keeps natural land outside the twenty four block route clearance") {
+    constexpr std::array<int, 4> seeds {{17, 424242, -9081, 1337}};
+    constexpr std::array<int, 8> route_z_samples {{
+        kOceanNavigationCorridorStartZ,
+        0,
+        499,
+        550,
+        1150,
+        4096,
+        8192,
+        10000,
+    }};
+
+    for (const auto seed : seeds) {
+        WorldGenerator generator(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::SparseArchipelagoV2);
+        for (const auto world_z : route_z_samples) {
+            for (int world_x = -kOceanNaturalLandExclusionHalfWidth + 1;
+                 world_x < kOceanNaturalLandExclusionHalfWidth;
+                 ++world_x) {
+                const auto surface = generator.sample_surface(world_x, world_z);
+                CAPTURE(seed);
+                CAPTURE(world_x);
+                CAPTURE(world_z);
+                CHECK(surface.surface_height < kSeaLevel);
+                CHECK(surface.water_level == kSeaLevel);
+                if (std::abs(world_x) <= kOceanNavigationCorridorHalfWidth) {
+                    CHECK(surface.surface_height <= kOceanNavigationCorridorMaxSeabedY);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("sparse ocean off route archipelago keeps twelve to twenty percent emerged land") {
+    constexpr std::array<int, 4> seeds {{17, 424242, -9081, 1337}};
+    for (const auto seed : seeds) {
+        WorldGenerator generator(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::SparseArchipelagoV2);
+        auto emerged_columns = 0;
+        auto sampled_columns = 0;
+        for (int world_z = -4096; world_z < 4096; world_z += 8) {
+            for (int world_x = 256; world_x < 4352; world_x += 8) {
+                const auto surface = generator.sample_surface(world_x, world_z);
+                emerged_columns += surface.water_level <= surface.surface_height ? 1 : 0;
+                ++sampled_columns;
+            }
+        }
+
+        const auto emerged_percent = density_percent(emerged_columns, sampled_columns);
+        CAPTURE(seed);
+        CAPTURE(emerged_percent);
+        CHECK(emerged_percent >= 12.0F);
+        CHECK(emerged_percent <= 20.0F);
+    }
+}
+
+TEST_CASE("ocean adventure reserves a deterministic obstacle-free navigation corridor") {
+    constexpr std::array<int, 3> seeds {{17, 424242, -9081}};
+    constexpr std::array<int, 5> route_z_samples {{
+        kOceanNavigationCorridorStartZ,
+        -1,
+        0,
+        511,
+        4096,
+    }};
+
+    CHECK_FALSE(is_ocean_navigation_corridor_column(
+        kOceanNavigationCorridorCenterX,
+        kOceanNavigationCorridorStartZ - 1));
+
+    for (const auto seed : seeds) {
+        WorldGenerator generator(seed, WorldGenerationProfile::OceanAdventure);
+        for (const auto world_z : route_z_samples) {
+            for (int world_x = kOceanNavigationCorridorCenterX - kOceanNavigationCorridorHalfWidth;
+                 world_x <= kOceanNavigationCorridorCenterX + kOceanNavigationCorridorHalfWidth;
+                 ++world_x) {
+                CAPTURE(seed);
+                CAPTURE(world_x);
+                CAPTURE(world_z);
+                const auto surface = generator.sample_surface(world_x, world_z);
+                CHECK(surface.surface_height <= kOceanNavigationCorridorMaxSeabedY);
+                CHECK(surface.water_level == kSeaLevel);
+
+                for (int y = kOceanNavigationCorridorMaxSeabedY + 1; y <= kSeaLevel; ++y) {
+                    CHECK(generator.sample_block(world_x, y, world_z) == to_block_id(BlockType::Air));
+                    const auto water_state = generator.sample_water_state(world_x, y, world_z);
+                    CHECK(water_level_from_state(water_state) == kMaxWaterLevel);
+                    CHECK(water_state_is_source(water_state));
+                    CHECK(water_state_is_infinite(water_state));
+                }
+                for (int y = kSeaLevel + 1; y <= kSeaLevel + 24; ++y) {
+                    CHECK(generator.sample_block(world_x, y, world_z) == to_block_id(BlockType::Air));
+                    CHECK(generator.sample_water_state(world_x, y, world_z) == 0);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("completed ocean chunks remove decorations that overhang the navigation corridor") {
+    constexpr std::array<int, 2> seeds {{424242, -7719}};
+    constexpr std::array<int, 2> route_chunk_z {{0, 37}};
+
+    for (const auto seed : seeds) {
+        WorldGenerator generator(seed, WorldGenerationProfile::OceanAdventure);
+        for (const auto chunk_z : route_chunk_z) {
+            for (const auto chunk_x : {-1, 0, 1}) {
+                Chunk chunk({chunk_x, chunk_z});
+                generator.generate_chunk(chunk);
+
+                for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
+                    for (int local_x = 0; local_x < kChunkSizeX; ++local_x) {
+                        const auto world_x = chunk_x * kChunkSizeX + local_x;
+                        const auto world_z = chunk_z * kChunkSizeZ + local_z;
+                        if (!is_ocean_navigation_corridor_column(world_x, world_z)) {
+                            continue;
+                        }
+
+                        auto first_obstacle_y = -1;
+                        auto first_water_mismatch_y = -1;
+                        for (int y = kOceanNavigationCorridorMaxSeabedY + 1; y <= kWorldMaxY; ++y) {
+                            if (first_obstacle_y < 0 &&
+                                chunk.get_local(local_x, y, local_z) != to_block_id(BlockType::Air)) {
+                                first_obstacle_y = y;
+                            }
+                            const auto expected_water = y <= kSeaLevel
+                                                            ? make_water_state(kMaxWaterLevel, true, true)
+                                                            : 0;
+                            if (first_water_mismatch_y < 0 &&
+                                chunk.get_water_state_local(local_x, y, local_z) != expected_water) {
+                                first_water_mismatch_y = y;
+                            }
+                        }
+                        CAPTURE(seed);
+                        CAPTURE(chunk_x);
+                        CAPTURE(chunk_z);
+                        CAPTURE(local_x);
+                        CAPTURE(local_z);
+                        CAPTURE(first_obstacle_y);
+                        CAPTURE(first_water_mismatch_y);
+                        CHECK(first_obstacle_y == -1);
+                        CHECK(first_water_mismatch_y == -1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("generated cell restoration preserves natural infinite water without save overrides") {
+    World world(88031, 0, WorldGenerationProfile::OceanAdventure);
+    constexpr int water_x = kOceanNavigationCorridorCenterX;
+    constexpr int water_y = kSeaLevel;
+    constexpr int water_z = 0;
+    constexpr int marker_y = kSeaLevel + 4;
+
+    world.ensure_chunk_loaded({0, 0});
+    const auto* generated_chunk = world.find_chunk({0, 0});
+    REQUIRE(generated_chunk != nullptr);
+    REQUIRE(water_state_is_infinite(generated_chunk->get_water_state_local(water_x, water_y, water_z)));
+
+    world.set_block(water_x, marker_y, water_z, to_block_id(BlockType::Stone));
+    world.set_block(water_x, water_y, water_z, to_block_id(BlockType::Water));
+    auto save_plan = world.capture_save_plan();
+    REQUIRE(save_plan.chunks.size() == 1U);
+    REQUIRE(save_plan.chunks.front().sparse_cells.size() == 2U);
+
+    CHECK(world.restore_generated_cell(water_x, water_y, water_z));
+    const auto* restored_chunk = world.find_chunk({0, 0});
+    REQUIRE(restored_chunk != nullptr);
+    CHECK(restored_chunk->get_local(water_x, water_y, water_z) == to_block_id(BlockType::Air));
+    CHECK(restored_chunk->get_water_state_local(water_x, water_y, water_z) ==
+          make_water_state(kMaxWaterLevel, true, true));
+    save_plan = world.capture_save_plan();
+    REQUIRE(save_plan.chunks.size() == 1U);
+    CHECK(save_plan.chunks.front().sparse_cells.size() == 1U);
+
+    CHECK(world.restore_generated_cell(water_x, marker_y, water_z));
+    CHECK(world.modified_chunk_snapshots().empty());
+    CHECK_FALSE(world.restore_generated_cell(water_x, marker_y, water_z));
+}
+
 TEST_CASE("world generator move operations preserve deterministic sampling") {
     WorldGenerator source(9191);
     const auto expected_surface = source.sample_surface(12, -34);
@@ -259,6 +671,52 @@ TEST_CASE("world generator move operations preserve deterministic sampling") {
     CHECK(assigned.sample_surface(12, -34).surface_block == expected_surface.surface_block);
     CHECK(assigned.sample_block(12, expected_surface.surface_height, -34) == expected_block);
     CHECK(assigned.sample_water_state(12, expected_surface.water_level, -34) == expected_water);
+
+    WorldGenerator ocean_source(1919, WorldGenerationProfile::OceanAdventure);
+    const auto ocean_surface = ocean_source.sample_surface(-128, 96);
+    WorldGenerator ocean_moved(std::move(ocean_source));
+    CHECK(ocean_moved.profile() == WorldGenerationProfile::OceanAdventure);
+    CHECK(ocean_moved.sample_surface(-128, 96).surface_height == ocean_surface.surface_height);
+}
+
+TEST_CASE("incremental chunk generation stays byte-identical to synchronous generation") {
+    WorldGenerator generator(74123, WorldGenerationProfile::OceanAdventure);
+    const ChunkCoord coord {-3, 5};
+    Chunk synchronous_chunk {coord};
+    generator.generate_chunk(synchronous_chunk);
+
+    auto incremental_state = generator.begin_chunk_generation(coord);
+    for (std::size_t column = 0; column < static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ); ++column) {
+        CAPTURE(column);
+        CHECK(generator.is_chunk_generation_complete(incremental_state) ==
+              (column == static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ)));
+        generator.advance_chunk_generation(incremental_state, 1U);
+    }
+
+    REQUIRE(generator.is_chunk_generation_complete(incremental_state));
+    CHECK(incremental_state.chunk.blocks() == synchronous_chunk.blocks());
+    CHECK(incremental_state.chunk.water_state() == synchronous_chunk.water_state());
+}
+
+TEST_CASE("chunk ore rasterization matches deterministic point sampling underground") {
+    WorldGenerator generator(49812);
+    const ChunkCoord coord {-2, 3};
+    Chunk chunk {coord};
+    generator.generate_chunk(chunk);
+
+    for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
+        for (int local_x = 0; local_x < kChunkSizeX; ++local_x) {
+            const auto world_x = coord.x * kChunkSizeX + local_x;
+            const auto world_z = coord.z * kChunkSizeZ + local_z;
+            const auto surface = generator.sample_surface(world_x, world_z);
+            for (int y = kWorldMinY; y <= surface.surface_height; ++y) {
+                CAPTURE(local_x);
+                CAPTURE(y);
+                CAPTURE(local_z);
+                CHECK(chunk.get_local(local_x, y, local_z) == generator.sample_block(world_x, y, world_z));
+            }
+        }
+    }
 }
 
 TEST_CASE("resource ores generate underground with low deterministic densities") {
@@ -888,6 +1346,8 @@ TEST_CASE("resource ore blocks are solid placeable terrain resources") {
         CHECK_FALSE(is_inventory_only_item(block_id));
         CHECK(is_placeable_item(block_id));
         CHECK(has_block_mesh(block_id));
+        CHECK(is_block_breakable(block_id));
+        CHECK(block_break_duration_seconds(block_id) > 0.0F);
         CHECK(properties.opaque);
         CHECK(properties.collidable);
         CHECK(properties.surface_support);
@@ -933,8 +1393,29 @@ TEST_CASE("block break durations stay coherent across fragile terrain and hard r
           block_break_duration_seconds(to_block_id(BlockType::Dirt)));
     CHECK(block_break_duration_seconds(to_block_id(BlockType::Torch)) <
           block_break_duration_seconds(to_block_id(BlockType::TallGrass)));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Pickaxe)) == doctest::Approx(0.0F));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Axe)) == doctest::Approx(0.0F));
+    CHECK(block_break_duration_seconds(to_block_id(BlockType::Shovel)) == doctest::Approx(0.0F));
     CHECK(is_block_breakable(to_block_id(BlockType::Stone)));
     CHECK_FALSE(is_block_breakable(to_block_id(BlockType::Air)));
+    CHECK_FALSE(is_block_breakable(to_block_id(BlockType::Pickaxe)));
+}
+
+TEST_CASE("crafted tools accelerate only their matching block families") {
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Pickaxe), to_block_id(BlockType::Stone)) == doctest::Approx(1.5F));
+    for (const auto ore_type : kResourceOreTypes) {
+        CAPTURE(static_cast<int>(ore_type));
+        CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Pickaxe), to_block_id(ore_type)) == doctest::Approx(1.5F));
+    }
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Pickaxe), to_block_id(BlockType::Dirt)) == doctest::Approx(1.0F));
+
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Axe), to_block_id(BlockType::Wood)) == doctest::Approx(2.0F));
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Axe), to_block_id(BlockType::PineWood)) == doctest::Approx(2.0F));
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Axe), to_block_id(BlockType::Stone)) == doctest::Approx(1.0F));
+
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Shovel), to_block_id(BlockType::Dirt)) == doctest::Approx(3.0F));
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Shovel), to_block_id(BlockType::Grass)) == doctest::Approx(3.0F));
+    CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Shovel), to_block_id(BlockType::Wood)) == doctest::Approx(1.0F));
 }
 
 TEST_CASE("block atlas expands to 128 square pixels and preserves transparent decorative tiles") {
@@ -1377,24 +1858,16 @@ TEST_CASE("world generator fills every submerged column up to the global sea lev
 TEST_CASE("old saved natural sea sources normalize to the current infinite water flag") {
     WorldGenerator generator(18300);
     const ChunkCoord origin {0, 0};
-    std::array<BlockId, kChunkVolume> blocks {};
-    std::array<WaterState, kChunkVolume> legacy_water {};
+    Chunk generated_chunk(origin);
+    generator.generate_chunk(generated_chunk);
+    const auto blocks = generated_chunk.blocks();
+    auto legacy_water = generated_chunk.water_state();
     auto found_natural_water = false;
 
-    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
-        for (int z = 0; z < kChunkSizeZ; ++z) {
-            for (int x = 0; x < kChunkSizeX; ++x) {
-                const auto block_index = static_cast<std::size_t>((y * kChunkSizeZ + z) * kChunkSizeX + x);
-                const auto world_x = origin.x * kChunkSizeX + x;
-                const auto world_z = origin.z * kChunkSizeZ + z;
-                blocks[block_index] = generator.sample_block(world_x, y, world_z);
-                auto water_state = generator.sample_water_state(world_x, y, world_z);
-                if (water_state_is_infinite(water_state)) {
-                    water_state = make_water_state(kMaxWaterLevel, true);
-                    found_natural_water = true;
-                }
-                legacy_water[block_index] = water_state;
-            }
+    for (auto& water_state : legacy_water) {
+        if (water_state_is_infinite(water_state)) {
+            water_state = make_water_state(kMaxWaterLevel, true);
+            found_natural_water = true;
         }
     }
     REQUIRE(found_natural_water);
@@ -1534,6 +2007,7 @@ TEST_CASE("finite water drains downward progressively and conserves volume") {
 
     const auto first_stats = world.process_pending_work(fluid_only_budget(1U));
     CHECK(first_stats.processed_fluid_cells == 1U);
+    CHECK(first_stats.fluid_cells_changed == 2U);
     CHECK(world.water_level(x, source_y, z) == 6U);
     CHECK(world.water_level(x, source_y - 1, z) == 2U);
     CHECK(world.water_level(x, source_y - 2, z) == 0U);
@@ -2048,8 +2522,9 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") 
 
     const auto uv_step = 1.0F / static_cast<float>(kBlockAtlasTilesPerAxis);
     const auto expected_block_delta = uv_step / 8.0F;
+    const auto half_texel_uv = 0.5F / static_cast<float>(kBlockAtlasSize);
 
-    CHECK(shared_near[0].u == doctest::Approx(left_near[0].u + expected_block_delta));
+    CHECK(shared_near[0].u == doctest::Approx(left_near[0].u + expected_block_delta - half_texel_uv));
     CHECK(right_near[0].u == doctest::Approx(shared_near[0].u + expected_block_delta));
 }
 
@@ -2114,19 +2589,50 @@ TEST_CASE("chunk mesher keeps water top texel density stable across the repeat b
     const auto uv_step = 1.0F / static_cast<float>(kBlockAtlasTilesPerAxis);
     const auto tile_u0 = static_cast<float>(water_tile.x) * uv_step;
     const auto expected_block_delta = uv_step / 8.0F;
+    const auto half_texel_uv = 0.5F / static_cast<float>(kBlockAtlasSize);
 
     CHECK(left_near[0].u == doctest::Approx(tile_u0 + expected_block_delta * 7.0F));
-    CHECK(shared_near[0].u == doctest::Approx(tile_u0));
-    CHECK(shared_near[1].u == doctest::Approx(tile_u0 + uv_step));
+    CHECK(shared_near[0].u == doctest::Approx(tile_u0 + half_texel_uv));
+    CHECK(shared_near[1].u == doctest::Approx(tile_u0 + uv_step - half_texel_uv));
     CHECK(right_near[0].u == doctest::Approx(tile_u0 + expected_block_delta));
 
-    CHECK(shared_mid[0].u == doctest::Approx(tile_u0));
-    CHECK(shared_mid[1].u == doctest::Approx(tile_u0 + uv_step));
-    CHECK(shared_far[0].u == doctest::Approx(tile_u0));
-    CHECK(shared_far[1].u == doctest::Approx(tile_u0 + uv_step));
+    CHECK(shared_mid[0].u == doctest::Approx(tile_u0 + half_texel_uv));
+    CHECK(shared_mid[1].u == doctest::Approx(tile_u0 + uv_step - half_texel_uv));
+    CHECK(shared_far[0].u == doctest::Approx(tile_u0 + half_texel_uv));
+    CHECK(shared_far[1].u == doctest::Approx(tile_u0 + uv_step - half_texel_uv));
 
-    CHECK(shared_near[1].u - left_near[0].u == doctest::Approx(expected_block_delta));
-    CHECK(right_near[0].u - shared_near[0].u == doctest::Approx(expected_block_delta));
+    CHECK(shared_near[1].u - left_near[0].u == doctest::Approx(expected_block_delta - half_texel_uv));
+    CHECK(right_near[0].u - shared_near[0].u == doctest::Approx(expected_block_delta - half_texel_uv));
+}
+
+TEST_CASE("chunk mesher keeps atlas UVs inside half texel safe bounds") {
+    World world(286, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 5, 1, to_block_id(BlockType::Stone));
+    world.set_block(3, 5, 1, to_block_id(BlockType::Glass));
+    world.set_block(5, 5, 1, to_block_id(BlockType::Water));
+
+    ChunkMesher mesher {};
+    const auto mesh = mesher.build_mesh(world, {0, 0});
+    const auto uv_step = 1.0F / static_cast<float>(kBlockAtlasTilesPerAxis);
+    const auto half_texel_uv = 0.5F / static_cast<float>(kBlockAtlasSize);
+    const auto coordinate_inside_tile = [&](float value) {
+        const auto local = std::fmod(value, uv_step);
+        const auto normalized_local = local < 0.0F ? local + uv_step : local;
+        return normalized_local + 1.0e-6F >= half_texel_uv &&
+               normalized_local <= uv_step - half_texel_uv + 1.0e-6F;
+    };
+
+    REQUIRE_FALSE(mesh.vertices.empty());
+    REQUIRE_FALSE(mesh.water_vertices.empty());
+    for (const auto& vertex : mesh.vertices) {
+        CHECK(coordinate_inside_tile(vertex.u));
+        CHECK(coordinate_inside_tile(vertex.v));
+    }
+    for (const auto& vertex : mesh.water_vertices) {
+        CHECK(coordinate_inside_tile(vertex.u));
+        CHECK(coordinate_inside_tile(vertex.v));
+    }
 }
 
 TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animation") {
@@ -2379,11 +2885,235 @@ TEST_CASE("update_streaming is a no-op while the player stays in the same chunk"
     CHECK(world.pending_generation_count() == 9);
 }
 
+TEST_CASE("update_streaming can expand a preload radius without moving its center") {
+    World world(57, 3, WorldGenerationProfile::OceanAdventure);
+    const glm::vec3 focus {0.5F, 70.0F, 0.5F};
+
+    const auto preload = world.update_streaming(focus, 1);
+    CHECK(preload.chunk_changed);
+    CHECK(preload.generation_enqueued == 9U);
+    CHECK(world.pending_generation_count() == 9U);
+
+    const auto duplicate = world.update_streaming(focus, 1);
+    CHECK_FALSE(duplicate.chunk_changed);
+    CHECK(duplicate.generation_enqueued == 0U);
+
+    const auto expanded = world.update_streaming(focus, 3);
+    CHECK_FALSE(expanded.chunk_changed);
+    CHECK(expanded.generation_enqueued == 40U);
+    CHECK(world.pending_generation_count() == 49U);
+}
+
+TEST_CASE("sparse save plans restore one cell without generating or loading a chunk") {
+    constexpr int seed = 62017;
+    constexpr int x = 3;
+    constexpr int y = 91;
+    constexpr int z = 4;
+    World source(seed, 0, WorldGenerationProfile::OceanAdventure);
+    const auto generated = source.peek_block_or_generated(x, y, z);
+    const auto replacement = generated == to_block_id(BlockType::Stone)
+                                 ? to_block_id(BlockType::Air)
+                                 : to_block_id(BlockType::Stone);
+    source.set_block(x, y, z, replacement);
+    auto plan = source.capture_save_plan();
+    REQUIRE(plan.chunks.size() == 1U);
+    REQUIRE(plan.chunks.front().sparse_cells.size() == 1U);
+
+    World restored(seed, 0, WorldGenerationProfile::OceanAdventure);
+    restored.begin_restore_save_plan(std::move(plan));
+    REQUIRE(restored.has_pending_save_restore());
+    const auto stats = restored.process_save_restore(1U, std::numeric_limits<double>::infinity());
+
+    CHECK(stats.processed_cells == 1U);
+    CHECK(stats.completed_chunks == 1U);
+    CHECK(stats.pending_cells == 0U);
+    CHECK(stats.progress == doctest::Approx(1.0F));
+    CHECK_FALSE(restored.has_pending_save_restore());
+    CHECK(restored.chunk_records().empty());
+    CHECK(restored.pending_generation_count() == 0U);
+    CHECK(restored.pending_lighting_count() == 0U);
+    CHECK(restored.pending_mesh_count() == 0U);
+
+    restored.ensure_chunk_loaded({0, 0});
+    CHECK(restored.get_block(x, y, z) == replacement);
+}
+
+TEST_CASE("sparse save plan validation is deferred and bounded by the restore cell budget") {
+    constexpr int seed = 62021;
+    WorldSavePlan plan {};
+    plan.seed = seed;
+    WorldSavePlanChunk chunk {};
+    chunk.coord = {0, 0};
+    chunk.sparse_cells.reserve(2048U);
+    for (std::uint16_t index = 0U; index < 2047U; ++index) {
+        chunk.sparse_cells.push_back({index, to_block_id(BlockType::Air), WaterState {0}});
+    }
+    // Je place volontairement l'erreur a la fin pour prouver que begin ne
+    // rescane pas synchroniquement tout le payload.
+    chunk.sparse_cells.push_back({0U, to_block_id(BlockType::Stone), WaterState {0}});
+    plan.chunks.push_back(std::move(chunk));
+
+    World restored(seed, 0);
+    CHECK_NOTHROW(restored.begin_restore_save_plan(std::move(plan)));
+    REQUIRE(restored.has_pending_save_restore());
+
+    const auto first = restored.process_save_restore(1U, std::numeric_limits<double>::infinity());
+    CHECK(first.processed_cells == 1U);
+    CHECK(first.completed_chunks == 0U);
+    CHECK(restored.has_pending_save_restore());
+
+    const auto middle = restored.process_save_restore(2046U, std::numeric_limits<double>::infinity());
+    CHECK(middle.processed_cells == 2046U);
+    CHECK_THROWS_AS(
+        static_cast<void>(restored.process_save_restore(
+            1U,
+            std::numeric_limits<double>::infinity())),
+        std::invalid_argument);
+}
+
+TEST_CASE("dense save plan restoration respects cell slices and completes incrementally") {
+    constexpr int seed = 62018;
+    WorldSavePlan plan {};
+    plan.seed = seed;
+    WorldSavePlanChunk chunk {};
+    chunk.coord = {0, 0};
+    chunk.dense_blocks.assign(kChunkVolume, to_block_id(BlockType::Air));
+    chunk.dense_water_state.assign(kChunkVolume, WaterState {0});
+    chunk.dense_blocks[37U] = to_block_id(BlockType::DiamondOre);
+    plan.chunks.push_back(std::move(chunk));
+
+    World restored(seed, 0);
+    restored.begin_restore_save_plan(std::move(plan));
+    const auto first = restored.process_save_restore(
+        static_cast<std::size_t>(kChunkHeight),
+        std::numeric_limits<double>::infinity());
+    CHECK(first.processed_cells == static_cast<std::size_t>(kChunkHeight));
+    CHECK(first.completed_chunks == 0U);
+    CHECK(first.progress > 0.0F);
+    CHECK(first.progress < 1.0F);
+    CHECK(restored.has_pending_save_restore());
+    CHECK(restored.chunk_records().empty());
+
+    auto iterations = std::size_t {1};
+    while (restored.has_pending_save_restore() && iterations < 1024U) {
+        (void)restored.process_save_restore(
+            static_cast<std::size_t>(kChunkHeight),
+            std::numeric_limits<double>::infinity());
+        ++iterations;
+    }
+    CHECK(iterations > 1U);
+    CHECK_FALSE(restored.has_pending_save_restore());
+    CHECK(restored.save_restore_progress() == doctest::Approx(1.0F));
+}
+
+TEST_CASE("restoring a generated cell removes an unloaded override without scheduling world work") {
+    constexpr int seed = 62019;
+    constexpr int x = 5;
+    constexpr int y = 88;
+    constexpr int z = 7;
+    World source(seed, 0, WorldGenerationProfile::OceanAdventure);
+    source.set_block(x, y, z, to_block_id(BlockType::GoldOre));
+    auto plan = source.capture_save_plan();
+
+    World restored(seed, 0, WorldGenerationProfile::OceanAdventure);
+    restored.begin_restore_save_plan(std::move(plan));
+    while (restored.has_pending_save_restore()) {
+        (void)restored.process_save_restore(8U, std::numeric_limits<double>::infinity());
+    }
+    REQUIRE(restored.chunk_records().empty());
+    REQUIRE_FALSE(restored.capture_save_plan().chunks.empty());
+
+    CHECK(restored.restore_generated_cell(x, y, z));
+    CHECK(restored.capture_save_plan().chunks.empty());
+    CHECK(restored.chunk_records().empty());
+    CHECK(restored.pending_generation_count() == 0U);
+    CHECK(restored.pending_fluid_count() == 0U);
+    CHECK(restored.pending_lighting_count() == 0U);
+    CHECK(restored.pending_mesh_count() == 0U);
+}
+
+TEST_CASE("legacy sea ship blueprint keeps its immutable v7 identity") {
+    CHECK(legacy_ship_voxel_count() == 2814U);
+    CHECK(legacy_ship_blueprint_checksum() != 0U);
+    CHECK(legacy_ship_blueprint_checksum() == 0x278956FF051EAC1EULL);
+}
+
+TEST_CASE("legacy sea ship migration is sliced and never loads chunks") {
+    constexpr int seed = 62020;
+    SeaAdventureSaveState legacy_state {};
+    legacy_state.active = true;
+    legacy_state.ship_position = {0.5F, static_cast<float>(kSeaLevel + 1), 0.5F};
+    legacy_state.stamped_ship_x = 0;
+    legacy_state.stamped_ship_z = 0;
+    legacy_state.has_stamped_ship = true;
+
+    SeaAdventureSystem source_sea;
+    source_sea.load_state(legacy_state, seed);
+    const auto render_state = source_sea.ship_render_state();
+    REQUIRE(render_state.blueprint != nullptr);
+    REQUIRE_FALSE(render_state.parts.empty());
+    REQUIRE(legacy_ship_voxel_count() == 2814U);
+
+    // Je cible le premier voxel canonique v7 pour verifier que la premiere
+    // tranche migre bien l'ancien monde, independamment du nouveau blueprint.
+    constexpr BlockCoord legacy_local {-3, 0, -31};
+    constexpr auto legacy_block = to_block_id(BlockType::Wood);
+    const auto legacy_x = legacy_state.stamped_ship_x + legacy_local.x;
+    const auto legacy_y = static_cast<int>(kSeaLevel + 1) + legacy_local.y;
+    const auto legacy_z = legacy_state.stamped_ship_z + legacy_local.z;
+
+    World source_world(seed, 0, WorldGenerationProfile::OceanAdventure);
+    source_world.set_block(legacy_x, legacy_y, legacy_z, legacy_block);
+    auto plan = source_world.capture_save_plan();
+    REQUIRE_FALSE(plan.chunks.empty());
+
+    World restored_world(seed, 0, WorldGenerationProfile::OceanAdventure);
+    restored_world.begin_restore_save_plan(std::move(plan));
+    while (restored_world.has_pending_save_restore()) {
+        (void)restored_world.process_save_restore(8U, std::numeric_limits<double>::infinity());
+    }
+
+    SeaAdventureSystem restored_sea;
+    restored_sea.load_state(legacy_state, seed);
+    restored_sea.begin_legacy_ship_migration(restored_world);
+    REQUIRE(restored_sea.has_pending_legacy_ship_migration());
+    const auto first = restored_sea.migrate_legacy_ship_step(
+        restored_world,
+        64U,
+        std::numeric_limits<double>::infinity());
+    CHECK(first.processed_cells == 64U);
+    CHECK(first.pending_cells > 0U);
+    CHECK(first.progress > 0.0F);
+    CHECK(first.progress < 1.0F);
+    CHECK(first.restored_cells == 1U);
+    CHECK(restored_sea.save_state().has_stamped_ship);
+    CHECK(restored_world.chunk_records().empty());
+
+    while (restored_sea.has_pending_legacy_ship_migration()) {
+        (void)restored_sea.migrate_legacy_ship_step(
+            restored_world,
+            64U,
+            std::numeric_limits<double>::infinity());
+    }
+    CHECK_FALSE(restored_sea.save_state().has_stamped_ship);
+    CHECK(restored_sea.legacy_ship_migration_progress() == doctest::Approx(1.0F));
+    CHECK(restored_world.capture_save_plan().chunks.empty());
+    CHECK(restored_world.chunk_records().empty());
+}
+
 TEST_CASE("process_pending_work respects chunk generation budget and eventually readies nearby chunks") {
     World world(58, 1);
     world.update_streaming({0.5F, 0.0F, 0.5F});
 
-    const auto first_stats = world.process_pending_work({1, 16, 65536});
+    WorldWorkBudget first_budget {};
+    first_budget.chunk_generation_budget = 1U;
+    first_budget.fluid_cell_budget = 16U;
+    first_budget.mesh_rebuild_budget = 65536U;
+    first_budget.light_node_budget = 65536U;
+    first_budget.max_generation_ms = std::numeric_limits<double>::infinity();
+    first_budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    first_budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+    const auto first_stats = world.process_pending_work(first_budget);
     CHECK(first_stats.generated_chunks == 1);
     CHECK(world.chunk_records().size() == 1);
     CHECK(world.pending_generation_count() == 8);
@@ -2414,6 +3144,43 @@ TEST_CASE("process_pending_work respects zero generation time budget") {
     CHECK(stats.generated_chunks == 0);
     CHECK(world.chunk_records().empty());
     CHECK(world.pending_generation_count() == 9);
+}
+
+TEST_CASE("world memory stats account for loaded chunks meshes and persistent overrides") {
+    World world(601, 0);
+    const auto empty_stats = world.memory_stats();
+    CHECK(empty_stats.loaded_chunks == 0U);
+    CHECK(empty_stats.world_cpu_bytes >= sizeof(World));
+
+    world.ensure_chunk_loaded({0, 0});
+    const auto loaded_stats = world.memory_stats();
+    CHECK(loaded_stats.loaded_chunks == 1U);
+    CHECK(loaded_stats.chunk_cpu_bytes >= sizeof(Chunk));
+    CHECK(loaded_stats.world_cpu_bytes >= empty_stats.world_cpu_bytes + loaded_stats.chunk_cpu_bytes);
+
+    world.rebuild_dirty_meshes();
+    const auto meshed_stats = world.memory_stats();
+    CHECK(meshed_stats.mesh_vertex_capacity > 0U);
+    CHECK(meshed_stats.mesh_index_capacity > 0U);
+    CHECK(meshed_stats.mesh_cpu_bytes > 0U);
+
+    const auto current_block = world.get_block(0, 0, 0);
+    const auto replacement = current_block == to_block_id(BlockType::Air)
+                                 ? to_block_id(BlockType::Stone)
+                                 : to_block_id(BlockType::Air);
+    world.set_block(0, 0, 0, replacement);
+    const auto modified_stats = world.memory_stats();
+    CHECK(modified_stats.override_chunks == 1U);
+    CHECK(modified_stats.override_bytes > 0U);
+    CHECK(modified_stats.override_bytes < sizeof(WorldChunkSnapshot));
+    CHECK(modified_stats.world_cpu_bytes > meshed_stats.world_cpu_bytes);
+
+    const auto save_plan = world.capture_save_plan();
+    REQUIRE(save_plan.chunks.size() == 1U);
+    CHECK(save_plan.chunks.front().dense_blocks.empty());
+    CHECK(save_plan.chunks.front().dense_water_state.empty());
+    REQUIRE(save_plan.chunks.front().sparse_cells.size() == 1U);
+    CHECK(save_plan.chunks.front().sparse_cells.front().block == replacement);
 }
 
 TEST_CASE("spawn preload stays ready while outer streaming work starts") {
@@ -2464,6 +3231,26 @@ TEST_CASE("mesher hides internal faces between adjacent solid blocks") {
     CHECK(single_block_mesh->face_count == 6);
 
     world.set_block(1, 10, 0, to_block_id(BlockType::Stone));
+    world.rebuild_dirty_meshes();
+
+    const auto* adjacent_mesh = world.mesh_for(coord);
+    REQUIRE(adjacent_mesh != nullptr);
+    CHECK(adjacent_mesh->face_count == 10);
+}
+
+TEST_CASE("mesher hides internal faces between adjacent glass blocks") {
+    World world(771, 1);
+    const ChunkCoord coord {0, 0};
+
+    test::make_chunk_empty(world, coord);
+    world.set_block(0, 10, 0, to_block_id(BlockType::Glass));
+    world.rebuild_dirty_meshes();
+
+    const auto* single_block_mesh = world.mesh_for(coord);
+    REQUIRE(single_block_mesh != nullptr);
+    CHECK(single_block_mesh->face_count == 6);
+
+    world.set_block(1, 10, 0, to_block_id(BlockType::Glass));
     world.rebuild_dirty_meshes();
 
     const auto* adjacent_mesh = world.mesh_for(coord);
@@ -2861,7 +3648,14 @@ TEST_CASE("near-player chunk load keeps seam remeshes on the priority path") {
     REQUIRE(origin_revision_before > 0);
 
     world.ensure_chunk_loaded(east);
-    const auto stats = world.process_pending_work({0, 0, 65536});
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 0U;
+    budget.mesh_rebuild_budget = 65536U;
+    budget.light_node_budget = 65536U;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+    const auto stats = world.process_pending_work(budget);
 
     CHECK(stats.prioritized_meshed_chunks >= 1);
     CHECK(world.mesh_revision(origin) > origin_revision_before);
@@ -2885,6 +3679,7 @@ TEST_CASE("far chunk load defers seam remeshes to the normal mesh budget") {
     budget.fluid_cell_budget = 0U;
     budget.mesh_rebuild_budget = 0U;
     budget.light_node_budget = 65536U;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
     const auto stats = world.process_pending_work(budget);
 
     CHECK(stats.prioritized_meshed_chunks == 0);
@@ -2892,7 +3687,7 @@ TEST_CASE("far chunk load defers seam remeshes to the normal mesh budget") {
     CHECK(world.pending_mesh_count() >= 1);
 }
 
-TEST_CASE("priority seam remeshes can bypass the normal mesh rebuild budget") {
+TEST_CASE("priority seam remeshes respect the global mesh rebuild budget") {
     World world(17, 1);
     test::make_chunk_empty(world, {0, 0});
     test::make_chunk_empty(world, {1, 0});
@@ -2901,10 +3696,98 @@ TEST_CASE("priority seam remeshes can bypass the normal mesh rebuild budget") {
     world.set_block(15, 10, 4, to_block_id(BlockType::Stone));
     world.set_block(16, 10, 4, to_block_id(BlockType::Stone));
 
-    const auto stats = world.process_pending_work({0, 1, 65536});
-    CHECK(stats.meshed_chunks == 2);
-    CHECK(stats.prioritized_meshed_chunks == 2);
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 1U;
+    budget.mesh_rebuild_budget = 1U;
+    budget.light_node_budget = 65536U;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+    const auto first_stats = world.process_pending_work(budget);
+    CHECK(first_stats.mesh_sections_processed == 1U);
+    CHECK(first_stats.meshed_chunks <= 1U);
+    CHECK(world.pending_mesh_count() > 0U);
+
+    auto total_meshed_chunks = first_stats.meshed_chunks;
+    auto total_prioritized_chunks = first_stats.prioritized_meshed_chunks;
+    for (int iteration = 0; iteration < 32 && world.pending_mesh_count() > 0U; ++iteration) {
+        const auto stats = world.process_pending_work(budget);
+        CHECK(stats.mesh_sections_processed <= budget.mesh_rebuild_budget);
+        total_meshed_chunks += stats.meshed_chunks;
+        total_prioritized_chunks += stats.prioritized_meshed_chunks;
+    }
+    CHECK(total_meshed_chunks == 2U);
+    CHECK(total_prioritized_chunks == 2U);
     CHECK(world.pending_mesh_count() == 0);
+}
+
+TEST_CASE("dirty chunks near the streaming center overtake a distant mesh backlog") {
+    World world(1700, 4);
+    const ChunkCoord near_coord {1, 0};
+    const ChunkCoord far_coord {4, 4};
+    test::make_chunk_empty(world, near_coord);
+    test::make_chunk_empty(world, far_coord);
+    world.rebuild_dirty_meshes();
+    (void)world.update_streaming({0.5F, 80.0F, 0.5F}, 4);
+
+    const auto near_revision = world.mesh_revision(near_coord);
+    const auto far_revision = world.mesh_revision(far_coord);
+    auto* near_chunk = world.find_chunk(near_coord);
+    auto* far_chunk = world.find_chunk(far_coord);
+    REQUIRE(near_chunk != nullptr);
+    REQUIRE(far_chunk != nullptr);
+    // Je salis les deux chunks sans les mettre directement en file pour verifier
+    // que le rescan periodique promeut bien celui qui entoure le joueur.
+    near_chunk->mark_dirty();
+    far_chunk->mark_dirty();
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 0U;
+    budget.light_node_budget = 0U;
+    budget.mesh_rebuild_budget = kChunkSectionCount;
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+    const auto stats = world.process_pending_work(budget);
+
+    CHECK(stats.prioritized_meshed_chunks == 1U);
+    CHECK(world.mesh_revision(near_coord) > near_revision);
+    CHECK(world.mesh_revision(far_coord) == far_revision);
+    CHECK(world.pending_mesh_count() >= 1U);
+}
+
+TEST_CASE("full chunk remeshing advances one section per budget unit and publishes atomically") {
+    World world(1701, 0);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    world.rebuild_dirty_meshes();
+
+    const auto revision_before = world.mesh_revision(origin);
+    REQUIRE(revision_before > 0U);
+    auto* chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+    chunk->mark_dirty();
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 0U;
+    budget.mesh_rebuild_budget = 1U;
+    budget.light_node_budget = 0U;
+    budget.max_meshing_ms = std::numeric_limits<double>::infinity();
+
+    for (std::size_t section = 0; section + 1U < kChunkSectionCount; ++section) {
+        const auto stats = world.process_pending_work(budget);
+        CAPTURE(section);
+        CHECK(stats.mesh_sections_processed == 1U);
+        CHECK(stats.meshed_chunks == 0U);
+        CHECK(world.mesh_revision(origin) == revision_before);
+        CHECK(world.pending_mesh_count() == 1U);
+    }
+
+    const auto final_stats = world.process_pending_work(budget);
+    CHECK(final_stats.mesh_sections_processed == 1U);
+    CHECK(final_stats.meshed_chunks == 1U);
+    CHECK(world.mesh_revision(origin) == revision_before + 1U);
+    CHECK(world.pending_mesh_count() == 0U);
 }
 
 TEST_CASE("overlapping lighting updates coalesce into a single pending job") {
@@ -2917,6 +3800,33 @@ TEST_CASE("overlapping lighting updates coalesce into a single pending job") {
     world.set_block(16, 0, 1, to_block_id(BlockType::Stone));
 
     CHECK(world.pending_lighting_count() == 1);
+}
+
+TEST_CASE("lighting setup and finalization consume bounded work units") {
+    World world(801, 0);
+    test::make_chunk_empty(world, {0, 0});
+    REQUIRE(world.pending_lighting_count() == 1U);
+
+    WorldWorkBudget budget {};
+    budget.chunk_generation_budget = 0U;
+    budget.fluid_cell_budget = 0U;
+    budget.mesh_rebuild_budget = 0U;
+    budget.light_node_budget = 1U;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
+
+    const auto setup_stats = world.process_pending_work(budget);
+    CHECK(setup_stats.lighting_work_units_processed == 1U);
+    CHECK(setup_stats.lighting_jobs_started == 1U);
+    CHECK(setup_stats.lighting_jobs_completed == 0U);
+    CHECK(setup_stats.lighting_setup_ms >= 0.0);
+    CHECK(world.pending_lighting_count() == 1U);
+
+    const auto finalize_stats = world.process_pending_work(budget);
+    CHECK(finalize_stats.lighting_work_units_processed == 1U);
+    CHECK(finalize_stats.light_nodes_processed == 0U);
+    CHECK(finalize_stats.lighting_jobs_completed == 1U);
+    CHECK(finalize_stats.lighting_finalize_ms >= 0.0);
+    CHECK(world.pending_lighting_count() == 0U);
 }
 
 TEST_CASE("lighting completion enqueues mesh rebuilds without a global dirty scan") {
@@ -2932,6 +3842,7 @@ TEST_CASE("lighting completion enqueues mesh rebuilds without a global dirty sca
     budget.fluid_cell_budget = 0U;
     budget.mesh_rebuild_budget = 0U;
     budget.light_node_budget = 65536U;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
     const auto stats = world.process_pending_work(budget);
     CHECK(stats.lighting_jobs_completed == 1);
     CHECK(world.pending_mesh_count() >= 1);
@@ -2957,7 +3868,7 @@ TEST_CASE("local block lighting only dirties affected mesh sections") {
     budget.mesh_rebuild_budget = 0;
     budget.light_node_budget = 65536;
     budget.max_generation_ms = 10.0;
-    budget.max_lighting_ms = 10.0;
+    budget.max_lighting_ms = std::numeric_limits<double>::infinity();
     budget.max_meshing_ms = 0.0;
 
     const auto stats = world.process_pending_work(budget);
@@ -3035,8 +3946,10 @@ TEST_CASE("rebuilding a dirty chunk enqueues a GPU upload event") {
 
     world.rebuild_dirty_meshes();
 
+    CHECK(world.pending_gpu_upload_count() > 0U);
     const auto uploads = world.consume_pending_gpu_uploads(8);
     CHECK(std::find(uploads.begin(), uploads.end(), origin) != uploads.end());
+    CHECK(world.pending_gpu_upload_count() == 0U);
     CHECK(world.consume_pending_gpu_uploads(8).empty());
 }
 

@@ -328,6 +328,27 @@ auto has_emissive_vertices(const CreatureMeshData& mesh) -> bool {
     });
 }
 
+auto part_uses_tile(const CreaturePartInstance& part, CreatureAtlasTile tile) -> bool {
+    const auto coordinates = creature_atlas_tile_coordinates(tile);
+    const auto uv_step = 1.0F / kCreatureAtlasTilesPerAxis;
+    const auto expected_u = static_cast<float>(coordinates[0]) * uv_step;
+    const auto expected_v = static_cast<float>(coordinates[1]) * uv_step;
+    return part.face_uvs[0].u0 == expected_u && part.face_uvs[0].v0 == expected_v;
+}
+
+auto all_part_transforms_are_finite(std::span<const CreaturePartInstance> parts) -> bool {
+    return std::all_of(parts.begin(), parts.end(), [](const CreaturePartInstance& part) {
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                if (!std::isfinite(part.transform[column][row])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    });
+}
+
 auto body_volume_proxy(const CreatureMeshData& mesh) -> float {
     MeshBounds bounds {
         glm::vec3 {std::numeric_limits<float>::max()},
@@ -448,6 +469,67 @@ TEST_CASE("creature spawn anchors map grass chunks to pig cow sheep and reject d
     CHECK(pig_anchor->species == CreatureSpecies::Pig);
     CHECK(sheep_anchor->species == CreatureSpecies::Sheep);
     CHECK_FALSE(desert_anchor.has_value());
+}
+
+TEST_CASE("creature population sync is rate limited and reuses stable spawn anchors") {
+    CreatureSystem system {};
+    World world(9001, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(12.0F);
+    const glm::vec3 player_position {2.5F, 13.001F, 2.5F};
+
+    system.update(0.0F, world, player_position, environment, cycle);
+    const auto initial_stats = system.consume_audit_stats();
+    CHECK(initial_stats.population_syncs == 1U);
+    CHECK(initial_stats.spawn_anchor_computations == 1U);
+    REQUIRE(system.active_creatures().size() == 1U);
+
+    std::size_t short_window_syncs = 0;
+    std::size_t short_window_anchor_computations = 0;
+    for (int frame = 0; frame < 10; ++frame) {
+        system.update(1.0F / 60.0F, world, player_position, environment, cycle);
+        const auto stats = system.consume_audit_stats();
+        short_window_syncs += stats.population_syncs;
+        short_window_anchor_computations += stats.spawn_anchor_computations;
+    }
+    CHECK(short_window_syncs == 0U);
+    CHECK(short_window_anchor_computations == 0U);
+
+    std::size_t next_window_syncs = 0;
+    std::size_t next_window_anchor_computations = 0;
+    for (int frame = 0; frame < 8; ++frame) {
+        system.update(1.0F / 60.0F, world, player_position, environment, cycle);
+        const auto stats = system.consume_audit_stats();
+        next_window_syncs += stats.population_syncs;
+        next_window_anchor_computations += stats.spawn_anchor_computations;
+    }
+    CHECK(next_window_syncs == 1U);
+    CHECK(next_window_anchor_computations == 0U);
+}
+
+TEST_CASE("resident navigation refreshes expensive targets at a bounded cadence") {
+    CreatureSystem system {};
+    World world(90115, 1);
+    test::make_chunk_surface(world, {0, 0}, 12, to_block_id(BlockType::Grass), to_block_id(BlockType::Dirt));
+    const auto resident = make_test_resident_anchor({4, 12, 4});
+    system.set_settlement_residents({resident});
+
+    const auto environment = EnvironmentClock::compute_state(13.0F);
+    const auto cycle = EnvironmentClock::classify_creature_cycle(13.0F);
+    std::size_t target_refreshes = 0;
+    std::size_t steering_fallbacks = 0;
+    for (int frame = 0; frame < 120; ++frame) {
+        system.update(1.0F / 60.0F, world, {12.5F, 13.001F, 12.5F}, environment, cycle);
+        const auto stats = system.consume_audit_stats();
+        target_refreshes += stats.resident_target_refreshes;
+        steering_fallbacks += stats.resident_steering_fallbacks;
+    }
+
+    REQUIRE(system.active_creatures().size() == 1U);
+    CHECK(target_refreshes >= 6U);
+    CHECK(target_refreshes <= 10U);
+    CHECK(steering_fallbacks < 30U);
 }
 
 TEST_CASE("day creatures stay passive grounded and emit no attack events") {
@@ -1538,6 +1620,207 @@ TEST_CASE("villager atlas and geometry build a readable passive NPC silhouette")
     CHECK(band_volume_proxy(mesh, 0.90F, 1.90F) > 0.10F);
     CHECK(all_vertex_attributes_are_bounded(mesh));
     CHECK_FALSE(has_emissive_vertices(mesh));
+}
+
+TEST_CASE("crew atlas provides deterministic non emissive maritime materials") {
+    const auto first_atlas = build_creature_atlas_pixels();
+    const auto second_atlas = build_creature_atlas_pixels();
+    REQUIRE(first_atlas == second_atlas);
+    REQUIRE(static_cast<std::size_t>(CreatureAtlasTile::Count) <=
+            static_cast<std::size_t>(kCreatureAtlasTilesPerAxis * kCreatureAtlasTilesPerAxis));
+
+    const std::array<CreatureAtlasTile, 6> uniform_tiles {{
+        CreatureAtlasTile::CrewNavyCloth,
+        CreatureAtlasTile::CrewIvoryCloth,
+        CreatureAtlasTile::CrewStripedCloth,
+        CreatureAtlasTile::CrewOchreCloth,
+        CreatureAtlasTile::CrewRedCloth,
+        CreatureAtlasTile::CrewBurgundyCloth,
+    }};
+    std::array<std::array<float, 4>, uniform_tiles.size()> averages {};
+    for (std::size_t index = 0; index < uniform_tiles.size(); ++index) {
+        averages[index] = tile_average_rgba(first_atlas, uniform_tiles[index]);
+        CHECK(tile_alpha_coverage(first_atlas, uniform_tiles[index]) == doctest::Approx(0.0F));
+        const auto coordinates = creature_atlas_tile_coordinates(uniform_tiles[index]);
+        CHECK(coordinates[0] >= 0);
+        CHECK(coordinates[0] < static_cast<int>(kCreatureAtlasTilesPerAxis));
+        CHECK(coordinates[1] >= 0);
+        CHECK(coordinates[1] < static_cast<int>(kCreatureAtlasTilesPerAxis));
+    }
+    for (std::size_t left = 0; left < averages.size(); ++left) {
+        for (std::size_t right = left + 1U; right < averages.size(); ++right) {
+            const auto color_delta = std::abs(averages[left][0] - averages[right][0]) +
+                                     std::abs(averages[left][1] - averages[right][1]) +
+                                     std::abs(averages[left][2] - averages[right][2]);
+            CHECK(color_delta > 18.0F);
+        }
+    }
+
+    CHECK(tile_average_rgba(first_atlas, CreatureAtlasTile::CrewGold)[0] >
+          tile_average_rgba(first_atlas, CreatureAtlasTile::CrewIron)[0] + 70.0F);
+    CHECK(tile_average_rgba(first_atlas, CreatureAtlasTile::CrewWater)[2] >
+          tile_average_rgba(first_atlas, CreatureAtlasTile::CrewWater)[0] + 75.0F);
+}
+
+TEST_CASE("six crew roles have distinct detailed silhouettes and coherent proportions") {
+    struct CrewRoleCase {
+        CrewVisualRole role;
+        CreatureAtlasTile uniform_tile;
+    };
+    const std::array<CrewRoleCase, kCrewVisualRenderCapacity> roles {{
+        {CrewVisualRole::Captain, CreatureAtlasTile::CrewNavyCloth},
+        {CrewVisualRole::Fisher, CreatureAtlasTile::CrewIvoryCloth},
+        {CrewVisualRole::Rigger, CreatureAtlasTile::CrewStripedCloth},
+        {CrewVisualRole::WaterTender, CreatureAtlasTile::CrewOchreCloth},
+        {CrewVisualRole::Deckhand, CreatureAtlasTile::CrewRedCloth},
+        {CrewVisualRole::Quartermaster, CreatureAtlasTile::CrewBurgundyCloth},
+    }};
+    std::array<CreatureMeshData, roles.size()> role_meshes {};
+
+    for (std::size_t index = 0; index < roles.size(); ++index) {
+        CrewRenderInstance crew {};
+        crew.role = roles[index].role;
+        crew.activity = CrewVisualActivity::Idle;
+        crew.animation_time = 0.75F;
+        crew.activity_phase = 0.40F;
+        crew.appearance_seed = 0xBADC0DEU + static_cast<std::uint32_t>(index) * 101U;
+
+        const auto parts = build_crew_parts(crew);
+        const auto mesh = build_crew_mesh(crew);
+        const auto bounds = mesh_bounds(mesh);
+        CAPTURE(index);
+        REQUIRE_FALSE(parts.empty());
+        CHECK(parts.size() >= 28U);
+        CHECK(parts.size() <= kCrewVisualPartBudget);
+        CHECK(mesh.part_count == parts.size());
+        CHECK(mesh.vertices.size() == parts.size() * 24U);
+        CHECK(mesh.indices.size() == parts.size() * 36U);
+        CHECK(all_part_transforms_are_finite(parts));
+        CHECK(std::any_of(parts.begin(), parts.end(), [&](const CreaturePartInstance& part) {
+            return part_uses_tile(part, roles[index].uniform_tile);
+        }));
+        CHECK(bounds.min.y >= -0.02F);
+        CHECK(bounds.max.y <= 2.10F);
+        CHECK((bounds.max.y - bounds.min.y) >= 1.72F);
+        CHECK((bounds.max.y - bounds.min.y) <= 2.10F);
+        CHECK((bounds.max.z - bounds.min.z) > 0.38F);
+        CHECK(all_vertex_attributes_are_bounded(mesh));
+        CHECK_FALSE(has_emissive_vertices(mesh));
+        role_meshes[index] = mesh;
+    }
+
+    for (std::size_t left = 0; left < role_meshes.size(); ++left) {
+        for (std::size_t right = left + 1U; right < role_meshes.size(); ++right) {
+            CHECK_FALSE(meshes_match_exactly(role_meshes[left], role_meshes[right]));
+        }
+    }
+    const auto captain_parts = build_crew_parts({
+        .appearance_seed = 42U,
+        .role = CrewVisualRole::Captain,
+        .activity = CrewVisualActivity::Idle,
+    });
+    CHECK(std::any_of(captain_parts.begin(), captain_parts.end(), [](const CreaturePartInstance& part) {
+        return part_uses_tile(part, CreatureAtlasTile::CrewGold);
+    }));
+}
+
+TEST_CASE("every maritime crew activity remains finite animated and inside its part budget") {
+    const std::array<CrewVisualActivity, 18> activities {{
+        CrewVisualActivity::Idle,
+        CrewVisualActivity::Walk,
+        CrewVisualActivity::Steer,
+        CrewVisualActivity::Inspect,
+        CrewVisualActivity::FishCast,
+        CrewVisualActivity::FishWait,
+        CrewVisualActivity::FishReel,
+        CrewVisualActivity::TendWater,
+        CrewVisualActivity::Carry,
+        CrewVisualActivity::HaulRope,
+        CrewVisualActivity::Scrub,
+        CrewVisualActivity::TurnCapstan,
+        CrewVisualActivity::SortCargo,
+        CrewVisualActivity::Socialize,
+        CrewVisualActivity::Rest,
+        CrewVisualActivity::Hurt,
+        CrewVisualActivity::KnockedOut,
+        CrewVisualActivity::Recover,
+    }};
+
+    CrewRenderInstance crew {};
+    crew.position = {12.0F, 4.0F, -18.0F};
+    crew.animation_time = 1.25F;
+    crew.appearance_seed = 778899U;
+    crew.role = CrewVisualRole::Quartermaster;
+    crew.motion_amount = 0.82F;
+    crew.activity_phase = 0.72F;
+    crew.hurt_amount = 0.35F;
+    crew.sky_light = 0.32F;
+    crew.local_light = 0.78F;
+    crew.precipitation_exposure = 0.0F;
+
+    const auto idle_mesh = build_crew_mesh(crew);
+    for (const auto activity : activities) {
+        crew.activity = activity;
+        const auto parts = build_crew_parts(crew);
+        const auto mesh = build_crew_mesh(crew);
+        CAPTURE(static_cast<int>(activity));
+        REQUIRE_FALSE(parts.empty());
+        CHECK(parts.size() <= kCrewVisualPartBudget);
+        CHECK(all_part_transforms_are_finite(parts));
+        CHECK(all_vertex_attributes_are_bounded(mesh));
+        CHECK(std::all_of(parts.begin(), parts.end(), [](const CreaturePartInstance& part) {
+            return part.sky_light == doctest::Approx(0.32F) &&
+                   part.block_light == doctest::Approx(0.78F) &&
+                   part.precipitation_exposure == doctest::Approx(0.0F);
+        }));
+        if (activity != CrewVisualActivity::Idle) {
+            CHECK_FALSE(meshes_match_exactly(idle_mesh, mesh));
+        }
+    }
+}
+
+TEST_CASE("crew fishing reveal knockout and malformed render inputs fail safely") {
+    CrewRenderInstance fisher {};
+    fisher.role = CrewVisualRole::Fisher;
+    fisher.activity = CrewVisualActivity::FishReel;
+    fisher.animation_time = 0.8F;
+    fisher.appearance_seed = 91U;
+    fisher.activity_phase = 0.40F;
+    const auto early_parts = build_crew_parts(fisher);
+    fisher.activity_phase = 0.75F;
+    const auto landed_parts = build_crew_parts(fisher);
+    CHECK(landed_parts.size() == early_parts.size() + 2U);
+    CHECK(std::any_of(landed_parts.begin(), landed_parts.end(), [](const CreaturePartInstance& part) {
+        return part_uses_tile(part, CreatureAtlasTile::CrewFish);
+    }));
+
+    fisher.activity = CrewVisualActivity::KnockedOut;
+    const auto knocked_out_mesh = build_crew_mesh(fisher);
+    const auto knocked_out_bounds = mesh_bounds(knocked_out_mesh);
+    CHECK((knocked_out_bounds.max.y - knocked_out_bounds.min.y) < 0.85F);
+    CHECK((knocked_out_bounds.max.x - knocked_out_bounds.min.x) > 1.50F);
+
+    CrewRenderInstance malformed {};
+    malformed.position = {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+    };
+    malformed.yaw_radians = std::numeric_limits<float>::quiet_NaN();
+    malformed.animation_time = std::numeric_limits<float>::infinity();
+    malformed.motion_amount = std::numeric_limits<float>::quiet_NaN();
+    malformed.activity_phase = std::numeric_limits<float>::infinity();
+    malformed.sky_light = std::numeric_limits<float>::quiet_NaN();
+    malformed.local_light = std::numeric_limits<float>::infinity();
+    malformed.role = static_cast<CrewVisualRole>(255U);
+    malformed.activity = static_cast<CrewVisualActivity>(255U);
+    const auto safe_parts = build_crew_parts(malformed);
+    REQUIRE_FALSE(safe_parts.empty());
+    CHECK(all_part_transforms_are_finite(safe_parts));
+    CHECK(std::all_of(safe_parts.begin(), safe_parts.end(), [](const CreaturePartInstance& part) {
+        return std::isfinite(part.sky_light) && std::isfinite(part.block_light) &&
+               std::isfinite(part.precipitation_exposure);
+    }));
 }
 
 TEST_CASE("villager walking animation keeps articulated body parts connected") {

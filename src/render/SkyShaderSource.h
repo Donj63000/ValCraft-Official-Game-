@@ -2,6 +2,18 @@
 
 namespace valcraft {
 
+inline constexpr auto* kSkyVertexShaderSource = R"(#version 330 core
+out vec2 v_uv;
+
+void main() {
+    vec2 positions[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    vec2 clip = positions[gl_VertexID];
+    // Je place le ciel au fond du depth buffer pour ne colorer que les pixels encore vides.
+    gl_Position = vec4(clip, 1.0, 1.0);
+    v_uv = clip * 0.5 + 0.5;
+}
+)";
+
 inline constexpr auto* kSkyFragmentShaderSource = R"(#version 330 core
 in vec2 v_uv;
 
@@ -21,6 +33,8 @@ uniform float u_precipitation_intensity;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform float u_weather_time;
+uniform int u_cloud_steps;
+uniform float u_cloud_detail;
 uniform sampler2D u_accent_atlas;
 
 out vec4 frag_color;
@@ -73,11 +87,21 @@ float fbm(vec3 p) {
 float cloud_density(vec3 sample_position, float cloud_intensity, float overcast_intensity, float storm_intensity) {
     float layer = smoothstep(0.22, 0.34, sample_position.y) * (1.0 - smoothstep(0.64, 0.82, sample_position.y));
     float base = fbm(sample_position * 0.82);
-    float detail = fbm(sample_position * 1.56 + vec3(2.7, 5.1, 1.9));
-    float erosion = fbm(sample_position * 2.60 + vec3(8.3, 1.4, 6.2));
+    float detail = base;
+    float erosion = base;
+    // Je garde les branches uniformes pour supprimer deux FBM complets sur les profils plus légers.
+    if (u_cloud_detail > 0.01) {
+        detail = fbm(sample_position * 1.56 + vec3(2.7, 5.1, 1.9));
+    }
+    if (u_cloud_detail > 0.75) {
+        erosion = fbm(sample_position * 2.60 + vec3(8.3, 1.4, 6.2));
+    }
     float weather_cover = clamp(max(cloud_intensity, overcast_intensity * 0.92), 0.0, 1.0);
     float coverage = mix(0.80, 0.50, weather_cover);
-    float shape = base * 0.74 + detail * 0.24 - erosion * mix(0.18, 0.08, overcast_intensity);
+    float detail_weight = 0.24 * clamp(u_cloud_detail, 0.0, 1.0);
+    float base_weight = 0.98 - detail_weight;
+    float erosion_weight = u_cloud_detail > 0.75 ? mix(0.18, 0.08, overcast_intensity) : 0.0;
+    float shape = base * base_weight + detail * detail_weight - erosion * erosion_weight;
     shape += overcast_intensity * 0.07 - storm_intensity * 0.02;
     return smoothstep(coverage, coverage + mix(0.16, 0.09, overcast_intensity), shape) * layer;
 }
@@ -159,17 +183,30 @@ void main() {
 
         vec3 cloud_premul = vec3(0.0);
         float cloud_alpha = 0.0;
+        int cloud_steps = clamp(u_cloud_steps, 1, 7);
+        float cloud_step_stride = cloud_steps > 1 ? 2.04 / float(cloud_steps - 1) : 1.02;
+        float cloud_alpha_scale = 7.0 / float(cloud_steps);
         for (int step = 0; step < 7; ++step) {
-            float distance_along_ray = 1.35 + float(step) * 0.34;
+            if (step >= cloud_steps) {
+                break;
+            }
+            float distance_along_ray = 1.35 + float(step) * cloud_step_stride;
             vec3 sample_position = direction * distance_along_ray * vec3(1.28, 0.88, 1.28) + wind;
             float density = cloud_density(sample_position, cloud_factor, overcast_factor, storm_factor) * cloud_view_band;
             if (density > 0.001) {
-                float light_density =
-                    cloud_density(sample_position + sun_direction * 0.28 + vec3(0.0, 0.05, 0.0), cloud_factor, overcast_factor, storm_factor);
+                float light_density = density;
+                if (u_cloud_detail > 0.01) {
+                    light_density = cloud_density(
+                        sample_position + sun_direction * 0.28 + vec3(0.0, 0.05, 0.0),
+                        cloud_factor,
+                        overcast_factor,
+                        storm_factor);
+                }
                 float self_light = clamp(0.42 + (light_density - density) * 2.6 + 0.22 * day_factor, 0.0, 1.0);
                 float top_light = clamp(sample_position.y * 1.25 - 0.16, 0.0, 1.0);
                 vec3 sample_color = mix(cloud_shadow_color, cloud_light_color, clamp(self_light * 0.72 + top_light * 0.28, 0.0, 1.0));
-                float sample_alpha = density * (0.20 + 0.18 * day_factor + overcast_factor * 0.12) * (1.0 - cloud_alpha);
+                float sample_alpha = density * (0.20 + 0.18 * day_factor + overcast_factor * 0.12) *
+                                     cloud_alpha_scale * (1.0 - cloud_alpha);
                 cloud_premul += sample_color * sample_alpha;
                 cloud_alpha += sample_alpha;
             }

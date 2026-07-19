@@ -7,6 +7,7 @@
 
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace valcraft {
@@ -20,6 +21,10 @@ struct CreatureAuditStats {
     std::size_t despawned = 0;
     std::size_t attacks = 0;
     std::size_t active_creatures = 0;
+    std::size_t population_syncs = 0;
+    std::size_t spawn_anchor_computations = 0;
+    std::size_t resident_target_refreshes = 0;
+    std::size_t resident_steering_fallbacks = 0;
 };
 
 struct CreatureDamageResult {
@@ -81,6 +86,10 @@ private:
 
     [[nodiscard]] auto compute_spawn_anchor(const World& world, const ChunkCoord& coord) const
         -> std::optional<CreatureSpawnAnchor>;
+    [[nodiscard]] auto cached_spawn_anchor(const World& world, const ChunkCoord& coord)
+        -> std::optional<CreatureSpawnAnchor>;
+    [[nodiscard]] auto cached_anchor_is_still_valid(const World& world, const CreatureSpawnAnchor& anchor) const -> bool;
+    void prune_spawn_anchor_cache(const World& world);
     [[nodiscard]] auto find_creature(const ChunkCoord& coord) -> CreatureInstance*;
     [[nodiscard]] auto find_creature(const ChunkCoord& coord) const -> const CreatureInstance*;
     [[nodiscard]] auto find_resident(const CreatureSpawnAnchor& anchor) const -> const CreatureSpawnAnchor*;
@@ -118,6 +127,11 @@ private:
         float remaining_seconds = 0.0F;
     };
 
+    struct SpawnAnchorCacheEntry {
+        CreatureSpawnAnchor anchor {};
+        std::uint64_t mesh_revision = 0;
+    };
+
     std::vector<CreatureInstance> creatures_ {};
     std::vector<CreatureRenderInstance> render_instances_ {};
     std::vector<CreatureAttackEvent> attacks_ {};
@@ -126,6 +140,13 @@ private:
     std::vector<CreatureSpawnAnchor> settlement_residents_ {};
     std::vector<ResidentProfile> resident_profiles_ {};
     std::vector<CreatureSpawnAnchor> session_dead_residents_ {};
+    std::vector<ResidentProfile> resident_candidates_scratch_ {};
+    std::vector<ChunkCoord> spawn_candidates_scratch_ {};
+    std::unordered_map<ChunkCoord, SpawnAnchorCacheEntry, ChunkCoordHash> spawn_anchor_cache_ {};
+    std::optional<ChunkCoord> last_population_center_ {};
+    std::size_t last_loaded_chunk_count_ = 0;
+    float population_sync_accumulator_ = 0.0F;
+    bool population_sync_requested_ = true;
     glm::vec3 settlement_center_ {0.0F};
     CreatureAuditStats audit_stats_ {};
 };

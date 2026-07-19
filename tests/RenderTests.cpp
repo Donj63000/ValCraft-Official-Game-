@@ -1,6 +1,10 @@
+#include "app/LoadingScreen.h"
 #include "render/ShadowCulling.h"
 #include "render/ItemDropGeometry.h"
 #include "render/SceneSamplerBindings.h"
+#include "render/RendererQuality.h"
+#include "render/Renderer.h"
+#include "render/ShipMesh.h"
 #include "render/SkyShaderSource.h"
 #include "world/BlockVisuals.h"
 
@@ -9,10 +13,14 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace valcraft {
 
@@ -93,8 +101,174 @@ void check_face_sample(const FaceSample& sample,
 
 } // namespace
 
+TEST_CASE("loading progress stays finite monotone and phase weighted") {
+    LoadingProgressTracker tracker;
+    CHECK(tracker.progress() == doctest::Approx(0.0F));
+    CHECK(tracker.update(LoadingPhase::Preparation, 1.0F) == doctest::Approx(0.05F));
+    CHECK(tracker.update(LoadingPhase::Generation, 0.5F) == doctest::Approx(0.39F));
+    CHECK(tracker.update(LoadingPhase::SaveRead, 1.0F) == doctest::Approx(0.39F));
+    CHECK(tracker.update_absolute(0.80F) == doctest::Approx(0.80F));
+    CHECK(tracker.update_absolute(-1.0F) == doctest::Approx(0.80F));
+    CHECK(tracker.update_absolute(std::numeric_limits<float>::quiet_NaN()) == doctest::Approx(0.80F));
+    CHECK(tracker.update_absolute(std::numeric_limits<float>::infinity()) == doctest::Approx(0.80F));
+    CHECK(tracker.update(LoadingPhase::Finalization, 1.5F) == doctest::Approx(0.999F));
+    CHECK_FALSE(tracker.completed());
+    CHECK(tracker.complete() == doctest::Approx(1.0F));
+    CHECK(tracker.completed());
+    CHECK(tracker.phase() == LoadingPhase::Complete);
+}
+
+TEST_CASE("maritime loading quotes rotate deterministically without allocations in their views") {
+    const auto quotes = maritime_loading_quotes();
+    REQUIRE(quotes.size() >= 6U);
+
+    const auto initial = make_maritime_loading_quote_view(1337U, 0.0);
+    const auto repeated = make_maritime_loading_quote_view(1337U, 0.0);
+    CHECK(initial.current == repeated.current);
+    CHECK(initial.current_index == repeated.current_index);
+    CHECK(initial.blend == doctest::Approx(0.0F));
+    CHECK(make_maritime_loading_quote_view(1337U, -8.0).cycle == 0U);
+    CHECK(make_maritime_loading_quote_view(1337U, std::numeric_limits<double>::quiet_NaN()).cycle == 0U);
+
+    std::set<std::size_t> visited;
+    for (std::size_t cycle = 0; cycle < quotes.size(); ++cycle) {
+        const auto selection = make_maritime_loading_quote_view(
+            1337U,
+            static_cast<double>(cycle) * 5.0);
+        CHECK(selection.current_index < quotes.size());
+        CHECK(selection.current != selection.next);
+        visited.insert(selection.current_index);
+    }
+    CHECK(visited.size() == quotes.size());
+    CHECK(make_maritime_loading_quote_view(1337U, 4.7).blend == doctest::Approx(0.5F));
+
+    for (const auto& quote : quotes) {
+        CHECK_FALSE(quote.line1.empty());
+        CHECK_FALSE(quote.line2.empty());
+        CHECK_FALSE(quote.author.empty());
+        for (const auto line : {quote.line1, quote.line2, quote.author}) {
+            for (const auto character : line) {
+                CHECK(is_loading_screen_character_supported(character));
+            }
+        }
+    }
+}
+
+TEST_CASE("loading screen layout remains inside compact desktop and 4k viewports") {
+    for (const auto dimensions : std::array<std::array<int, 2>, 3> {{{640, 360}, {1600, 900}, {3840, 2160}}}) {
+        const auto layout = make_loading_screen_layout(
+            LoadingScreenTheme::Maritime,
+            dimensions[0],
+            dimensions[1]);
+        CHECK(layout.content_x >= 0.0F);
+        CHECK(layout.content_x + layout.content_width <= layout.viewport_width);
+        CHECK(layout.panel_y >= 0.0F);
+        CHECK(layout.panel_y + layout.panel_height <= layout.viewport_height);
+        CHECK(layout.track_x >= layout.content_x);
+        CHECK(layout.track_x + layout.track_width <= layout.content_x + layout.content_width);
+        CHECK(layout.track_y >= layout.panel_y);
+        CHECK(layout.track_y + layout.track_height <= layout.panel_y + layout.panel_height);
+        CHECK(layout.quote_y >= layout.panel_y);
+        CHECK(layout.author_y + layout.quote_pixel_size * 7.0F <= layout.panel_y + layout.panel_height);
+        CHECK(layout.title_y >= 0.0F);
+        CHECK(layout.detail_y < layout.horizon_y);
+    }
+}
+
+TEST_CASE("renderer world resource reset progress handles initial empty and incremental states") {
+    RendererResourceResetProgress progress;
+    CHECK(progress.complete());
+    CHECK_FALSE(progress.active());
+    CHECK(progress.remaining() == 0U);
+
+    progress.begin(0U, false);
+    CHECK(progress.complete());
+    CHECK(progress.remaining() == 0U);
+
+    progress.begin(3U, true);
+    CHECK(progress.active());
+    CHECK(progress.remaining() == 4U);
+    progress.consume_one();
+    CHECK(progress.remaining() == 3U);
+    progress.consume_one();
+    progress.consume_one();
+    CHECK(progress.active());
+    progress.consume_one();
+    CHECK(progress.complete());
+    CHECK(progress.remaining() == 0U);
+}
+
+TEST_CASE("renderer ship mesh cache remains not ready until revision renderer and gpu agree") {
+    RendererShipMeshCacheState cache;
+    constexpr std::uint64_t geometry_revision = 0xA6E11EULL;
+    constexpr std::size_t part_count = 490U;
+    CHECK_FALSE(cache.matches(geometry_revision, part_count));
+    CHECK_FALSE(cache.ready(geometry_revision, part_count, false, false));
+
+    cache.remember(geometry_revision, part_count);
+    CHECK(cache.matches(geometry_revision, part_count));
+    CHECK_FALSE(cache.ready(geometry_revision, part_count, false, true));
+    CHECK_FALSE(cache.ready(geometry_revision, part_count, true, false));
+    CHECK(cache.ready(geometry_revision, part_count, true, true));
+    CHECK_FALSE(cache.ready(geometry_revision + 1U, part_count, true, true));
+    CHECK_FALSE(cache.ready(geometry_revision, part_count - 1U, true, true));
+
+    cache.reset();
+    CHECK_FALSE(cache.matches(geometry_revision, part_count));
+    CHECK_FALSE(cache.ready(geometry_revision, part_count, true, true));
+}
+
+static_assert(std::is_same_v<
+              decltype(std::declval<Renderer&>().prepare_ship_mesh(std::declval<const ShipRenderState&>())),
+              bool>);
+static_assert(std::is_same_v<
+              decltype(std::declval<Renderer&>().process_world_resource_reset(std::size_t {}, 0.0)),
+              bool>);
+
+using RenderFrameWithCrew = void (Renderer::*)(
+    World&,
+    const PlayerController&,
+    const HotbarState&,
+    const InventoryMenuState&,
+    const DeathScreenState&,
+    const PauseMenuState&,
+    const MainMenuState&,
+    const SaveSlotMenuState&,
+    const OptionsMenuState&,
+    const ConfirmDialogState&,
+    std::span<const CreatureRenderInstance>,
+    std::span<const CrewRenderInstance>,
+    std::span<const ItemDropRenderInstance>,
+    const ShipRenderState&,
+    const PlayerProgressionState&,
+    bool,
+    const GameplayHudAnnouncementView&,
+    const MaritimeHudView&,
+    const EnvironmentState&,
+    int,
+    int);
+
+static_assert(std::is_same_v<
+              decltype(static_cast<RenderFrameWithCrew>(&Renderer::render_frame)),
+              RenderFrameWithCrew>);
+
+TEST_CASE("crew renderer owns six additional long range slots and packed local lighting") {
+    CHECK(kCrewVisualRenderCapacity == 6U);
+    CHECK(kCrewVisualPartBudget == 64U);
+    CHECK(kCrewVisualDrawDistance == doctest::Approx(96.0F));
+
+    // Je garde ces quatre flottants contigus car ils partagent l'attribut GPU 15.
+    CHECK(offsetof(CreaturePartInstance, sky_light) ==
+          offsetof(CreaturePartInstance, emissive_strength) + sizeof(float));
+    CHECK(offsetof(CreaturePartInstance, block_light) ==
+          offsetof(CreaturePartInstance, sky_light) + sizeof(float));
+    CHECK(offsetof(CreaturePartInstance, precipitation_exposure) ==
+          offsetof(CreaturePartInstance, block_light) + sizeof(float));
+}
+
 TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     const std::string_view shader_source {kSkyFragmentShaderSource};
+    const std::string_view vertex_source {kSkyVertexShaderSource};
 
     CHECK(shader_source.find("float noise3(") == std::string_view::npos);
     CHECK(shader_source.find("float value_noise3(") != std::string_view::npos);
@@ -106,6 +280,334 @@ TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     CHECK(shader_source.find("max(cloud_factor, overcast_factor) > volumetric_cloud_minimum") != std::string_view::npos);
     CHECK(shader_source.find("star_spawn") != std::string_view::npos);
     CHECK(shader_source.find("star_weather_visibility") != std::string_view::npos);
+    CHECK(shader_source.find("uniform int u_cloud_steps") != std::string_view::npos);
+    CHECK(shader_source.find("uniform float u_cloud_detail") != std::string_view::npos);
+    CHECK(shader_source.find("step >= cloud_steps") != std::string_view::npos);
+    CHECK(vertex_source.find("vec4(clip, 1.0, 1.0)") != std::string_view::npos);
+}
+
+TEST_CASE("renderer quality profiles bound expensive passes predictably") {
+    const auto high = resolve_renderer_quality_settings(RendererQuality::High, 3840, 2160);
+    const auto medium = resolve_renderer_quality_settings(RendererQuality::Medium, 1920, 1080);
+    const auto low = resolve_renderer_quality_settings(RendererQuality::Low, 1280, 720);
+
+    CHECK(high.resolved_quality == RendererQuality::High);
+    CHECK(high.cloud_steps == 7);
+    CHECK(high.cloud_detail == doctest::Approx(1.0F));
+    CHECK(high.glow_downsample == 2);
+    CHECK(high.high_precision_hdr);
+
+    CHECK(medium.cloud_steps == 4);
+    CHECK(medium.cloud_detail < high.cloud_detail);
+    CHECK(medium.glow_downsample == 3);
+    CHECK_FALSE(medium.high_precision_hdr);
+
+    CHECK(low.cloud_steps == 2);
+    CHECK(low.cloud_detail == doctest::Approx(0.0F));
+    CHECK(low.post_detail_scale == doctest::Approx(0.0F));
+    CHECK(low.glow_downsample == 4);
+
+    CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 1920, 1080).resolved_quality == RendererQuality::High);
+    CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 2560, 1440).resolved_quality == RendererQuality::Medium);
+    CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 3840, 2160).resolved_quality == RendererQuality::Low);
+}
+
+TEST_CASE("gpu timer conversion keeps asynchronous query units explicit") {
+    CHECK(gpu_elapsed_nanoseconds_to_milliseconds(0U) == doctest::Approx(0.0));
+    CHECK(gpu_elapsed_nanoseconds_to_milliseconds(1'000'000U) == doctest::Approx(1.0));
+    CHECK(gpu_elapsed_nanoseconds_to_milliseconds(16'666'667U) == doctest::Approx(16.666667));
+}
+
+TEST_CASE("dynamic renderer quality downgrades quickly and upgrades with hysteresis") {
+    RendererAdaptiveQualityController controller;
+    CHECK(controller.settings(RendererQuality::Dynamic, 1920, 1080).resolved_quality == RendererQuality::High);
+
+    static_cast<void>(controller.update(RendererQuality::Dynamic, 1920, 1080, 35.0));
+    const auto downgraded = controller.update(RendererQuality::Dynamic, 1920, 1080, 35.0);
+    CHECK(downgraded.resolved_quality == RendererQuality::Medium);
+
+    for (std::size_t sample = 0; sample < 280U; ++sample) {
+        static_cast<void>(controller.update(RendererQuality::Dynamic, 1920, 1080, 8.0));
+    }
+    CHECK(controller.state().resolved_quality == RendererQuality::High);
+    CHECK(controller.state().frame_time_ema_ms == doctest::Approx(8.0));
+    CHECK(controller.state().frame_time_p95_ms == doctest::Approx(8.0));
+}
+
+TEST_CASE("fixed renderer quality ignores adaptive timing samples") {
+    RendererAdaptiveQualityController controller;
+    for (std::size_t sample = 0; sample < 32U; ++sample) {
+        static_cast<void>(controller.update(RendererQuality::High, 3840, 2160, 80.0));
+    }
+    CHECK(controller.state().resolved_quality == RendererQuality::High);
+}
+
+TEST_CASE("ship mesh removes joined box faces and keeps local coordinates") {
+    const std::array<ShipPart, 2> parts {{
+        {ShipPartShape::Box, ShipMaterial::LightDeck, {0.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 1.0F}},
+        {ShipPartShape::Box, ShipMaterial::LightDeck, {1.0F, 0.0F, 0.0F}, {2.0F, 1.0F, 1.0F}},
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+
+    CHECK(mesh.face_count == 10U);
+    CHECK(mesh.vertices.size() == 40U);
+    CHECK(mesh.indices.size() == 60U);
+    const auto max_x = std::max_element(mesh.vertices.begin(), mesh.vertices.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.x < rhs.x;
+    });
+    REQUIRE(max_x != mesh.vertices.end());
+    CHECK(max_x->x == doctest::Approx(2.0F));
+}
+
+TEST_CASE("ship deck underside blocks its own sky lighting") {
+    const std::array<ShipPart, 1> parts {{
+        {ShipPartShape::Box, ShipMaterial::LightDeck, {0.0F, 0.0F, 0.0F}, {2.0F, 1.0F, 2.0F}},
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+    auto underside_vertices = std::size_t {0U};
+    auto top_vertices = std::size_t {0U};
+
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.ny < -0.9F) {
+            ++underside_vertices;
+            CHECK(vertex.sky_light < 0.5F);
+        } else if (vertex.ny > 0.9F) {
+            ++top_vertices;
+            CHECK(vertex.sky_light == doctest::Approx(1.0F));
+        }
+    }
+    CHECK(underside_vertices == 4U);
+    CHECK(top_vertices == 4U);
+}
+
+TEST_CASE("ship lower deck lanterns illuminate the main deck ceiling") {
+    const std::array<ShipPart, 2> parts {{
+        {ShipPartShape::Box, ShipMaterial::LightDeck, {0.0F, 3.0F, 0.0F}, {2.0F, 4.0F, 2.0F}},
+        {ShipPartShape::Box, ShipMaterial::Lantern, {0.85F, 2.30F, 0.85F}, {1.15F, 2.65F, 1.15F}},
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+    auto ceiling_vertices = std::size_t {0U};
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.ny < -0.90F && std::abs(vertex.y - 3.0F) < 0.001F) {
+            ++ceiling_vertices;
+            CHECK(vertex.block_light > 0.0F);
+        }
+    }
+    CHECK(ceiling_vertices == 4U);
+}
+
+TEST_CASE("ship mesh repeats atlas detail across long structural faces") {
+    const std::array<ShipPart, 1> parts {{
+        {ShipPartShape::Box, ShipMaterial::CleanBeam, {0.0F, 0.0F, 0.0F}, {6.0F, 1.0F, 1.0F}},
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+
+    CHECK(mesh.face_count == 14U);
+    CHECK(mesh.vertices.size() == mesh.face_count * 4U);
+    CHECK(mesh.indices.size() == mesh.face_count * 6U);
+}
+
+TEST_CASE("ship canvas panel turns a fore and aft sail into a supported triangle") {
+    const std::array<ShipPart, 1> parts {{
+        {
+            ShipPartShape::Panel,
+            ShipMaterial::CreamCanvas,
+            {0.0F, 0.0F, 0.0F},
+            {0.1F, 4.0F, 4.0F},
+            {1.0F, 0.0F, 0.0F},
+            0.08F,
+        },
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+    REQUIRE(mesh.face_count > 5U);
+    CHECK(mesh.vertices.size() == mesh.face_count * 4U);
+    CHECK(mesh.indices.size() == mesh.face_count * 6U);
+
+    auto top_vertex_count = std::size_t {0U};
+    auto bottom_reaches_forward_corner = false;
+    for (const auto& vertex : mesh.vertices) {
+        if (std::abs(vertex.y - 4.0F) <= 0.001F) {
+            ++top_vertex_count;
+            CHECK(vertex.z == doctest::Approx(0.0F));
+        }
+        if (std::abs(vertex.y) <= 0.001F && std::abs(vertex.z - 4.0F) <= 0.001F) {
+            bottom_reaches_forward_corner = true;
+        }
+    }
+    CHECK(top_vertex_count > 0U);
+    CHECK(bottom_reaches_forward_corner);
+}
+
+TEST_CASE("ship canvas keeps repeated detail across a large trapezoidal sail") {
+    const std::array<ShipPart, 1> parts {{
+        {
+            ShipPartShape::Panel,
+            ShipMaterial::CreamCanvas,
+            {-6.0F, 0.0F, 0.0F},
+            {6.0F, 14.0F, 0.10F},
+            {0.0F, 0.0F, 1.0F},
+            0.08F,
+        },
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+    REQUIRE(mesh.face_count > 12U);
+
+    auto canvas_tiles = std::size_t {0U};
+    for (std::size_t face = 0; face < mesh.vertices.size(); face += 4U) {
+        const auto& first = mesh.vertices[face];
+        if (std::abs(first.nz) < 0.90F) {
+            continue;
+        }
+        const auto point = [](const ChunkVertex& vertex) {
+            return glm::vec3 {vertex.x, vertex.y, vertex.z};
+        };
+        const auto first_span = glm::length(point(mesh.vertices[face + 1U]) - point(first));
+        const auto second_span = glm::length(point(mesh.vertices[face + 3U]) - point(first));
+        CHECK(first_span <= 2.01F);
+        CHECK(second_span <= 2.01F);
+        ++canvas_tiles;
+    }
+    CHECK(canvas_tiles > 20U);
+}
+
+TEST_CASE("stern glyph bitmap follows the outward face orientation") {
+    const std::array<ShipPart, 1> parts {{
+        {
+            ShipPartShape::Glyph,
+            ShipMaterial::Brass,
+            {0.0F, 0.0F, 0.0F},
+            {5.0F, 7.0F, 0.10F},
+            {0.0F, 0.0F, -1.0F},
+            0.06F,
+            false,
+            false,
+            U'L',
+        },
+    }};
+    const auto mesh = build_ship_mesh_data(parts);
+    auto top_min_x = std::numeric_limits<float>::max();
+    auto top_max_x = std::numeric_limits<float>::lowest();
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.y <= 5.95F) {
+            continue;
+        }
+        top_min_x = std::min(top_min_x, vertex.x);
+        top_max_x = std::max(top_max_x, vertex.x);
+    }
+    CHECK(top_min_x == doctest::Approx(4.0F));
+    CHECK(top_max_x == doctest::Approx(4.82F));
+}
+
+TEST_CASE("L'Amelie mesh renders every maritime family with interior and lantern lighting") {
+    const auto& blueprint = amelie_ship_blueprint();
+    const auto mesh = build_ship_mesh_data(blueprint.parts);
+
+    REQUIRE_FALSE(mesh.empty());
+    CHECK(mesh.face_count > blueprint.parts.size());
+    CHECK(mesh.vertices.size() == mesh.face_count * 4U);
+    CHECK(mesh.indices.size() == mesh.face_count * 6U);
+    CHECK(mesh.water_vertices.empty());
+    CHECK(mesh.water_indices.empty());
+
+    std::set<int> materials;
+    auto minimum_sky = 1.0F;
+    auto maximum_sky = 0.0F;
+    auto maximum_block = 0.0F;
+    for (const auto& vertex : mesh.vertices) {
+        CHECK(std::isfinite(vertex.x));
+        CHECK(std::isfinite(vertex.y));
+        CHECK(std::isfinite(vertex.z));
+        CHECK(vertex.x >= blueprint.bounds.min.x - 0.25F);
+        CHECK(vertex.x <= blueprint.bounds.max.x + 0.25F);
+        CHECK(vertex.y >= blueprint.bounds.min.y - 0.25F);
+        CHECK(vertex.y <= blueprint.bounds.max.y + 0.25F);
+        CHECK(vertex.z >= blueprint.bounds.min.z - 0.25F);
+        CHECK(vertex.z <= blueprint.bounds.max.z + 0.25F);
+        CHECK(vertex.ao >= 0.60F);
+        CHECK(vertex.ao <= 1.0F);
+        CHECK(vertex.sky_light >= 0.0F);
+        CHECK(vertex.sky_light <= 1.0F);
+        CHECK(vertex.block_light >= 0.0F);
+        CHECK(vertex.block_light <= 1.0F);
+        materials.insert(static_cast<int>(std::lround(vertex.material_class)));
+        minimum_sky = std::min(minimum_sky, vertex.sky_light);
+        maximum_sky = std::max(maximum_sky, vertex.sky_light);
+        maximum_block = std::max(maximum_block, vertex.block_light);
+    }
+
+    CHECK(materials.contains(static_cast<int>(BlockVisualMaterial::Wood)));
+    CHECK(materials.contains(static_cast<int>(BlockVisualMaterial::Fabric)));
+    CHECK(materials.contains(static_cast<int>(BlockVisualMaterial::Metal)));
+    CHECK(materials.contains(static_cast<int>(BlockVisualMaterial::Brass)));
+    CHECK(materials.contains(static_cast<int>(BlockVisualMaterial::Emissive)));
+    CHECK(materials.contains(static_cast<int>(BlockVisualMaterial::Glass)));
+    CHECK(minimum_sky < 0.5F);
+    CHECK(maximum_sky == doctest::Approx(1.0F));
+    CHECK(maximum_block >= 11.0F / 15.0F);
+
+    auto illuminated_cabin_ceiling_vertices = std::size_t {0};
+    auto downward_cabin_vertices = std::size_t {0};
+    auto lowest_cabin_ceiling = std::numeric_limits<float>::max();
+    auto highest_cabin_ceiling = std::numeric_limits<float>::lowest();
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.ny < -0.90F && std::abs(vertex.x - 1.25F) < 2.0F && std::abs(vertex.z + 30.5F) < 2.0F) {
+            ++downward_cabin_vertices;
+            lowest_cabin_ceiling = std::min(lowest_cabin_ceiling, vertex.y);
+            highest_cabin_ceiling = std::max(highest_cabin_ceiling, vertex.y);
+        }
+        if (vertex.ny < -0.90F && vertex.y >= 3.60F && vertex.y <= 3.70F &&
+            std::abs(vertex.x - 1.25F) < 2.0F && std::abs(vertex.z + 30.5F) < 2.0F) {
+            ++illuminated_cabin_ceiling_vertices;
+            CHECK(vertex.block_light > 0.0F);
+        }
+    }
+    CAPTURE(downward_cabin_vertices);
+    CAPTURE(lowest_cabin_ceiling);
+    CAPTURE(highest_cabin_ceiling);
+    CHECK(illuminated_cabin_ceiling_vertices > 0U);
+}
+
+TEST_CASE("large ship visibility uses its nearest bounds instead of its center") {
+    std::array<FrustumPlane, 6> permissive_frustum {};
+    for (auto& plane : permissive_frustum) {
+        plane.normal = {0.0F, 1.0F, 0.0F};
+        plane.distance = 1'000.0F;
+    }
+    const ChunkBounds ship_bounds {
+        {-7.2F, -2.0F, -30.5F},
+        {7.2F, 24.5F, 38.5F},
+        {0.0F, 11.25F, 4.0F},
+    };
+    const glm::vec3 eye {0.0F, 6.0F, -25.0F};
+    const glm::vec3 looking_towards_stern {0.0F, 0.0F, -1.0F};
+    ShadowPassContext shadow_context {};
+    shadow_context.enabled = true;
+    shadow_context.frustum = permissive_frustum;
+    shadow_context.focus = eye;
+    shadow_context.max_distance_sq = 4.0F;
+
+    const auto generic_visibility = classify_chunk_visibility(
+        ship_bounds,
+        permissive_frustum,
+        eye,
+        looking_towards_stern,
+        10'000.0F,
+        100.0F,
+        shadow_context,
+        true);
+    CHECK_FALSE(generic_visibility.camera);
+    CHECK_FALSE(generic_visibility.shadow);
+
+    const auto ship_visibility = classify_large_bounds_visibility(
+        ship_bounds,
+        permissive_frustum,
+        eye,
+        10'000.0F,
+        shadow_context,
+        true);
+    CHECK(ship_visibility.camera);
+    CHECK(ship_visibility.shadow);
+    CHECK(ship_visibility.distance_squared == doctest::Approx(0.0F));
 }
 
 TEST_CASE("accent atlas keeps celestial sprites bright and readable") {
@@ -288,6 +790,83 @@ TEST_CASE("item drop geometry keeps cube layers and atlas faces aligned with gpu
     const auto stacked_vertices = build_item_drop_vertices(std::span<const ItemDropRenderInstance>(&drop, 1));
     CHECK(stacked_instances.size() == 3);
     CHECK(stacked_vertices.size() == 108);
+
+    drop.count = 1;
+    drop.age_seconds = (std::numeric_limits<float>::max)();
+    drop.spin_radians = (std::numeric_limits<float>::max)();
+    const auto safe_instances = build_item_drop_gpu_instances(std::span<const ItemDropRenderInstance>(&drop, 1));
+    const auto safe_vertices = build_item_drop_vertices(std::span<const ItemDropRenderInstance>(&drop, 1));
+    REQUIRE(safe_instances.size() == 1);
+    CHECK(std::isfinite(safe_instances.front().center.x));
+    CHECK(std::isfinite(safe_instances.front().center.y));
+    CHECK(std::isfinite(safe_instances.front().center.z));
+    CHECK(std::isfinite(safe_instances.front().rotation));
+    for (const auto& vertex : safe_vertices) {
+        CHECK(std::isfinite(vertex.x));
+        CHECK(std::isfinite(vertex.y));
+        CHECK(std::isfinite(vertex.z));
+    }
+}
+
+TEST_CASE("item drop atlas mapping covers tools and ignores corrupted block ids") {
+    constexpr std::array<BlockVisualFace, 6> faces {{
+        BlockVisualFace::PositiveX,
+        BlockVisualFace::NegativeX,
+        BlockVisualFace::PositiveY,
+        BlockVisualFace::NegativeY,
+        BlockVisualFace::PositiveZ,
+        BlockVisualFace::NegativeZ,
+    }};
+
+    for (BlockId block_id = to_block_id(BlockType::Grass); block_id <= to_block_id(BlockType::Shovel); ++block_id) {
+        const auto item_id = block_item_id(block_id);
+        CAPTURE(static_cast<int>(block_id));
+        REQUIRE(item_id != to_block_id(BlockType::Air));
+
+        for (const auto face : faces) {
+            CHECK(item_drop_atlas_tile(block_id, face) == block_atlas_tile(item_id, face));
+        }
+
+        ItemDropRenderInstance drop {};
+        drop.block_id = block_id;
+        drop.count = 1;
+        const auto instances = build_item_drop_gpu_instances(std::span<const ItemDropRenderInstance>(&drop, 1));
+        REQUIRE(instances.size() == 1);
+        CHECK(instances.front().block_id == item_id);
+    }
+
+    struct ToolCase {
+        BlockType type;
+        BlockAtlasTile tile;
+    };
+    constexpr std::array<ToolCase, 3> tools {{
+        {BlockType::Pickaxe, {5, 6}},
+        {BlockType::Axe, {6, 6}},
+        {BlockType::Shovel, {7, 6}},
+    }};
+
+    for (const auto& tool : tools) {
+        const auto block_id = to_block_id(tool.type);
+        CAPTURE(static_cast<int>(tool.type));
+        CHECK(item_drop_atlas_tile(block_id, BlockVisualFace::PositiveX) == tool.tile);
+
+        ItemDropRenderInstance drop {};
+        drop.block_id = block_id;
+        drop.count = 1;
+        const auto instances = build_item_drop_gpu_instances(std::span<const ItemDropRenderInstance>(&drop, 1));
+        REQUIRE(instances.size() == 1);
+        CHECK(instances.front().face_tiles_0_1.x == doctest::Approx(static_cast<float>(tool.tile.x)));
+        CHECK(instances.front().face_tiles_0_1.y == doctest::Approx(static_cast<float>(tool.tile.y)));
+    }
+
+    ItemDropRenderInstance corrupted {};
+    corrupted.block_id = static_cast<BlockId>(255U);
+    corrupted.count = 1;
+    const auto corrupted_instances = build_item_drop_gpu_instances(std::span<const ItemDropRenderInstance>(&corrupted, 1));
+    const auto corrupted_vertices = build_item_drop_vertices(std::span<const ItemDropRenderInstance>(&corrupted, 1));
+    CHECK(corrupted_instances.empty());
+    CHECK(corrupted_vertices.empty());
+    CHECK(item_drop_atlas_tile(corrupted.block_id, BlockVisualFace::PositiveX) == BlockAtlasTile {});
 }
 
 TEST_CASE("glass block exposes a readable window tile for village construction") {
@@ -318,7 +897,7 @@ TEST_CASE("glass block exposes a readable window tile for village construction")
     CHECK(pane_reflection_pixel[2] > pane_reflection_pixel[0]);
 }
 
-TEST_CASE("equipment items stay inventory-only and expose readable antique icons") {
+TEST_CASE("equipment and tool items stay inventory-only and expose readable icons") {
     struct GearVisualCase {
         BlockType type;
         BlockAtlasTile tile;
@@ -326,13 +905,16 @@ TEST_CASE("equipment items stay inventory-only and expose readable antique icons
         BlockVisualMaterial material;
     };
 
-    const std::array<GearVisualCase, 6> gear_items {{
+    const std::array<GearVisualCase, 9> gear_items {{
         {BlockType::Pastron, {2, 4}, {5, 7}, BlockVisualMaterial::Rock},
         {BlockType::RoundShield, {3, 4}, {7, 7}, BlockVisualMaterial::Rock},
         {BlockType::Sword, {4, 4}, {8, 7}, BlockVisualMaterial::Rock},
         {BlockType::Spear, {5, 4}, {8, 8}, BlockVisualMaterial::Rock},
         {BlockType::Shoes, {6, 4}, {4, 11}, BlockVisualMaterial::Wood},
         {BlockType::Pants, {7, 4}, {5, 8}, BlockVisualMaterial::Wood},
+        {BlockType::Pickaxe, {5, 6}, {8, 4}, BlockVisualMaterial::Rock},
+        {BlockType::Axe, {6, 6}, {11, 5}, BlockVisualMaterial::Wood},
+        {BlockType::Shovel, {7, 6}, {7, 12}, BlockVisualMaterial::Rock},
     }};
     const auto atlas_pixels = build_block_atlas_pixels();
     REQUIRE(atlas_pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
@@ -423,6 +1005,52 @@ TEST_CASE("block atlas supports the antique Greek village material palette") {
     CHECK(roof_center[0] > roof_center[1] + 45);
     CHECK(roof_center[1] > roof_center[2] + 24);
     CHECK(roof_seam[0] < roof_center[0]);
+}
+
+TEST_CASE("L'Amelie ship atlas owns eight deterministic and distinct maritime materials") {
+    const std::array<ShipAtlasMaterial, kShipAtlasMaterialCount> materials {{
+        ShipAtlasMaterial::DarkHull,
+        ShipAtlasMaterial::LightDeck,
+        ShipAtlasMaterial::CleanBeam,
+        ShipAtlasMaterial::CreamCanvas,
+        ShipAtlasMaterial::Rope,
+        ShipAtlasMaterial::Iron,
+        ShipAtlasMaterial::Brass,
+        ShipAtlasMaterial::Lantern,
+    }};
+    const auto first_pixels = build_block_atlas_pixels();
+    const auto second_pixels = build_block_atlas_pixels();
+    REQUIRE(first_pixels == second_pixels);
+
+    std::array<std::uint64_t, kShipAtlasMaterialCount> checksums {};
+    for (std::size_t material_index = 0; material_index < materials.size(); ++material_index) {
+        const auto tile = ship_atlas_tile(materials[material_index]);
+        CHECK(tile.x == static_cast<int>(material_index));
+        CHECK(tile.y == kShipAtlasRow);
+
+        auto checksum = std::uint64_t {1469598103934665603ULL};
+        for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+                const auto pixel = sample_block_atlas_pixel(first_pixels, tile.x, tile.y, x, y);
+                REQUIRE(pixel[3] == 255U);
+                for (const auto channel : pixel) {
+                    checksum ^= static_cast<std::uint64_t>(channel);
+                    checksum *= 1099511628211ULL;
+                }
+            }
+        }
+        checksums[material_index] = checksum;
+    }
+
+    for (std::size_t left = 0; left < checksums.size(); ++left) {
+        for (std::size_t right = left + 1U; right < checksums.size(); ++right) {
+            CHECK(checksums[left] != checksums[right]);
+        }
+    }
+    CHECK(ship_visual_material(ShipAtlasMaterial::CreamCanvas) == BlockVisualMaterial::Fabric);
+    CHECK(ship_visual_material(ShipAtlasMaterial::Iron) == BlockVisualMaterial::Metal);
+    CHECK(ship_visual_material(ShipAtlasMaterial::Brass) == BlockVisualMaterial::Brass);
+    CHECK(ship_visual_material(ShipAtlasMaterial::Lantern) == BlockVisualMaterial::Emissive);
 }
 
 } // namespace valcraft

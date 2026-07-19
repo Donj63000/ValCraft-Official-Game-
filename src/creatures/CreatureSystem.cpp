@@ -54,6 +54,8 @@ constexpr int kResidentTargetSearchRadius = 3;
 constexpr float kCreatureHurtDuration = 0.34F;
 constexpr float kCreatureDeathVisualDuration = 1.18F;
 constexpr float kCreatureSpawnSuppressionDuration = 14.0F;
+constexpr float kPopulationSyncIntervalSeconds = 0.25F;
+constexpr float kResidentTargetRefreshSeconds = 0.25F;
 
 struct SpeciesTuning {
     float day_speed = 1.0F;
@@ -63,11 +65,6 @@ struct SpeciesTuning {
     float day_roam_radius = 4.5F;
     float night_roam_radius = 5.5F;
     float chase_radius = 10.5F;
-};
-
-struct SpawnCandidate {
-    ChunkCoord coord {};
-    float distance_squared = 0.0F;
 };
 
 struct SteeringMoveResult {
@@ -268,6 +265,12 @@ void sanitize_loaded_creature(CreatureInstance& creature) noexcept {
                 creature.resident_target_index,
                 static_cast<std::uint8_t>(creature.anchor.patrol_point_count - 1U)));
     }
+    creature.resident_cached_target = {};
+    creature.resident_target_refresh_timer = 0.0F;
+    creature.resident_cached_heading = 0.0F;
+    creature.resident_cached_phase = 0U;
+    creature.resident_target_valid = false;
+    creature.resident_heading_valid = false;
     ensure_creature_health(creature);
 }
 
@@ -871,7 +874,8 @@ void update_resident_creature(CreatureInstance& creature,
                               const World& world,
                               const glm::vec3& player_position,
                               const EnvironmentState& environment,
-                              std::span<const CreatureInstance> active_creatures) {
+                              std::span<const CreatureInstance> active_creatures,
+                              CreatureAuditStats& audit_stats) {
     const auto tuning = tuning_for(creature.anchor.species);
     const auto home_position = resident_floor_position(creature.anchor);
     const auto preferred_floor_y = creature.anchor.ground_block.y;
@@ -882,6 +886,8 @@ void update_resident_creature(CreatureInstance& creature,
         creature.wander_heading = creature.yaw_radians;
         creature.behavior_state = CreatureBehaviorState::Idle;
         creature.behavior_timer = 0.0F;
+        creature.resident_target_valid = false;
+        creature.resident_heading_valid = false;
     }
 
     creature.phase = CreaturePhase::Day;
@@ -899,7 +905,7 @@ void update_resident_creature(CreatureInstance& creature,
     const auto player_close = player_distance < kResidentPersonalSpace && player_distance_sq > 1.0e-6F;
     const auto player_lookable = player_distance < kResidentPlayerLookDistance && player_distance_sq > 1.0e-6F;
     const auto phase = resident_routine_phase(environment.time_of_day);
-    auto target_position = resident_activity_target(profile, phase);
+    auto requested_target = resident_activity_target(profile, phase);
     const auto crowd = resident_crowd_context(creature, active_creatures);
 
     if (phase == ResidentRoutinePhase::Social && crowd.has_nearby_resident) {
@@ -909,12 +915,30 @@ void update_resident_creature(CreatureInstance& creature,
             0.0F,
             crowd.nearest_resident_direction.y * meet_distance,
         };
-        target_position.x = glm::mix(target_position.x, meet_target.x, 0.34F);
-        target_position.z = glm::mix(target_position.z, meet_target.z, 0.34F);
+        requested_target.x = glm::mix(requested_target.x, meet_target.x, 0.34F);
+        requested_target.z = glm::mix(requested_target.z, meet_target.z, 0.34F);
     }
-    // Je replie les objectifs de routine vers une case marchable du village pour eviter
-    // qu'un villageois insiste sur une cible placee dans un mur, une decoration ou un trou.
-    target_position = resolve_resident_activity_target(creature, profile, world, target_position);
+    creature.resident_target_refresh_timer =
+        std::max(0.0F, creature.resident_target_refresh_timer - non_negative_finite(dt));
+    const auto phase_value = static_cast<std::uint8_t>(phase);
+    const auto phase_changed = !creature.resident_target_valid || creature.resident_cached_phase != phase_value;
+    if (phase_changed || creature.resident_target_refresh_timer <= 0.0F) {
+        // Je replie l'objectif vers une case marchable quatre fois par seconde au
+        // lieu de rescanner jusqu'a 49 colonnes a chaque tick de rendu.
+        const auto previous_target = creature.resident_cached_target;
+        creature.resident_cached_target =
+            resolve_resident_activity_target(creature, profile, world, requested_target);
+        creature.resident_cached_phase = phase_value;
+        creature.resident_target_valid = true;
+        const auto jitter = static_cast<float>((profile.routine_seed >> 9U) & 3U) * 0.015F;
+        creature.resident_target_refresh_timer = kResidentTargetRefreshSeconds + jitter;
+        if (phase_changed ||
+            horizontal_distance_squared(previous_target, creature.resident_cached_target) > 0.20F * 0.20F) {
+            creature.resident_heading_valid = false;
+        }
+        ++audit_stats.resident_target_refreshes;
+    }
+    const auto target_position = creature.resident_cached_target;
 
     const auto to_target = glm::vec2 {
         target_position.x - creature.position.x,
@@ -1102,20 +1126,51 @@ void update_resident_creature(CreatureInstance& creature,
     if (desired_distance > 1.0e-6F) {
         attempted_move = true;
         const auto base_heading = yaw_from_direction(normalize_or_cardinal(desired_move, profile.routine_seed));
-        const auto steering_result = try_move_grounded_towards(
-            creature,
-            world,
-            base_heading,
-            desired_distance,
-            profile.roam_radius,
-            {target_position.x, target_position.z},
-            normalize_or_cardinal(desired_move, profile.routine_seed),
-            true,
-            preferred_floor_y);
-        moved = steering_result.moved;
-        steering_diverted = steering_result.diverted;
-        if (moved) {
-            resolved_yaw = steering_result.heading;
+        if (creature.resident_heading_valid) {
+            auto probe = creature;
+            if (try_move_grounded(
+                    probe,
+                    world,
+                    direction_from_yaw(creature.resident_cached_heading) * desired_distance,
+                    profile.roam_radius,
+                    preferred_floor_y)) {
+                const glm::vec2 target_xz {target_position.x, target_position.z};
+                const glm::vec2 before_xz {creature.position.x, creature.position.z};
+                const glm::vec2 after_xz {probe.position.x, probe.position.z};
+                if (glm::dot(target_xz - after_xz, target_xz - after_xz) <=
+                    glm::dot(target_xz - before_xz, target_xz - before_xz) + 0.01F) {
+                    creature.position = probe.position;
+                    moved = true;
+                    resolved_yaw = creature.resident_cached_heading;
+                    steering_diverted = std::abs(wrap_angle(resolved_yaw - base_heading)) > 0.05F;
+                }
+            }
+            if (!moved) {
+                creature.resident_heading_valid = false;
+            }
+        }
+
+        if (!moved) {
+            // Je ne relance la recherche exhaustive de 60 directions que lorsque
+            // le cap valide de la frame precedente est bloque ou devenu mauvais.
+            ++audit_stats.resident_steering_fallbacks;
+            const auto steering_result = try_move_grounded_towards(
+                creature,
+                world,
+                base_heading,
+                desired_distance,
+                profile.roam_radius,
+                {target_position.x, target_position.z},
+                normalize_or_cardinal(desired_move, profile.routine_seed),
+                true,
+                preferred_floor_y);
+            moved = steering_result.moved;
+            steering_diverted = steering_result.diverted;
+            if (moved) {
+                resolved_yaw = steering_result.heading;
+                creature.resident_cached_heading = steering_result.heading;
+                creature.resident_heading_valid = true;
+            }
         }
     }
 
@@ -1916,7 +1971,32 @@ void CreatureSystem::update(float dt,
     const auto clamped_dt = non_negative_finite(dt);
     update_spawn_suppressions(clamped_dt);
     const auto safe_player_position = finite_vec3_or(player_position, {});
-    sync_active_creatures(world, safe_player_position, cycle);
+    if (creatures_.capacity() < kCreatureMaxActiveCount) {
+        creatures_.reserve(kCreatureMaxActiveCount);
+    }
+    if (render_instances_.capacity() < kCreatureMaxActiveCount + death_visuals_.size()) {
+        render_instances_.reserve(kCreatureMaxActiveCount + death_visuals_.size());
+    }
+
+    population_sync_accumulator_ += clamped_dt;
+    const auto population_center = world.world_to_chunk(
+        static_cast<int>(std::floor(safe_player_position.x)),
+        static_cast<int>(std::floor(safe_player_position.z)));
+    const auto center_changed = !last_population_center_.has_value() || *last_population_center_ != population_center;
+    const auto loaded_chunk_count = world.chunk_records().size();
+    const auto loaded_chunks_changed = loaded_chunk_count != last_loaded_chunk_count_;
+    if (population_sync_requested_ || center_changed || loaded_chunks_changed ||
+        population_sync_accumulator_ >= kPopulationSyncIntervalSeconds) {
+        // Je reserve le travail de population aux changements structurels et a
+        // une cadence de 4 Hz; l'animation et les combats restent fluides a 60 Hz.
+        sync_active_creatures(world, safe_player_position, cycle);
+        prune_spawn_anchor_cache(world);
+        population_sync_accumulator_ = 0.0F;
+        population_sync_requested_ = false;
+        last_population_center_ = population_center;
+        last_loaded_chunk_count_ = loaded_chunk_count;
+        ++audit_stats_.population_syncs;
+    }
 
     const auto active_view = std::span<const CreatureInstance>(creatures_.data(), creatures_.size());
     for (auto& creature : creatures_) {
@@ -2038,6 +2118,7 @@ void CreatureSystem::set_settlement_residents(std::vector<CreatureSpawnAnchor> r
     session_dead_residents_.clear();
     spawn_suppressions_.clear();
     settlement_residents_ = std::move(residents);
+    population_sync_requested_ = true;
     settlement_residents_.erase(
         std::remove_if(settlement_residents_.begin(), settlement_residents_.end(), [](const CreatureSpawnAnchor& anchor) {
             return !is_resident_species(anchor.species);
@@ -2123,6 +2204,11 @@ void CreatureSystem::load_creatures(const std::vector<CreatureInstance>& creatur
     attacks_.clear();
     death_visuals_.clear();
     spawn_suppressions_.clear();
+    spawn_anchor_cache_.clear();
+    population_sync_accumulator_ = 0.0F;
+    population_sync_requested_ = true;
+    last_population_center_.reset();
+    last_loaded_chunk_count_ = 0;
     rebuild_render_instances(environment);
     audit_stats_ = {};
     audit_stats_.active_creatures = creatures_.size();
@@ -2137,6 +2223,13 @@ void CreatureSystem::clear() noexcept {
     settlement_residents_.clear();
     resident_profiles_.clear();
     session_dead_residents_.clear();
+    resident_candidates_scratch_.clear();
+    spawn_candidates_scratch_.clear();
+    spawn_anchor_cache_.clear();
+    last_population_center_.reset();
+    last_loaded_chunk_count_ = 0;
+    population_sync_accumulator_ = 0.0F;
+    population_sync_requested_ = true;
     settlement_center_ = {0.0F, 0.0F, 0.0F};
     audit_stats_ = {};
 }
@@ -2190,7 +2283,7 @@ void CreatureSystem::sync_active_creatures(const World& world,
             continue;
         }
 
-        const auto refreshed_anchor = compute_spawn_anchor(world, iterator->anchor.chunk);
+        const auto refreshed_anchor = cached_spawn_anchor(world, iterator->anchor.chunk);
         if (!refreshed_anchor.has_value() || *refreshed_anchor != iterator->anchor) {
             ++audit_stats_.despawned;
             iterator = creatures_.erase(iterator);
@@ -2200,8 +2293,11 @@ void CreatureSystem::sync_active_creatures(const World& world,
         ++iterator;
     }
 
-    std::vector<ResidentProfile> resident_candidates {};
-    resident_candidates.reserve(resident_profiles_.size());
+    auto& resident_candidates = resident_candidates_scratch_;
+    resident_candidates.clear();
+    if (resident_candidates.capacity() < resident_profiles_.size()) {
+        resident_candidates.reserve(resident_profiles_.size());
+    }
     for (const auto& profile : resident_profiles_) {
         if (!is_chunk_within_radius(center, profile.anchor.chunk, kCreatureActivationRadiusChunks) ||
             world.find_chunk(profile.anchor.chunk) == nullptr ||
@@ -2226,23 +2322,33 @@ void CreatureSystem::sync_active_creatures(const World& world,
         resident_candidates.push_back(resolved_profile);
     }
 
-    auto wildlife_begin = std::stable_partition(creatures_.begin(), creatures_.end(), [](const CreatureInstance& creature) {
-        return is_resident_species(creature.anchor.species);
-    });
-    const auto resident_count = static_cast<std::size_t>(std::distance(creatures_.begin(), wildlife_begin));
-    const auto wildlife_count = static_cast<std::size_t>(std::distance(wildlife_begin, creatures_.end()));
+    const auto resident_count = static_cast<std::size_t>(
+        std::count_if(creatures_.begin(), creatures_.end(), [](const CreatureInstance& creature) {
+            return is_resident_species(creature.anchor.species);
+        }));
+    auto wildlife_count = creatures_.size() - resident_count;
     const auto reserved_resident_count = resident_count + resident_candidates.size();
     const auto wildlife_capacity =
         reserved_resident_count >= kCreatureMaxActiveCount ? 0U : kCreatureMaxActiveCount - reserved_resident_count;
-    if (wildlife_count > wildlife_capacity) {
-        std::sort(wildlife_begin, creatures_.end(), [&](const CreatureInstance& lhs, const CreatureInstance& rhs) {
-            const auto lhs_distance = horizontal_distance_squared(lhs.position, player_position);
-            const auto rhs_distance = horizontal_distance_squared(rhs.position, player_position);
-            return lhs_distance < rhs_distance;
-        });
-        const auto trimmed_begin = wildlife_begin + static_cast<std::ptrdiff_t>(wildlife_capacity);
-        audit_stats_.despawned += static_cast<std::size_t>(std::distance(trimmed_begin, creatures_.end()));
-        creatures_.erase(trimmed_begin, creatures_.end());
+    while (wildlife_count > wildlife_capacity) {
+        auto farthest = creatures_.end();
+        auto farthest_distance = -1.0F;
+        for (auto iterator = creatures_.begin(); iterator != creatures_.end(); ++iterator) {
+            if (is_resident_species(iterator->anchor.species)) {
+                continue;
+            }
+            const auto distance = horizontal_distance_squared(iterator->position, player_position);
+            if (distance > farthest_distance) {
+                farthest_distance = distance;
+                farthest = iterator;
+            }
+        }
+        if (farthest == creatures_.end()) {
+            break;
+        }
+        creatures_.erase(farthest);
+        --wildlife_count;
+        ++audit_stats_.despawned;
     }
 
     for (const auto& resident : resident_candidates) {
@@ -2258,8 +2364,13 @@ void CreatureSystem::sync_active_creatures(const World& world,
         return;
     }
 
-    std::vector<SpawnCandidate> candidates;
-    candidates.reserve(static_cast<std::size_t>((kCreatureActivationRadiusChunks * 2 + 1) * (kCreatureActivationRadiusChunks * 2 + 1)));
+    auto& candidates = spawn_candidates_scratch_;
+    candidates.clear();
+    constexpr auto kMaximumCandidateCount =
+        static_cast<std::size_t>((kCreatureActivationRadiusChunks * 2 + 1) * (kCreatureActivationRadiusChunks * 2 + 1));
+    if (candidates.capacity() < kMaximumCandidateCount) {
+        candidates.reserve(kMaximumCandidateCount);
+    }
 
     for (const auto& [coord, record] : world.chunk_records()) {
         (void)record;
@@ -2271,11 +2382,12 @@ void CreatureSystem::sync_active_creatures(const World& world,
             })) {
             continue;
         }
-        candidates.push_back({coord, chunk_distance_squared_to_player(coord, player_position)});
+        candidates.push_back(coord);
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const SpawnCandidate& lhs, const SpawnCandidate& rhs) {
-        return lhs.distance_squared < rhs.distance_squared;
+    std::sort(candidates.begin(), candidates.end(), [&](const ChunkCoord& lhs, const ChunkCoord& rhs) {
+        return chunk_distance_squared_to_player(lhs, player_position) <
+               chunk_distance_squared_to_player(rhs, player_position);
     });
 
     for (const auto& candidate : candidates) {
@@ -2283,7 +2395,7 @@ void CreatureSystem::sync_active_creatures(const World& world,
             break;
         }
 
-        const auto anchor = compute_spawn_anchor(world, candidate.coord);
+        const auto anchor = cached_spawn_anchor(world, candidate);
         if (!anchor.has_value() || is_spawn_suppressed(*anchor)) {
             continue;
         }
@@ -2312,7 +2424,15 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
 
     if (is_resident_species(creature.anchor.species)) {
         if (const auto* profile = find_resident_profile(creature.anchor); profile != nullptr) {
-            update_resident_creature(creature, *profile, dt, world, player_position, environment, active_creatures);
+            update_resident_creature(
+                creature,
+                *profile,
+                dt,
+                world,
+                player_position,
+                environment,
+                active_creatures,
+                audit_stats_);
             return;
         }
     }
@@ -2771,6 +2891,50 @@ void CreatureSystem::rebuild_render_instances(const EnvironmentState& environmen
             death_amount,
             visual.hit_direction,
         });
+    }
+}
+
+auto CreatureSystem::cached_spawn_anchor(const World& world, const ChunkCoord& coord)
+    -> std::optional<CreatureSpawnAnchor> {
+    if (world.find_chunk(coord) == nullptr) {
+        spawn_anchor_cache_.erase(coord);
+        return std::nullopt;
+    }
+
+    const auto revision = world.mesh_revision(coord);
+    if (const auto cached = spawn_anchor_cache_.find(coord); cached != spawn_anchor_cache_.end()) {
+        if (cached->second.mesh_revision == revision &&
+            cached_anchor_is_still_valid(world, cached->second.anchor)) {
+            return cached->second.anchor;
+        }
+    }
+
+    ++audit_stats_.spawn_anchor_computations;
+    const auto refreshed = compute_spawn_anchor(world, coord);
+    if (!refreshed.has_value()) {
+        // Je ne cache pas les echecs : un chunk encore en cours de preparation
+        // doit pouvoir devenir eligible au prochain passage de population.
+        spawn_anchor_cache_.erase(coord);
+        return std::nullopt;
+    }
+    spawn_anchor_cache_.insert_or_assign(coord, SpawnAnchorCacheEntry {*refreshed, revision});
+    return refreshed;
+}
+
+auto CreatureSystem::cached_anchor_is_still_valid(const World& world, const CreatureSpawnAnchor& anchor) const -> bool {
+    const auto surface_y = world.loaded_surface_height(anchor.ground_block.x, anchor.ground_block.z);
+    return surface_y.has_value() &&
+           *surface_y == anchor.ground_block.y &&
+           is_spawn_column_clear(world, anchor.ground_block.x, anchor.ground_block.y, anchor.ground_block.z);
+}
+
+void CreatureSystem::prune_spawn_anchor_cache(const World& world) {
+    for (auto iterator = spawn_anchor_cache_.begin(); iterator != spawn_anchor_cache_.end();) {
+        if (world.find_chunk(iterator->first) == nullptr) {
+            iterator = spawn_anchor_cache_.erase(iterator);
+        } else {
+            ++iterator;
+        }
     }
 }
 

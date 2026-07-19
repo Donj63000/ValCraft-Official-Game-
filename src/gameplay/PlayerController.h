@@ -12,6 +12,7 @@
 namespace valcraft {
 
 class World;
+class ShipEntity;
 
 enum class PlayerDeathCause : std::uint8_t {
     None = 0,
@@ -19,6 +20,9 @@ enum class PlayerDeathCause : std::uint8_t {
     Drowning = 2,
     Void = 3,
     Zombie = 4,
+    Starvation = 5,
+    Thirst = 6,
+    Stranded = 7,
 };
 
 inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept -> std::string_view {
@@ -31,6 +35,12 @@ inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept 
         return "ABYSSE";
     case PlayerDeathCause::Zombie:
         return "ZOMBIE";
+    case PlayerDeathCause::Starvation:
+        return "FAIM";
+    case PlayerDeathCause::Thirst:
+        return "SOIF";
+    case PlayerDeathCause::Stranded:
+        return "NAVIRE PERDU";
     case PlayerDeathCause::None:
     default:
         return "INCONNUE";
@@ -104,7 +114,7 @@ class PlayerController {
 public:
     explicit PlayerController(glm::vec3 spawn_position = {0.0F, 70.0F, 0.0F});
 
-    void update(const PlayerInput& input, float dt, const World& world);
+    void update(const PlayerInput& input, float dt, const World& world, const ShipEntity* dynamic_obstacle = nullptr);
 
     [[nodiscard]] auto state() const noexcept -> const PlayerState&;
     [[nodiscard]] auto position() const noexcept -> const glm::vec3&;
@@ -123,6 +133,8 @@ public:
 
     void load_state(const PlayerState& state) noexcept;
     void set_position(const glm::vec3& position) noexcept;
+    void translate_platform_delta(const glm::vec3& delta) noexcept;
+    void resolve_dynamic_platform_support(float support_height) noexcept;
     void set_velocity(const glm::vec3& velocity) noexcept;
     void set_fly_mode_enabled(bool enabled) noexcept;
     void set_selected_block(BlockId block_id) noexcept;
@@ -137,13 +149,24 @@ public:
     void apply_external_damage(float amount, PlayerDeathCause cause) noexcept;
 
     [[nodiscard]] auto current_target(const World& world, float max_distance = 8.0F) const -> RaycastHit;
-    auto update_block_breaking(World& world, float dt, bool breaking_held, float max_distance = 8.0F)
+    auto update_block_breaking(World& world,
+                               float dt,
+                               bool breaking_held,
+                               float max_distance = 8.0F,
+                               float tool_speed_multiplier = 1.0F)
+        -> std::optional<BrokenBlockResult>;
+    auto update_block_breaking(World& world,
+                               float dt,
+                               bool breaking_held,
+                               const RaycastHit& target,
+                               float tool_speed_multiplier = 1.0F)
         -> std::optional<BrokenBlockResult>;
     void cancel_block_breaking() noexcept;
     [[nodiscard]] auto block_break_progress() const noexcept -> const BlockBreakProgress&;
     auto try_break_block(World& world, float max_distance = 8.0F) const -> std::optional<BrokenBlockResult>;
     auto try_place_block(World& world, float max_distance = 8.0F) const -> std::optional<PlacedBlockResult>;
     [[nodiscard]] auto collides_at(const World& world, const glm::vec3& feet_position) const -> bool;
+    [[nodiscard]] auto overlaps_dynamic_obstacle(const ShipEntity& obstacle) const noexcept -> bool;
 
 private:
     struct WaterContactState {
@@ -153,9 +176,9 @@ private:
         bool swimming = false;
     };
 
-    void update_survival_state(float dt, const World& world);
+    void update_survival_state(float dt, const WaterContactState& water_contact);
     void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
-    void move_axis(float delta, int axis, const World& world);
+    void move_axis(float delta, int axis, const World& world, const ShipEntity* dynamic_obstacle);
     void apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown = false) noexcept;
     void heal(float amount) noexcept;
     void reset_jump_assist_state() noexcept;

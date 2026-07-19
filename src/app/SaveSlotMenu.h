@@ -39,6 +39,7 @@ struct SaveSlotMenuState {
     std::size_t selected_index = 0;
     float cursor_x = 0.0F;
     float cursor_y = 0.0F;
+    GameMode new_game_mode = GameMode::ClassicAdventure;
     std::array<SaveSlotMetadata, kSaveSlotCount> slots {};
     std::optional<std::size_t> active_slot {};
 
@@ -99,6 +100,13 @@ inline constexpr auto save_slot_menu_mode_title(SaveSlotMenuMode mode) noexcept 
     }
 }
 
+inline constexpr auto save_slot_menu_title(const SaveSlotMenuState& state) noexcept -> std::string_view {
+    if (state.mode == SaveSlotMenuMode::NewGame && state.new_game_mode == GameMode::SeaAdventure) {
+        return "AVENTURE EN MER";
+    }
+    return save_slot_menu_mode_title(state.mode);
+}
+
 inline constexpr auto save_slot_menu_mode_subtitle(SaveSlotMenuMode mode) noexcept -> std::string_view {
     switch (mode) {
     case SaveSlotMenuMode::NewGame:
@@ -110,6 +118,13 @@ inline constexpr auto save_slot_menu_mode_subtitle(SaveSlotMenuMode mode) noexce
     default:
         return "";
     }
+}
+
+inline constexpr auto save_slot_menu_subtitle(const SaveSlotMenuState& state) noexcept -> std::string_view {
+    if (state.mode == SaveSlotMenuMode::NewGame && state.new_game_mode == GameMode::SeaAdventure) {
+        return "CHOISIS UN SLOT POUR PRENDRE LA MER";
+    }
+    return save_slot_menu_mode_subtitle(state.mode);
 }
 
 inline constexpr auto save_slot_menu_slot_enabled(const SaveSlotMenuState& state, std::size_t slot_index) noexcept -> bool {

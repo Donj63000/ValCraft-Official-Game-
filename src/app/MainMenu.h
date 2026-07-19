@@ -12,8 +12,9 @@ namespace valcraft {
 
 enum class MainMenuAction : std::uint8_t {
     Play = 0,
-    Load = 1,
-    Options = 2,
+    SeaAdventure = 1,
+    Load = 2,
+    Options = 3,
 };
 
 struct MainMenuState {
@@ -36,7 +37,7 @@ struct MainMenuButtonLayout {
     bool hovered = false;
 };
 
-constexpr std::size_t kMainMenuButtonCount = 3;
+constexpr std::size_t kMainMenuButtonCount = 4;
 
 struct MainMenuLayout {
     float hero_center_x = 0.0F;
@@ -54,6 +55,8 @@ inline constexpr auto main_menu_action_label(MainMenuAction action) noexcept -> 
     switch (action) {
     case MainMenuAction::Play:
         return "JOUER";
+    case MainMenuAction::SeaAdventure:
+        return "AVENTURE EN MER";
     case MainMenuAction::Load:
         return "CHARGER";
     case MainMenuAction::Options:
@@ -72,8 +75,10 @@ inline constexpr auto main_menu_action_from_index(std::size_t index) noexcept ->
     case 0:
         return MainMenuAction::Play;
     case 1:
-        return MainMenuAction::Load;
+        return MainMenuAction::SeaAdventure;
     case 2:
+        return MainMenuAction::Load;
+    case 3:
     default:
         return MainMenuAction::Options;
     }
@@ -92,9 +97,11 @@ inline auto build_main_menu_layout(int viewport_width, int viewport_height, cons
     const auto safe_width = static_cast<float>(std::max(viewport_width, 360));
     const auto safe_height = static_cast<float>(std::max(viewport_height, 300));
 
+    const auto compact_height = layout_height < 300.0F;
     const auto button_width = std::clamp(safe_width * 0.22F, 240.0F, 340.0F);
-    const auto button_height = std::clamp(safe_height * 0.072F, 44.0F, 58.0F);
-    const auto button_gap = std::clamp(safe_height * 0.022F, 12.0F, 20.0F);
+    const auto button_height_source = compact_height ? layout_height : safe_height;
+    const auto button_height = std::clamp(button_height_source * 0.072F, compact_height ? 38.0F : 44.0F, compact_height ? 44.0F : 58.0F);
+    const auto button_gap = std::clamp(button_height_source * 0.022F, compact_height ? 8.0F : 12.0F, compact_height ? 12.0F : 20.0F);
     const auto stack_height =
         button_height * static_cast<float>(kMainMenuButtonCount) +
         button_gap * static_cast<float>(kMainMenuButtonCount - 1U);

@@ -4,6 +4,7 @@
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
 #include "gameplay/PlayerProgression.h"
+#include "gameplay/SeaAdventure.h"
 #include "player/PlayerGeometry.h"
 
 #include "TestUtils.h"
@@ -17,6 +18,9 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
 
 namespace valcraft {
 
@@ -134,6 +138,16 @@ auto meshes_match_in_camera_space(const CreatureMeshData& lhs,
     }
 
     return true;
+}
+
+void place_sea_adventure_underway(SeaAdventureSystem& sea_adventure, int world_seed) {
+    // Je place explicitement les anciens tests de physique en pleine mer : ils
+    // continuent ainsi a verifier le transport dynamique independamment du
+    // nouveau scenario de depart au port.
+    auto state = sea_adventure.save_state();
+    state.voyage_phase = SeaVoyagePhase::Underway;
+    state.voyage_phase_elapsed = 0.0F;
+    sea_adventure.load_state(state, world_seed);
 }
 
 auto angle_distance_degrees(float lhs, float rhs) -> float {
@@ -275,6 +289,19 @@ TEST_CASE("experience reward rules stay bounded and apply the night surface bonu
     CHECK(block_break_experience(to_block_id(BlockType::Wood)) == 15ULL);
     CHECK(block_break_experience(to_block_id(BlockType::PineWood)) == 15ULL);
     CHECK(block_break_experience(to_block_id(BlockType::Planks)) == 15ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::CoalOre)) == 20ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::IronOre)) == 32ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::GoldOre)) == 48ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::DiamondOre)) == 72ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::MetallicAlloyOre)) == 96ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::MetallicAlloyOre)) >
+          block_break_experience(to_block_id(BlockType::DiamondOre)));
+    CHECK(block_break_experience(to_block_id(BlockType::DiamondOre)) >
+          block_break_experience(to_block_id(BlockType::GoldOre)));
+    CHECK(block_break_experience(to_block_id(BlockType::GoldOre)) >
+          block_break_experience(to_block_id(BlockType::IronOre)));
+    CHECK(block_break_experience(to_block_id(BlockType::IronOre)) >
+          block_break_experience(to_block_id(BlockType::CoalOre)));
     CHECK(block_break_experience(to_block_id(BlockType::Air)) == 0ULL);
 
     const auto kill_reward = creature_kill_experience(CreatureSpecies::Villager, {2.5F, 13.001F, -4.5F}, 42U);
@@ -350,6 +377,53 @@ TEST_CASE("player controller sanitizes non finite loaded state before gameplay m
     CHECK(player.fall_safety_multiplier() == doctest::Approx(1.0F));
     CHECK(player.movement_speed_multiplier() == doctest::Approx(1.0F));
     CHECK(player.block_break_speed_multiplier() == doctest::Approx(1.0F));
+}
+
+TEST_CASE("player controller normalizes extreme finite loaded visual state before building the viewmodel") {
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    PlayerState extreme {};
+    extreme.position = {0.5F, 1.001F, 0.5F};
+    extreme.velocity = {0.0F, 0.0F, 0.0F};
+    extreme.animation_time = 1000000000.0F;
+    extreme.step_phase = 1000000000.0F;
+    extreme.hurt_timer = 1000000000.0F;
+    extreme.damage_cooldown = 1000000000.0F;
+    extreme.regen_delay = 1000000000.0F;
+    extreme.regen_tick_timer = 1000000000.0F;
+    extreme.drowning_tick_timer = 1000000000.0F;
+    extreme.fall_start_y = -1000000000.0F;
+    extreme.landing_impact = 1000000000.0F;
+    extreme.airborne_time = 1000000000.0F;
+    extreme.look_sway_yaw = 1000000000.0F;
+    extreme.look_sway_pitch = -1000000000.0F;
+
+    player.load_state(extreme);
+
+    const auto& state = player.state();
+    CHECK(state.animation_time == doctest::Approx(3600.0F));
+    CHECK(state.step_phase >= 0.0F);
+    CHECK(state.step_phase < 6.2831855F);
+    CHECK(state.hurt_timer <= 0.35F);
+    CHECK(state.damage_cooldown <= 0.55F);
+    CHECK(state.regen_delay <= 6.0F);
+    CHECK(state.regen_tick_timer <= 2.5F);
+    CHECK(state.drowning_tick_timer <= 1.0F);
+    CHECK(state.fall_start_y == doctest::Approx(state.position.y));
+    CHECK(state.landing_impact == doctest::Approx(1.0F));
+    CHECK(state.airborne_time == doctest::Approx(60.0F));
+    CHECK(state.look_sway_yaw == doctest::Approx(1.0F));
+    CHECK(state.look_sway_pitch == doctest::Approx(-1.0F));
+
+    const auto viewmodel = build_player_viewmodel_mesh(player);
+    REQUIRE_FALSE(viewmodel.empty());
+    const auto bounds = mesh_bounds(viewmodel.mesh);
+    CHECK(std::isfinite(bounds.min.x));
+    CHECK(std::isfinite(bounds.min.y));
+    CHECK(std::isfinite(bounds.min.z));
+    CHECK(std::isfinite(bounds.max.x));
+    CHECK(std::isfinite(bounds.max.y));
+    CHECK(std::isfinite(bounds.max.z));
+    CHECK(glm::length(bounds.max - bounds.min) < 8.0F);
 }
 
 TEST_CASE("player controller ignores non finite frame input") {
@@ -752,6 +826,1093 @@ TEST_CASE("flight mode can be force disabled when progression does not allow it"
     CHECK(player.state().fall_start_y == doctest::Approx(player.position().y));
 }
 
+TEST_CASE("platform translation moves the player without resetting gameplay state") {
+    PlayerController player({1.0F, 4.0F, 5.0F});
+    PlayerState state {};
+    state.position = {1.0F, 4.0F, 5.0F};
+    state.velocity = {2.0F, -0.5F, 3.0F};
+    state.fall_start_y = 9.0F;
+    state.primary_action_active = true;
+    state.primary_action_progress = 0.55F;
+    state.secondary_action_active = true;
+    state.secondary_action_progress = 0.25F;
+    state.yaw_degrees = 32.0F;
+    state.pitch_degrees = -12.0F;
+    player.load_state(state);
+
+    player.translate_platform_delta({0.75F, 0.0F, -1.25F});
+
+    CHECK(player.position().x == doctest::Approx(1.75F));
+    CHECK(player.position().y == doctest::Approx(4.0F));
+    CHECK(player.position().z == doctest::Approx(3.75F));
+    CHECK(player.state().velocity.x == doctest::Approx(2.0F));
+    CHECK(player.state().velocity.y == doctest::Approx(-0.5F));
+    CHECK(player.state().velocity.z == doctest::Approx(3.0F));
+    CHECK(player.state().fall_start_y == doctest::Approx(9.0F));
+    CHECK(player.state().primary_action_active);
+    CHECK(player.state().primary_action_progress == doctest::Approx(0.55F));
+    CHECK(player.state().secondary_action_active);
+    CHECK(player.state().secondary_action_progress == doctest::Approx(0.25F));
+    CHECK(player.state().yaw_degrees == doctest::Approx(32.0F));
+
+    player.translate_platform_delta({0.0F, 1.5F, 0.0F});
+    CHECK(player.position().y == doctest::Approx(5.5F));
+    CHECK(player.state().fall_start_y == doctest::Approx(10.5F));
+}
+
+TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explorable levels") {
+    const auto& blueprint = amelie_ship_blueprint();
+    REQUIRE_FALSE(blueprint.parts.empty());
+    CHECK(blueprint.name == std::string_view {"L'Am\xC3\xA9lie"});
+    CHECK(blueprint.name.size() == 9U);
+    CHECK(blueprint.geometry_revision != 0U);
+    CHECK(blueprint.bounds.min.x < blueprint.bounds.max.x);
+    CHECK(blueprint.bounds.min.y < blueprint.bounds.max.y);
+    CHECK(blueprint.bounds.min.z < blueprint.bounds.max.z);
+    CHECK(is_ocean_navigation_corridor_column(
+        static_cast<int>(std::floor(blueprint.bounds.min.x)),
+        static_cast<int>(std::floor(blueprint.bounds.min.z))));
+    CHECK(is_ocean_navigation_corridor_column(
+        static_cast<int>(std::ceil(blueprint.bounds.max.x)),
+        static_cast<int>(std::ceil(blueprint.bounds.max.z))));
+
+    for (const auto& part : blueprint.parts) {
+        CAPTURE(static_cast<int>(part.shape));
+        CAPTURE(static_cast<int>(part.material));
+        CHECK(std::min(part.local_start.x, part.local_end.x) >= blueprint.bounds.min.x - 0.001F);
+        CHECK(std::min(part.local_start.y, part.local_end.y) >= blueprint.bounds.min.y - 0.001F);
+        CHECK(std::min(part.local_start.z, part.local_end.z) >= blueprint.bounds.min.z - 0.001F);
+        CHECK(std::max(part.local_start.x, part.local_end.x) <= blueprint.bounds.max.x + 0.001F);
+        CHECK(std::max(part.local_start.y, part.local_end.y) <= blueprint.bounds.max.y + 0.001F);
+        CHECK(std::max(part.local_start.z, part.local_end.z) <= blueprint.bounds.max.z + 0.001F);
+    }
+
+    const auto tall_mast_count = std::count_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) {
+            return part.shape == ShipPartShape::Segment && part.material == ShipMaterial::CleanBeam &&
+                   std::abs(part.local_end.x - part.local_start.x) < 0.001F &&
+                   std::abs(part.local_end.z - part.local_start.z) < 0.001F &&
+                   std::abs(part.local_end.y - part.local_start.y) >= 10.0F;
+        });
+    CHECK(tall_mast_count == 3);
+
+    const auto sail_count = std::count_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) { return part.material == ShipMaterial::CreamCanvas; });
+    REQUIRE(sail_count >= 7);
+    for (const auto mast_z : std::array<float, 3> {-17.5F, 0.0F, 18.0F}) {
+        const auto square_sails = std::count_if(
+            blueprint.parts.begin(),
+            blueprint.parts.end(),
+            [mast_z](const ShipPart& part) {
+                const auto center_z = (part.local_start.z + part.local_end.z) * 0.5F;
+                return part.shape == ShipPartShape::Panel &&
+                       part.material == ShipMaterial::CreamCanvas &&
+                       std::abs(part.orientation.z) > 0.90F &&
+                       std::abs(center_z - mast_z) < 0.50F;
+            });
+        CHECK(square_sails == 2);
+    }
+    for (const auto& part : blueprint.parts) {
+        if (part.material == ShipMaterial::CreamCanvas || part.material == ShipMaterial::Rope) {
+            CHECK_FALSE(part.collidable);
+            CHECK_FALSE(part.supports_player);
+        }
+    }
+    auto forward_lantern_count = std::size_t {0};
+    for (const auto& part : blueprint.parts) {
+        const auto center_z = (part.local_start.z + part.local_end.z) * 0.5F;
+        const auto min_y = std::min(part.local_start.y, part.local_end.y);
+        if (part.material != ShipMaterial::Lantern || center_z <= 33.0F || min_y < 4.0F) {
+            continue;
+        }
+        ++forward_lantern_count;
+        CHECK(std::max(std::abs(part.local_start.x), std::abs(part.local_end.x)) <= 1.80F);
+    }
+    CHECK(forward_lantern_count == 2);
+
+    auto engraved_name = std::u32string {};
+    auto previous_glyph_min_x = std::numeric_limits<float>::infinity();
+    for (const auto& part : blueprint.parts) {
+        if (part.shape != ShipPartShape::Glyph) {
+            continue;
+        }
+        engraved_name.push_back(part.glyph);
+        CHECK(part.local_end.x < previous_glyph_min_x);
+        previous_glyph_min_x = part.local_start.x;
+        CHECK(part.local_start.z < -29.0F);
+        CHECK(part.local_end.z < -29.0F);
+        CHECK_FALSE(part.collidable);
+    }
+    CHECK(engraved_name == U"L'Am\u00E9lie");
+
+    const auto lower_stair_count = std::count_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) {
+            return part.shape == ShipPartShape::Stair && part.supports_player &&
+                   std::abs(part.local_start.y - 1.0F) < 0.001F && part.local_start.z < 0.0F;
+        });
+    const auto forward_stair_count = std::count_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) {
+            return part.shape == ShipPartShape::Stair && part.supports_player &&
+                   std::abs(part.local_start.y - 1.0F) < 0.001F && part.local_start.z > 0.0F;
+        });
+    CHECK(lower_stair_count == 6);
+    CHECK(forward_stair_count == 6);
+    for (int half_step = 1; half_step <= 6; ++half_step) {
+        const auto expected_top = 1.0F + static_cast<float>(half_step) * 0.5F;
+        const auto matching_steps = std::count_if(
+            blueprint.parts.begin(),
+            blueprint.parts.end(),
+            [expected_top](const ShipPart& part) {
+                return part.shape == ShipPartShape::Stair &&
+                       std::abs(part.local_start.y - 1.0F) < 0.001F &&
+                       std::abs(part.local_end.y - expected_top) < 0.001F;
+            });
+        CHECK(matching_steps == 2);
+    }
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(5520);
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+    const auto& anchors = blueprint.anchors;
+    CHECK(sea_adventure.deck_spawn_position() == origin + anchors.safe_spawn);
+    const std::array<glm::vec3, 5> interior_anchors {{
+        anchors.lower_deck,
+        anchors.captain_cabin,
+        anchors.crew_quarters,
+        anchors.galley,
+        anchors.cargo_hold,
+    }};
+    for (const auto& anchor : interior_anchors) {
+        const auto feet = origin + anchor;
+        const auto support = ship.support_height(feet);
+        REQUIRE(support.has_value());
+        CHECK(*support == doctest::Approx(origin.y + 1.0F));
+        CHECK(feet.y == doctest::Approx(*support + 0.01F));
+        CHECK_FALSE(ship.intersects_aabb(
+            feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
+            feet + glm::vec3 {0.30F, 1.80F, 0.30F}));
+    }
+
+    const auto main_deck_feet = origin + anchors.safe_spawn;
+    const auto main_deck_support = ship.support_height(main_deck_feet);
+    REQUIRE(main_deck_support.has_value());
+    CHECK(*main_deck_support == doctest::Approx(origin.y + 4.0F));
+    const auto exact_main_deck_support = ship.support_height_in_range(
+        main_deck_feet,
+        *main_deck_support,
+        *main_deck_support);
+    REQUIRE(exact_main_deck_support.has_value());
+    CHECK(*exact_main_deck_support == doctest::Approx(*main_deck_support));
+    CHECK_FALSE(ship.intersects_aabb(
+        main_deck_feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
+        main_deck_feet + glm::vec3 {0.30F, 1.80F, 0.30F}));
+
+    const std::array<glm::vec3, 3> upper_anchors {{
+        anchors.helm,
+        anchors.aft_hatch,
+        anchors.fore_hatch,
+    }};
+    for (const auto& anchor : upper_anchors) {
+        const auto feet = origin + anchor;
+        const auto support = ship.support_height(feet);
+        REQUIRE(support.has_value());
+        CHECK(feet.y == doctest::Approx(*support + 0.01F));
+        CHECK_FALSE(ship.intersects_aabb(
+            feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
+            feet + glm::vec3 {0.30F, 1.80F, 0.30F}));
+    }
+
+    const auto glass_window = std::find_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) { return part.material == ShipMaterial::Glass; });
+    REQUIRE(glass_window != blueprint.parts.end());
+    CHECK(glass_window->collidable);
+    const auto window_center = origin + (glass_window->local_start + glass_window->local_end) * 0.5F;
+    CHECK(ship.intersects_aabb(
+        window_center - glm::vec3 {0.02F},
+        window_center + glm::vec3 {0.02F}));
+
+    constexpr float kRefittedBowSampleZ = 34.5F;
+    const auto forward_deck_at_bow = std::find_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [kRefittedBowSampleZ](const ShipPart& part) {
+            const auto min_z = std::min(part.local_start.z, part.local_end.z);
+            const auto max_z = std::max(part.local_start.z, part.local_end.z);
+            return part.shape == ShipPartShape::Slab && min_z <= kRefittedBowSampleZ && max_z >= kRefittedBowSampleZ;
+        });
+    REQUIRE(forward_deck_at_bow != blueprint.parts.end());
+    CHECK(std::max(std::abs(forward_deck_at_bow->local_start.x),
+                   std::abs(forward_deck_at_bow->local_end.x)) <= 1.60F);
+    for (const auto& part : blueprint.parts) {
+        const auto min_z = std::min(part.local_start.z, part.local_end.z);
+        const auto max_z = std::max(part.local_start.z, part.local_end.z);
+        const auto min_y = std::min(part.local_start.y, part.local_end.y);
+        if (part.collidable && part.material == ShipMaterial::CleanBeam &&
+            min_z <= kRefittedBowSampleZ && max_z >= kRefittedBowSampleZ && min_y >= 5.0F) {
+            CHECK(std::max(std::abs(part.local_start.x), std::abs(part.local_end.x)) <= 1.65F);
+        }
+    }
+
+    const std::array<glm::vec3, 5> safe_interior_anchors {{
+        anchors.lower_deck,
+        anchors.captain_cabin,
+        anchors.crew_quarters,
+        anchors.galley,
+        anchors.cargo_hold,
+    }};
+    for (const auto& anchor : safe_interior_anchors) {
+        const auto occupant_min = anchor + glm::vec3 {-0.30F, 0.0F, -0.30F};
+        const auto occupant_max = anchor + glm::vec3 {0.30F, 1.80F, 0.30F};
+        for (const auto& part : blueprint.parts) {
+            if (part.material != ShipMaterial::Lantern) {
+                continue;
+            }
+            const auto part_min = glm::min(part.local_start, part.local_end);
+            const auto part_max = glm::max(part.local_start, part.local_end);
+            const auto overlaps = occupant_min.x < part_max.x && occupant_max.x > part_min.x &&
+                                  occupant_min.y < part_max.y && occupant_max.y > part_min.y &&
+                                  occupant_min.z < part_max.z && occupant_max.z > part_min.z;
+            CHECK_FALSE(overlaps);
+        }
+    }
+
+    const auto collidable_part = std::find_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) { return part.collidable; });
+    REQUIRE(collidable_part != blueprint.parts.end());
+    const auto collidable_center = origin +
+                                   (collidable_part->local_start + collidable_part->local_end) * 0.5F;
+    CHECK(ship.intersects_aabb(
+        collidable_center - glm::vec3 {0.01F},
+        collidable_center + glm::vec3 {0.01F}));
+    CHECK_FALSE(ship.intersects_aabb(
+        origin + blueprint.bounds.max + glm::vec3 {10.0F},
+        origin + blueprint.bounds.max + glm::vec3 {11.0F}));
+    CHECK_FALSE(ship.intersects_aabb(collidable_center, collidable_center));
+}
+
+TEST_CASE("loaded Amelie occupants are reconciled only when the new layout requires it") {
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(5522);
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+
+    const auto embedded_in_galley = origin + glm::vec3 {-3.0F, 1.01F, 5.0F};
+    REQUIRE(ship.intersects_aabb(
+        embedded_in_galley + glm::vec3 {-0.30F, 0.0F, -0.30F},
+        embedded_in_galley + glm::vec3 {0.30F, 1.80F, 0.30F}));
+    const auto furniture_result = reconcile_loaded_ship_occupant(
+        ship,
+        embedded_in_galley,
+        0.30F,
+        1.80F,
+        false);
+    REQUIRE(furniture_result.relocated);
+    CHECK(furniture_result.position != embedded_in_galley);
+    CHECK_FALSE(ship.intersects_aabb(
+        furniture_result.position + glm::vec3 {-0.30F, 0.0F, -0.30F},
+        furniture_result.position + glm::vec3 {0.30F, 1.80F, 0.30F}));
+    const auto furniture_support = ship.support_height(furniture_result.position);
+    REQUIRE(furniture_support.has_value());
+    CHECK(furniture_result.position.y == doctest::Approx(*furniture_support + 0.01F));
+
+    // Je vérifie que l'agrandissement conserve désormais cet ancien point de
+    // pont au lieu de déplacer inutilement son occupant au chargement.
+    const auto supported_legacy_deck = origin + glm::vec3 {7.5F, 4.0F, 0.0F};
+    REQUIRE(ship.support_height(supported_legacy_deck).has_value());
+    const auto legacy_result = reconcile_loaded_ship_occupant(
+        ship,
+        supported_legacy_deck,
+        0.30F,
+        1.80F,
+        true);
+    CHECK_FALSE(legacy_result.relocated);
+    CHECK(legacy_result.position == supported_legacy_deck);
+
+    const auto swimmer = origin + glm::vec3 {0.0F, 0.50F, 0.0F};
+    const auto swimmer_result = reconcile_loaded_ship_occupant(ship, swimmer, 0.30F, 1.80F, true);
+    CHECK_FALSE(swimmer_result.relocated);
+    CHECK(swimmer_result.position == swimmer);
+
+    const auto distant_occupant = origin + glm::vec3 {50.0F, 4.0F, 0.0F};
+    const auto distant_result = reconcile_loaded_ship_occupant(
+        ship,
+        distant_occupant,
+        0.30F,
+        1.80F,
+        true);
+    CHECK_FALSE(distant_result.relocated);
+    CHECK(distant_result.position == distant_occupant);
+
+    const auto legacy_lower_deck_drop = origin + glm::vec3 {0.0F, 2.0F, -5.0F};
+    REQUIRE_FALSE(ship.support_height(legacy_lower_deck_drop).has_value());
+    const auto legacy_lower_result = reconcile_loaded_ship_occupant(
+        ship,
+        legacy_lower_deck_drop,
+        0.15F,
+        0.24F,
+        true);
+    REQUIRE(legacy_lower_result.relocated);
+    CHECK(ship.support_height(legacy_lower_result.position).has_value());
+
+    const auto legacy_cabin_roof = origin + glm::vec3 {0.0F, 9.0F, 20.0F};
+    const auto legacy_roof_result = reconcile_loaded_ship_occupant(
+        ship,
+        legacy_cabin_roof,
+        0.30F,
+        1.80F,
+        true);
+    REQUIRE(legacy_roof_result.relocated);
+    CHECK(ship.support_height(legacy_roof_result.position).has_value());
+
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+    const auto invalid_drop_result = reconcile_loaded_ship_occupant(
+        ship,
+        {nan, 2.0F, 0.0F},
+        0.15F,
+        0.24F,
+        true,
+        ShipInvalidPositionPolicy::Preserve);
+    CHECK_FALSE(invalid_drop_result.relocated);
+    CHECK(std::isnan(invalid_drop_result.position.x));
+
+    ItemDrop invalid_drop {};
+    invalid_drop.position = invalid_drop_result.position;
+    invalid_drop.stack = inventory_make_slot(to_block_id(BlockType::Stone), 1);
+    ItemDropSystem drop_system {};
+    drop_system.load_drops({invalid_drop});
+    CHECK(drop_system.drops().empty());
+
+    const auto extreme_drop_result = reconcile_loaded_ship_occupant(
+        ship,
+        {(std::numeric_limits<float>::max)(), 2.0F, 0.0F},
+        0.15F,
+        0.24F,
+        true,
+        ShipInvalidPositionPolicy::Preserve);
+    CHECK_FALSE(extreme_drop_result.relocated);
+    ItemDrop extreme_drop {};
+    extreme_drop.position = extreme_drop_result.position;
+    extreme_drop.stack = inventory_make_slot(to_block_id(BlockType::Stone), 1);
+    drop_system.load_drops({extreme_drop});
+    CHECK(drop_system.drops().empty());
+
+    const auto stamped_legacy_origin = origin + glm::vec3 {1.0F, 0.0F, 0.0F};
+    const auto offset_legacy_deck = stamped_legacy_origin + glm::vec3 {7.5F, 4.0F, 0.0F};
+    const auto offset_legacy_result = reconcile_loaded_ship_occupant(
+        ship,
+        offset_legacy_deck,
+        0.30F,
+        1.80F,
+        true,
+        ShipInvalidPositionPolicy::Relocate,
+        stamped_legacy_origin);
+    REQUIRE(offset_legacy_result.relocated);
+    CHECK(ship.support_height(offset_legacy_result.position).has_value());
+}
+
+TEST_CASE("sea adventure ship entity carries players standing on its deck") {
+    EnvironmentState environment {};
+    World world(5501, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    sea_adventure.stamp_ship(world);
+
+    PlayerController deck_player(sea_adventure.ship_position() + glm::vec3 {0.0F, 4.10F, -8.0F});
+    const auto initial_deck_relative = deck_player.position() - sea_adventure.ship_position();
+    for (int frame = 0; frame < 8; ++frame) {
+        const auto before_player = deck_player.position();
+        const auto before_ship = sea_adventure.ship_position();
+        const auto result = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+
+        CHECK(result.ship_moved_player);
+        CHECK(deck_player.position().x == doctest::Approx(before_player.x + result.ship_delta.x));
+        CHECK(deck_player.position().y == doctest::Approx(before_player.y + result.ship_delta.y));
+        CHECK(deck_player.position().z == doctest::Approx(before_player.z + result.ship_delta.z));
+        CHECK(sea_adventure.ship_position().z == doctest::Approx(before_ship.z + result.ship_delta.z));
+    }
+    const auto final_deck_relative = deck_player.position() - sea_adventure.ship_position();
+    CHECK(final_deck_relative.x == doctest::Approx(initial_deck_relative.x));
+    CHECK(final_deck_relative.y == doctest::Approx(initial_deck_relative.y));
+    CHECK(final_deck_relative.z == doctest::Approx(initial_deck_relative.z));
+
+    SeaAdventureSystem support_sea {};
+    support_sea.reset(5502);
+    place_sea_adventure_underway(support_sea, 5502);
+    support_sea.stamp_ship(world);
+    const auto& anchors = amelie_ship_blueprint().anchors;
+    PlayerController raised_deck_player(support_sea.ship_entity().world_origin() + anchors.helm);
+    const auto support_result = support_sea.update(world, raised_deck_player, environment, 0.25F, false);
+    CHECK(support_result.ship_moved_player);
+    CHECK(support_result.on_ship);
+    CHECK(raised_deck_player.position().z ==
+          doctest::Approx(support_sea.ship_entity().world_origin().z + anchors.helm.z));
+
+    SeaAdventureSystem distant_sea {};
+    distant_sea.reset(5503);
+    distant_sea.stamp_ship(world);
+    PlayerController distant_player(distant_sea.ship_position() + glm::vec3 {40.0F, 4.10F, 0.0F});
+    const auto distant_before = distant_player.position();
+    const auto distant_result = distant_sea.update(world, distant_player, environment, 0.25F, false);
+    CHECK_FALSE(distant_result.ship_moved_player);
+    CHECK(distant_player.position().x == doctest::Approx(distant_before.x));
+    CHECK(distant_player.position().y == doctest::Approx(distant_before.y));
+    CHECK(distant_player.position().z == doctest::Approx(distant_before.z));
+}
+
+TEST_CASE("new sea adventure waits on board then leaves the port progressively") {
+    World world(5530, 1, WorldGenerationProfile::OceanAdventure);
+    EnvironmentState environment {};
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+
+    REQUIRE(sea_adventure.save_state().voyage_phase == SeaVoyagePhase::Moored);
+    const auto initial_ship_position = sea_adventure.ship_position();
+    PlayerController ashore_player(initial_ship_position + glm::vec3 {40.0F, 4.10F, 0.0F});
+    for (int frame = 0; frame < 40; ++frame) {
+        const auto result = sea_adventure.update(world, ashore_player, environment, 0.25F, false);
+        CHECK(result.ship_delta == glm::vec3 {});
+    }
+    CHECK(sea_adventure.save_state().voyage_phase_elapsed == doctest::Approx(0.0F));
+    CHECK(sea_adventure.ship_position() == initial_ship_position);
+
+    PlayerController deck_player(sea_adventure.deck_spawn_position());
+    for (int frame = 0; frame < 16; ++frame) {
+        const auto result = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+        CHECK_FALSE(result.departure_started);
+        CHECK(result.ship_delta == glm::vec3 {});
+    }
+    CHECK(sea_adventure.save_state().voyage_phase_elapsed == doctest::Approx(4.0F));
+
+    // Je suspends le compteur a terre puis je reprends exactement les quatre
+    // secondes restantes : les huit secondes sont bien cumulees a bord.
+    deck_player.set_position(initial_ship_position + glm::vec3 {40.0F, 4.10F, 0.0F});
+    for (int frame = 0; frame < 20; ++frame) {
+        const auto result = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+        CHECK_FALSE(result.departure_started);
+        CHECK(result.ship_delta == glm::vec3 {});
+    }
+    CHECK(sea_adventure.save_state().voyage_phase_elapsed == doctest::Approx(4.0F));
+
+    deck_player.set_position(sea_adventure.deck_spawn_position());
+    for (int frame = 0; frame < 15; ++frame) {
+        const auto result = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+        CHECK_FALSE(result.departure_started);
+        CHECK(result.ship_delta == glm::vec3 {});
+    }
+    REQUIRE(sea_adventure.save_state().voyage_phase == SeaVoyagePhase::Moored);
+    CHECK(sea_adventure.save_state().voyage_phase_elapsed == doctest::Approx(7.75F));
+    CHECK(sea_adventure.hud_state(deck_player).departure_seconds_remaining == doctest::Approx(0.25F));
+
+    const auto departure = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+    CHECK(departure.departure_started);
+    CHECK(departure.ship_delta == glm::vec3 {});
+    REQUIRE(sea_adventure.save_state().voyage_phase == SeaVoyagePhase::Departing);
+    CHECK(sea_adventure.hud_state(deck_player).departure_seconds_remaining == doctest::Approx(12.0F));
+
+    // Je quitte volontairement le pont apres le largage : le depart engage ne
+    // doit plus se mettre en pause et l'acceleration reste progressive.
+    deck_player.set_position(sea_adventure.ship_position() + glm::vec3 {40.0F, 4.10F, 0.0F});
+    const auto first_acceleration = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+    REQUIRE(first_acceleration.ship_delta.z > 0.0F);
+    REQUIRE(first_acceleration.ship_speed > 0.0F);
+
+    auto reached_open_sea = false;
+    for (int frame = 0; frame < 47; ++frame) {
+        const auto result = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+        reached_open_sea = reached_open_sea || result.reached_open_sea;
+    }
+    REQUIRE(reached_open_sea);
+    REQUIRE(sea_adventure.save_state().voyage_phase == SeaVoyagePhase::Underway);
+    const auto cruise = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+    CHECK(cruise.ship_speed > first_acceleration.ship_speed);
+    CHECK(sea_adventure.ship_position().z > initial_ship_position.z);
+}
+
+TEST_CASE("sea adventure releases jumping flying and falling players from ship transport") {
+    EnvironmentState environment {};
+    World world(5510, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+
+    PlayerController jumping_player(sea_adventure.deck_spawn_position());
+    for (int frame = 0; frame < 8 && !jumping_player.state().on_ground; ++frame) {
+        jumping_player.update(PlayerInput {}, 1.0F / 30.0F, world, &ship);
+    }
+    REQUIRE(jumping_player.state().on_ground);
+
+    PlayerInput jump_input {};
+    jump_input.jump = true;
+    jumping_player.update(jump_input, 1.0F / 60.0F, world, &ship);
+    REQUIRE_FALSE(jumping_player.state().on_ground);
+    REQUIRE(jumping_player.state().velocity.y > 0.0F);
+
+    const auto jumping_before = jumping_player.position();
+    const auto jump_result = sea_adventure.update(world, jumping_player, environment, 0.25F, false);
+    CHECK_FALSE(jump_result.ship_moved_player);
+    CHECK_FALSE(jump_result.on_ship);
+    CHECK(jumping_player.position().z == doctest::Approx(jumping_before.z));
+
+    PlayerController flying_player(sea_adventure.deck_spawn_position());
+    flying_player.set_fly_mode_enabled(true);
+    const auto flying_before = flying_player.position();
+    const auto flying_result = sea_adventure.update(world, flying_player, environment, 0.25F, false);
+    CHECK_FALSE(flying_result.ship_moved_player);
+    CHECK_FALSE(flying_result.on_ship);
+    CHECK(flying_player.position().z == doctest::Approx(flying_before.z));
+
+    PlayerController falling_player(sea_adventure.ship_position() + glm::vec3 {0.0F, 10.0F, -8.0F});
+    falling_player.set_velocity({0.0F, -4.0F, 0.0F});
+    const auto falling_before = falling_player.position();
+    const auto falling_result = sea_adventure.update(world, falling_player, environment, 0.25F, false);
+    CHECK_FALSE(falling_result.ship_moved_player);
+    CHECK_FALSE(falling_result.on_ship);
+    CHECK(falling_player.position().z == doctest::Approx(falling_before.z));
+}
+
+TEST_CASE("sea adventure boards a player on deck only after a real fall collision") {
+    EnvironmentState environment {};
+    World world(5511, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    PlayerController player(ship.world_origin() + glm::vec3 {2.5F, 10.0F, -8.5F});
+
+    auto landed_on_ship = false;
+    auto saw_untransported_fall = false;
+    for (int frame = 0; frame < 180; ++frame) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world, &ship);
+        const auto result = sea_adventure.update(world, player, environment, 1.0F / 60.0F, false);
+        if (!player.state().on_ground) {
+            saw_untransported_fall = saw_untransported_fall || !result.ship_moved_player;
+        }
+        if (result.on_ship) {
+            CHECK(result.ship_moved_player);
+            landed_on_ship = true;
+            break;
+        }
+    }
+
+    REQUIRE(saw_untransported_fall);
+    REQUIRE(landed_on_ship);
+    CHECK(player.state().on_ground);
+    CHECK(player.state().health < player.max_health());
+    const auto support_height = ship.support_height(player.position());
+    REQUIRE(support_height.has_value());
+    CHECK(player.position().y == doctest::Approx(*support_height).epsilon(0.001F));
+}
+
+TEST_CASE("sea adventure moving hull pushes a player without leaving an overlap") {
+    EnvironmentState environment {};
+    World world(5512, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto& blueprint = amelie_ship_blueprint();
+    const auto bow_closure = std::find_if(
+        blueprint.parts.begin(),
+        blueprint.parts.end(),
+        [](const ShipPart& part) {
+            return part.collidable && part.material == ShipMaterial::DarkHull &&
+                   part.local_start.x < 0.0F && part.local_end.x > 0.0F &&
+                   part.local_end.z >= 30.0F && part.local_start.y < 1.0F && part.local_end.y > 2.0F;
+        });
+    REQUIRE(bow_closure != blueprint.parts.end());
+    PlayerController player(
+        ship.world_origin() + glm::vec3 {0.0F, 1.001F, bow_closure->local_end.z + 0.31F});
+    player.set_fly_mode_enabled(true);
+
+    REQUIRE_FALSE(player.overlaps_dynamic_obstacle(ship));
+    const auto player_before = player.position();
+    const auto result = sea_adventure.update(world, player, environment, 0.25F, false);
+
+    CHECK(result.ship_moved_player);
+    CHECK_FALSE(result.on_ship);
+    CHECK(player.position().z == doctest::Approx(player_before.z + result.ship_delta.z));
+    CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+}
+
+TEST_CASE("sea adventure ship entity moves without rewriting world chunks") {
+    EnvironmentState environment {};
+    environment.wind_strength = 0.35F;
+    World world(5504, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+
+    REQUIRE(world.chunk_records().empty());
+    sea_adventure.stamp_ship(world);
+    CHECK(world.chunk_records().empty());
+    CHECK(world.modified_chunk_snapshots().empty());
+
+    const auto render_before = sea_adventure.ship_render_state();
+    REQUIRE(render_before.visible);
+    REQUIRE(render_before.blueprint != nullptr);
+    REQUIRE(render_before.parts.size() > 300U);
+    const auto collidable_part = std::find_if(
+        render_before.parts.begin(),
+        render_before.parts.end(),
+        [](const ShipPart& part) { return part.collidable; });
+    REQUIRE(collidable_part != render_before.parts.end());
+    const auto part_center = render_before.world_origin +
+                             (collidable_part->local_start + collidable_part->local_end) * 0.5F;
+    CHECK(sea_adventure.ship_entity().intersects_aabb(
+        part_center - glm::vec3 {0.02F},
+        part_center + glm::vec3 {0.02F}));
+
+    PlayerController player(sea_adventure.ship_position() + glm::vec3 {0.0F, 4.10F, -8.0F});
+    for (int frame = 0; frame < 24; ++frame) {
+        const auto result = sea_adventure.update(world, player, environment, 1.0F / 60.0F, false);
+        CHECK(result.ship_moved_player);
+    }
+
+    const auto render_after = sea_adventure.ship_render_state();
+    CHECK(render_after.world_origin.z > render_before.world_origin.z);
+    CHECK(render_after.parts.data() == render_before.parts.data());
+    CHECK(render_after.geometry_revision == render_before.geometry_revision);
+    CHECK(world.chunk_records().empty());
+    CHECK(world.modified_chunk_snapshots().empty());
+    CHECK_FALSE(sea_adventure.save_state().has_stamped_ship);
+}
+
+TEST_CASE("legacy sea adventure ship migration restores the generated corridor without overrides") {
+    World world(5514, 0, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+
+    const auto render_state = sea_adventure.ship_render_state();
+    REQUIRE(render_state.visible);
+    REQUIRE(render_state.blueprint != nullptr);
+    REQUIRE_FALSE(render_state.parts.empty());
+    REQUIRE(legacy_ship_voxel_count() == 2814U);
+
+    // Je grave un voxel representatif de l'empreinte v7 historique : la
+    // migration doit l'effacer sans reutiliser la geometrie visuelle actuelle.
+    constexpr BlockCoord legacy_local {-3, 0, -31};
+    constexpr auto legacy_block = to_block_id(BlockType::Wood);
+    const auto world_x = static_cast<int>(render_state.world_origin.x) + legacy_local.x;
+    const auto world_y = static_cast<int>(render_state.world_origin.y) + legacy_local.y;
+    const auto world_z = static_cast<int>(render_state.world_origin.z) + legacy_local.z;
+    REQUIRE(is_ocean_navigation_corridor_column(world_x, world_z));
+    world.set_block(world_x, world_y, world_z, legacy_block);
+    REQUIRE_FALSE(world.modified_chunk_snapshots().empty());
+
+    auto legacy_state = sea_adventure.save_state();
+    legacy_state.has_stamped_ship = true;
+    legacy_state.stamped_ship_x = static_cast<std::int32_t>(std::floor(legacy_state.ship_position.x));
+    legacy_state.stamped_ship_z = static_cast<std::int32_t>(std::floor(legacy_state.ship_position.z));
+    sea_adventure.load_state(legacy_state);
+    sea_adventure.stamp_ship(world);
+
+    CHECK_FALSE(sea_adventure.save_state().has_stamped_ship);
+    CHECK(world.modified_chunk_snapshots().empty());
+    WorldGenerator generator(world.seed(), WorldGenerationProfile::OceanAdventure);
+    CHECK(world.get_block(world_x, world_y, world_z) == generator.sample_block(world_x, world_y, world_z));
+    CHECK(world.water_level(world_x, world_y, world_z) ==
+          water_level_from_state(generator.sample_water_state(world_x, world_y, world_z)));
+}
+
+TEST_CASE("sea adventure reload keeps route fishing deterministic") {
+    constexpr int seed = 5506;
+    World world(seed, 1, WorldGenerationProfile::OceanAdventure);
+    EnvironmentState environment {};
+
+    SeaAdventureSystem uninterrupted {};
+    uninterrupted.reset(seed);
+    const auto saved = uninterrupted.save_state();
+
+    SeaAdventureSystem restored {};
+    restored.load_state(saved, seed);
+    PlayerController uninterrupted_player(uninterrupted.deck_spawn_position());
+    PlayerController restored_player(restored.deck_spawn_position());
+
+    const auto uninterrupted_result = uninterrupted.update(world, uninterrupted_player, environment, 0.0F, true);
+    const auto restored_result = restored.update(world, restored_player, environment, 0.0F, true);
+
+    REQUIRE(uninterrupted_result.fishing_started);
+    REQUIRE(restored_result.fishing_started);
+    CHECK(restored.save_state().fishing_target_seconds ==
+          doctest::Approx(uninterrupted.save_state().fishing_target_seconds));
+}
+
+TEST_CASE("sea adventure cancels fishing when the player leaves the ship") {
+    World world(5507, 1, WorldGenerationProfile::OceanAdventure);
+    EnvironmentState environment {};
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+
+    const auto started = sea_adventure.update(world, player, environment, 0.0F, true);
+    REQUIRE(started.fishing_started);
+    REQUIRE(sea_adventure.save_state().fishing_active);
+
+    player.set_position(sea_adventure.ship_position() + glm::vec3 {40.0F, 4.10F, 0.0F});
+    const auto left_ship = sea_adventure.update(world, player, environment, 0.1F, false);
+
+    CHECK(left_ship.fishing_failed);
+    CHECK_FALSE(sea_adventure.save_state().fishing_active);
+    CHECK(sea_adventure.save_state().fishing_progress == doctest::Approx(0.0F));
+    CHECK(sea_adventure.save_state().fishing_target_seconds == doctest::Approx(0.0F));
+}
+
+TEST_CASE("sea adventure HUD reports the weather adjusted dynamic ship speed") {
+    World world(5508, 1, WorldGenerationProfile::OceanAdventure);
+    EnvironmentState environment {};
+    environment.wind_strength = 0.85F;
+    environment.storm_intensity = 0.15F;
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+
+    const auto result = sea_adventure.update(world, player, environment, 0.1F, false);
+    const auto hud = sea_adventure.hud_state(player);
+    const auto spawn_offset = sea_adventure.deck_spawn_position() - sea_adventure.ship_position();
+
+    CHECK(std::abs(result.ship_speed - 1.18F) > 0.001F);
+    CHECK(hud.ship_speed == doctest::Approx(result.ship_speed));
+    CHECK(spawn_offset.x == doctest::Approx(0.0F));
+    CHECK(spawn_offset.y == doctest::Approx(4.10F));
+    CHECK(spawn_offset.z == doctest::Approx(-8.0F));
+}
+
+TEST_CASE("sea adventure resource counters saturate instead of wrapping") {
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.wood = std::numeric_limits<std::uint32_t>::max();
+    state.water_flasks = std::numeric_limits<std::uint32_t>::max();
+    state.food_rations = std::numeric_limits<std::uint32_t>::max();
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(state, 5509);
+
+    REQUIRE(sea_adventure.collect_resource(to_block_id(BlockType::Wood)));
+    REQUIRE(sea_adventure.collect_resource(to_block_id(BlockType::Water)));
+    REQUIRE(sea_adventure.record_hunt(CreatureSpecies::Cow));
+
+    CHECK(sea_adventure.save_state().wood == std::numeric_limits<std::uint32_t>::max());
+    CHECK(sea_adventure.save_state().water_flasks == std::numeric_limits<std::uint32_t>::max());
+    CHECK(sea_adventure.save_state().food_rations == std::numeric_limits<std::uint32_t>::max());
+}
+
+TEST_CASE("player physics uses the dynamic ship as floor and obstacle") {
+    World world(5505, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+
+    PlayerController deck_player(origin + glm::vec3 {2.5F, 4.05F, -8.5F});
+    for (int frame = 0; frame < 3; ++frame) {
+        deck_player.update(PlayerInput {}, 1.0F / 30.0F, world, &ship);
+    }
+    CHECK(deck_player.state().on_ground);
+    CHECK(deck_player.position().y == doctest::Approx(origin.y + 4.0F + 0.001F));
+
+    PlayerController mast_player(origin + glm::vec3 {-0.61F, 4.001F, 0.0F});
+    mast_player.set_fly_mode_enabled(true);
+    PlayerInput move_towards_mast {};
+    move_towards_mast.move_right = 1.0F;
+    const auto initial_x = mast_player.position().x;
+    mast_player.update(move_towards_mast, 0.20F, world, &ship);
+    CHECK(mast_player.position().x < initial_x + 0.05F);
+    CHECK_FALSE(ship.intersects_aabb(
+        mast_player.position() + glm::vec3 {-0.3F, 0.0F, -0.3F},
+        mast_player.position() + glm::vec3 {0.3F, 1.8F, 0.3F}));
+
+    const auto& parts = amelie_ship_blueprint().parts;
+    const auto starboard_hull = std::find_if(
+        parts.begin(),
+        parts.end(),
+        [](const ShipPart& part) {
+            return part.collidable && part.material == ShipMaterial::DarkHull &&
+                   part.local_start.x > 0.0F && part.local_start.z <= -8.5F &&
+                   part.local_end.z >= -8.5F && part.local_start.y < 1.0F && part.local_end.y > 2.0F;
+        });
+    REQUIRE(starboard_hull != parts.end());
+    PlayerController hull_player(
+        origin + glm::vec3 {starboard_hull->local_end.x + 0.31F, 1.001F, -8.5F});
+    hull_player.set_fly_mode_enabled(true);
+    REQUIRE_FALSE(hull_player.overlaps_dynamic_obstacle(ship));
+    PlayerInput move_towards_hull {};
+    move_towards_hull.move_right = -1.0F;
+    const auto hull_initial_x = hull_player.position().x;
+    hull_player.update(move_towards_hull, 0.20F, world, &ship);
+    CHECK(hull_player.position().x < hull_initial_x);
+    CHECK(hull_player.position().x >= origin.x + starboard_hull->local_end.x + 0.299F);
+    CHECK_FALSE(hull_player.overlaps_dynamic_obstacle(ship));
+}
+
+TEST_CASE("player walks up and down an Amelie half step without losing deck contact") {
+    World world(5521, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+    PlayerController player(origin + glm::vec3 {0.0F, 1.001F, -8.5F});
+
+    for (int frame = 0; frame < 3; ++frame) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world, &ship);
+    }
+    REQUIRE(player.state().on_ground);
+    REQUIRE(player.position().y == doctest::Approx(origin.y + 1.001F));
+
+    PlayerInput climb {};
+    climb.move_forward = 1.0F;
+    const auto lower_z = player.position().z;
+    auto climbed = false;
+    for (int frame = 0; frame < 20; ++frame) {
+        player.update(climb, 1.0F / 60.0F, world, &ship);
+        if (player.position().y >= origin.y + 1.40F) {
+            climbed = true;
+            break;
+        }
+    }
+
+    REQUIRE(climbed);
+    CHECK(player.position().z < lower_z);
+    CHECK(player.position().y == doctest::Approx(origin.y + 1.501F).epsilon(0.001F));
+    CHECK(player.state().on_ground);
+    CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+
+    PlayerInput descend {};
+    descend.move_forward = -1.0F;
+    const auto raised_z = player.position().z;
+    auto descended = false;
+    for (int frame = 0; frame < 20; ++frame) {
+        player.update(descend, 1.0F / 60.0F, world, &ship);
+        if (player.position().y <= origin.y + 1.10F) {
+            descended = true;
+            break;
+        }
+    }
+
+    REQUIRE(descended);
+    CHECK(player.position().z > raised_z);
+    CHECK(player.position().y == doctest::Approx(origin.y + 1.001F).epsilon(0.001F));
+    CHECK(player.state().on_ground);
+    CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+}
+
+TEST_CASE("player traverses both complete Amelie staircases in both directions") {
+    World world(5523, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+
+    const auto walk_until = [&](PlayerController& player, float forward, const auto& reached) {
+        PlayerInput input {};
+        input.move_forward = forward;
+        for (int frame = 0; frame < 240; ++frame) {
+            player.update(input, 1.0F / 60.0F, world, &ship);
+            CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+            if (reached(player.position())) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    PlayerController aft_player(origin + glm::vec3 {0.0F, 1.001F, -8.40F});
+    REQUIRE(walk_until(aft_player, 1.0F, [&](const glm::vec3& position) {
+        return position.y >= origin.y + 4.0F && position.z <= origin.z - 15.25F;
+    }));
+    REQUIRE(aft_player.state().on_ground);
+    REQUIRE(walk_until(aft_player, -1.0F, [&](const glm::vec3& position) {
+        return position.y <= origin.y + 1.05F && position.z >= origin.z - 8.65F;
+    }));
+    CHECK(aft_player.state().on_ground);
+
+    PlayerController fore_player(origin + glm::vec3 {0.0F, 1.001F, 7.50F});
+    REQUIRE(walk_until(fore_player, -1.0F, [&](const glm::vec3& position) {
+        return position.y >= origin.y + 4.0F && position.z >= origin.z + 14.25F;
+    }));
+    REQUIRE(fore_player.state().on_ground);
+    REQUIRE(walk_until(fore_player, 1.0F, [&](const glm::vec3& position) {
+        return position.y <= origin.y + 1.05F && position.z <= origin.z + 7.75F;
+    }));
+    CHECK(fore_player.state().on_ground);
+}
+
+TEST_CASE("Amelie lower deck compartments stay connected in both directions") {
+    World world(5525, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+
+    const auto travel_until = [&](PlayerController& player,
+                                  const PlayerInput& input,
+                                  const auto& reached) {
+        for (int frame = 0; frame < 360; ++frame) {
+            player.update(input, 1.0F / 60.0F, world, &ship);
+            CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+            CHECK(player.position().y > origin.y + 0.95F);
+            CHECK(player.position().y < origin.y + 1.10F);
+            CHECK(player.state().on_ground);
+            CHECK_FALSE(player.state().head_underwater);
+            if (reached(player.position())) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    PlayerInput towards_bow {};
+    towards_bow.move_forward = -1.0F;
+    PlayerInput towards_stern {};
+    towards_stern.move_forward = 1.0F;
+    PlayerInput towards_starboard {};
+    towards_starboard.move_right = 1.0F;
+    PlayerInput towards_port {};
+    towards_port.move_right = -1.0F;
+
+    // Je passe a cote de l'escalier avant, je rejoins la cale centrale, puis
+    // je reproduis exactement le trajet inverse sans escalader ni tomber.
+    PlayerController cargo_player(origin + glm::vec3 {1.55F, 1.001F, 9.0F});
+    REQUIRE(travel_until(cargo_player, towards_bow, [&](const glm::vec3& position) {
+        return position.z >= origin.z + 14.65F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_port, [&](const glm::vec3& position) {
+        return position.x <= origin.x + 0.05F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_bow, [&](const glm::vec3& position) {
+        return position.z >= origin.z + 19.0F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_stern, [&](const glm::vec3& position) {
+        return position.z <= origin.z + 14.70F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_starboard, [&](const glm::vec3& position) {
+        return position.x >= origin.x + 1.50F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_stern, [&](const glm::vec3& position) {
+        return position.z <= origin.z + 9.0F;
+    }));
+
+    // Je valide aussi le contournement de l'escalier arriere et la porte de
+    // cabine, afin que les deux extremites du pont inferieur restent reliees.
+    PlayerController cabin_player(origin + glm::vec3 {1.60F, 1.001F, -8.5F});
+    REQUIRE(travel_until(cabin_player, towards_stern, [&](const glm::vec3& position) {
+        return position.z <= origin.z - 15.65F;
+    }));
+    REQUIRE(travel_until(cabin_player, towards_port, [&](const glm::vec3& position) {
+        return position.x <= origin.x + 0.05F;
+    }));
+    REQUIRE(travel_until(cabin_player, towards_stern, [&](const glm::vec3& position) {
+        return position.z <= origin.z - 22.0F;
+    }));
+    REQUIRE(travel_until(cabin_player, towards_bow, [&](const glm::vec3& position) {
+        return position.z >= origin.z - 15.65F;
+    }));
+    REQUIRE(travel_until(cabin_player, towards_starboard, [&](const glm::vec3& position) {
+        return position.x >= origin.x + 1.55F;
+    }));
+    REQUIRE(travel_until(cabin_player, towards_bow, [&](const glm::vec3& position) {
+        return position.z >= origin.z - 8.5F;
+    }));
+}
+
+TEST_CASE("Amelie deck equipment exposes stable dynamic support") {
+    World world(5524, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    const auto& ship = sea_adventure.ship_entity();
+    const auto origin = ship.world_origin();
+    const auto& parts = amelie_ship_blueprint().parts;
+    const auto capstan = std::find_if(parts.begin(), parts.end(), [](const ShipPart& part) {
+        return part.material == ShipMaterial::CleanBeam && part.collidable &&
+               std::abs(part.local_start.z - 15.0F) < 0.001F &&
+               std::abs(part.local_end.z - 16.2F) < 0.001F;
+    });
+    REQUIRE(capstan != parts.end());
+    REQUIRE(capstan->supports_player);
+
+    const auto capstan_top = origin + glm::vec3 {
+        (capstan->local_start.x + capstan->local_end.x) * 0.5F,
+        capstan->local_end.y + 0.001F,
+        (capstan->local_start.z + capstan->local_end.z) * 0.5F,
+    };
+    PlayerController player(capstan_top);
+    for (int frame = 0; frame < 8; ++frame) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world, &ship);
+    }
+    CHECK(player.state().on_ground);
+    CHECK(player.position().y == doctest::Approx(capstan_top.y));
+    CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+}
+
+TEST_CASE("sea adventure reserves save-safe space ahead of Amelie") {
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.ship_position.z = 1'000'000.0F;
+    const auto sanitized = sanitize_sea_adventure_save_state(state);
+    const auto& bounds = amelie_ship_blueprint().bounds;
+    const auto forward_world_extent = sanitized.ship_position.z - 0.5F + bounds.max.z;
+
+    CHECK(sanitized.ship_position.z < 1'000'000.0F);
+    CHECK(forward_world_extent <= 1'000'000.0F);
+}
+
+TEST_CASE("sea adventure keeps precise movement at large world coordinates") {
+    World world(5526, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.ship_position = {0.5F, 49.0F, 524'288.0F};
+    state.route_distance = 524'287.5F;
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(state, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+    EnvironmentState environment {};
+    const auto initial_position = sea_adventure.ship_position();
+    for (int frame = 0; frame < 10; ++frame) {
+        const auto result = sea_adventure.update(world, player, environment, 1.0F / 60.0F, false);
+        CHECK(result.ship_speed > 0.0F);
+    }
+    CHECK(sea_adventure.ship_position().z > initial_position.z);
+    CHECK(sea_adventure.save_state().route_distance > state.route_distance);
+
+    SeaAdventureSystem stationary {};
+    stationary.reset(world.seed());
+    PlayerController stationary_player(stationary.deck_spawn_position());
+    const auto stationary_result = stationary.update(world, stationary_player, environment, 0.0F, false);
+    CHECK(stationary_result.ship_delta == glm::vec3 {});
+    CHECK_FALSE(stationary_result.ship_moved_player);
+    CHECK(stationary_result.on_ship);
+
+    SeaAdventureSaveState boundary_state {};
+    boundary_state.active = true;
+    boundary_state.ship_position = {0.5F, 49.0F, 1'000'000.0F};
+    SeaAdventureSystem boundary {};
+    boundary.load_state(boundary_state, world.seed());
+    PlayerController boundary_player(boundary.deck_spawn_position());
+    const auto boundary_position = boundary.ship_position();
+    const auto boundary_result = boundary.update(world, boundary_player, environment, 0.25F, false);
+    CHECK(boundary.ship_position() == boundary_position);
+    CHECK(boundary_result.ship_delta == glm::vec3 {});
+    CHECK(boundary_result.ship_speed == doctest::Approx(0.0F));
+    CHECK_FALSE(boundary_result.ship_moved_player);
+}
+
 TEST_CASE("player jump from the ground increases vertical position") {
     World world(24, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -826,6 +1987,18 @@ TEST_CASE("player cannot place a block inside the player volume") {
     CHECK(world.get_block(0, 2, 0) == to_block_id(BlockType::Air));
 }
 
+TEST_CASE("player cannot place a torch inside the player volume") {
+    World world(331, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(0, 2, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    player.set_selected_block(to_block_id(BlockType::Torch));
+
+    CHECK_FALSE(player.try_place_block(world, 4.0F));
+    CHECK(world.get_block(0, 2, 0) == to_block_id(BlockType::Air));
+}
+
 TEST_CASE("player cannot place a block above the world ceiling") {
     World world(34, 1);
     test::make_chunk_empty(world, {0, -1});
@@ -838,7 +2011,7 @@ TEST_CASE("player cannot place a block above the world ceiling") {
     aim_input.look_delta_y = 2000.0F;
     player.update(aim_input, 0.0F, world);
 
-    const auto hit = player.current_target(world, 4.0F);
+    const auto hit = player.current_target(world, 8.0F);
     REQUIRE(hit.hit);
     CHECK(hit.block == BlockCoord {0, kWorldMaxY, -1});
     CHECK(hit.adjacent == BlockCoord {0, kWorldMaxY + 1, -1});
@@ -852,7 +2025,7 @@ TEST_CASE("hotbar torch slot places a torch that emits light") {
     test::make_chunk_empty(world, {0, -1});
     world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
 
-    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerController player({0.5F, 8.001F, -0.5F});
     PlayerInput aim_input {};
     aim_input.look_delta_y = 2000.0F;
     player.update(aim_input, 0.0F, world);
@@ -861,12 +2034,12 @@ TEST_CASE("hotbar torch slot places a torch that emits light") {
     select_hotbar_index(hotbar, 6);
     player.set_selected_block(selected_hotbar_block(hotbar));
 
-    const auto hit = player.current_target(world, 4.0F);
+    const auto hit = player.current_target(world, 8.0F);
     REQUIRE(hit.hit);
     CHECK(hit.block == BlockCoord {0, 4, -1});
     CHECK(hit.adjacent == BlockCoord {0, 5, -1});
 
-    REQUIRE(player.try_place_block(world, 4.0F));
+    REQUIRE(player.try_place_block(world, 8.0F));
     world.rebuild_lighting();
 
     CHECK(world.get_block(0, 5, -1) == to_block_id(BlockType::Torch));
@@ -1013,6 +2186,30 @@ TEST_CASE("held block breaking waits for the configured duration before removing
     CHECK_FALSE(player.block_break_progress().active);
 }
 
+TEST_CASE("held block breaking reuses a target already raycast by the game loop") {
+    World world(36112, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    const auto target = player.current_target(world, 4.0F);
+    REQUIRE(target.hit);
+    const auto completed_break = player.update_block_breaking(
+        world,
+        block_break_duration_seconds(target.block_id),
+        true,
+        target);
+
+    REQUIRE(completed_break.has_value());
+    CHECK(completed_break->block == target.block);
+    CHECK(completed_break->block_id == target.block_id);
+    CHECK(world.get_block(target.block.x, target.block.y, target.block.z) == to_block_id(BlockType::Air));
+}
+
 TEST_CASE("progression block break speed multiplier shortens held block breaking") {
     World base_world(36110, 1);
     World leveled_world(36111, 1);
@@ -1046,6 +2243,92 @@ TEST_CASE("progression block break speed multiplier shortens held block breaking
     CHECK(completed_break->block == BlockCoord {0, 4, -1});
     CHECK(completed_break->block_id == to_block_id(BlockType::Stone));
     CHECK(leveled_world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
+}
+
+TEST_CASE("held tool multiplier shortens block breaking on matching target") {
+    World world(36112, 1);
+    test::make_chunk_empty(world, {0, -1});
+    world.set_block(0, 4, -1, to_block_id(BlockType::Stone));
+
+    PlayerController player({0.5F, 5.001F, -0.5F});
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+    player.update(aim_input, 0.0F, world);
+
+    const auto stone_duration = block_break_duration_seconds(to_block_id(BlockType::Stone));
+    const auto pickaxe_multiplier =
+        tool_break_speed_multiplier(to_block_id(BlockType::Pickaxe), to_block_id(BlockType::Stone));
+    const auto pickaxe_duration = stone_duration / pickaxe_multiplier;
+    REQUIRE(pickaxe_multiplier == doctest::Approx(1.5F));
+    REQUIRE(pickaxe_duration + 0.10F < stone_duration);
+
+    CHECK_FALSE(player.update_block_breaking(world, pickaxe_duration - 0.04F, true, 4.0F, pickaxe_multiplier).has_value());
+    REQUIRE(player.block_break_progress().active);
+    CHECK(player.block_break_progress().duration_seconds == doctest::Approx(pickaxe_duration));
+    CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Stone));
+
+    const auto completed_break = player.update_block_breaking(world, 0.04F, true, 4.0F, pickaxe_multiplier);
+    REQUIRE(completed_break.has_value());
+    CHECK(completed_break->block == BlockCoord {0, 4, -1});
+    CHECK(completed_break->block_id == to_block_id(BlockType::Stone));
+    CHECK(world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
+}
+
+TEST_CASE("resource ores stay breakable by hand while pickaxe accelerates each ore") {
+    const std::array<BlockType, 5> ore_types {{
+        BlockType::CoalOre,
+        BlockType::IronOre,
+        BlockType::GoldOre,
+        BlockType::DiamondOre,
+        BlockType::MetallicAlloyOre,
+    }};
+    PlayerInput aim_input {};
+    aim_input.look_delta_y = 2000.0F;
+
+    for (std::size_t index = 0; index < ore_types.size(); ++index) {
+        const auto ore_id = to_block_id(ore_types[index]);
+        CAPTURE(static_cast<int>(ore_types[index]));
+
+        World hand_world(36113 + static_cast<int>(index * 2U), 1);
+        test::make_chunk_empty(hand_world, {0, -1});
+        hand_world.set_block(0, 4, -1, ore_id);
+        PlayerController hand_player({0.5F, 5.001F, -0.5F});
+        hand_player.update(aim_input, 0.0F, hand_world);
+
+        const auto ore_duration = block_break_duration_seconds(ore_id);
+        REQUIRE(ore_duration > 0.0F);
+        const auto hand_break = hand_player.update_block_breaking(hand_world, ore_duration + 0.02F, true, 4.0F);
+        REQUIRE(hand_break.has_value());
+        CHECK(hand_break->block == BlockCoord {0, 4, -1});
+        CHECK(hand_break->block_id == ore_id);
+        CHECK(hand_world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
+
+        World pickaxe_world(36114 + static_cast<int>(index * 2U), 1);
+        test::make_chunk_empty(pickaxe_world, {0, -1});
+        pickaxe_world.set_block(0, 4, -1, ore_id);
+        PlayerController pickaxe_player({0.5F, 5.001F, -0.5F});
+        pickaxe_player.update(aim_input, 0.0F, pickaxe_world);
+
+        const auto pickaxe_multiplier = tool_break_speed_multiplier(to_block_id(BlockType::Pickaxe), ore_id);
+        const auto pickaxe_duration = ore_duration / pickaxe_multiplier;
+        REQUIRE(pickaxe_multiplier > 1.0F);
+        REQUIRE(pickaxe_duration + 0.10F < ore_duration);
+
+        CHECK_FALSE(
+            pickaxe_player
+                .update_block_breaking(pickaxe_world, pickaxe_duration - 0.04F, true, 4.0F, pickaxe_multiplier)
+                .has_value());
+        REQUIRE(pickaxe_player.block_break_progress().active);
+        CHECK(pickaxe_player.block_break_progress().duration_seconds == doctest::Approx(pickaxe_duration));
+        CHECK(pickaxe_world.get_block(0, 4, -1) == ore_id);
+
+        const auto pickaxe_break =
+            pickaxe_player.update_block_breaking(pickaxe_world, 0.04F, true, 4.0F, pickaxe_multiplier);
+        REQUIRE(pickaxe_break.has_value());
+        CHECK(pickaxe_break->block == BlockCoord {0, 4, -1});
+        CHECK(pickaxe_break->block_id == ore_id);
+        CHECK(pickaxe_world.get_block(0, 4, -1) == to_block_id(BlockType::Air));
+    }
 }
 
 TEST_CASE("releasing the break input cancels the current breaking progress") {
@@ -1188,6 +2471,140 @@ TEST_CASE("item drops collide with generated terrain before the chunk is loaded"
     CHECK(world.find_chunk(chunk_coord) == nullptr);
 }
 
+TEST_CASE("item drops stay grounded on the moving sea adventure deck") {
+    World world(365, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    EnvironmentState environment {};
+    PlayerController off_ship_player(sea_adventure.ship_position() + glm::vec3 {40.0F, 4.10F, 0.0F});
+
+    ItemDropSystem drop_system {};
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    const auto initial_drop_position =
+        sea_adventure.ship_entity().world_origin() + glm::vec3 {2.5F, 4.001F, -8.5F};
+    drop_system.spawn_drop(
+        inventory_make_slot(to_block_id(BlockType::Wood), 1),
+        initial_drop_position,
+        {});
+
+    const auto initial_relative = initial_drop_position - sea_adventure.ship_position();
+    constexpr float kStep = 1.0F / 60.0F;
+    for (int frame = 0; frame < 60; ++frame) {
+        const auto sea_result = sea_adventure.update(world, off_ship_player, environment, kStep, false);
+        drop_system.update(
+            kStep,
+            world,
+            {1000.0F, 80.0F, 1000.0F},
+            inventory,
+            hotbar,
+            &sea_adventure.ship_entity(),
+            sea_result.ship_delta);
+    }
+
+    REQUIRE(drop_system.active_drop_count() == 1U);
+    const auto& drop = drop_system.drops().front();
+    const auto final_relative = drop.position - sea_adventure.ship_position();
+    const auto support_height = sea_adventure.ship_entity().support_height(drop.position);
+    REQUIRE(support_height.has_value());
+    CHECK(drop.grounded);
+    CHECK_FALSE(drop.sleeping);
+    CHECK(drop.position.y == doctest::Approx(*support_height + 0.001F));
+    CHECK(final_relative.x == doctest::Approx(initial_relative.x));
+    CHECK(final_relative.z == doctest::Approx(initial_relative.z));
+}
+
+TEST_CASE("settled item drops sleep and skip steady state physics") {
+    World world(366, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    ItemDropSystem drop_system {};
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    drop_system.spawn_drop(
+        inventory_make_slot(to_block_id(BlockType::Wood), 1),
+        {0.5F, 1.08F, 0.5F},
+        {0.0F, 0.0F, 0.0F});
+
+    constexpr float kStep = 1.0F / 60.0F;
+    for (int frame = 0; frame < 180; ++frame) {
+        drop_system.update(kStep, world, {100.0F, 80.0F, 100.0F}, inventory, hotbar);
+    }
+    REQUIRE(drop_system.active_drop_count() == 1);
+    REQUIRE(drop_system.drops().front().sleeping);
+    (void)drop_system.consume_audit_stats();
+
+    for (int frame = 0; frame < 120; ++frame) {
+        drop_system.update(kStep, world, {100.0F, 80.0F, 100.0F}, inventory, hotbar);
+    }
+    const auto steady_stats = drop_system.consume_audit_stats();
+    CHECK(steady_stats.physics_updates == 0U);
+    CHECK(steady_stats.support_checks <= 5U);
+    CHECK(steady_stats.sleeping_drops == 1U);
+    CHECK(drop_system.drops().front().sleeping);
+}
+
+TEST_CASE("sleeping item drops wake for magnetism and removed support") {
+    constexpr float kStep = 1.0F / 60.0F;
+
+    SUBCASE("magnetism wakes immediately") {
+        World world(367, 1);
+        test::make_chunk_empty(world, {0, 0});
+        test::make_flat_floor(world, -2, 2, 0, -2, 2);
+        ItemDropSystem drop_system {};
+        HotbarState hotbar {};
+        InventoryMenuState inventory {};
+        drop_system.spawn_drop(
+            inventory_make_slot(to_block_id(BlockType::Wood), 1),
+            {0.5F, 1.08F, 0.5F},
+            {0.0F, 0.0F, 0.0F});
+        for (int frame = 0; frame < 180; ++frame) {
+            drop_system.update(kStep, world, {100.0F, 80.0F, 100.0F}, inventory, hotbar);
+        }
+        REQUIRE(drop_system.drops().front().sleeping);
+        (void)drop_system.consume_audit_stats();
+
+        const auto drop_position = drop_system.drops().front().position;
+        drop_system.update(kStep, world, drop_position + glm::vec3 {2.0F, 0.0F, 0.0F}, inventory, hotbar);
+
+        REQUIRE(drop_system.active_drop_count() == 1);
+        CHECK_FALSE(drop_system.drops().front().sleeping);
+        CHECK(drop_system.consume_audit_stats().woken_drops == 1U);
+    }
+
+    SUBCASE("support removal wakes on the bounded validation tick") {
+        World world(368, 1);
+        test::make_chunk_empty(world, {0, 0});
+        test::make_flat_floor(world, -2, 2, 0, -2, 2);
+        ItemDropSystem drop_system {};
+        HotbarState hotbar {};
+        InventoryMenuState inventory {};
+        drop_system.spawn_drop(
+            inventory_make_slot(to_block_id(BlockType::Wood), 1),
+            {0.5F, 1.08F, 0.5F},
+            {0.0F, 0.0F, 0.0F});
+        for (int frame = 0; frame < 180; ++frame) {
+            drop_system.update(kStep, world, {100.0F, 80.0F, 100.0F}, inventory, hotbar);
+        }
+        REQUIRE(drop_system.drops().front().sleeping);
+        (void)drop_system.consume_audit_stats();
+
+        world.set_block(0, 0, 0, to_block_id(BlockType::Air));
+        for (int frame = 0; frame < 40; ++frame) {
+            drop_system.update(kStep, world, {100.0F, 80.0F, 100.0F}, inventory, hotbar);
+        }
+
+        const auto wake_stats = drop_system.consume_audit_stats();
+        REQUIRE(drop_system.active_drop_count() == 1);
+        CHECK_FALSE(drop_system.drops().front().sleeping);
+        CHECK(wake_stats.support_checks >= 1U);
+        CHECK(wake_stats.woken_drops == 1U);
+        CHECK(wake_stats.physics_updates >= 1U);
+    }
+}
+
 TEST_CASE("item drops sanitize corrupted loaded state") {
     constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
     constexpr auto infinity = std::numeric_limits<float>::infinity();
@@ -1205,10 +2622,15 @@ TEST_CASE("item drops sanitize corrupted loaded state") {
     ItemDrop invalid_stack = valid_drop;
     invalid_stack.stack = inventory_make_slot(static_cast<BlockId>(255U), 5);
 
-    ItemDropSystem drop_system {};
-    drop_system.load_drops({valid_drop, invalid_position, invalid_stack});
+    ItemDrop extreme_time = valid_drop;
+    extreme_time.position.x = 1.5F;
+    extreme_time.age_seconds = (std::numeric_limits<float>::max)();
+    extreme_time.pickup_cooldown = (std::numeric_limits<float>::max)();
 
-    REQUIRE(drop_system.active_drop_count() == 1);
+    ItemDropSystem drop_system {};
+    drop_system.load_drops({valid_drop, extreme_time, invalid_position, invalid_stack});
+
+    REQUIRE(drop_system.active_drop_count() == 2);
     const auto& loaded = drop_system.drops().front();
     CHECK(loaded.stack.block_id == to_block_id(BlockType::Stone));
     CHECK(loaded.stack.count == kMaxItemStackCount);
@@ -1217,15 +2639,24 @@ TEST_CASE("item drops sanitize corrupted loaded state") {
     CHECK(loaded.velocity.z == doctest::Approx(0.0F));
     CHECK(loaded.age_seconds == doctest::Approx(0.0F));
     CHECK(loaded.pickup_cooldown == doctest::Approx(0.0F));
+    const auto& loaded_extreme = drop_system.drops()[1];
+    CHECK(std::isfinite(loaded_extreme.age_seconds));
+    CHECK(loaded_extreme.age_seconds >= 0.0F);
+    CHECK(loaded_extreme.age_seconds < 63.0F);
+    CHECK(loaded_extreme.pickup_cooldown == doctest::Approx(1.0F));
 
     World world(365, 1);
     test::make_chunk_empty(world, {0, 0});
     std::vector<ItemDropRenderInstance> render_instances {};
     drop_system.build_render_instances(world, render_instances);
-    REQUIRE(render_instances.size() == 1);
-    CHECK(std::isfinite(render_instances.front().position.x));
-    CHECK(std::isfinite(render_instances.front().position.y));
-    CHECK(std::isfinite(render_instances.front().position.z));
+    REQUIRE(render_instances.size() == 2);
+    for (const auto& instance : render_instances) {
+        CHECK(std::isfinite(instance.position.x));
+        CHECK(std::isfinite(instance.position.y));
+        CHECK(std::isfinite(instance.position.z));
+        CHECK(std::isfinite(instance.age_seconds));
+        CHECK(std::isfinite(instance.spin_radians));
+    }
 }
 
 TEST_CASE("placing a solid block can replace decorative flora") {

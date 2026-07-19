@@ -3,9 +3,22 @@ param(
     [string]$BuildDir = "",
     [ValidateSet("RelWithDebInfo", "Release", "Debug")]
     [string]$Configuration = "RelWithDebInfo",
+    [ValidateRange(1, 36000)]
     [int]$SmokeFrames = 720,
+    [int]$WarmupFrames = 180,
+    [ValidateRange(1, 10)]
+    [int]$Repetitions = 3,
+    [ValidateRange(640, 7680)]
+    [int]$Width = 1920,
+    [ValidateRange(360, 4320)]
+    [int]$Height = 1080,
     [string[]]$Scenarios = @("baseline", "world_stress", "no_shadows", "no_post_process"),
     [switch]$Trace,
+    [switch]$AdaptiveQuality,
+    [switch]$EnforceThresholds,
+    [string]$BaselinePath = "",
+    [ValidateRange(0.0, 100.0)]
+    [double]$MaxRegressionPercent = 8.0,
     [switch]$NoConfigure,
     [switch]$NoBuild,
     [string]$ArtifactDir = ""
@@ -38,9 +51,10 @@ function Add-ToPath {
             continue
         }
 
-        $pathEntries = $env:PATH -split ';'
+        $pathSeparator = [System.IO.Path]::PathSeparator
+        $pathEntries = $env:PATH -split [Regex]::Escape([string]$pathSeparator)
         if ($pathEntries -notcontains $entry) {
-            $env:PATH = "$entry;$env:PATH"
+            $env:PATH = "$entry$pathSeparator$env:PATH"
         }
     }
 }
@@ -106,17 +120,32 @@ function Get-ScenarioDefinition {
         [int]$SmokeFrames,
 
         [Parameter(Mandatory)]
+        [int]$WarmupFrames,
+
+        [Parameter(Mandatory)]
+        [int]$Width,
+
+        [Parameter(Mandatory)]
+        [int]$Height,
+
+        [Parameter(Mandatory)]
         [string]$OutputPath,
 
         [Parameter(Mandatory)]
         [string]$AuditRoot,
 
+        [switch]$AdaptiveQuality,
+
         [switch]$Trace
     )
 
+    $totalFrames = $SmokeFrames + $WarmupFrames
     $arguments = @(
         "--smoke-test",
-        "--smoke-frames=$SmokeFrames",
+        "--smoke-frames=$totalFrames",
+        "--perf-warmup-frames=$WarmupFrames",
+        "--window-width=$Width",
+        "--window-height=$Height",
         "--hidden-window",
         "--freeze-time",
         "--perf-report",
@@ -144,6 +173,10 @@ function Get-ScenarioDefinition {
     default {
         throw "Unknown perf scenario '$Name'."
     }
+    }
+
+    if (-not $AdaptiveQuality) {
+        $arguments += "--fixed-render-quality"
     }
 
     if ($Trace) {
@@ -213,10 +246,24 @@ function Assert-ScenarioReport {
         [Parameter(Mandatory)]
         [int]$SmokeFrames,
 
+        [Parameter(Mandatory)]
+        [int]$WarmupFrames,
+
+        [Parameter(Mandatory)]
+        [int]$Width,
+
+        [Parameter(Mandatory)]
+        [int]$Height,
+
+        [Parameter(Mandatory)]
+        [string]$Configuration,
+
+        [switch]$AdaptiveQuality,
+
         [switch]$Trace
     )
 
-    if ($Report.schema_version -ne 1) {
+    if ($Report.schema_version -ne 2) {
         throw "Perf scenario '$ScenarioName' returned unexpected schema_version '$($Report.schema_version)'."
     }
     if ($null -eq $Report.metadata -or $null -eq $Report.summary -or $null -eq $Report.hotspots) {
@@ -228,11 +275,36 @@ function Assert-ScenarioReport {
     if ([int]$Report.summary.frame_count -ne $SmokeFrames) {
         throw "Perf scenario '$ScenarioName' reported frame_count=$($Report.summary.frame_count), expected $SmokeFrames."
     }
+    if ([int]$Report.metadata.warmup_frames -ne $WarmupFrames) {
+        throw "Perf scenario '$ScenarioName' reported warmup_frames=$($Report.metadata.warmup_frames), expected $WarmupFrames."
+    }
+    if ([int]$Report.metadata.viewport_width -ne $Width -or [int]$Report.metadata.viewport_height -ne $Height) {
+        throw "Perf scenario '$ScenarioName' reported an unexpected viewport."
+    }
+    if ([string]$Report.metadata.platform -eq "unknown" -or
+        [string]$Report.metadata.build_type -ne $Configuration) {
+        throw "Perf scenario '$ScenarioName' used incompatible platform/build metadata."
+    }
+    $expectedQuality = if ($AdaptiveQuality) { "adaptive" } else { "fixed_high" }
+    if ([string]$Report.metadata.quality_profile -ne $expectedQuality) {
+        throw "Perf scenario '$ScenarioName' reported quality '$($Report.metadata.quality_profile)', expected '$expectedQuality'."
+    }
     if ($Trace -and @($Report.frames).Count -ne $SmokeFrames) {
         throw "Perf scenario '$ScenarioName' did not emit the expected frame trace."
     }
     if ($null -eq $Report.worst_frames -or $null -eq $Report.spike_windows) {
         throw "Perf scenario '$ScenarioName' is missing worst_frames or spike_windows."
+    }
+    if ([int]$Report.summary.gpu_timing_samples -le 0 -or
+        [double]$Report.summary.gpu_frame_ms.p95 -le 0.0) {
+        throw "Perf scenario '$ScenarioName' did not produce valid GPU timing samples."
+    }
+    if ([double]$Report.summary.process_private_bytes.max -le 0.0 -or
+        [double]$Report.summary.process_working_set_bytes.max -le 0.0 -or
+        [double]$Report.summary.gpu_buffer_bytes.max -le 0.0 -or
+        [int64]$Report.summary.max_draw_calls -le 0 -or
+        [int64]$Report.summary.max_triangles -le 0) {
+        throw "Perf scenario '$ScenarioName' produced incomplete render or memory counters."
     }
 }
 
@@ -268,6 +340,93 @@ function Assert-AuditRun {
     }
 }
 
+function Get-Median {
+    param([double[]]$Values)
+
+    if (@($Values).Count -eq 0) {
+        return 0.0
+    }
+
+    $sorted = @($Values | Sort-Object)
+    $middle = [int][Math]::Floor($sorted.Count / 2)
+    if (($sorted.Count % 2) -eq 1) {
+        return [double]$sorted[$middle]
+    }
+    return ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2.0
+}
+
+function Get-ScenarioThreshold {
+    param([string]$ScenarioName)
+
+    switch ($ScenarioName) {
+    "world_stress" {
+        return @{ P95 = 25.0; Max = 100.0; GpuP95 = 16.7; PrivateBytes = 1610612736.0 }
+    }
+    default {
+        return @{ P95 = 16.7; Max = 75.0; GpuP95 = 16.7; PrivateBytes = 1073741824.0 }
+    }
+    }
+}
+
+function Get-MedianAbsoluteDeviation {
+    param([double[]]$Values)
+
+    if (@($Values).Count -eq 0) {
+        return 0.0
+    }
+    $median = Get-Median -Values $Values
+    return Get-Median -Values @($Values | ForEach-Object { [Math]::Abs([double]$_ - $median) })
+}
+
+function Assert-ScenarioThreshold {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Summary
+    )
+
+    $threshold = Get-ScenarioThreshold -ScenarioName $Summary.scenario
+    if ([double]$Summary.frame_p95 -gt [double]$threshold.P95) {
+        throw "Perf scenario '$($Summary.scenario)' exceeded p95 threshold: $($Summary.frame_p95) ms > $($threshold.P95) ms."
+    }
+    if ([double]$Summary.frame_max -gt [double]$threshold.Max) {
+        throw "Perf scenario '$($Summary.scenario)' exceeded max-frame threshold: $($Summary.frame_max) ms > $($threshold.Max) ms."
+    }
+    if ([double]$Summary.gpu_frame_p95 -gt [double]$threshold.GpuP95) {
+        throw "Perf scenario '$($Summary.scenario)' exceeded GPU p95 threshold."
+    }
+    $maximumLongLagFrames = [Math]::Max(2, [Math]::Ceiling([double]$SmokeFrames * 0.01))
+    if ([int]$Summary.lag_frames_33_3 -gt $maximumLongLagFrames) {
+        throw "Perf scenario '$($Summary.scenario)' produced too many frames above 33.3 ms."
+    }
+    if ([double]$Summary.private_bytes_peak -gt [double]$threshold.PrivateBytes) {
+        throw "Perf scenario '$($Summary.scenario)' exceeded private-memory threshold."
+    }
+}
+
+function Assert-NoBaselineRegression {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Current,
+
+        [Parameter(Mandatory)]
+        [pscustomobject]$Baseline,
+
+        [Parameter(Mandatory)]
+        [double]$AllowedPercent
+    )
+
+    foreach ($metric in @("frame_avg", "frame_p95", "gpu_frame_p95", "private_bytes_peak")) {
+        $baselineValue = [double]$Baseline.$metric
+        if ($baselineValue -le 0.0) {
+            continue
+        }
+        $limit = $baselineValue * (1.0 + ($AllowedPercent / 100.0))
+        if ([double]$Current.$metric -gt $limit) {
+            throw "Perf scenario '$($Current.scenario)' regressed on '$metric': $($Current.$metric) > $limit."
+        }
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {
     $BuildDir = Join-Path $repoRoot "cmake-build-perf"
@@ -284,8 +443,9 @@ $clionBinDir = Get-LatestClionBinDir
 $cmakeFallback = if ($clionBinDir) { Join-Path $clionBinDir "cmake\win\x64\bin\cmake.exe" } else { $null }
 $mingwBinDir = if ($clionBinDir) { Join-Path $clionBinDir "mingw\bin" } else { $null }
 $ninjaDir = if ($clionBinDir) { Join-Path $clionBinDir "ninja\win\x64" } else { $null }
+$cmakeFallbackDir = if ($cmakeFallback) { Split-Path -Parent $cmakeFallback } else { $null }
 
-Add-ToPath -Entries @($mingwBinDir, $ninjaDir, (Split-Path -Parent $cmakeFallback))
+Add-ToPath -Entries @($mingwBinDir, $ninjaDir, $cmakeFallbackDir)
 $cmakeExe = Resolve-ToolPath -CommandName "cmake" -FallbackPaths @($cmakeFallback)
 
 if (-not $NoConfigure) {
@@ -303,7 +463,9 @@ if (-not $NoBuild) {
     Invoke-External -FilePath $cmakeExe -Arguments @("--build", $BuildDir, "--target", "ValCraft", "--parallel")
 }
 
-$gameExe = Join-Path $BuildDir "bin\ValCraft.exe"
+$isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+$gameExecutableName = if ($isWindows) { "ValCraft.exe" } else { "ValCraft" }
+$gameExe = Join-Path (Join-Path $BuildDir "bin") $gameExecutableName
 if (-not (Test-Path $gameExe)) {
     throw "ValCraft executable not found at '$gameExe'."
 }
@@ -315,51 +477,141 @@ New-Item -ItemType Directory -Path $ArtifactDir | Out-Null
 
 $scenarioSummaries = @()
 foreach ($scenarioName in $Scenarios) {
-    $outputPath = Join-Path $ArtifactDir ($scenarioName + ".json")
-    $definition = Get-ScenarioDefinition -Name $scenarioName -SmokeFrames $SmokeFrames -OutputPath $outputPath -AuditRoot $ArtifactDir -Trace:$Trace
-    Write-Host ("==> Running perf scenario '{0}'" -f $scenarioName)
-    Invoke-External -FilePath $gameExe -Arguments $definition.Arguments -WorkingDirectory $BuildDir
+    $runs = @()
+    for ($repetition = 1; $repetition -le $Repetitions; ++$repetition) {
+        $outputPath = Join-Path $ArtifactDir ("{0}-run-{1}.json" -f $scenarioName, $repetition)
+        $definition = Get-ScenarioDefinition `
+            -Name $scenarioName `
+            -SmokeFrames $SmokeFrames `
+            -WarmupFrames $WarmupFrames `
+            -Width $Width `
+            -Height $Height `
+            -OutputPath $outputPath `
+            -AuditRoot $ArtifactDir `
+            -AdaptiveQuality:$AdaptiveQuality `
+            -Trace:$Trace
+        Write-Host ("==> Running perf scenario '{0}' ({1}/{2})" -f $scenarioName, $repetition, $Repetitions)
+        Invoke-External -FilePath $gameExe -Arguments $definition.Arguments -WorkingDirectory $BuildDir
 
-    if (-not (Test-Path $outputPath)) {
-        throw "Perf scenario '$scenarioName' did not produce '$outputPath'."
-    }
+        if (-not (Test-Path $outputPath)) {
+            throw "Perf scenario '$scenarioName' did not produce '$outputPath'."
+        }
 
-    $report = Get-Content -Path $outputPath -Raw | ConvertFrom-Json
-    Assert-ScenarioReport -Report $report -ScenarioName $scenarioName -SmokeFrames $SmokeFrames -Trace:$Trace
-    $runDirectory = Find-LatestScenarioRun -AuditRoot $ArtifactDir -ScenarioName $scenarioName
-    if ($null -eq $runDirectory) {
-        throw "Perf scenario '$scenarioName' did not create an audit run directory."
+        $report = Get-Content -Path $outputPath -Raw | ConvertFrom-Json
+        Assert-ScenarioReport `
+            -Report $report `
+            -ScenarioName $scenarioName `
+            -SmokeFrames $SmokeFrames `
+            -WarmupFrames $WarmupFrames `
+            -Width $Width `
+            -Height $Height `
+            -Configuration $Configuration `
+            -AdaptiveQuality:$AdaptiveQuality `
+            -Trace:$Trace
+        $runDirectory = Find-LatestScenarioRun -AuditRoot $ArtifactDir -ScenarioName $scenarioName
+        if ($null -eq $runDirectory) {
+            throw "Perf scenario '$scenarioName' did not create an audit run directory."
+        }
+        Assert-AuditRun -RunDirectory $runDirectory -ScenarioName $scenarioName
+
+        $runs += [PSCustomObject]@{
+            repetition = $repetition
+            frame_avg = [double]$report.summary.frame_total_ms.avg
+            frame_p95 = [double]$report.summary.frame_total_ms.p95
+            frame_p99 = [double]$report.summary.frame_total_ms.p99
+            frame_max = [double]$report.summary.frame_total_ms.max
+            gpu_frame_p95 = [double]$report.summary.gpu_frame_ms.p95
+            private_bytes_peak = [double]$report.summary.process_private_bytes.max
+            working_set_bytes_peak = [double]$report.summary.process_working_set_bytes.max
+            lag_frames_16_7 = [int]$report.summary.lag_buckets.over_16_7_ms
+            lag_frames_33_3 = [int]$report.summary.lag_buckets.over_33_3_ms
+            lag_frames_50_0 = [int]$report.summary.lag_buckets.over_50_0_ms
+            worst_frame_stage = [string]$report.hotspots.worst_frame_stage
+            platform = [string]$report.metadata.platform
+            build_type = [string]$report.metadata.build_type
+            vsync_mode = [string]$report.metadata.vsync_mode
+            spike_windows = @($report.spike_windows).Count
+            run_directory = $runDirectory.FullName
+            output = $outputPath
+        }
     }
-    Assert-AuditRun -RunDirectory $runDirectory -ScenarioName $scenarioName
 
     $summary = [PSCustomObject]@{
         scenario = $scenarioName
-        frame_avg = [double]$report.summary.frame_total_ms.avg
-        frame_p95 = [double]$report.summary.frame_total_ms.p95
-        frame_max = [double]$report.summary.frame_total_ms.max
-        lag_frames_16_7 = [int]$report.summary.lag_buckets.over_16_7_ms
-        lag_frames_33_3 = [int]$report.summary.lag_buckets.over_33_3_ms
-        lag_frames_50_0 = [int]$report.summary.lag_buckets.over_50_0_ms
-        worst_frame_stage = [string]$report.hotspots.worst_frame_stage
-        spike_windows = @($report.spike_windows).Count
-        run_directory = $runDirectory.FullName
-        output = $outputPath
+        frame_avg = Get-Median -Values @($runs.frame_avg)
+        frame_p95 = Get-Median -Values @($runs.frame_p95)
+        frame_p99 = Get-Median -Values @($runs.frame_p99)
+        frame_max = [double]($runs.frame_max | Measure-Object -Maximum).Maximum
+        gpu_frame_p95 = Get-Median -Values @($runs.gpu_frame_p95)
+        private_bytes_peak = [double]($runs.private_bytes_peak | Measure-Object -Maximum).Maximum
+        working_set_bytes_peak = [double]($runs.working_set_bytes_peak | Measure-Object -Maximum).Maximum
+        lag_frames_16_7 = [int]($runs.lag_frames_16_7 | Measure-Object -Maximum).Maximum
+        lag_frames_33_3 = [int]($runs.lag_frames_33_3 | Measure-Object -Maximum).Maximum
+        lag_frames_50_0 = [int]($runs.lag_frames_50_0 | Measure-Object -Maximum).Maximum
+        frame_avg_mad = Get-MedianAbsoluteDeviation -Values @($runs.frame_avg)
+        frame_p95_mad = Get-MedianAbsoluteDeviation -Values @($runs.frame_p95)
+        platform = [string]$runs[0].platform
+        build_type = [string]$runs[0].build_type
+        vsync_mode = [string]$runs[0].vsync_mode
+        repetitions = $runs
     }
     $scenarioSummaries += $summary
+}
+
+if ($EnforceThresholds) {
+    foreach ($summary in $scenarioSummaries) {
+        Assert-ScenarioThreshold -Summary $summary
+    }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($BaselinePath)) {
+    $resolvedBaselinePath = [System.IO.Path]::GetFullPath($BaselinePath)
+    if (-not (Test-Path $resolvedBaselinePath)) {
+        throw "Baseline suite not found at '$resolvedBaselinePath'."
+    }
+    $baselineSuite = Get-Content -Path $resolvedBaselinePath -Raw | ConvertFrom-Json
+    if ([int]$baselineSuite.schema_version -ne 2 -or
+        [string]$baselineSuite.configuration -ne $Configuration -or
+        [int]$baselineSuite.measured_frames -ne $SmokeFrames -or
+        [int]$baselineSuite.warmup_frames -ne $WarmupFrames -or
+        [int]$baselineSuite.viewport_width -ne $Width -or
+        [int]$baselineSuite.viewport_height -ne $Height -or
+        [string]$baselineSuite.platform -ne [string]$scenarioSummaries[0].platform -or
+        [string]$baselineSuite.build_type -ne [string]$scenarioSummaries[0].build_type -or
+        [bool]$baselineSuite.adaptive_quality -ne [bool]$AdaptiveQuality) {
+        throw "Baseline suite metadata is incompatible with the current performance run."
+    }
+    foreach ($summary in $scenarioSummaries) {
+        $baseline = @($baselineSuite.scenarios | Where-Object { $_.scenario -eq $summary.scenario }) | Select-Object -First 1
+        if ($null -eq $baseline) {
+            throw "Baseline suite does not contain scenario '$($summary.scenario)'."
+        }
+        Assert-NoBaselineRegression -Current $summary -Baseline $baseline -AllowedPercent $MaxRegressionPercent
+    }
 }
 
 Write-Host "==> Performance suite summary"
 $scenarioSummaries |
     Sort-Object scenario |
-    Format-Table scenario, frame_avg, frame_p95, frame_max, lag_frames_16_7, lag_frames_33_3, lag_frames_50_0, worst_frame_stage, spike_windows -AutoSize |
+    Format-Table scenario, frame_avg, frame_p95, frame_p99, frame_max, gpu_frame_p95, private_bytes_peak, lag_frames_16_7, lag_frames_33_3 -AutoSize |
     Out-String |
     Write-Host
 
 $suiteSummary = [PSCustomObject]@{
-    schema_version = 1
+    schema_version = 2
     configuration = $Configuration
-    smoke_frames = $SmokeFrames
+    measured_frames = $SmokeFrames
+    warmup_frames = $WarmupFrames
+    repetitions = $Repetitions
+    viewport_width = $Width
+    viewport_height = $Height
     trace_enabled = [bool]$Trace
+    adaptive_quality = [bool]$AdaptiveQuality
+    platform = if ($scenarioSummaries.Count -gt 0) { [string]$scenarioSummaries[0].platform } else { "unknown" }
+    build_type = if ($scenarioSummaries.Count -gt 0) { [string]$scenarioSummaries[0].build_type } else { "unknown" }
+    thresholds_enforced = [bool]$EnforceThresholds
+    baseline_path = $BaselinePath
+    max_regression_percent = $MaxRegressionPercent
     build_dir = $BuildDir
     artifact_dir = $ArtifactDir
     scenarios = $scenarioSummaries

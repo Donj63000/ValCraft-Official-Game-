@@ -11,11 +11,41 @@ namespace valcraft {
 
 namespace {
 
+constexpr float kTwoPi = 6.2831853071795864769F;
+constexpr float kDropAnimationCycleSeconds = 10.0F * kTwoPi;
+
+auto normalized_animation_value(float value, float cycle) noexcept -> float {
+    if (!std::isfinite(value) || value <= 0.0F) {
+        return 0.0F;
+    }
+    return std::fmod(value, cycle);
+}
+
+struct ItemDropFaceTilePack {
+    glm::vec4 face_tiles_0_1 {0.0F};
+    glm::vec4 face_tiles_2_3 {0.0F};
+    glm::vec4 face_tiles_4_5 {0.0F};
+};
+
 auto atlas_uv_rect(const BlockAtlasTile& tile) -> std::array<float, 4> {
     const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
     const auto u0 = static_cast<float>(tile.x) * uv_step;
     const auto v0 = static_cast<float>(tile.y) * uv_step;
     return {u0, v0, u0 + uv_step, v0 + uv_step};
+}
+
+auto pack_item_drop_face_tiles(BlockId item_id) -> ItemDropFaceTilePack {
+    const auto positive_x = item_drop_atlas_tile(item_id, BlockVisualFace::PositiveX);
+    const auto negative_x = item_drop_atlas_tile(item_id, BlockVisualFace::NegativeX);
+    const auto positive_y = item_drop_atlas_tile(item_id, BlockVisualFace::PositiveY);
+    const auto negative_y = item_drop_atlas_tile(item_id, BlockVisualFace::NegativeY);
+    const auto positive_z = item_drop_atlas_tile(item_id, BlockVisualFace::PositiveZ);
+    const auto negative_z = item_drop_atlas_tile(item_id, BlockVisualFace::NegativeZ);
+    return {
+        {static_cast<float>(positive_x.x), static_cast<float>(positive_x.y), static_cast<float>(negative_x.x), static_cast<float>(negative_x.y)},
+        {static_cast<float>(positive_y.x), static_cast<float>(positive_y.y), static_cast<float>(negative_y.x), static_cast<float>(negative_y.y)},
+        {static_cast<float>(positive_z.x), static_cast<float>(positive_z.y), static_cast<float>(negative_z.x), static_cast<float>(negative_z.y)},
+    };
 }
 
 void append_item_drop_face(std::vector<ChunkVertex>& vertices,
@@ -77,7 +107,7 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
         }},
         rotate_normal(1.0F, 0.0F, 0.0F),
         0.85F,
-        atlas_uv_rect(block_atlas_tile(block_id, BlockVisualFace::PositiveX)),
+        atlas_uv_rect(item_drop_atlas_tile(block_id, BlockVisualFace::PositiveX)),
         sky_light,
         block_light,
         material_class);
@@ -92,7 +122,7 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
         }},
         rotate_normal(-1.0F, 0.0F, 0.0F),
         0.85F,
-        atlas_uv_rect(block_atlas_tile(block_id, BlockVisualFace::NegativeX)),
+        atlas_uv_rect(item_drop_atlas_tile(block_id, BlockVisualFace::NegativeX)),
         sky_light,
         block_light,
         material_class);
@@ -107,7 +137,7 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
         }},
         rotate_normal(0.0F, 1.0F, 0.0F),
         1.0F,
-        atlas_uv_rect(block_atlas_tile(block_id, BlockVisualFace::PositiveY)),
+        atlas_uv_rect(item_drop_atlas_tile(block_id, BlockVisualFace::PositiveY)),
         sky_light,
         block_light,
         material_class);
@@ -122,7 +152,7 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
         }},
         rotate_normal(0.0F, -1.0F, 0.0F),
         0.65F,
-        atlas_uv_rect(block_atlas_tile(block_id, BlockVisualFace::NegativeY)),
+        atlas_uv_rect(item_drop_atlas_tile(block_id, BlockVisualFace::NegativeY)),
         sky_light,
         block_light,
         material_class);
@@ -137,7 +167,7 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
         }},
         rotate_normal(0.0F, 0.0F, 1.0F),
         0.75F,
-        atlas_uv_rect(block_atlas_tile(block_id, BlockVisualFace::PositiveZ)),
+        atlas_uv_rect(item_drop_atlas_tile(block_id, BlockVisualFace::PositiveZ)),
         sky_light,
         block_light,
         material_class);
@@ -152,7 +182,7 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
         }},
         rotate_normal(0.0F, 0.0F, -1.0F),
         0.75F,
-        atlas_uv_rect(block_atlas_tile(block_id, BlockVisualFace::NegativeZ)),
+        atlas_uv_rect(item_drop_atlas_tile(block_id, BlockVisualFace::NegativeZ)),
         sky_light,
         block_light,
         material_class);
@@ -166,12 +196,18 @@ void build_item_drop_gpu_instances_into(std::span<const ItemDropRenderInstance> 
     instances.reserve(item_drops.size() * 3U);
 
     for (const auto& drop : item_drops) {
-        if (drop.block_id == to_block_id(BlockType::Air) || drop.count == 0) {
+        const auto item_id = block_item_id(drop.block_id);
+        if (item_id == to_block_id(BlockType::Air) || drop.count == 0) {
             continue;
         }
 
-        const auto material_class = block_visual_material_value(drop.block_id);
-        const auto bob_offset = std::sin(drop.age_seconds * 3.2F) * 0.06F + 0.12F;
+        const auto material_class = block_visual_material_value(item_id);
+        const auto face_tiles = pack_item_drop_face_tiles(item_id);
+        // Je garde ce dernier garde-fou dans le generateur : meme une instance
+        // construite hors du systeme de gameplay ne doit produire aucun NaN GPU.
+        const auto animation_age = normalized_animation_value(drop.age_seconds, kDropAnimationCycleSeconds);
+        const auto rotation = normalized_animation_value(drop.spin_radians, kTwoPi);
+        const auto bob_offset = std::sin(animation_age * 3.2F) * 0.06F + 0.12F;
         const auto size = drop.count >= 32 ? 0.42F : (drop.count >= 2 ? 0.39F : 0.35F);
         const auto layer_count = drop.count >= 32 ? 3 : (drop.count >= 2 ? 2 : 1);
 
@@ -185,11 +221,14 @@ void build_item_drop_gpu_instances_into(std::span<const ItemDropRenderInstance> 
                     layer == 2 ? -lateral_offset : 0.0F,
                 },
                 size,
-                drop.spin_radians,
-                block_item_id(drop.block_id),
+                rotation,
+                item_id,
                 drop.sky_light,
                 drop.block_light,
                 material_class,
+                face_tiles.face_tiles_0_1,
+                face_tiles.face_tiles_2_3,
+                face_tiles.face_tiles_4_5,
             });
         }
     }

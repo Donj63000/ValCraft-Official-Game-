@@ -1,11 +1,13 @@
 #pragma once
 
 #include "app/Hotbar.h"
+#include "app/GameMode.h"
 #include "app/InventoryMenu.h"
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
 #include "gameplay/PlayerProgression.h"
+#include "gameplay/SeaAdventure.h"
 #include "world/World.h"
 
 #include <glm/vec3.hpp>
@@ -14,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -29,6 +32,7 @@ struct SaveSlotMetadata {
     float weather_time_seconds = 0.0F;
     std::uint32_t modified_chunk_count = 0;
     bool has_starting_village = false;
+    GameMode game_mode = GameMode::ClassicAdventure;
 
     auto operator==(const SaveSlotMetadata&) const -> bool = default;
 };
@@ -38,12 +42,40 @@ struct SaveGameSnapshot {
     glm::vec3 spawn_position {0.5F, 70.0F, 0.5F};
     PlayerState player_state {};
     PlayerProgressionState progression {};
+    SeaAdventureSaveState sea_adventure {};
     HotbarState hotbar {};
     InventoryMenuState inventory {};
     std::vector<CreatureInstance> creatures {};
     std::vector<ItemDrop> item_drops {};
+    // Je conserve les donnees de monde sous leur forme compacte au chargement,
+    // afin de ne jamais materialiser tous les chunks sur le thread d'interface.
+    WorldSavePlan world_save_plan {};
+    // Je garde ce champ pour l'ecriture des anciens appelants et des fixtures.
     std::vector<WorldChunkSnapshot> chunk_snapshots {};
 };
+
+enum class SaveLoadPhase : std::uint8_t {
+    OpeningFile,
+    ReadingMetadata,
+    ReadingPlayer,
+    ReadingEntities,
+    ReadingWorld,
+    Finalizing,
+};
+
+struct SaveLoadProgress {
+    SaveLoadPhase phase = SaveLoadPhase::OpeningFile;
+    std::uint64_t completed_bytes = 0;
+    std::uint64_t total_bytes = 0;
+    float normalized = 0.0F;
+};
+
+enum class SaveLoadControl : std::uint8_t {
+    Continue,
+    Cancel,
+};
+
+using SaveLoadProgressCallback = std::function<SaveLoadControl(const SaveLoadProgress&)>;
 
 [[nodiscard]] auto save_slot_file_path(const std::filesystem::path& root_directory, std::size_t slot_index)
     -> std::filesystem::path;
@@ -51,7 +83,15 @@ struct SaveGameSnapshot {
     -> std::array<SaveSlotMetadata, kSaveSlotCount>;
 [[nodiscard]] auto load_save_slot(const std::filesystem::path& root_directory, std::size_t slot_index)
     -> std::optional<SaveGameSnapshot>;
+[[nodiscard]] auto load_save_slot(const std::filesystem::path& root_directory,
+                                  std::size_t slot_index,
+                                  const SaveLoadProgressCallback& progress_callback)
+    -> std::optional<SaveGameSnapshot>;
 [[nodiscard]] auto remove_save_slot(const std::filesystem::path& root_directory, std::size_t slot_index) -> bool;
 void write_save_slot(const std::filesystem::path& root_directory, std::size_t slot_index, const SaveGameSnapshot& snapshot);
+void write_save_slot(const std::filesystem::path& root_directory,
+                     std::size_t slot_index,
+                     const SaveGameSnapshot& snapshot,
+                     const WorldSavePlan& world_save_plan);
 
 } // namespace valcraft

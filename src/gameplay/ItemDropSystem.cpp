@@ -1,11 +1,14 @@
 #include "gameplay/ItemDropSystem.h"
 
+#include "gameplay/SeaAdventure.h"
+
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 
 namespace valcraft {
 
@@ -22,6 +25,15 @@ constexpr float kPickupDelaySeconds = 0.18F;
 constexpr float kMergeRadius = 0.70F;
 constexpr float kGroundFriction = 0.82F;
 constexpr float kAirFriction = 0.98F;
+constexpr float kSleepVelocityThreshold = 0.04F;
+constexpr float kSleepDelaySeconds = 0.35F;
+constexpr float kSleepSupportCheckInterval = 0.50F;
+constexpr float kMaximumDropWorldCoordinateMagnitude = 1'000'000.0F;
+constexpr float kMaximumLoadedDropSpeed = 64.0F;
+constexpr float kMaximumLoadedPickupCooldownSeconds = 1.0F;
+// Les frequences 3,2 et 1,9 retrouvent ensemble leur phase apres 20 pi
+// secondes; je peux donc borner l'age sans saut visuel.
+constexpr float kDropAnimationCycleSeconds = 20.0F * std::numbers::pi_v<float>;
 constexpr std::size_t kMaxActiveDrops = 128;
 
 auto finite_or(float value, float fallback) noexcept -> float {
@@ -30,6 +42,17 @@ auto finite_or(float value, float fallback) noexcept -> float {
 
 auto non_negative_finite(float value) noexcept -> float {
     return std::isfinite(value) ? std::max(value, 0.0F) : 0.0F;
+}
+
+auto normalized_drop_age(float value) noexcept -> float {
+    if (!std::isfinite(value) || value <= 0.0F) {
+        return 0.0F;
+    }
+    return std::fmod(value, kDropAnimationCycleSeconds);
+}
+
+auto sanitized_pickup_cooldown(float value) noexcept -> float {
+    return std::clamp(finite_or(value, 0.0F), 0.0F, kMaximumLoadedPickupCooldownSeconds);
 }
 
 auto is_finite_vec3(const glm::vec3& value) noexcept -> bool {
@@ -44,16 +67,11 @@ auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept 
     };
 }
 
-auto sanitize_loaded_drop(ItemDrop& drop) noexcept -> bool {
-    normalize_item_stack(drop.stack);
-    if (!inventory_slot_has_item(drop.stack) || !is_finite_vec3(drop.position)) {
-        return false;
-    }
-
-    drop.velocity = finite_vec3_or(drop.velocity, {});
-    drop.age_seconds = non_negative_finite(drop.age_seconds);
-    drop.pickup_cooldown = non_negative_finite(drop.pickup_cooldown);
-    return true;
+auto sanitized_drop_velocity(const glm::vec3& velocity) noexcept -> glm::vec3 {
+    return glm::clamp(
+        finite_vec3_or(velocity, {}),
+        glm::vec3 {-kMaximumLoadedDropSpeed},
+        glm::vec3 {kMaximumLoadedDropSpeed});
 }
 
 auto drop_physics_block(const World& world, int x, int y, int z) -> BlockId {
@@ -86,7 +104,11 @@ auto drop_collides_at(const World& world, const glm::vec3& position) -> bool {
     return false;
 }
 
-void move_drop_axis(ItemDrop& drop, float delta, int axis, const World& world) {
+void move_drop_axis(ItemDrop& drop,
+                    float delta,
+                    int axis,
+                    const World& world,
+                    const ShipEntity* dynamic_platform) {
     if (std::abs(delta) <= 1.0e-6F) {
         return;
     }
@@ -138,6 +160,8 @@ void move_drop_axis(ItemDrop& drop, float delta, int axis, const World& world) {
                 } else {
                     next_position.y = static_cast<float>(block_y + 1) + kDropCollisionEpsilon;
                     drop.grounded = true;
+                    drop.sleep_support_valid = true;
+                    drop.sleep_support_block = {x, block_y, z};
                 }
                 drop.velocity.y = 0.0F;
                 drop.position = next_position;
@@ -168,6 +192,59 @@ void move_drop_axis(ItemDrop& drop, float delta, int axis, const World& world) {
         }
     }
 
+    if (dynamic_platform != nullptr) {
+        // Je traite le pont comme un support mobile exact avant les autres
+        // collisions du navire afin que le drop ne traverse pas le plancher.
+        if (axis == 1 && delta < 0.0F) {
+            const auto support_height = dynamic_platform->support_height(next_position);
+            if (support_height.has_value() && drop.position.y >= *support_height - kDropCollisionEpsilon &&
+                next_position.y <= *support_height + kDropCollisionEpsilon) {
+                next_position.y = *support_height + kDropCollisionEpsilon;
+                drop.velocity.y = 0.0F;
+                drop.grounded = true;
+                drop.sleep_support_valid = false;
+                drop.position = next_position;
+                return;
+            }
+        }
+
+        const auto intersects_dynamic_platform = [&](const glm::vec3& candidate_position) noexcept {
+            const auto obstacle_min = glm::vec3 {
+                candidate_position.x - kDropHalfWidth,
+                candidate_position.y,
+                candidate_position.z - kDropHalfWidth,
+            };
+            const auto obstacle_max = glm::vec3 {
+                candidate_position.x + kDropHalfWidth,
+                candidate_position.y + kDropHeight,
+                candidate_position.z + kDropHalfWidth,
+            };
+            return dynamic_platform->intersects_aabb(obstacle_min, obstacle_max);
+        };
+
+        if (intersects_dynamic_platform(next_position)) {
+            auto safe_fraction = 0.0F;
+            auto colliding_fraction = 1.0F;
+            for (int iteration = 0; iteration < 8; ++iteration) {
+                const auto candidate_fraction = (safe_fraction + colliding_fraction) * 0.5F;
+                auto candidate_position = drop.position;
+                candidate_position[axis] += delta * candidate_fraction;
+                if (intersects_dynamic_platform(candidate_position)) {
+                    colliding_fraction = candidate_fraction;
+                } else {
+                    safe_fraction = candidate_fraction;
+                }
+            }
+            next_position = drop.position;
+            next_position[axis] += delta * safe_fraction;
+            drop.velocity[axis] = 0.0F;
+            if (axis == 1 && delta < 0.0F) {
+                drop.grounded = true;
+                drop.sleep_support_valid = false;
+            }
+        }
+    }
+
     drop.position = next_position;
 }
 
@@ -187,17 +264,47 @@ auto drop_light_level(const World& world, const glm::vec3& position, bool sky) -
 
 } // namespace
 
+auto is_sane_item_drop_position(const glm::vec3& position) noexcept -> bool {
+    return is_finite_vec3(position) &&
+           std::abs(position.x) <= kMaximumDropWorldCoordinateMagnitude &&
+           std::abs(position.y) <= kMaximumDropWorldCoordinateMagnitude &&
+           std::abs(position.z) <= kMaximumDropWorldCoordinateMagnitude;
+}
+
+auto sanitize_item_drop_state(ItemDrop& drop) noexcept -> bool {
+    normalize_item_stack(drop.stack);
+    if (!inventory_slot_has_item(drop.stack) || !is_sane_item_drop_position(drop.position)) {
+        return false;
+    }
+
+    drop.velocity = sanitized_drop_velocity(drop.velocity);
+    drop.age_seconds = normalized_drop_age(drop.age_seconds);
+    drop.pickup_cooldown = sanitized_pickup_cooldown(drop.pickup_cooldown);
+    drop.sleeping = false;
+    drop.sleep_support_valid = false;
+    drop.sleep_candidate_seconds = 0.0F;
+    drop.sleep_support_check_timer = 0.0F;
+    drop.sleep_support_block = {};
+    return true;
+}
+
+ItemDropSystem::ItemDropSystem() {
+    // Je borne et reserve le stockage une seule fois pour qu'aucun spawn en jeu
+    // ne declenche de reallocation du tableau de drops.
+    drops_.reserve(kMaxActiveDrops);
+}
+
 void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& position, const glm::vec3& initial_velocity) {
     HotbarSlot remaining = stack;
     normalize_item_stack(remaining);
     if (!inventory_slot_has_item(remaining)) {
         return;
     }
-    if (!is_finite_vec3(position)) {
+    if (!is_sane_item_drop_position(position)) {
         ++audit_stats_.rejected_spawns;
         return;
     }
-    const auto safe_initial_velocity = finite_vec3_or(initial_velocity, {});
+    const auto safe_initial_velocity = sanitized_drop_velocity(initial_velocity);
 
     const auto merge_radius_sq = kMergeRadius * kMergeRadius;
     for (auto& drop : drops_) {
@@ -233,7 +340,12 @@ void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& positi
         }
     }
 
-    drops_.push_back({position, safe_initial_velocity, remaining, 0.0F, kPickupDelaySeconds, false});
+    ItemDrop drop {};
+    drop.position = position;
+    drop.velocity = safe_initial_velocity;
+    drop.stack = remaining;
+    drop.pickup_cooldown = kPickupDelaySeconds;
+    drops_.push_back(drop);
     ++audit_stats_.spawned;
     audit_stats_.active_drops = drops_.size();
 }
@@ -242,8 +354,11 @@ void ItemDropSystem::update(float dt,
                             const World& world,
                             const glm::vec3& player_position,
                             InventoryMenuState& inventory,
-                            HotbarState& hotbar) {
+                            HotbarState& hotbar,
+                            const ShipEntity* dynamic_platform,
+                            glm::vec3 platform_delta) {
     const auto clamped_dt = non_negative_finite(dt);
+    platform_delta = finite_vec3_or(platform_delta, {});
     const auto pickup_radius_sq = kPickupRadius * kPickupRadius;
     const auto magnet_radius_sq = kMagnetRadius * kMagnetRadius;
     const auto player_position_is_finite = is_finite_vec3(player_position);
@@ -251,18 +366,35 @@ void ItemDropSystem::update(float dt,
     for (auto iterator = drops_.begin(); iterator != drops_.end();) {
         auto& drop = *iterator;
         normalize_item_stack(drop.stack);
-        if (!inventory_slot_has_item(drop.stack) || !is_finite_vec3(drop.position) || drop.position.y < -8.0F) {
+        if (!inventory_slot_has_item(drop.stack) || !is_sane_item_drop_position(drop.position) || drop.position.y < -8.0F) {
             ++audit_stats_.expired;
             iterator = drops_.erase(iterator);
             continue;
         }
-        drop.velocity = finite_vec3_or(drop.velocity, {});
-        drop.age_seconds = non_negative_finite(drop.age_seconds);
-        drop.pickup_cooldown = non_negative_finite(drop.pickup_cooldown);
+        drop.velocity = sanitized_drop_velocity(drop.velocity);
+        drop.age_seconds = normalized_drop_age(drop.age_seconds);
+        drop.pickup_cooldown = sanitized_pickup_cooldown(drop.pickup_cooldown);
+        drop.sleep_candidate_seconds = non_negative_finite(drop.sleep_candidate_seconds);
+        drop.sleep_support_check_timer = non_negative_finite(drop.sleep_support_check_timer);
 
-        drop.age_seconds += clamped_dt;
+        drop.age_seconds = normalized_drop_age(drop.age_seconds + clamped_dt);
         drop.pickup_cooldown = std::max(0.0F, drop.pickup_cooldown - clamped_dt);
-        drop.grounded = false;
+
+        if (dynamic_platform != nullptr && glm::dot(platform_delta, platform_delta) > 1.0e-10F) {
+            auto carried_position = drop.position + platform_delta;
+            const auto support_height = dynamic_platform->support_height(carried_position);
+            if (support_height.has_value() &&
+                std::abs(drop.position.y - *support_height) <= 0.03F) {
+                // Je conserve la position relative d'un drop pose sur le pont;
+                // il reste actif car un support mobile invalide le sommeil monde.
+                carried_position.y = *support_height + kDropCollisionEpsilon;
+                drop.position = carried_position;
+                drop.sleeping = false;
+                drop.grounded = true;
+                drop.sleep_support_valid = false;
+                drop.sleep_candidate_seconds = 0.0F;
+            }
+        }
 
         const auto to_player = player_position_is_finite ? player_position - drop.position : glm::vec3 {};
         const auto distance_sq = player_position_is_finite ? glm::dot(to_player, to_player) : std::numeric_limits<float>::max();
@@ -275,25 +407,79 @@ void ItemDropSystem::update(float dt,
             }
         }
 
-        if (player_position_is_finite && drop.pickup_cooldown <= 0.0F && distance_sq <= magnet_radius_sq && distance_sq > 1.0e-5F) {
+        const auto magnet_active = player_position_is_finite &&
+                                   drop.pickup_cooldown <= 0.0F &&
+                                   distance_sq <= magnet_radius_sq;
+        if (drop.sleeping) {
+            auto should_wake = magnet_active;
+            drop.sleep_support_check_timer += clamped_dt;
+            if (!should_wake && drop.sleep_support_check_timer >= kSleepSupportCheckInterval) {
+                drop.sleep_support_check_timer = 0.0F;
+                ++audit_stats_.support_checks;
+                should_wake = !drop.sleep_support_valid ||
+                              !is_block_collidable(drop_physics_block(
+                                  world,
+                                  drop.sleep_support_block.x,
+                                  drop.sleep_support_block.y,
+                                  drop.sleep_support_block.z));
+            }
+
+            if (!should_wake) {
+                drop.velocity = {};
+                drop.grounded = true;
+                ++iterator;
+                continue;
+            }
+
+            // Je reveille immediatement le drop si le joueur l'attire, et au
+            // prochain controle borne si son bloc support a disparu.
+            drop.sleeping = false;
+            drop.grounded = false;
+            drop.sleep_support_valid = false;
+            drop.sleep_candidate_seconds = 0.0F;
+            ++audit_stats_.woken_drops;
+        }
+
+        if (magnet_active && distance_sq > 1.0e-5F) {
             const auto distance = std::sqrt(distance_sq);
             const auto direction = to_player / distance;
             const auto pull = glm::clamp(7.0F - distance * 1.7F, 0.0F, 7.0F);
             drop.velocity += direction * (pull * clamped_dt);
         }
 
+        drop.grounded = false;
         if (drop_collides_at(world, drop.position)) {
             drop.position.y += 0.02F;
         }
 
         drop.velocity.y = std::max(drop.velocity.y - kDropGravity * clamped_dt, -kDropTerminalVelocity);
-        move_drop_axis(drop, drop.velocity.x * clamped_dt, 0, world);
-        move_drop_axis(drop, drop.velocity.y * clamped_dt, 1, world);
-        move_drop_axis(drop, drop.velocity.z * clamped_dt, 2, world);
+        move_drop_axis(drop, drop.velocity.x * clamped_dt, 0, world, dynamic_platform);
+        move_drop_axis(drop, drop.velocity.y * clamped_dt, 1, world, dynamic_platform);
+        move_drop_axis(drop, drop.velocity.z * clamped_dt, 2, world, dynamic_platform);
+        ++audit_stats_.physics_updates;
 
         const auto friction = drop.grounded ? kGroundFriction : kAirFriction;
         drop.velocity.x *= friction;
         drop.velocity.z *= friction;
+
+        const auto horizontal_velocity_sq =
+            drop.velocity.x * drop.velocity.x + drop.velocity.z * drop.velocity.z;
+        if (drop.grounded &&
+            std::abs(drop.velocity.y) <= kSleepVelocityThreshold &&
+            horizontal_velocity_sq <= kSleepVelocityThreshold * kSleepVelocityThreshold &&
+            !magnet_active) {
+            drop.sleep_candidate_seconds += clamped_dt;
+            if (drop.sleep_candidate_seconds >= kSleepDelaySeconds && drop.sleep_support_valid) {
+                drop.sleeping = true;
+                drop.velocity = {};
+                drop.sleep_support_check_timer = 0.0F;
+            }
+        } else {
+            drop.sleep_candidate_seconds = 0.0F;
+            if (!drop.grounded) {
+                drop.sleep_support_valid = false;
+            }
+        }
 
         const auto pickup_offset = player_position_is_finite ? player_position - drop.position : glm::vec3 {};
         if (player_position_is_finite && drop.pickup_cooldown <= 0.0F && glm::dot(pickup_offset, pickup_offset) <= pickup_radius_sq) {
@@ -309,6 +495,8 @@ void ItemDropSystem::update(float dt,
     }
 
     audit_stats_.active_drops = drops_.size();
+    audit_stats_.sleeping_drops = static_cast<std::size_t>(
+        std::count_if(drops_.begin(), drops_.end(), [](const ItemDrop& drop) { return drop.sleeping; }));
 }
 
 void ItemDropSystem::build_render_instances(const World& world, std::vector<ItemDropRenderInstance>& out) const {
@@ -316,16 +504,17 @@ void ItemDropSystem::build_render_instances(const World& world, std::vector<Item
     out.reserve(drops_.size());
 
     for (const auto& drop : drops_) {
-        if (!inventory_slot_has_item(drop.stack) || !is_finite_vec3(drop.position)) {
+        if (!inventory_slot_has_item(drop.stack) || !is_sane_item_drop_position(drop.position)) {
             continue;
         }
 
+        const auto animation_age = normalized_drop_age(drop.age_seconds);
         out.push_back({
             drop.position,
             drop.stack.block_id,
             drop.stack.count,
-            drop.age_seconds,
-            drop.age_seconds * 1.9F,
+            animation_age,
+            animation_age * 1.9F,
             drop_light_level(world, drop.position, true),
             drop_light_level(world, drop.position, false),
         });
@@ -344,6 +533,8 @@ auto ItemDropSystem::consume_audit_stats() noexcept -> ItemDropAuditStats {
     const auto stats = audit_stats_;
     audit_stats_ = {};
     audit_stats_.active_drops = drops_.size();
+    audit_stats_.sleeping_drops = static_cast<std::size_t>(
+        std::count_if(drops_.begin(), drops_.end(), [](const ItemDrop& drop) { return drop.sleeping; }));
     return stats;
 }
 
@@ -351,7 +542,7 @@ void ItemDropSystem::load_drops(const std::vector<ItemDrop>& drops) {
     drops_.clear();
     drops_.reserve(std::min(drops.size(), kMaxActiveDrops));
     for (auto drop : drops) {
-        if (!sanitize_loaded_drop(drop)) {
+        if (!sanitize_item_drop_state(drop)) {
             continue;
         }
         drops_.push_back(drop);
@@ -361,6 +552,7 @@ void ItemDropSystem::load_drops(const std::vector<ItemDrop>& drops) {
     }
     audit_stats_ = {};
     audit_stats_.active_drops = drops_.size();
+    audit_stats_.sleeping_drops = 0;
 }
 
 void ItemDropSystem::clear() noexcept {

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <ctime>
@@ -13,6 +14,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace valcraft {
 
@@ -39,14 +46,22 @@ auto format_iso_utc(const std::chrono::system_clock::time_point& time_point) -> 
 }
 
 auto make_session_id(const std::chrono::system_clock::time_point& started_at) -> std::string {
+    static std::atomic<std::uint64_t> next_session_sequence {0};
     const auto seconds = format_timestamp_utc(started_at, "%Y%m%d-%H%M%S");
     const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
                                   started_at.time_since_epoch())
                                   .count() %
                               1000LL;
+#ifdef _WIN32
+    const auto process_id = static_cast<std::uint64_t>(_getpid());
+#else
+    const auto process_id = static_cast<std::uint64_t>(getpid());
+#endif
+    const auto sequence = next_session_sequence.fetch_add(1, std::memory_order_relaxed);
 
     std::ostringstream stream;
-    stream << seconds << '-' << std::setw(3) << std::setfill('0') << milliseconds;
+    stream << seconds << '-' << std::setw(3) << std::setfill('0') << milliseconds
+           << '-' << process_id << '-' << sequence;
     return stream.str();
 }
 
@@ -107,33 +122,7 @@ auto indent_block(std::string text, std::string_view indent) -> std::string {
 auto frame_sample_to_json(const FramePerformanceSample& sample) -> std::string {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(6);
-    stream << "{"
-           << "\"frame_index\": " << sample.frame_index
-           << ", \"frame_total_ms\": " << sample.frame_total_ms
-           << ", \"streaming_ms\": " << sample.streaming_ms
-           << ", \"generation_ms\": " << sample.generation_ms
-           << ", \"lighting_ms\": " << sample.lighting_ms
-           << ", \"meshing_ms\": " << sample.meshing_ms
-           << ", \"upload_ms\": " << sample.upload_ms
-           << ", \"shadow_ms\": " << sample.shadow_ms
-           << ", \"world_ms\": " << sample.world_ms
-           << ", \"generated_chunks\": " << sample.generated_chunks
-           << ", \"meshed_chunks\": " << sample.meshed_chunks
-           << ", \"light_nodes_processed\": " << sample.light_nodes_processed
-           << ", \"uploaded_meshes\": " << sample.uploaded_meshes
-           << ", \"pending_generation\": " << sample.pending_generation
-           << ", \"pending_mesh\": " << sample.pending_mesh
-           << ", \"pending_lighting\": " << sample.pending_lighting
-           << ", \"stream_chunk_changes\": " << sample.stream_chunk_changes
-           << ", \"generation_enqueued\": " << sample.generation_enqueued
-           << ", \"generation_pruned\": " << sample.generation_pruned
-           << ", \"unloaded_chunks\": " << sample.unloaded_chunks
-           << ", \"lighting_jobs_completed\": " << sample.lighting_jobs_completed
-           << ", \"visible_chunks\": " << sample.visible_chunks
-           << ", \"shadow_chunks\": " << sample.shadow_chunks
-           << ", \"world_chunks\": " << sample.world_chunks
-           << ", \"dominant_stage\": \"" << performance_stage_name(sample.dominant_stage) << "\""
-           << "}";
+    append_sample_json(stream, sample, "");
     return stream.str();
 }
 
@@ -192,13 +181,25 @@ auto audit_second_to_json(const AuditSecondSample& sample) -> std::string {
            << ", \"frame_ms_avg\": " << sample.frame_ms_avg
            << ", \"frame_ms_p95\": " << sample.frame_ms_p95
            << ", \"frame_ms_max\": " << sample.frame_ms_max
+           << ", \"event_processing_ms_avg\": " << sample.event_processing_ms_avg
+           << ", \"simulation_ms_avg\": " << sample.simulation_ms_avg
+           << ", \"audio_ms_avg\": " << sample.audio_ms_avg
+           << ", \"render_preparation_ms_avg\": " << sample.render_preparation_ms_avg
            << ", \"streaming_ms_avg\": " << sample.streaming_ms_avg
            << ", \"generation_ms_avg\": " << sample.generation_ms_avg
+           << ", \"fluid_ms_avg\": " << sample.fluid_ms_avg
            << ", \"lighting_ms_avg\": " << sample.lighting_ms_avg
            << ", \"meshing_ms_avg\": " << sample.meshing_ms_avg
            << ", \"upload_ms_avg\": " << sample.upload_ms_avg
            << ", \"shadow_ms_avg\": " << sample.shadow_ms_avg
            << ", \"world_ms_avg\": " << sample.world_ms_avg
+           << ", \"render_cpu_ms_avg\": " << sample.render_cpu_ms_avg
+           << ", \"render_overhead_ms_avg\": " << sample.render_overhead_ms_avg
+           << ", \"present_ms_avg\": " << sample.present_ms_avg
+           << ", \"telemetry_ms_avg\": " << sample.telemetry_ms_avg
+           << ", \"residual_ms_avg\": " << sample.residual_ms_avg
+           << ", \"gpu_frame_ms_avg\": " << sample.gpu_frame_ms_avg
+           << ", \"gpu_timing_samples\": " << sample.gpu_timing_samples
            << ", \"input_raw_events\": " << sample.input_raw_events
            << ", \"input_action_events\": " << sample.input_action_events
            << ", \"ui_events\": " << sample.ui_events
@@ -220,6 +221,9 @@ auto audit_second_to_json(const AuditSecondSample& sample) -> std::string {
            << ", \"pending_generation_max\": " << sample.pending_generation_max
            << ", \"pending_mesh_max\": " << sample.pending_mesh_max
            << ", \"pending_lighting_max\": " << sample.pending_lighting_max
+           << ", \"pending_fluid_max\": " << sample.pending_fluid_max
+           << ", \"process_working_set_bytes_max\": " << sample.process_working_set_bytes_max
+           << ", \"process_private_bytes_max\": " << sample.process_private_bytes_max
            << ", \"creature_spawns\": " << sample.creature_spawns
            << ", \"creature_despawns\": " << sample.creature_despawns
            << ", \"creature_attacks\": " << sample.creature_attacks
@@ -249,7 +253,7 @@ auto category_counts_json(const std::array<std::size_t, kAuditCategoryCount>& co
     return stream.str();
 }
 
-auto collect_frame_lines(const std::vector<AuditFrameSample>& samples,
+auto collect_frame_lines(const std::deque<AuditFrameSample>& samples,
                          const PerformanceRunReport& report,
                          const AuditOptions& options) -> std::vector<std::string> {
     std::vector<std::string> lines;
@@ -401,6 +405,7 @@ auto make_audit_run_paths(const AuditOptions& options,
     AuditRunPaths paths {};
     const auto root_directory = std::filesystem::absolute(options.root_directory);
     const auto run_directory_name = run_directory_stamp(started_at) + "-" +
+                                    sanitize_audit_label(session_id) + "-" +
                                     std::string(audit_mode_name(options.mode)) + "-" +
                                     sanitize_audit_label(options.label);
 
@@ -413,7 +418,6 @@ auto make_audit_run_paths(const AuditOptions& options,
     paths.seconds_path = paths.run_directory / "seconds.jsonl";
     paths.frames_path = paths.run_directory / "frames.jsonl";
     paths.spikes_path = paths.run_directory / "spikes.json";
-    (void)session_id;
     return paths;
 }
 
@@ -461,7 +465,6 @@ struct AuditWriter::Impl {
         std::string line {};
         AuditPriority priority = AuditPriority::Normal;
         AuditEventCategory category = AuditEventCategory::Session;
-        bool counts_as_event = false;
     };
 
     AuditOptions options {};
@@ -474,23 +477,20 @@ struct AuditWriter::Impl {
     std::condition_variable wake_condition {};
     std::thread worker {};
     std::vector<std::string> errors {};
-    std::array<std::size_t, kAuditCategoryCount> dropped_event_counts {};
+    AuditWriterCounters counters {};
     bool started = false;
+    bool stopping = false;
     bool stop_requested = false;
     bool failed = false;
 
-    [[nodiscard]] auto is_active() const noexcept -> bool {
+    [[nodiscard]] auto is_active_unlocked() const noexcept -> bool {
         return started && !stop_requested && !failed;
     }
 
-    void record_failure(std::string message) {
-        std::lock_guard lock(mutex);
-        if (failed) {
-            return;
+    void append_errors_unlocked(std::vector<std::string>* output) const {
+        if (output != nullptr && !errors.empty()) {
+            output->insert(output->end(), errors.begin(), errors.end());
         }
-        failed = true;
-        errors.push_back(std::move(message));
-        wake_condition.notify_all();
     }
 
     [[nodiscard]] auto open_stream(std::ofstream& stream, const std::filesystem::path& path) -> bool {
@@ -503,7 +503,51 @@ struct AuditWriter::Impl {
         return true;
     }
 
-    void flush_batch(std::deque<PendingLine>& batch) {
+    void close_streams_unlocked() {
+        if (events_stream.is_open()) {
+            events_stream.close();
+        }
+        if (seconds_stream.is_open()) {
+            seconds_stream.close();
+        }
+        if (frames_stream.is_open()) {
+            frames_stream.close();
+        }
+        events_stream.clear();
+        seconds_stream.clear();
+        frames_stream.clear();
+    }
+
+    void count_written_unlocked(const PendingLine& entry) noexcept {
+        switch (entry.target) {
+        case Target::Events:
+            ++counters.written_event_counts[audit_event_category_index(entry.category)];
+            break;
+        case Target::Seconds:
+            ++counters.written_second_samples;
+            break;
+        case Target::Frames:
+            ++counters.written_frames;
+            break;
+        }
+    }
+
+    void count_dropped_unlocked(const PendingLine& entry) noexcept {
+        switch (entry.target) {
+        case Target::Events:
+            ++counters.dropped_event_counts[audit_event_category_index(entry.category)];
+            break;
+        case Target::Seconds:
+            ++counters.dropped_second_samples;
+            break;
+        case Target::Frames:
+            ++counters.dropped_frames;
+            break;
+        }
+    }
+
+    [[nodiscard]] auto flush_batch(const std::deque<PendingLine>& batch) -> bool {
+        std::size_t written_count = 0;
         for (const auto& entry : batch) {
             std::ofstream* target = nullptr;
             switch (entry.target) {
@@ -520,10 +564,32 @@ struct AuditWriter::Impl {
 
             (*target) << entry.line << '\n';
             if (!target->good()) {
-                record_failure("Audit writer failed while flushing JSONL output");
-                return;
+                std::lock_guard lock(mutex);
+                for (std::size_t index = 0; index < written_count; ++index) {
+                    count_written_unlocked(batch[index]);
+                }
+                for (std::size_t index = written_count; index < batch.size(); ++index) {
+                    count_dropped_unlocked(batch[index]);
+                }
+                for (const auto& queued_entry : queue) {
+                    count_dropped_unlocked(queued_entry);
+                }
+                queue.clear();
+                failed = true;
+                errors.emplace_back("Audit writer failed while flushing JSONL output");
+                wake_condition.notify_all();
+                return false;
+            }
+            ++written_count;
+        }
+
+        {
+            std::lock_guard lock(mutex);
+            for (const auto& entry : batch) {
+                count_written_unlocked(entry);
             }
         }
+        return true;
     }
 
     void worker_main() {
@@ -537,7 +603,7 @@ struct AuditWriter::Impl {
             {
                 std::unique_lock lock(mutex);
                 wake_condition.wait_for(lock, flush_interval, [&] {
-                    return stop_requested || failed || !queue.empty();
+                    return stop_requested || failed || queue.size() >= max_batch_size;
                 });
 
                 if (queue.empty()) {
@@ -554,8 +620,7 @@ struct AuditWriter::Impl {
                 }
             }
 
-            flush_batch(batch);
-            if (failed) {
+            if (!flush_batch(batch)) {
                 break;
             }
         }
@@ -563,30 +628,29 @@ struct AuditWriter::Impl {
 
     [[nodiscard]] auto enqueue_line(PendingLine line) -> bool {
         std::lock_guard lock(mutex);
-        if (!is_active()) {
+        if (!is_active_unlocked()) {
+            return false;
+        }
+
+        if (options.writer_queue_capacity == 0) {
+            count_dropped_unlocked(line);
             return false;
         }
 
         if (queue.size() >= options.writer_queue_capacity) {
-            const auto low_priority = line.priority == AuditPriority::Low || line.priority == AuditPriority::Normal;
-            if (line.counts_as_event && low_priority) {
-                ++dropped_event_counts[audit_event_category_index(line.category)];
+            const auto droppable = std::min_element(queue.begin(), queue.end(), [](const PendingLine& left,
+                                                                                   const PendingLine& right) {
+                return static_cast<std::uint8_t>(left.priority) < static_cast<std::uint8_t>(right.priority);
+            });
+
+            if (droppable == queue.end() ||
+                static_cast<std::uint8_t>(droppable->priority) >= static_cast<std::uint8_t>(line.priority)) {
+                count_dropped_unlocked(line);
                 return false;
             }
 
-            const auto droppable = std::find_if(queue.begin(), queue.end(), [](const PendingLine& pending) {
-                return pending.counts_as_event &&
-                       (pending.priority == AuditPriority::Low || pending.priority == AuditPriority::Normal);
-            });
-            if (droppable != queue.end()) {
-                ++dropped_event_counts[audit_event_category_index(droppable->category)];
-                queue.erase(droppable);
-            } else {
-                if (line.counts_as_event) {
-                    ++dropped_event_counts[audit_event_category_index(line.category)];
-                }
-                return false;
-            }
+            count_dropped_unlocked(*droppable);
+            queue.erase(droppable);
         }
 
         queue.push_back(std::move(line));
@@ -599,80 +663,118 @@ AuditWriter::AuditWriter()
     : impl_(std::make_unique<Impl>()) {
 }
 
-AuditWriter::~AuditWriter() = default;
+AuditWriter::~AuditWriter() {
+    stop(nullptr);
+}
 
 auto AuditWriter::start(const AuditOptions& options,
                         const AuditRunPaths& paths,
                         std::vector<std::string>* errors) -> bool {
+    std::unique_lock lock(impl_->mutex);
+    if (impl_->started || impl_->stopping || impl_->worker.joinable()) {
+        impl_->errors.emplace_back("Audit writer is already running or stopping");
+        impl_->append_errors_unlocked(errors);
+        return false;
+    }
+
     impl_->options = options;
     impl_->paths = paths;
     impl_->errors.clear();
     impl_->queue.clear();
-    impl_->dropped_event_counts.fill(0);
+    impl_->counters = {};
     impl_->stop_requested = false;
     impl_->failed = false;
+    impl_->close_streams_unlocked();
 
-    std::filesystem::create_directories(paths.run_directory);
+    try {
+        std::filesystem::create_directories(paths.run_directory);
+    } catch (const std::exception& exception) {
+        impl_->failed = true;
+        impl_->errors.push_back(std::string("Unable to create audit run directory: ") + exception.what());
+        impl_->append_errors_unlocked(errors);
+        return false;
+    }
+
     if (!impl_->open_stream(impl_->events_stream, paths.events_path) ||
         !impl_->open_stream(impl_->seconds_stream, paths.seconds_path) ||
         !impl_->open_stream(impl_->frames_stream, paths.frames_path)) {
-        if (errors != nullptr) {
-            errors->insert(errors->end(), impl_->errors.begin(), impl_->errors.end());
-        }
+        impl_->close_streams_unlocked();
+        impl_->append_errors_unlocked(errors);
         return false;
     }
 
     impl_->started = true;
-    impl_->worker = std::thread([state = impl_.get()] { state->worker_main(); });
+    try {
+        impl_->worker = std::thread([state = impl_.get()] { state->worker_main(); });
+    } catch (const std::exception& exception) {
+        impl_->started = false;
+        impl_->failed = true;
+        impl_->close_streams_unlocked();
+        impl_->errors.push_back(std::string("Unable to start audit writer thread: ") + exception.what());
+        impl_->append_errors_unlocked(errors);
+        return false;
+    }
     return true;
 }
 
 void AuditWriter::stop(std::vector<std::string>* errors) {
+    std::thread worker;
     {
-        std::lock_guard lock(impl_->mutex);
-        if (!impl_->started) {
-            if (errors != nullptr && !impl_->errors.empty()) {
-                errors->insert(errors->end(), impl_->errors.begin(), impl_->errors.end());
-            }
+        std::unique_lock lock(impl_->mutex);
+        if (impl_->stopping) {
+            impl_->wake_condition.wait(lock, [&] { return !impl_->stopping; });
+            impl_->append_errors_unlocked(errors);
             return;
         }
+        if (!impl_->started) {
+            impl_->append_errors_unlocked(errors);
+            return;
+        }
+
         impl_->stop_requested = true;
+        impl_->started = false;
+        impl_->stopping = true;
+        worker = std::move(impl_->worker);
         impl_->wake_condition.notify_all();
     }
 
-    if (impl_->worker.joinable()) {
-        impl_->worker.join();
+    if (worker.joinable()) {
+        worker.join();
     }
 
-    impl_->started = false;
-    impl_->events_stream.close();
-    impl_->seconds_stream.close();
-    impl_->frames_stream.close();
-    if (errors != nullptr && !impl_->errors.empty()) {
-        errors->insert(errors->end(), impl_->errors.begin(), impl_->errors.end());
+    {
+        std::lock_guard lock(impl_->mutex);
+        impl_->close_streams_unlocked();
+        impl_->stopping = false;
+        impl_->wake_condition.notify_all();
+        impl_->append_errors_unlocked(errors);
     }
 }
 
 auto AuditWriter::enqueue_event(std::string line, AuditPriority priority, AuditEventCategory category) -> bool {
-    return impl_->enqueue_line({Impl::Target::Events, std::move(line), priority, category, true});
+    return impl_->enqueue_line({Impl::Target::Events, std::move(line), priority, category});
 }
 
 auto AuditWriter::enqueue_second(std::string line, AuditPriority priority) -> bool {
-    return impl_->enqueue_line({Impl::Target::Seconds, std::move(line), priority, AuditEventCategory::Performance, false});
+    return impl_->enqueue_line({Impl::Target::Seconds, std::move(line), priority, AuditEventCategory::Performance});
 }
 
 auto AuditWriter::enqueue_frame(std::string line, AuditPriority priority) -> bool {
-    return impl_->enqueue_line({Impl::Target::Frames, std::move(line), priority, AuditEventCategory::Performance, false});
+    return impl_->enqueue_line({Impl::Target::Frames, std::move(line), priority, AuditEventCategory::Performance});
 }
 
 auto AuditWriter::active() const noexcept -> bool {
     std::lock_guard lock(impl_->mutex);
-    return impl_->is_active();
+    return impl_->is_active_unlocked();
+}
+
+auto AuditWriter::counters() const -> AuditWriterCounters {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->counters;
 }
 
 auto AuditWriter::dropped_event_counts() const -> std::array<std::size_t, kAuditCategoryCount> {
-    std::lock_guard lock(impl_->mutex);
-    return impl_->dropped_event_counts;
+    return counters().dropped_event_counts;
 }
 
 auto build_summary_text(const AuditManifest& manifest,
@@ -692,7 +794,9 @@ auto build_summary_text(const AuditManifest& manifest,
     stream << "  duration_seconds=" << manifest.duration_seconds
            << " recorded_frames=" << manifest.recorded_frames
            << " written_frames=" << manifest.written_frames
-           << " second_samples=" << manifest.second_samples << '\n';
+           << " dropped_frames=" << manifest.dropped_frames
+           << " second_samples=" << manifest.second_samples
+           << " dropped_second_samples=" << manifest.dropped_second_samples << '\n';
     stream << "  events_written=" << total_written_events
            << " events_dropped=" << total_dropped_events
            << " spike_windows=" << report.spike_windows.size() << '\n';
@@ -740,8 +844,10 @@ auto build_summary_json(const AuditManifest& manifest,
     stream << "    \"events_written\": " << total_written_events << ",\n";
     stream << "    \"events_dropped\": " << total_dropped_events << ",\n";
     stream << "    \"second_samples\": " << manifest.second_samples << ",\n";
+    stream << "    \"dropped_second_samples\": " << manifest.dropped_second_samples << ",\n";
     stream << "    \"recorded_frames\": " << manifest.recorded_frames << ",\n";
     stream << "    \"written_frames\": " << manifest.written_frames << ",\n";
+    stream << "    \"dropped_frames\": " << manifest.dropped_frames << ",\n";
     stream << "    \"spike_windows\": " << report.spike_windows.size() << ",\n";
     stream << "    \"written_event_counts\": " << category_counts_json(manifest.written_event_counts) << ",\n";
     stream << "    \"dropped_event_counts\": " << category_counts_json(manifest.dropped_event_counts) << '\n';
@@ -798,8 +904,10 @@ auto build_manifest_json(const AuditManifest& manifest) -> std::string {
     stream << "  \"written_event_counts\": " << category_counts_json(manifest.written_event_counts) << ",\n";
     stream << "  \"dropped_event_counts\": " << category_counts_json(manifest.dropped_event_counts) << ",\n";
     stream << "  \"second_samples\": " << manifest.second_samples << ",\n";
+    stream << "  \"dropped_second_samples\": " << manifest.dropped_second_samples << ",\n";
     stream << "  \"recorded_frames\": " << manifest.recorded_frames << ",\n";
     stream << "  \"written_frames\": " << manifest.written_frames << ",\n";
+    stream << "  \"dropped_frames\": " << manifest.dropped_frames << ",\n";
     stream << "  \"errors\": " << audit_json_array(errors_json) << ",\n";
     stream << "  \"produced_files\": " << audit_json_array(files_json) << '\n';
     stream << "}\n";
@@ -808,7 +916,7 @@ auto build_manifest_json(const AuditManifest& manifest) -> std::string {
 
 auto build_spikes_json(const AuditManifest& manifest,
                        const PerformanceRunReport& report,
-                       const std::vector<AuditEvent>& events) -> std::string {
+                       const std::deque<AuditEvent>& events) -> std::string {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(6);
     stream << "{\n";
@@ -854,15 +962,17 @@ auto build_spikes_json(const AuditManifest& manifest,
 }
 
 struct AuditRecorder::Impl {
+    static constexpr std::size_t kRetainedEventContext = 4'096U;
+    static constexpr std::size_t kRetainedMeasureFrames = 36'000U;
+
     AuditOptions options {};
     AuditStartContext start_context {};
     AuditRunPaths paths {};
     AuditWriter writer {};
     std::vector<std::string> errors {};
-    std::vector<AuditEvent> events {};
-    std::vector<AuditFrameSample> frames {};
-    std::vector<AuditSecondSample> seconds {};
-    std::array<std::size_t, kAuditCategoryCount> written_event_counts {};
+    std::deque<AuditEvent> events {};
+    std::deque<AuditFrameSample> frames {};
+    std::size_t recorded_frame_count = 0;
     std::string session_id {};
     std::chrono::system_clock::time_point started_at_system {};
     std::chrono::steady_clock::time_point started_at_steady {};
@@ -940,7 +1050,9 @@ void AuditRecorder::record_event(AuditEvent event, AuditPriority priority) {
         return;
     }
 
-    ++impl_->written_event_counts[audit_event_category_index(event.category)];
+    if (impl_->events.size() >= Impl::kRetainedEventContext) {
+        impl_->events.pop_front();
+    }
     impl_->events.push_back(std::move(event));
 }
 
@@ -953,13 +1065,19 @@ void AuditRecorder::record_frame(AuditFrameSample sample, AuditPriority priority
     sample.session_id = impl_->session_id;
     sample.mode = impl_->options.mode;
     sample.t_us = impl_->elapsed_microseconds();
-    impl_->frames.push_back(sample);
+    ++impl_->recorded_frame_count;
 
     if (impl_->options.mode == AuditMode::Forensic || impl_->options.trace_frames) {
         if (!impl_->writer.enqueue_frame(audit_frame_to_json(sample), priority) && !impl_->writer.active()) {
             impl_->disable("Audit writer disabled while recording frame traces");
         }
+        return;
     }
+
+    if (impl_->frames.size() >= Impl::kRetainedMeasureFrames) {
+        impl_->frames.pop_front();
+    }
+    impl_->frames.push_back(std::move(sample));
 }
 
 void AuditRecorder::record_second(AuditSecondSample sample, AuditPriority priority) {
@@ -971,8 +1089,6 @@ void AuditRecorder::record_second(AuditSecondSample sample, AuditPriority priori
     sample.session_id = impl_->session_id;
     sample.mode = impl_->options.mode;
     sample.t_us = impl_->elapsed_microseconds();
-    impl_->seconds.push_back(sample);
-
     if (!impl_->writer.enqueue_second(audit_second_to_json(sample), priority) && !impl_->writer.active()) {
         impl_->disable("Audit writer disabled while recording second aggregates");
     }
@@ -992,6 +1108,7 @@ void AuditRecorder::finalize(const AuditFinalizeContext& context) {
 
     impl_->finalized = true;
     impl_->writer.stop(&impl_->errors);
+    const auto writer_counters = impl_->writer.counters();
     if (!impl_->options.enabled) {
         return;
     }
@@ -1010,32 +1127,23 @@ void AuditRecorder::finalize(const AuditFinalizeContext& context) {
     manifest.ended_at_utc = format_iso_utc(ended_at);
     manifest.duration_seconds = std::chrono::duration<double>(ended_at - impl_->started_at_system).count();
     manifest.paths = impl_->paths;
-    manifest.written_event_counts = impl_->written_event_counts;
-    manifest.dropped_event_counts = impl_->writer.dropped_event_counts();
-    manifest.second_samples = impl_->seconds.size();
-    manifest.recorded_frames = impl_->frames.size();
+    manifest.written_event_counts = writer_counters.written_event_counts;
+    manifest.dropped_event_counts = writer_counters.dropped_event_counts;
+    manifest.second_samples = writer_counters.written_second_samples;
+    manifest.dropped_second_samples = writer_counters.dropped_second_samples;
+    manifest.recorded_frames = impl_->recorded_frame_count;
     manifest.errors = impl_->errors;
 
     const auto frame_lines = collect_frame_lines(impl_->frames, context.performance_report, impl_->options);
-    manifest.written_frames = frame_lines.size();
-
-    std::vector<std::string> event_lines;
-    event_lines.reserve(impl_->events.size());
-    for (const auto& event : impl_->events) {
-        event_lines.push_back(audit_event_to_json(event));
-    }
-
-    std::vector<std::string> second_lines;
-    second_lines.reserve(impl_->seconds.size());
-    for (const auto& second : impl_->seconds) {
-        second_lines.push_back(audit_second_to_json(second));
-    }
+    const auto streams_contain_frame_trace = impl_->options.mode == AuditMode::Forensic || impl_->options.trace_frames;
+    manifest.written_frames = streams_contain_frame_trace ? writer_counters.written_frames : frame_lines.size();
+    manifest.dropped_frames = streams_contain_frame_trace ? writer_counters.dropped_frames : 0;
 
     const auto should_write_compatibility_json = !impl_->options.compatibility_json_path.empty();
     try {
-        write_lines_file(impl_->paths.events_path, event_lines);
-        write_lines_file(impl_->paths.seconds_path, second_lines);
-        write_lines_file(impl_->paths.frames_path, frame_lines);
+        if (!streams_contain_frame_trace) {
+            write_lines_file(impl_->paths.frames_path, frame_lines);
+        }
         write_text_file(impl_->paths.spikes_path, build_spikes_json(manifest, context.performance_report, impl_->events));
 
         const auto summary_text = build_summary_text(

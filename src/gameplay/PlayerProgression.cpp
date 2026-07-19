@@ -96,6 +96,16 @@ auto block_break_experience(BlockId block_id) noexcept -> std::uint64_t {
     case BlockType::PineWood:
     case BlockType::Planks:
         return 15ULL;
+    case BlockType::CoalOre:
+        return 20ULL;
+    case BlockType::IronOre:
+        return 32ULL;
+    case BlockType::GoldOre:
+        return 48ULL;
+    case BlockType::DiamondOre:
+        return 72ULL;
+    case BlockType::MetallicAlloyOre:
+        return 96ULL;
     case BlockType::Air:
     case BlockType::Pastron:
     case BlockType::RoundShield:
@@ -103,6 +113,9 @@ auto block_break_experience(BlockId block_id) noexcept -> std::uint64_t {
     case BlockType::Spear:
     case BlockType::Shoes:
     case BlockType::Pants:
+    case BlockType::Pickaxe:
+    case BlockType::Axe:
+    case BlockType::Shovel:
         return 0ULL;
     default:
         return is_block_breakable(item_id) ? 10ULL : 0ULL;

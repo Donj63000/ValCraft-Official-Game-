@@ -26,6 +26,11 @@ constexpr float kMaterialGore = 0.56F;
 constexpr float kMaterialZombieFlesh = 0.74F;
 constexpr float kMaterialZombieBone = 0.88F;
 constexpr float kMaterialZombieGlow = 1.00F;
+constexpr float kMaterialCrewFabric = 0.22F;
+constexpr float kMaterialCrewSkin = 0.34F;
+constexpr float kMaterialCrewLeather = 0.52F;
+constexpr float kMaterialCrewWood = 0.58F;
+constexpr float kMaterialCrewMetal = 0.86F;
 constexpr std::array<float, 2> kSides {{-1.0F, 1.0F}};
 
 struct FaceDefinition {
@@ -1330,6 +1335,501 @@ void append_day_villager(std::vector<CreaturePartInstance>& mesh,
     }
 }
 
+auto safe_crew_role(CrewVisualRole role) noexcept -> CrewVisualRole {
+    const auto value = static_cast<std::uint8_t>(role);
+    return value <= static_cast<std::uint8_t>(CrewVisualRole::Quartermaster) ? role : CrewVisualRole::Deckhand;
+}
+
+auto safe_crew_activity(CrewVisualActivity activity) noexcept -> CrewVisualActivity {
+    const auto value = static_cast<std::uint8_t>(activity);
+    return value <= static_cast<std::uint8_t>(CrewVisualActivity::Recover) ? activity : CrewVisualActivity::Idle;
+}
+
+auto finite_or(float value, float fallback) noexcept -> float {
+    return std::isfinite(value) ? value : fallback;
+}
+
+auto finite_position(const glm::vec3& position) noexcept -> glm::vec3 {
+    return {
+        finite_or(position.x, 0.0F),
+        finite_or(position.y, 0.0F),
+        finite_or(position.z, 0.0F),
+    };
+}
+
+auto crew_cloth_tile(CrewVisualRole role) noexcept -> CreatureAtlasTile {
+    switch (role) {
+    case CrewVisualRole::Captain:
+        return CreatureAtlasTile::CrewNavyCloth;
+    case CrewVisualRole::Fisher:
+        return CreatureAtlasTile::CrewIvoryCloth;
+    case CrewVisualRole::Rigger:
+        return CreatureAtlasTile::CrewStripedCloth;
+    case CrewVisualRole::WaterTender:
+        return CreatureAtlasTile::CrewOchreCloth;
+    case CrewVisualRole::Deckhand:
+        return CreatureAtlasTile::CrewRedCloth;
+    case CrewVisualRole::Quartermaster:
+    default:
+        return CreatureAtlasTile::CrewBurgundyCloth;
+    }
+}
+
+auto crew_skin_tile(std::uint32_t seed) noexcept -> CreatureAtlasTile {
+    switch ((seed >> 3U) % 3U) {
+    case 0U:
+        return CreatureAtlasTile::CrewSkinLight;
+    case 1U:
+        return CreatureAtlasTile::CrewSkinMedium;
+    case 2U:
+    default:
+        return CreatureAtlasTile::CrewSkinDark;
+    }
+}
+
+auto crew_hair_tile(std::uint32_t seed, CrewVisualRole role) noexcept -> CreatureAtlasTile {
+    if (role == CrewVisualRole::Captain && ((seed >> 11U) & 1U) != 0U) {
+        return CreatureAtlasTile::CrewHairGrey;
+    }
+    switch ((seed >> 7U) % 3U) {
+    case 0U:
+        return CreatureAtlasTile::CrewHairBrown;
+    case 1U:
+        return CreatureAtlasTile::CrewHairBlack;
+    case 2U:
+    default:
+        return CreatureAtlasTile::CrewHairGrey;
+    }
+}
+
+void append_crew_box(std::vector<CreaturePartInstance>& parts,
+                     const glm::mat4& root,
+                     const glm::vec3& center,
+                     const glm::vec3& half_extent,
+                     const glm::vec3& rotation,
+                     CreatureAtlasTile tile,
+                     float material_class,
+                     float cavity_mask = 0.08F) {
+    append_box(parts, root, center, half_extent, rotation, tile, 0.0F, 0.0F, material_class, cavity_mask, 0.0F);
+}
+
+void append_crew_box(std::vector<CreaturePartInstance>& parts,
+                     const glm::mat4& root,
+                     const glm::vec3& center,
+                     const glm::vec3& half_extent,
+                     float uniform_rotation,
+                     CreatureAtlasTile tile,
+                     float material_class,
+                     float cavity_mask = 0.08F) {
+    append_crew_box(
+        parts,
+        root,
+        center,
+        half_extent,
+        glm::vec3 {uniform_rotation},
+        tile,
+        material_class,
+        cavity_mask);
+}
+
+void append_crew_segment(std::vector<CreaturePartInstance>& parts,
+                         const glm::mat4& root,
+                         const glm::vec3& start,
+                         const glm::vec3& end,
+                         const glm::vec2& half_width,
+                         CreatureAtlasTile tile,
+                         float material_class,
+                         float cavity_mask = 0.08F) {
+    const auto delta = end - start;
+    const auto length = glm::length(delta);
+    if (!std::isfinite(length) || length <= 1.0e-4F || half_width.x <= 1.0e-4F || half_width.y <= 1.0e-4F) {
+        return;
+    }
+
+    const auto axis_y = delta / length;
+    const auto reference = std::abs(glm::dot(axis_y, glm::vec3 {0.0F, 1.0F, 0.0F})) > 0.94F
+                               ? glm::vec3 {1.0F, 0.0F, 0.0F}
+                               : glm::vec3 {0.0F, 1.0F, 0.0F};
+    const auto axis_x = glm::normalize(glm::cross(reference, axis_y));
+    const auto axis_z = glm::normalize(glm::cross(axis_y, axis_x));
+    auto basis = glm::mat4 {1.0F};
+    basis[0] = glm::vec4 {axis_x, 0.0F};
+    basis[1] = glm::vec4 {axis_y, 0.0F};
+    basis[2] = glm::vec4 {axis_z, 0.0F};
+
+    auto transform = glm::translate(root, (start + end) * 0.5F);
+    transform *= basis;
+    transform = glm::scale(transform, glm::vec3 {half_width.x * 2.0F, length + 0.018F, half_width.y * 2.0F});
+    parts.push_back({
+        transform,
+        make_uniform_uvs(tile),
+        0.0F,
+        0.0F,
+        material_class,
+        cavity_mask,
+        0.0F,
+    });
+}
+
+struct CrewPose {
+    std::array<glm::vec3, 2> elbows {};
+    std::array<glm::vec3, 2> hands {};
+    float crouch = 0.0F;
+    float body_lean = 0.0F;
+    float head_pitch = 0.0F;
+    float head_yaw = 0.0F;
+    float stride = 0.0F;
+};
+
+auto build_crew_pose(const CrewRenderInstance& crew, CrewVisualActivity activity, float phase) noexcept -> CrewPose {
+    const auto animation_time = finite_or(crew.animation_time, 0.0F);
+    const auto motion = saturate(finite_or(crew.motion_amount, 0.0F));
+    const auto cycle = std::sin(animation_time * 5.4F + phase * kTwoPi);
+    const auto slow_cycle = std::sin(animation_time * 2.2F + phase * kTwoPi);
+    CrewPose pose {};
+    pose.stride = activity == CrewVisualActivity::Walk ? cycle * motion : 0.0F;
+    pose.head_yaw = slow_cycle * 0.035F;
+    for (std::size_t index = 0; index < kSides.size(); ++index) {
+        const auto side = kSides[index];
+        const auto arm_swing = pose.stride * side;
+        pose.elbows[index] = {-0.015F - arm_swing * 0.065F, 1.105F, side * 0.225F};
+        pose.hands[index] = {0.030F - arm_swing * 0.135F, 0.910F, side * 0.205F};
+    }
+
+    switch (activity) {
+    case CrewVisualActivity::Steer:
+        pose.body_lean = 0.035F + slow_cycle * 0.015F;
+        pose.elbows = {{{0.205F, 1.285F, -0.235F}, {0.205F, 1.285F, 0.235F}}};
+        pose.hands = {{{0.455F, 1.175F + slow_cycle * 0.025F, -0.190F}, {0.455F, 1.175F - slow_cycle * 0.025F, 0.190F}}};
+        break;
+    case CrewVisualActivity::Inspect:
+        pose.head_pitch = -0.075F;
+        pose.elbows = {{{0.175F, 1.405F, -0.185F}, {-0.035F, 1.105F, 0.225F}}};
+        pose.hands = {{{0.315F, 1.550F, -0.090F}, {0.075F, 0.985F, 0.190F}}};
+        break;
+    case CrewVisualActivity::FishCast:
+        pose.body_lean = -0.055F;
+        pose.head_pitch = -0.035F;
+        pose.elbows = {{{0.205F, 1.370F, -0.165F}, {0.145F, 1.260F, 0.175F}}};
+        pose.hands = {{{0.430F, 1.455F, -0.075F}, {0.365F, 1.270F, 0.075F}}};
+        break;
+    case CrewVisualActivity::FishWait:
+        pose.head_pitch = 0.055F;
+        pose.elbows = {{{0.185F, 1.215F, -0.175F}, {0.150F, 1.145F, 0.175F}}};
+        pose.hands = {{{0.405F, 1.155F, -0.070F}, {0.355F, 1.075F, 0.070F}}};
+        break;
+    case CrewVisualActivity::FishReel:
+        pose.body_lean = 0.060F + cycle * 0.025F;
+        pose.elbows = {{{0.185F, 1.285F, -0.170F}, {0.150F, 1.155F, 0.170F}}};
+        pose.hands = {{{0.415F, 1.235F + cycle * 0.045F, -0.065F}, {0.355F, 1.075F - cycle * 0.035F, 0.065F}}};
+        break;
+    case CrewVisualActivity::TendWater:
+        pose.crouch = 0.075F;
+        pose.body_lean = 0.085F;
+        pose.elbows = {{{0.170F, 1.125F, -0.190F}, {0.215F, 1.095F, 0.190F}}};
+        pose.hands = {{{0.380F, 0.965F + cycle * 0.025F, -0.145F}, {0.420F, 0.945F - cycle * 0.025F, 0.145F}}};
+        break;
+    case CrewVisualActivity::Carry:
+        pose.body_lean = 0.045F;
+        pose.elbows = {{{0.170F, 1.105F, -0.230F}, {0.170F, 1.105F, 0.230F}}};
+        pose.hands = {{{0.405F, 0.960F, -0.185F}, {0.405F, 0.960F, 0.185F}}};
+        break;
+    case CrewVisualActivity::HaulRope:
+        pose.body_lean = 0.105F + cycle * 0.045F;
+        pose.crouch = 0.035F;
+        pose.elbows = {{{0.145F, 1.275F, -0.175F}, {0.245F, 1.065F, 0.175F}}};
+        pose.hands = {{{0.375F, 1.185F, -0.060F}, {0.450F, 0.925F, 0.060F}}};
+        break;
+    case CrewVisualActivity::Scrub:
+        pose.body_lean = 0.120F;
+        pose.crouch = 0.080F;
+        pose.elbows = {{{0.155F, 1.215F, -0.165F}, {0.260F, 0.980F, 0.165F}}};
+        pose.hands = {{{0.340F, 1.145F, -0.055F}, {0.455F, 0.825F, 0.055F}}};
+        break;
+    case CrewVisualActivity::TurnCapstan:
+        pose.body_lean = 0.115F;
+        pose.crouch = 0.040F;
+        pose.elbows = {{{0.230F, 1.180F, -0.205F}, {0.230F, 1.180F, 0.205F}}};
+        pose.hands = {{{0.485F, 1.055F, -0.155F}, {0.485F, 1.055F, 0.155F}}};
+        break;
+    case CrewVisualActivity::SortCargo:
+        pose.body_lean = 0.130F;
+        pose.crouch = 0.135F;
+        pose.head_pitch = 0.110F;
+        pose.elbows = {{{0.165F, 1.055F, -0.190F}, {0.165F, 1.055F, 0.190F}}};
+        pose.hands = {{{0.360F, 0.785F + cycle * 0.025F, -0.130F}, {0.360F, 0.785F - cycle * 0.025F, 0.130F}}};
+        break;
+    case CrewVisualActivity::Socialize:
+        pose.head_yaw = slow_cycle * 0.110F;
+        pose.elbows[0] = {0.090F, 1.335F, -0.210F};
+        pose.hands[0] = {0.265F, 1.455F + slow_cycle * 0.045F, -0.185F};
+        pose.elbows[1] = {0.020F, 1.100F, 0.225F};
+        pose.hands[1] = {0.115F, 1.015F, 0.190F};
+        break;
+    case CrewVisualActivity::Rest:
+        pose.crouch = 0.095F;
+        pose.head_pitch = 0.035F;
+        pose.elbows = {{{0.095F, 1.180F, -0.225F}, {0.095F, 1.100F, 0.225F}}};
+        pose.hands = {{{0.245F, 1.080F, 0.105F}, {0.235F, 1.155F, -0.105F}}};
+        break;
+    case CrewVisualActivity::Hurt:
+        pose.body_lean = -0.120F;
+        pose.head_pitch = -0.090F;
+        pose.elbows = {{{-0.105F, 1.390F, -0.250F}, {-0.105F, 1.390F, 0.250F}}};
+        pose.hands = {{{0.010F, 1.570F, -0.300F}, {0.010F, 1.570F, 0.300F}}};
+        break;
+    case CrewVisualActivity::Recover:
+        pose.crouch = 0.180F * (1.0F - phase);
+        pose.body_lean = 0.150F * (1.0F - phase);
+        pose.elbows[0] = {0.125F, 1.075F, -0.225F};
+        pose.hands[0] = {0.315F, 0.760F, -0.205F};
+        break;
+    case CrewVisualActivity::Idle:
+    case CrewVisualActivity::Walk:
+    case CrewVisualActivity::KnockedOut:
+    default:
+        break;
+    }
+    return pose;
+}
+
+void append_crew_role_details(std::vector<CreaturePartInstance>& parts,
+                              const glm::mat4& root,
+                              CrewVisualRole role,
+                              CreatureAtlasTile cloth,
+                              CreatureAtlasTile hair,
+                              float scale,
+                              float body_y) {
+    const auto fabric = kMaterialCrewFabric;
+    const auto metal = kMaterialCrewMetal;
+    switch (role) {
+    case CrewVisualRole::Captain:
+        // Je construis un tricorne en plusieurs volumes pour garder une silhouette lisible de loin.
+        append_crew_box(parts, root, {0.015F, body_y + 0.692F, 0.0F}, {0.185F, 0.026F, 0.225F}, {0.0F}, cloth, fabric);
+        append_crew_box(parts, root, {0.010F, body_y + 0.737F, -0.125F}, {0.145F, 0.048F, 0.045F}, {0.15F, 0.06F, 0.0F}, cloth, fabric);
+        append_crew_box(parts, root, {0.010F, body_y + 0.737F, 0.125F}, {0.145F, 0.048F, 0.045F}, {-0.15F, -0.06F, 0.0F}, cloth, fabric);
+        append_crew_box(parts, root, {-0.105F, body_y + 0.735F, 0.0F}, {0.050F, 0.050F, 0.135F}, {0.0F, 0.0F, 0.18F}, cloth, fabric);
+        append_crew_box(parts, root, {0.188F, body_y + 0.172F, -0.185F}, {0.030F, 0.030F, 0.100F}, {0.0F}, CreatureAtlasTile::CrewGold, metal, 0.04F);
+        append_crew_box(parts, root, {0.188F, body_y + 0.172F, 0.185F}, {0.030F, 0.030F, 0.100F}, {0.0F}, CreatureAtlasTile::CrewGold, metal, 0.04F);
+        for (int button = 0; button < 3; ++button) {
+            append_crew_box(parts, root, {0.188F, body_y + 0.205F - static_cast<float>(button) * 0.105F, 0.0F},
+                            {0.014F, 0.014F, 0.014F}, {0.0F}, CreatureAtlasTile::CrewGold, metal, 0.02F);
+        }
+        append_crew_box(parts, root, {-0.085F, body_y - 0.210F, -0.105F}, {0.115F, 0.245F, 0.095F}, {0.0F, 0.0F, -0.035F}, cloth, fabric);
+        append_crew_box(parts, root, {-0.085F, body_y - 0.210F, 0.105F}, {0.115F, 0.245F, 0.095F}, {0.0F, 0.0F, -0.035F}, cloth, fabric);
+        break;
+    case CrewVisualRole::Fisher:
+        append_crew_box(parts, root, {0.000F, body_y + 0.626F, 0.0F}, {0.150F, 0.035F, 0.155F}, {0.0F}, CreatureAtlasTile::CrewRedCloth, fabric);
+        append_crew_box(parts, root, {-0.165F, body_y + 0.585F, -0.085F}, {0.075F, 0.025F, 0.035F}, {0.0F, 0.25F, -0.35F}, CreatureAtlasTile::CrewRedCloth, fabric);
+        append_crew_box(parts, root, {0.180F, body_y - 0.020F, 0.0F}, {0.020F, 0.255F, 0.130F}, {0.0F, 0.0F, -0.55F}, CreatureAtlasTile::CrewRedCloth, fabric);
+        append_crew_box(parts, root, {-0.020F, body_y - 0.310F, 0.180F}, {0.080F, 0.105F, 0.055F}, {0.0F}, CreatureAtlasTile::CrewCanvas, fabric);
+        break;
+    case CrewVisualRole::Rigger:
+        append_crew_box(parts, root, {-0.010F, body_y + 0.665F, 0.0F}, {0.150F, 0.075F, 0.155F}, {0.0F}, CreatureAtlasTile::CrewNavyCloth, fabric);
+        append_crew_box(parts, root, {-0.118F, body_y + 0.725F, 0.0F}, {0.075F, 0.035F, 0.160F}, {0.0F, 0.0F, 0.15F}, CreatureAtlasTile::CrewNavyCloth, fabric);
+        for (int coil = 0; coil < 4; ++coil) {
+            const auto angle = static_cast<float>(coil) * kPi * 0.5F;
+            const auto center = glm::vec3 {-0.105F, body_y + 0.105F + std::sin(angle) * 0.120F, 0.185F + std::cos(angle) * 0.060F};
+            append_crew_box(parts, root, center, {0.025F, 0.085F, 0.025F}, {angle * 0.20F, 0.0F, angle}, CreatureAtlasTile::CrewRope, kMaterialCrewLeather);
+        }
+        break;
+    case CrewVisualRole::WaterTender:
+        append_crew_box(parts, root, {-0.010F, body_y + 0.655F, 0.0F}, {0.150F, 0.035F, 0.155F}, {0.0F}, CreatureAtlasTile::CrewIvoryCloth, fabric);
+        append_crew_box(parts, root, {-0.165F, body_y + 0.610F, 0.105F}, {0.065F, 0.024F, 0.032F}, {0.0F, -0.18F, -0.30F}, CreatureAtlasTile::CrewIvoryCloth, fabric);
+        append_crew_box(parts, root, {0.188F, body_y - 0.045F, 0.0F}, {0.025F, 0.285F, 0.145F}, {0.0F}, CreatureAtlasTile::CrewCanvas, fabric);
+        append_crew_box(parts, root, {0.208F, body_y - 0.295F, -0.095F}, {0.035F, 0.055F, 0.040F}, {0.0F}, CreatureAtlasTile::CrewWater, kMaterialCrewMetal);
+        append_crew_box(parts, root, {0.208F, body_y - 0.295F, 0.095F}, {0.035F, 0.055F, 0.040F}, {0.0F}, CreatureAtlasTile::CrewWater, kMaterialCrewMetal);
+        break;
+    case CrewVisualRole::Deckhand:
+        append_crew_box(parts, root, {-0.010F, body_y + 0.645F, 0.0F}, {0.150F, 0.030F, 0.155F}, {0.0F}, CreatureAtlasTile::CrewNavyCloth, fabric);
+        append_crew_box(parts, root, {-0.165F, body_y + 0.600F, -0.095F}, {0.070F, 0.024F, 0.032F}, {0.0F, 0.22F, -0.32F}, CreatureAtlasTile::CrewNavyCloth, fabric);
+        append_crew_box(parts, root, {0.168F, body_y + 0.315F, 0.0F}, {0.028F, 0.085F, 0.145F}, {0.0F, 0.0F, -0.28F}, CreatureAtlasTile::CrewIvoryCloth, fabric);
+        append_crew_box(parts, root, {0.145F, body_y + 0.240F, 0.115F}, {0.025F, 0.120F, 0.035F}, {0.25F, 0.0F, -0.15F}, CreatureAtlasTile::CrewIvoryCloth, fabric);
+        break;
+    case CrewVisualRole::Quartermaster:
+        append_crew_box(parts, root, {0.188F, body_y + 0.115F, 0.0F}, {0.026F, 0.250F, 0.145F}, {0.0F}, CreatureAtlasTile::CrewBurgundyCloth, fabric);
+        append_crew_box(parts, root, {-0.015F, body_y - 0.255F, 0.185F}, {0.075F, 0.105F, 0.035F}, {0.0F}, CreatureAtlasTile::CrewCanvas, fabric);
+        append_crew_box(parts, root, {-0.015F, body_y - 0.382F, -0.185F}, {0.025F, 0.060F, 0.018F}, {0.0F}, CreatureAtlasTile::CrewGold, metal);
+        for (int button = 0; button < 3; ++button) {
+            append_crew_box(parts, root, {0.216F, body_y + 0.185F - static_cast<float>(button) * 0.105F, 0.0F},
+                            {0.012F, 0.012F, 0.012F}, {0.0F}, CreatureAtlasTile::CrewGold, metal, 0.02F);
+        }
+        break;
+    }
+
+    static_cast<void>(hair);
+    static_cast<void>(scale);
+}
+
+void append_crew_activity_prop(std::vector<CreaturePartInstance>& parts,
+                               const glm::mat4& root,
+                               const CrewRenderInstance& crew,
+                               CrewVisualRole role,
+                               CrewVisualActivity activity,
+                               const CrewPose& pose,
+                               float phase) {
+    const auto& left_hand = pose.hands[0];
+    const auto& right_hand = pose.hands[1];
+    switch (activity) {
+    case CrewVisualActivity::Inspect: {
+        const auto eyepiece = glm::vec3 {0.245F, 1.625F - pose.crouch, -0.065F};
+        const auto tip = glm::vec3 {0.515F, 1.660F - pose.crouch, -0.065F};
+        append_crew_segment(parts, root, eyepiece, tip, {0.032F, 0.032F}, CreatureAtlasTile::CrewGold, kMaterialCrewMetal);
+        append_crew_box(parts, root, tip, {0.030F, 0.045F, 0.045F}, {0.0F, 0.0F, kPi * 0.5F}, CreatureAtlasTile::CrewLeather, kMaterialCrewLeather);
+        break;
+    }
+    case CrewVisualActivity::FishCast:
+    case CrewVisualActivity::FishWait:
+    case CrewVisualActivity::FishReel: {
+        const auto reel = (left_hand + right_hand) * 0.5F;
+        const auto cast = activity == CrewVisualActivity::FishCast ? 0.48F : 0.0F;
+        const auto rod_tip = glm::vec3 {0.92F + cast, 1.78F + cast * 0.45F, 0.0F};
+        append_crew_segment(parts, root, reel, rod_tip, {0.018F, 0.018F}, CreatureAtlasTile::CrewWood, kMaterialCrewWood);
+        append_crew_box(parts, root, reel, {0.035F, 0.055F, 0.055F}, {0.0F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        const auto line_end_y = activity == CrewVisualActivity::FishReel ? 0.46F + phase * 0.55F : 0.18F;
+        const auto line_end = glm::vec3 {rod_tip.x + 0.12F, line_end_y, 0.0F};
+        append_crew_segment(parts, root, rod_tip, line_end, {0.006F, 0.006F}, CreatureAtlasTile::CrewRope, kMaterialCrewLeather, 0.02F);
+        if (activity == CrewVisualActivity::FishReel && phase >= 0.58F) {
+            append_crew_box(parts, root, {line_end.x, line_end.y - 0.045F, 0.0F}, {0.115F, 0.050F, 0.040F}, {0.0F, 0.0F, -0.18F}, CreatureAtlasTile::CrewFish, kMaterialCrewSkin);
+            append_crew_box(parts, root, {line_end.x - 0.125F, line_end.y - 0.045F, 0.0F}, {0.045F, 0.040F, 0.012F}, {0.0F, 0.0F, 0.45F}, CreatureAtlasTile::CrewFish, kMaterialCrewSkin);
+        }
+        break;
+    }
+    case CrewVisualActivity::TendWater: {
+        const auto center = glm::vec3 {0.515F, 0.635F, 0.0F};
+        append_crew_box(parts, root, center + glm::vec3 {0.0F, -0.13F, -0.135F}, {0.135F, 0.135F, 0.018F}, {0.0F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        append_crew_box(parts, root, center + glm::vec3 {0.0F, -0.13F, 0.135F}, {0.135F, 0.135F, 0.018F}, {0.0F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        append_crew_box(parts, root, center + glm::vec3 {0.0F, -0.255F, 0.0F}, {0.135F, 0.018F, 0.135F}, {0.0F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        append_crew_box(parts, root, center + glm::vec3 {0.0F, -0.105F, 0.0F}, {0.118F, 0.010F, 0.118F}, {0.0F}, CreatureAtlasTile::CrewWater, kMaterialCrewMetal, 0.02F);
+        append_crew_segment(parts, root, center + glm::vec3 {0.0F, -0.02F, -0.135F}, center + glm::vec3 {0.0F, 0.20F, 0.0F}, {0.012F, 0.012F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        append_crew_segment(parts, root, center + glm::vec3 {0.0F, 0.20F, 0.0F}, center + glm::vec3 {0.0F, -0.02F, 0.135F}, {0.012F, 0.012F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        break;
+    }
+    case CrewVisualActivity::Carry: {
+        const auto center = glm::vec3 {0.500F, 0.920F, 0.0F};
+        const auto content = role == CrewVisualRole::WaterTender ? CreatureAtlasTile::CrewWater : CreatureAtlasTile::CrewFish;
+        append_crew_box(parts, root, center, {0.175F, 0.135F, 0.245F}, {0.0F}, CreatureAtlasTile::CrewWood, kMaterialCrewWood);
+        append_crew_box(parts, root, center + glm::vec3 {0.185F, 0.0F, 0.0F}, {0.018F, 0.155F, 0.265F}, {0.0F}, CreatureAtlasTile::CrewIron, kMaterialCrewMetal);
+        append_crew_box(parts, root, center + glm::vec3 {0.0F, 0.145F, 0.0F}, {0.145F, 0.030F, 0.205F}, {0.0F}, content, kMaterialCrewSkin);
+        break;
+    }
+    case CrewVisualActivity::HaulRope:
+        append_crew_segment(parts, root, {0.28F, 1.35F, -0.06F}, {0.72F, 0.68F, 0.06F}, {0.020F, 0.020F}, CreatureAtlasTile::CrewRope, kMaterialCrewLeather);
+        break;
+    case CrewVisualActivity::Scrub: {
+        const auto mop_end = glm::vec3 {0.70F + std::sin(finite_or(crew.animation_time, 0.0F) * 4.0F) * 0.20F, 0.075F, 0.0F};
+        append_crew_segment(parts, root, left_hand, mop_end, {0.018F, 0.018F}, CreatureAtlasTile::CrewWood, kMaterialCrewWood);
+        append_crew_box(parts, root, mop_end, {0.105F, 0.035F, 0.230F}, {0.0F}, CreatureAtlasTile::CrewCanvas, kMaterialCrewFabric);
+        break;
+    }
+    case CrewVisualActivity::SortCargo:
+        if (role == CrewVisualRole::Quartermaster) {
+            append_crew_box(parts, root, {0.440F, 0.755F, 0.0F}, {0.115F, 0.018F, 0.165F}, {0.0F, 0.0F, -0.16F}, CreatureAtlasTile::CrewCanvas, kMaterialCrewFabric);
+            append_crew_box(parts, root, {0.455F, 0.785F, 0.0F}, {0.080F, 0.010F, 0.125F}, {0.0F, 0.0F, -0.16F}, CreatureAtlasTile::CrewIvoryCloth, kMaterialCrewFabric);
+        }
+        break;
+    case CrewVisualActivity::Rest:
+        append_crew_box(parts, root, {0.305F, 1.030F, 0.0F}, {0.065F, 0.075F, 0.065F}, {0.0F}, CreatureAtlasTile::CrewWood, kMaterialCrewWood);
+        break;
+    case CrewVisualActivity::Idle:
+    case CrewVisualActivity::Walk:
+    case CrewVisualActivity::Steer:
+    case CrewVisualActivity::TurnCapstan:
+    case CrewVisualActivity::Socialize:
+    case CrewVisualActivity::Hurt:
+    case CrewVisualActivity::KnockedOut:
+    case CrewVisualActivity::Recover:
+    default:
+        break;
+    }
+}
+
+void append_crew_model(std::vector<CreaturePartInstance>& parts, const CrewRenderInstance& source) {
+    const auto first_part = parts.size();
+    const auto role = safe_crew_role(source.role);
+    const auto activity = safe_crew_activity(source.activity);
+    const auto phase = saturate(finite_or(source.activity_phase, 0.0F));
+    const auto hurt = saturate(finite_or(source.hurt_amount, 0.0F));
+    auto knockout = saturate(finite_or(source.knockout_amount, 0.0F));
+    if (activity == CrewVisualActivity::KnockedOut) {
+        knockout = std::max(knockout, 1.0F);
+    } else if (activity == CrewVisualActivity::Recover) {
+        knockout = std::max(knockout, 1.0F - phase);
+    }
+
+    const auto scale = 0.94F + seed_detail_unit(source.appearance_seed, 75) * 0.055F +
+                       (role == CrewVisualRole::Rigger ? 0.025F : 0.0F);
+    const auto cloth = crew_cloth_tile(role);
+    const auto skin = crew_skin_tile(source.appearance_seed);
+    const auto hair = crew_hair_tile(source.appearance_seed, role);
+    const auto pose = build_crew_pose(source, activity, phase);
+    const auto fall_sign = seed_detail_signed(source.appearance_seed, 76) >= 0.0F ? 1.0F : -1.0F;
+    const auto yaw = finite_or(source.yaw_radians, 0.0F);
+
+    auto root = glm::translate(glm::mat4 {1.0F}, finite_position(source.position));
+    root = glm::rotate(root, yaw, glm::vec3 {0.0F, 1.0F, 0.0F});
+    root = glm::translate(root, glm::vec3 {hurt * -0.055F, knockout * 0.18F, 0.0F});
+    root = glm::rotate(root, -knockout * 1.48F, glm::vec3 {0.0F, 0.0F, 1.0F});
+    root = glm::rotate(root, fall_sign * knockout * 0.16F + hurt * fall_sign * 0.08F, glm::vec3 {1.0F, 0.0F, 0.0F});
+    root = glm::rotate(root, pose.body_lean * (1.0F - knockout), glm::vec3 {0.0F, 0.0F, 1.0F});
+    root = glm::scale(root, glm::vec3 {scale});
+
+    const auto breath = std::sin(finite_or(source.animation_time, 0.0F) * (activity == CrewVisualActivity::Rest ? 1.25F : 2.0F) + phase * kTwoPi) * 0.010F;
+    const auto body_y = 1.145F - pose.crouch + breath;
+    const auto torso_half = glm::vec3 {0.175F, 0.315F, 0.120F};
+    const auto pelvis_y = 0.785F - pose.crouch;
+
+    append_crew_box(parts, root, {0.0F, body_y, 0.0F}, torso_half, {0.0F}, cloth, kMaterialCrewFabric, 0.13F);
+    append_crew_box(parts, root, {-0.020F, pelvis_y, 0.0F}, {0.155F, 0.105F, 0.115F}, {0.0F}, CreatureAtlasTile::CrewNavyCloth, kMaterialCrewFabric, 0.10F);
+    append_crew_box(parts, root, {0.0F, 0.925F - pose.crouch, 0.0F}, {0.185F, 0.026F, 0.130F}, {0.0F}, CreatureAtlasTile::CrewLeather, kMaterialCrewLeather, 0.06F);
+    append_crew_box(parts, root, {0.020F, 1.475F - pose.crouch + breath * 0.25F, 0.0F}, {0.060F, 0.055F, 0.060F}, {0.0F}, skin, kMaterialCrewSkin);
+    append_crew_box(parts, root, {0.025F, 1.655F - pose.crouch + breath * 0.35F, 0.0F}, {0.145F, 0.160F, 0.140F}, {pose.head_pitch, pose.head_yaw, 0.0F}, skin, kMaterialCrewSkin, 0.10F);
+    append_crew_box(parts, root, {-0.010F, 1.817F - pose.crouch, 0.0F}, {0.145F, 0.035F, 0.142F}, {pose.head_pitch * 0.25F, pose.head_yaw, 0.0F}, hair, kMaterialCrewLeather, 0.07F);
+    append_crew_box(parts, root, {-0.100F, 1.685F - pose.crouch, 0.0F}, {0.045F, 0.125F, 0.145F}, {pose.head_pitch * 0.20F, pose.head_yaw, 0.0F}, hair, kMaterialCrewLeather, 0.08F);
+    append_crew_box(parts, root, {0.185F, 1.650F - pose.crouch, 0.0F}, {0.050F, 0.062F, 0.042F}, {pose.head_pitch, pose.head_yaw, 0.0F}, skin, kMaterialCrewSkin, 0.04F);
+    for (const auto side : kSides) {
+        append_crew_box(parts, root, {0.164F, 1.704F - pose.crouch, side * 0.067F}, {0.016F, 0.025F, 0.018F}, {0.0F}, CreatureAtlasTile::VillagerEye, kMaterialCrewSkin, 0.82F);
+        append_crew_box(parts, root, {0.010F, 1.655F - pose.crouch, side * 0.151F}, {0.025F, 0.045F, 0.022F}, {0.0F}, skin, kMaterialCrewSkin);
+    }
+    if (((source.appearance_seed >> 13U) & 1U) != 0U || role == CrewVisualRole::Captain) {
+        append_crew_box(parts, root, {0.166F, 1.580F - pose.crouch, 0.0F}, {0.022F, 0.028F, 0.090F}, {0.0F}, hair, kMaterialCrewLeather);
+        append_crew_box(parts, root, {0.072F, 1.505F - pose.crouch, 0.0F}, {0.070F, 0.075F, 0.105F}, {0.0F}, hair, kMaterialCrewLeather, 0.12F);
+    }
+
+    const auto shoulder_y = 1.350F - pose.crouch;
+    for (std::size_t index = 0; index < kSides.size(); ++index) {
+        const auto side = kSides[index];
+        const auto shoulder = glm::vec3 {0.0F, shoulder_y, side * 0.220F};
+        append_crew_segment(parts, root, shoulder, pose.elbows[index] - glm::vec3 {0.0F, pose.crouch, 0.0F},
+                            {0.055F, 0.055F}, cloth, kMaterialCrewFabric, 0.11F);
+        append_crew_segment(parts, root, pose.elbows[index] - glm::vec3 {0.0F, pose.crouch, 0.0F},
+                            pose.hands[index] - glm::vec3 {0.0F, pose.crouch, 0.0F}, {0.048F, 0.048F}, skin, kMaterialCrewSkin, 0.08F);
+        append_crew_box(parts, root, pose.hands[index] - glm::vec3 {0.0F, pose.crouch, 0.0F}, {0.050F, 0.052F, 0.050F}, {0.0F}, skin, kMaterialCrewSkin, 0.07F);
+
+        const auto leg_stride = pose.stride * side;
+        const auto hip = glm::vec3 {-0.020F, pelvis_y, side * 0.095F};
+        const auto knee = glm::vec3 {leg_stride * 0.105F, 0.455F - pose.crouch * 0.45F, side * 0.098F};
+        const auto ankle = glm::vec3 {-leg_stride * 0.050F, 0.135F, side * 0.100F};
+        append_crew_segment(parts, root, hip, knee, {0.062F, 0.058F}, CreatureAtlasTile::CrewNavyCloth, kMaterialCrewFabric, 0.10F);
+        append_crew_segment(parts, root, knee, ankle, {0.056F, 0.052F}, CreatureAtlasTile::CrewNavyCloth, kMaterialCrewFabric, 0.09F);
+        append_crew_box(parts, root, {0.045F + leg_stride * 0.020F, 0.070F, side * 0.100F}, {0.105F, 0.065F, 0.065F}, {0.0F}, CreatureAtlasTile::CrewLeather, kMaterialCrewLeather, 0.06F);
+    }
+
+    append_crew_role_details(parts, root, role, cloth, hair, scale, body_y);
+    append_crew_activity_prop(parts, root, source, role, activity, pose, phase);
+
+    // Je laisse le renderer appliquer le cycle jour/nuit global une seule fois ;
+    // cette valeur represente uniquement l'occlusion locale du ciel.
+    const auto sky_light = saturate(finite_or(source.sky_light, 1.0F));
+    const auto block_light = saturate(finite_or(source.local_light, 0.0F));
+    const auto precipitation = saturate(finite_or(source.precipitation_exposure, 1.0F));
+    for (auto index = first_part; index < parts.size(); ++index) {
+        parts[index].sky_light = sky_light;
+        parts[index].block_light = block_light;
+        parts[index].precipitation_exposure = precipitation;
+    }
+}
+
 auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std::array<std::uint8_t, 4> {
     const auto fx = static_cast<float>(x) + 0.5F;
     const auto fy = static_cast<float>(y) + 0.5F;
@@ -1565,6 +2065,99 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
                          194.0F + eye_white * 14.0F - pupil * 160.0F - brow * 12.0F,
                          alpha);
     }
+    case CreatureAtlasTile::CrewNavyCloth:
+    case CreatureAtlasTile::CrewIvoryCloth:
+    case CreatureAtlasTile::CrewOchreCloth:
+    case CreatureAtlasTile::CrewRedCloth:
+    case CreatureAtlasTile::CrewBurgundyCloth: {
+        auto base = glm::vec3 {38.0F, 58.0F, 82.0F};
+        if (tile == CreatureAtlasTile::CrewIvoryCloth) {
+            base = {214.0F, 202.0F, 170.0F};
+        } else if (tile == CreatureAtlasTile::CrewOchreCloth) {
+            base = {174.0F, 116.0F, 42.0F};
+        } else if (tile == CreatureAtlasTile::CrewRedCloth) {
+            base = {142.0F, 48.0F, 40.0F};
+        } else if (tile == CreatureAtlasTile::CrewBurgundyCloth) {
+            base = {92.0F, 34.0F, 48.0F};
+        }
+        const auto weave = std::sin(nx * 29.0F + grain * 3.0F) * 3.0F +
+                           std::cos(ny * 31.0F + soft_grain * 3.0F) * 3.0F;
+        const auto fold = line_mask(nx + ny * 0.16F, 0.54F, 0.045F) * 12.0F;
+        return make_rgba(base.r + weave - fold, base.g + weave - fold * 0.72F, base.b + weave - fold * 0.52F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewStripedCloth: {
+        const auto stripe = (static_cast<int>(std::floor(ny * 8.0F)) & 1) == 0 ? 1.0F : 0.0F;
+        const auto seam = edge < 0.08F ? 12.0F : 0.0F;
+        return make_rgba(196.0F - stripe * 116.0F - seam,
+                         190.0F - stripe * 108.0F - seam,
+                         168.0F - stripe * 92.0F - seam * 0.7F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::CrewSkinLight:
+    case CreatureAtlasTile::CrewSkinMedium:
+    case CreatureAtlasTile::CrewSkinDark: {
+        auto base = glm::vec3 {218.0F, 166.0F, 126.0F};
+        if (tile == CreatureAtlasTile::CrewSkinMedium) {
+            base = {172.0F, 116.0F, 78.0F};
+        } else if (tile == CreatureAtlasTile::CrewSkinDark) {
+            base = {112.0F, 72.0F, 50.0F};
+        }
+        const auto warmth = radial_falloff(nx, ny, 0.48F, 0.50F, 0.72F) * 9.0F;
+        return make_rgba(base.r + warmth + grain * 5.0F,
+                         base.g + warmth * 0.55F + soft_grain * 4.0F,
+                         base.b + warmth * 0.34F + grain * 3.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::CrewHairBrown:
+    case CreatureAtlasTile::CrewHairBlack:
+    case CreatureAtlasTile::CrewHairGrey: {
+        auto base = glm::vec3 {70.0F, 45.0F, 27.0F};
+        if (tile == CreatureAtlasTile::CrewHairBlack) {
+            base = {30.0F, 28.0F, 26.0F};
+        } else if (tile == CreatureAtlasTile::CrewHairGrey) {
+            base = {132.0F, 126.0F, 116.0F};
+        }
+        const auto strand = (0.5F + 0.5F * std::sin(nx * 34.0F + soft_grain * 5.0F)) * 18.0F;
+        return make_rgba(base.r + strand, base.g + strand * 0.82F, base.b + strand * 0.62F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewLeather: {
+        const auto scratch = line_mask(nx - ny * 0.36F, 0.31F, 0.025F) * 18.0F;
+        return make_rgba(92.0F + grain * 18.0F + scratch,
+                         55.0F + soft_grain * 10.0F + scratch * 0.55F,
+                         28.0F + grain * 7.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::CrewGold: {
+        const auto glint = smooth_range(0.68F, 0.96F, std::sin((nx + ny) * 13.0F) * 0.5F + 0.5F);
+        return make_rgba(190.0F + glint * 54.0F, 132.0F + glint * 56.0F, 34.0F + glint * 30.0F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewRope: {
+        const auto twist = 0.5F + 0.5F * std::sin((nx * 2.0F + ny) * 24.0F);
+        return make_rgba(142.0F + twist * 32.0F, 105.0F + twist * 25.0F, 58.0F + twist * 16.0F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewWood: {
+        const auto grain_line = 0.5F + 0.5F * std::sin(ny * 26.0F + grain * 8.0F);
+        return make_rgba(104.0F + grain_line * 30.0F, 62.0F + grain_line * 17.0F, 29.0F + grain_line * 9.0F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewIron: {
+        const auto brushed = 0.5F + 0.5F * std::sin(nx * 37.0F + grain * 4.0F);
+        return make_rgba(92.0F + brushed * 54.0F, 98.0F + brushed * 55.0F, 102.0F + brushed * 57.0F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewWater: {
+        const auto ripple = 0.5F + 0.5F * std::sin(nx * 15.0F + ny * 21.0F + soft_grain * 5.0F);
+        return make_rgba(42.0F + ripple * 28.0F, 116.0F + ripple * 42.0F, 166.0F + ripple * 54.0F, 0.0F);
+    }
+    case CreatureAtlasTile::CrewFish: {
+        const auto scale_pattern = std::abs(std::sin(nx * 25.0F) * std::sin(ny * 19.0F));
+        return make_rgba(92.0F + scale_pattern * 58.0F,
+                         132.0F + scale_pattern * 52.0F,
+                         142.0F + scale_pattern * 48.0F,
+                         0.0F);
+    }
+    case CreatureAtlasTile::CrewCanvas: {
+        const auto fiber = std::sin(nx * 38.0F) * 4.0F + std::cos(ny * 39.0F) * 4.0F;
+        return make_rgba(188.0F + fiber, 172.0F + fiber, 132.0F + fiber * 0.72F, 0.0F);
+    }
     case CreatureAtlasTile::Count:
         break;
     }
@@ -1642,6 +2235,17 @@ auto build_creature_parts(const CreatureRenderInstance& creature) -> std::vector
     return mesh;
 }
 
+void append_crew_parts(std::vector<CreaturePartInstance>& parts, const CrewRenderInstance& crew) {
+    append_crew_model(parts, crew);
+}
+
+auto build_crew_parts(const CrewRenderInstance& crew) -> std::vector<CreaturePartInstance> {
+    std::vector<CreaturePartInstance> parts {};
+    parts.reserve(64U);
+    append_crew_parts(parts, crew);
+    return parts;
+}
+
 auto build_creature_mesh(std::span<const CreaturePartInstance> parts) -> CreatureMeshData {
     CreatureMeshData mesh {};
     mesh.vertices.reserve(parts.size() * 24U);
@@ -1695,6 +2299,11 @@ auto build_creature_mesh(std::span<const CreaturePartInstance> parts) -> Creatur
 
 auto build_creature_mesh(const CreatureRenderInstance& creature) -> CreatureMeshData {
     const auto parts = build_creature_parts(creature);
+    return build_creature_mesh(std::span<const CreaturePartInstance>(parts.data(), parts.size()));
+}
+
+auto build_crew_mesh(const CrewRenderInstance& crew) -> CreatureMeshData {
+    const auto parts = build_crew_parts(crew);
     return build_creature_mesh(std::span<const CreaturePartInstance>(parts.data(), parts.size()));
 }
 
