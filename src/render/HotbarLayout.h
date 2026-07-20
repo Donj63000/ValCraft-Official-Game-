@@ -129,6 +129,21 @@ struct MaritimeHudBarLayout {
     float fill_width = 0.0F;
 };
 
+struct MaritimeCrewFocusLayout {
+    bool visible = false;
+    float panel_x = 0.0F;
+    float panel_y = 0.0F;
+    float panel_width = 0.0F;
+    float panel_height = 0.0F;
+    float title_x = 0.0F;
+    float title_y = 0.0F;
+    float detail_x = 0.0F;
+    float detail_y = 0.0F;
+    float status_x = 0.0F;
+    float status_y = 0.0F;
+    MaritimeHudBarLayout progress_bar {};
+};
+
 struct MaritimeHudLayout {
     bool visible = false;
     bool compact = false;
@@ -148,6 +163,7 @@ struct MaritimeHudLayout {
     MaritimeHudBarLayout thirst_bar {};
     MaritimeHudBarLayout stamina_bar {};
     MaritimeHudBarLayout fishing_bar {};
+    MaritimeCrewFocusLayout crew_focus {};
 };
 
 inline constexpr auto hotbar_slot_has_icon(const HotbarSlot& slot) noexcept -> bool {
@@ -396,7 +412,9 @@ inline auto build_maritime_hud_layout(int viewport_width,
                                       float thirst_ratio,
                                       float stamina_ratio,
                                       bool fishing_active,
-                                      float fishing_ratio) -> MaritimeHudLayout {
+                                      float fishing_ratio,
+                                      bool crew_focus_visible = false,
+                                      float crew_progress_ratio = 0.0F) -> MaritimeHudLayout {
     const auto width = static_cast<float>(std::max(viewport_width, 1));
     const auto height = static_cast<float>(std::max(viewport_height, 1));
     const auto min_dimension = std::min(width, height);
@@ -445,6 +463,43 @@ inline auto build_maritime_hud_layout(int viewport_width,
     layout.thirst_bar = make_bar(first_bar_y + row_gap, thirst_ratio);
     layout.stamina_bar = make_bar(first_bar_y + row_gap * 2.0F, stamina_ratio);
     layout.fishing_bar = make_bar(layout.cargo_y + (compact ? 15.0F : 18.0F), fishing_ratio);
+
+    auto& crew = layout.crew_focus;
+    crew.visible = crew_focus_visible;
+    crew.panel_width = std::clamp(
+        width * (compact ? 0.74F : 0.36F),
+        compact ? 250.0F : 330.0F,
+        compact ? 390.0F : 500.0F);
+    crew.panel_height = compact ? 68.0F : 78.0F;
+    crew.panel_x = (width - crew.panel_width) * 0.5F;
+
+    const auto preferred_focus_y = height * (compact ? 0.56F : 0.60F);
+    const auto minimum_focus_y = panel_y + panel_height + safe_margin;
+    const auto maximum_focus_y = std::max(
+        safe_margin,
+        height - crew.panel_height - (compact ? 20.0F : 30.0F));
+    crew.panel_y = std::clamp(
+        std::max(preferred_focus_y, minimum_focus_y),
+        safe_margin,
+        maximum_focus_y);
+
+    const auto focus_padding = compact ? 11.0F : 14.0F;
+    crew.title_x = crew.panel_x + focus_padding;
+    crew.title_y = crew.panel_y + (compact ? 9.0F : 11.0F);
+    crew.detail_x = crew.title_x;
+    crew.detail_y = crew.panel_y + (compact ? 27.0F : 31.0F);
+    crew.status_x = crew.title_x;
+    crew.status_y = crew.panel_y + (compact ? 44.0F : 51.0F);
+    crew.progress_bar.x = crew.title_x;
+    crew.progress_bar.y = crew.panel_y + crew.panel_height - (compact ? 8.0F : 9.0F);
+    crew.progress_bar.width = std::max(
+        20.0F,
+        crew.panel_width - focus_padding * 2.0F);
+    crew.progress_bar.height = compact ? 4.0F : 5.0F;
+    crew.progress_bar.fill_width =
+        crew.progress_bar.width *
+        std::clamp(crew_progress_ratio, 0.0F, 1.0F);
+
     return layout;
 }
 

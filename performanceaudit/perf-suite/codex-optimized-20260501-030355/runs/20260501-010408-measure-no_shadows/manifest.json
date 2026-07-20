@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260501-010408-278",
+  "label": "no_shadows",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-codex",
+  "arguments": ["--smoke-test", "--smoke-frames=720", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\no_shadows.json", "--perf-scenario=no_shadows", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355", "--audit-mode=measure", "--stream-radius=5", "--disable-shadows"],
+  "started_at_utc": "2026-05-01T01:04:08Z",
+  "ended_at_utc": "2026-05-01T01:04:10Z",
+  "duration_seconds": 2.657931,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 211, "render": 0, "performance": 1, "creatures": 4, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 3,
+  "recorded_frames": 720,
+  "written_frames": 3,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\no_shadows.json"]
+}

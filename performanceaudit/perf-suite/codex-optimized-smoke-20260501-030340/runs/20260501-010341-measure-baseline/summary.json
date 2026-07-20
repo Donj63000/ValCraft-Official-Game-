@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "session_id": "20260501-010341-409",
+  "label": "baseline",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-codex",
+  "arguments": ["--smoke-test", "--smoke-frames=720", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\baseline.json", "--perf-scenario=baseline", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340", "--audit-mode=measure", "--stream-radius=5"],
+  "started_at_utc": "2026-05-01T01:03:41Z",
+  "ended_at_utc": "2026-05-01T01:03:45Z",
+  "duration_seconds": 3.819892,
+  "counts": {
+    "events_written": 251,
+    "events_dropped": 0,
+    "second_samples": 4,
+    "recorded_frames": 720,
+    "written_frames": 6,
+    "spike_windows": 2,
+    "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 242, "render": 0, "performance": 2, "creatures": 4, "items": 0},
+    "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0}
+  },
+  "files": {
+    "manifest": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\manifest.json",
+    "summary_json": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\summary.json",
+    "summary_txt": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\summary.txt",
+    "events": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\events.jsonl",
+    "seconds": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\seconds.jsonl",
+    "frames": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\frames.jsonl",
+    "spikes": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-smoke-20260501-030340\\runs\\20260501-010341-measure-baseline\\spikes.json"
+  },
+  "errors": [],
+  "performance_report":   {
+    "schema_version": 1,
+    "metadata": {
+      "platform": "windows",
+      "build_type": "RelWithDebInfo",
+      "capture_mode": "measure",
+      "smoke_frames": 720,
+      "stream_radius": 5,
+      "shadows_enabled": true,
+      "shadow_map_size": 1024,
+      "post_process_enabled": true,
+      "freeze_time": true,
+      "scenario": "baseline",
+      "trace_included": false
+    },
+    "summary": {
+      "frame_count": 720,
+      "frame_total_ms": {"avg": 4.837370, "max": 437.719900, "p50": 3.815450, "p95": 5.989470, "p99": 11.226032},
+      "streaming_ms": {"avg": 0.036374, "max": 5.092200, "p50": 0.000300, "p95": 0.000900, "p99": 0.010248},
+      "generation_ms": {"avg": 0.226932, "max": 2.394600, "p50": 0.000400, "p95": 1.650005, "p99": 1.885868},
+      "lighting_ms": {"avg": 0.111210, "max": 3.218800, "p50": 0.000200, "p95": 0.699480, "p99": 1.543604},
+      "meshing_ms": {"avg": 0.958018, "max": 15.364300, "p50": 0.000500, "p95": 3.532330, "p99": 3.882154},
+      "upload_ms": {"avg": 0.070997, "max": 1.237900, "p50": 0.000600, "p95": 0.338440, "p99": 0.479490},
+      "shadow_ms": {"avg": 0.077260, "max": 0.284300, "p50": 0.061700, "p95": 0.193710, "p99": 0.251653},
+      "world_ms": {"avg": 0.247932, "max": 0.700300, "p50": 0.242950, "p95": 0.364325, "p99": 0.463435},
+      "pending_generation": {"avg": 3.565278, "max": 86},
+      "pending_mesh": {"avg": 7.555556, "max": 68},
+      "pending_lighting": {"avg": 0.000000, "max": 0},
+      "visible_chunks": {"avg": 63.009722, "max": 73},
+      "shadow_chunks": {"avg": 120.338889, "max": 134},
+      "world_chunks": {"avg": 63.009722, "max": 73},
+      "lag_buckets": {"over_16_7_ms": 2, "over_33_3_ms": 1, "over_50_0_ms": 1},
+      "max_generated_chunks": 2,
+      "max_meshed_chunks": 16,
+      "max_light_nodes_processed": 0,
+      "max_uploaded_meshes": 8,
+      "scheduler_totals": {"stream_chunk_changes": 8, "generation_enqueued": 88, "generation_pruned": 0, "unloaded_chunks": 66, "lighting_jobs_completed": 177}
+    },
+    "hotspots": {
+      "worst_frame_stage": "meshing",
+      "dominant_stage_counts": {
+        "streaming": 6,
+        "generation": 1,
+        "lighting": 0,
+        "meshing": 227,
+        "upload": 0,
+        "shadow": 0,
+        "world": 486,
+        "unattributed": 0
+      }
+    },
+    "event_summary": {"total": 0, "block_breaks": 0, "block_places": 0},
+    "worst_frames": [
+      {"frame_index": 0, "frame_total_ms": 437.719900, "streaming_ms": 0.000800, "generation_ms": 1.700100, "lighting_ms": 1.798700, "meshing_ms": 15.364300, "upload_ms": 1.237900, "shadow_ms": 0.200600, "world_ms": 0.700300, "generated_chunks": 2, "meshed_chunks": 16, "light_nodes_processed": 0, "uploaded_meshes": 8, "pending_generation": 86, "pending_mesh": 11, "pending_lighting": 0, "stream_chunk_changes": 0, "generation_enqueued": 0, "generation_pruned": 0, "unloaded_chunks": 0, "lighting_jobs_completed": 4, "visible_chunks": 15, "shadow_chunks": 24, "world_chunks": 15, "dominant_stage": "meshing"},
+      {"frame_index": 719, "frame_total_ms": 18.449600, "streaming_ms": 0.000200, "generation_ms": 1.313300, "lighting_ms": 0.513900, "meshing_ms": 3.239800, "upload_ms": 0.160400, "shadow_ms": 0.072900, "world_ms": 0.189200, "generated_chunks": 1, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 2, "pending_generation": 6, "pending_mesh": 18, "pending_lighting": 0, "stream_chunk_changes": 0, "generation_enqueued": 0, "generation_pruned": 0, "unloaded_chunks": 0, "lighting_jobs_completed": 1, "visible_chunks": 65, "shadow_chunks": 125, "world_chunks": 65, "dominant_stage": "meshing"},
+      {"frame_index": 2, "frame_total_ms": 14.626000, "streaming_ms": 0.000100, "generation_ms": 1.446900, "lighting_ms": 0.435900, "meshing_ms": 3.073500, "upload_ms": 0.451700, "shadow_ms": 0.091300, "world_ms": 0.226800, "generated_chunks": 2, "meshed_chunks": 3, "light_nodes_processed": 0, "uploaded_meshes": 3, "pending_generation": 82, "pending_mesh": 17, "pending_lighting": 0, "stream_chunk_changes": 0, "generation_enqueued": 0, "generation_pruned": 0, "unloaded_chunks": 0, "lighting_jobs_completed": 2, "visible_chunks": 16, "shadow_chunks": 25, "world_chunks": 16, "dominant_stage": "meshing"},
+      {"frame_index": 596, "frame_total_ms": 13.645600, "streaming_ms": 5.092200, "generation_ms": 1.045900, "lighting_ms": 3.021700, "meshing_ms": 3.703700, "upload_ms": 0.074000, "shadow_ms": 0.053200, "world_ms": 0.202800, "generated_chunks": 1, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 0, "pending_generation": 10, "pending_mesh": 13, "pending_lighting": 0, "stream_chunk_changes": 1, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 12, "lighting_jobs_completed": 5, "visible_chunks": 70, "shadow_chunks": 125, "world_chunks": 70, "dominant_stage": "streaming"},
+      {"frame_index": 629, "frame_total_ms": 13.272400, "streaming_ms": 5.057800, "generation_ms": 1.805400, "lighting_ms": 3.218800, "meshing_ms": 2.206000, "upload_ms": 0.104400, "shadow_ms": 0.065800, "world_ms": 0.219000, "generated_chunks": 1, "meshed_chunks": 1, "light_nodes_processed": 0, "uploaded_meshes": 0, "pending_generation": 10, "pending_mesh": 13, "pending_lighting": 0, "stream_chunk_changes": 1, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 9, "lighting_jobs_completed": 4, "visible_chunks": 68, "shadow_chunks": 125, "world_chunks": 68, "dominant_stage": "streaming"},
+      {"frame_index": 716, "frame_total_ms": 13.266000, "streaming_ms": 4.131600, "generation_ms": 1.835700, "lighting_ms": 3.011800, "meshing_ms": 3.568500, "upload_ms": 0.072500, "shadow_ms": 0.046500, "world_ms": 0.197700, "generated_chunks": 2, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 0, "pending_generation": 9, "pending_mesh": 16, "pending_lighting": 0, "stream_chunk_changes": 1, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 11, "lighting_jobs_completed": 5, "visible_chunks": 65, "shadow_chunks": 127, "world_chunks": 65, "dominant_stage": "streaming"},
+      {"frame_index": 476, "frame_total_ms": 12.026400, "streaming_ms": 4.737500, "generation_ms": 1.674600, "lighting_ms": 2.321200, "meshing_ms": 2.516800, "upload_ms": 0.065300, "shadow_ms": 0.046200, "world_ms": 0.147200, "generated_chunks": 2, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 0, "pending_generation": 9, "pending_mesh": 15, "pending_lighting": 0, "stream_chunk_changes": 1, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 12, "lighting_jobs_completed": 5, "visible_chunks": 69, "shadow_chunks": 127, "world_chunks": 69, "dominant_stage": "streaming"},
+      {"frame_index": 356, "frame_total_ms": 11.518100, "streaming_ms": 3.915600, "generation_ms": 1.549500, "lighting_ms": 2.601700, "meshing_ms": 2.874000, "upload_ms": 0.062500, "shadow_ms": 0.049900, "world_ms": 0.165900, "generated_chunks": 2, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 0, "pending_generation": 9, "pending_mesh": 16, "pending_lighting": 0, "stream_chunk_changes": 1, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 11, "lighting_jobs_completed": 5, "visible_chunks": 64, "shadow_chunks": 126, "world_chunks": 64, "dominant_stage": "streaming"},
+      {"frame_index": 236, "frame_total_ms": 9.980900, "streaming_ms": 2.991500, "generation_ms": 1.851200, "lighting_ms": 1.908100, "meshing_ms": 2.526200, "upload_ms": 0.075800, "shadow_ms": 0.053300, "world_ms": 0.166100, "generated_chunks": 2, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 0, "pending_generation": 9, "pending_mesh": 14, "pending_lighting": 0, "stream_chunk_changes": 1, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 11, "lighting_jobs_completed": 4, "visible_chunks": 65, "shadow_chunks": 119, "world_chunks": 65, "dominant_stage": "streaming"},
+      {"frame_index": 55, "frame_total_ms": 9.298800, "streaming_ms": 0.000300, "generation_ms": 0.000100, "lighting_ms": 0.000200, "meshing_ms": 3.535700, "upload_ms": 0.295000, "shadow_ms": 0.068000, "world_ms": 0.280100, "generated_chunks": 0, "meshed_chunks": 2, "light_nodes_processed": 0, "uploaded_meshes": 2, "pending_generation": 0, "pending_mesh": 62, "pending_lighting": 0, "stream_chunk_changes": 0, "generation_enqueued": 0, "generation_pruned": 0, "unloaded_chunks": 0, "lighting_jobs_completed": 0, "visible_chunks": 42, "shadow_chunks": 82, "world_chunks": 42, "dominant_stage": "meshing"}
+    ],
+    "spike_windows": [
+      {"start_frame": 0, "end_frame": 0, "peak_frame": 0, "peak_ms": 437.719900, "dominant_stage": "meshing"},
+      {"start_frame": 719, "end_frame": 719, "peak_frame": 719, "peak_ms": 18.449600, "dominant_stage": "meshing"}
+    ],
+    "events": [
+    ]
+  }
+}

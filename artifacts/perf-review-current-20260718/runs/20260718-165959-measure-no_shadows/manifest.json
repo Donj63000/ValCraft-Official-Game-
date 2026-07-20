@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260718-165959-961",
+  "label": "no_shadows",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+  "arguments": ["--smoke-test", "--smoke-frames=720", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\no_shadows.json", "--perf-scenario=no_shadows", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718", "--audit-mode=measure", "--stream-radius=5", "--disable-shadows"],
+  "started_at_utc": "2026-07-18T16:59:59Z",
+  "ended_at_utc": "2026-07-18T17:00:25Z",
+  "duration_seconds": 25.214361,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 727, "render": 0, "performance": 196, "creatures": 17, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 10,
+  "recorded_frames": 720,
+  "written_frames": 352,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\no_shadows.json"]
+}

@@ -887,67 +887,189 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
         CHECK(std::max(part.local_start.z, part.local_end.z) <= blueprint.bounds.max.z + 0.001F);
     }
 
-    const auto tall_mast_count = std::count_if(
-        blueprint.parts.begin(),
-        blueprint.parts.end(),
-        [](const ShipPart& part) {
-            return part.shape == ShipPartShape::Segment && part.material == ShipMaterial::CleanBeam &&
-                   std::abs(part.local_end.x - part.local_start.x) < 0.001F &&
-                   std::abs(part.local_end.z - part.local_start.z) < 0.001F &&
-                   std::abs(part.local_end.y - part.local_start.y) >= 10.0F;
-        });
-    CHECK(tall_mast_count == 3);
-
-    const auto sail_count = std::count_if(
-        blueprint.parts.begin(),
-        blueprint.parts.end(),
-        [](const ShipPart& part) { return part.material == ShipMaterial::CreamCanvas; });
-    REQUIRE(sail_count >= 7);
-    for (const auto mast_z : std::array<float, 3> {-17.5F, 0.0F, 18.0F}) {
-        const auto square_sails = std::count_if(
+    const auto tall_mast_count =
+        std::count_if(
             blueprint.parts.begin(),
             blueprint.parts.end(),
-            [mast_z](const ShipPart& part) {
-                const auto center_z = (part.local_start.z + part.local_end.z) * 0.5F;
-                return part.shape == ShipPartShape::Panel &&
-                       part.material == ShipMaterial::CreamCanvas &&
-                       std::abs(part.orientation.z) > 0.90F &&
-                       std::abs(center_z - mast_z) < 0.50F;
+            [](const ShipPart& part) {
+                return
+                    part.shape == ShipPartShape::Segment &&
+                    part.material == ShipMaterial::SolidGold &&
+                    part.thickness >= 0.40F &&
+                    std::abs(
+                        part.local_end.x -
+                        part.local_start.x) < 0.001F &&
+                    std::abs(
+                        part.local_end.z -
+                        part.local_start.z) < 0.001F &&
+                    std::abs(
+                        part.local_end.y -
+                        part.local_start.y) >= 10.0F;
             });
+
+    CHECK(tall_mast_count == 3);
+
+    const auto sail_count =
+        std::count_if(
+            blueprint.parts.begin(),
+            blueprint.parts.end(),
+            [](const ShipPart& part) {
+                return
+                    part.shape == ShipPartShape::Panel &&
+                    part.material ==
+                        ShipMaterial::BlackCanvas;
+            });
+
+    // Six voiles carrées et trois voiles triangulaires.
+    CHECK(sail_count == 9);
+
+    for (const auto mast_z :
+         std::array<float, 3> {
+             -17.5F,
+             0.0F,
+             18.0F,
+         }) {
+
+        const auto square_sails =
+            std::count_if(
+                blueprint.parts.begin(),
+                blueprint.parts.end(),
+                [mast_z](const ShipPart& part) {
+                    const auto center_z =
+                        (
+                            part.local_start.z +
+                            part.local_end.z
+                        ) *
+                        0.5F;
+
+                    return
+                        part.shape ==
+                            ShipPartShape::Panel &&
+                        part.material ==
+                            ShipMaterial::BlackCanvas &&
+                        std::abs(
+                            part.orientation.z) >
+                            0.90F &&
+                        std::abs(
+                            center_z -
+                            mast_z) <
+                            0.50F;
+                });
+
         CHECK(square_sails == 2);
     }
+
     for (const auto& part : blueprint.parts) {
-        if (part.material == ShipMaterial::CreamCanvas || part.material == ShipMaterial::Rope) {
+        if (part.material == ShipMaterial::BlackCanvas ||
+            part.material == ShipMaterial::Rope) {
+
             CHECK_FALSE(part.collidable);
             CHECK_FALSE(part.supports_player);
         }
     }
-    auto forward_lantern_count = std::size_t {0};
+
+    auto forward_lantern_count =
+        std::size_t {0};
+
     for (const auto& part : blueprint.parts) {
-        const auto center_z = (part.local_start.z + part.local_end.z) * 0.5F;
-        const auto min_y = std::min(part.local_start.y, part.local_end.y);
-        if (part.material != ShipMaterial::Lantern || center_z <= 33.0F || min_y < 4.0F) {
+        const auto center_z =
+            (
+                part.local_start.z +
+                part.local_end.z
+            ) *
+            0.5F;
+
+        const auto min_y =
+            std::min(
+                part.local_start.y,
+                part.local_end.y);
+
+        if (part.material != ShipMaterial::Lantern ||
+            center_z <= 33.0F ||
+            min_y < 4.0F) {
+
             continue;
         }
+
         ++forward_lantern_count;
-        CHECK(std::max(std::abs(part.local_start.x), std::abs(part.local_end.x)) <= 1.80F);
+
+        CHECK(
+            std::max(
+                std::abs(part.local_start.x),
+                std::abs(part.local_end.x)) <=
+            1.80F);
     }
+
     CHECK(forward_lantern_count == 2);
 
-    auto engraved_name = std::u32string {};
-    auto previous_glyph_min_x = std::numeric_limits<float>::infinity();
+    auto stern_engraved_name =
+        std::u32string {};
+
+    auto mast_engraved_name =
+        std::u32string {};
+
+    auto previous_stern_glyph_min_x =
+        std::numeric_limits<float>::infinity();
+
+    auto previous_mast_glyph_min_y =
+        std::numeric_limits<float>::infinity();
+
     for (const auto& part : blueprint.parts) {
         if (part.shape != ShipPartShape::Glyph) {
             continue;
         }
-        engraved_name.push_back(part.glyph);
-        CHECK(part.local_end.x < previous_glyph_min_x);
-        previous_glyph_min_x = part.local_start.x;
-        CHECK(part.local_start.z < -29.0F);
-        CHECK(part.local_end.z < -29.0F);
+
         CHECK_FALSE(part.collidable);
+
+        if (part.local_start.z < -29.0F &&
+            part.local_end.z < -29.0F) {
+
+            stern_engraved_name.push_back(
+                part.glyph);
+
+            CHECK(
+                part.local_end.x <
+                previous_stern_glyph_min_x);
+
+            previous_stern_glyph_min_x =
+                part.local_start.x;
+
+            continue;
+        }
+
+        const auto center_z =
+            (
+                part.local_start.z +
+                part.local_end.z
+            ) *
+            0.5F;
+
+        CHECK(
+            std::abs(center_z) <
+            0.30F);
+
+        CHECK(
+            part.material ==
+            ShipMaterial::Iron);
+
+        CHECK(
+            part.local_end.y <
+            previous_mast_glyph_min_y);
+
+        previous_mast_glyph_min_y =
+            part.local_start.y;
+
+        mast_engraved_name.push_back(
+            part.glyph);
     }
-    CHECK(engraved_name == U"L'Am\u00E9lie");
+
+    CHECK(
+        stern_engraved_name ==
+        U"L'Am\u00E9lie");
+
+    CHECK(
+        mast_engraved_name ==
+        U"L'am\u00E9lie");
 
     const auto lower_stair_count = std::count_if(
         blueprint.parts.begin(),

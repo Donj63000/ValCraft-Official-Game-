@@ -1,0 +1,62 @@
+﻿{
+    "schema_version":  1,
+    "configuration":  "RelWithDebInfo",
+    "smoke_frames":  180,
+    "trace_enabled":  false,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  10.466333,
+                          "frame_p95":  17.13567,
+                          "frame_max":  93.467,
+                          "lag_frames_16_7":  12,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  7,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195810-measure-baseline",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\baseline.json"
+                      },
+                      {
+                          "scenario":  "world_stress",
+                          "frame_avg":  14.411892,
+                          "frame_p95":  18.498865,
+                          "frame_max":  63.355,
+                          "lag_frames_16_7":  24,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  22,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\world_stress.json"
+                      },
+                      {
+                          "scenario":  "no_shadows",
+                          "frame_avg":  12.23894,
+                          "frame_p95":  35.82552,
+                          "frame_max":  62.1169,
+                          "lag_frames_16_7":  24,
+                          "lag_frames_33_3":  10,
+                          "lag_frames_50_0":  4,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  8,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195819-measure-no_shadows",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\no_shadows.json"
+                      },
+                      {
+                          "scenario":  "no_post_process",
+                          "frame_avg":  11.423132,
+                          "frame_p95":  20.456665,
+                          "frame_max":  66.7029,
+                          "lag_frames_16_7":  31,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  11,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\no_post_process.json"
+                      }
+                  ]
+}

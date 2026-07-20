@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260501-005313-826",
+  "label": "baseline",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-codex",
+  "arguments": ["--smoke-test", "--smoke-frames=720", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\baseline.json", "--perf-scenario=baseline", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700", "--audit-mode=measure", "--stream-radius=5"],
+  "started_at_utc": "2026-05-01T00:53:13Z",
+  "ended_at_utc": "2026-05-01T00:53:21Z",
+  "duration_seconds": 8.108083,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 300, "render": 0, "performance": 24, "creatures": 4, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 7,
+  "recorded_frames": 720,
+  "written_frames": 76,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\runs\\20260501-005313-measure-baseline\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-baseline-20260501-024700\\baseline.json"]
+}

@@ -1,0 +1,23 @@
+﻿{
+    "schema_version":  1,
+    "configuration":  "RelWithDebInfo",
+    "smoke_frames":  180,
+    "trace_enabled":  false,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-codex",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260501-033347",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  8.692536,
+                          "frame_p95":  17.02205,
+                          "frame_max":  132.2751,
+                          "lag_frames_16_7":  15,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  15,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260501-033347\\runs\\20260501-013348-measure-baseline",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260501-033347\\baseline.json"
+                      }
+                  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "20260718-231225-093-44144-0",
+  "label": "amelie-stern",
+  "mode": "forensic",
+  "status": "aborted",
+  "platform": "windows",
+  "build_type": "Debug",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft",
+  "arguments": ["--smoke-test", "--smoke-session=sea-new", "--smoke-ship-view=stern", "--smoke-frames=240", "--window-width=1600", "--window-height=900", "--freeze-time", "--capture-frame=artifacts/amelie-qa/stern.bmp", "--audit", "--audit-mode=forensic", "--audit-dir=artifacts/amelie-qa/audit-debug-final-stern", "--audit-label=amelie-stern"],
+  "started_at_utc": "2026-07-18T23:12:25Z",
+  "ended_at_utc": "2026-07-18T23:12:27Z",
+  "duration_seconds": 2.136410,
+  "written_event_counts": {"session": 6, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 0,
+  "dropped_second_samples": 0,
+  "recorded_frames": 0,
+  "written_frames": 0,
+  "dropped_frames": 0,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-stern\\runs\\20260718-231225-20260718-231225-093-44144-0-forensic-amelie-stern\\spikes.json"]
+}

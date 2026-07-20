@@ -95,6 +95,7 @@ struct SeaAdventureHudState {
     std::uint32_t food_rations = 0U;
     std::uint32_t water_flasks = 0U;
     std::uint32_t fish = 0U;
+    ShipCrewFocusState crew_focus {};
 };
 
 struct ShipVoxel {
@@ -114,6 +115,11 @@ enum class ShipMaterial : std::uint8_t {
     Brass,
     Lantern,
     Glass,
+
+    // Je conserve les valeurs historiques et j'ajoute les nouveaux matériaux
+    // à la fin pour ne casser aucune donnée utilisant encore les anciens index.
+    BlackCanvas,
+    SolidGold,
 };
 
 enum class ShipPartShape : std::uint8_t {

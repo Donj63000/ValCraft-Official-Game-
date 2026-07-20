@@ -1,0 +1,5 @@
+ValCraft audit summary [amelie-interior]
+  session_id=20260718-231509-833-36536-0 mode=measure status=aborted
+  duration_seconds=1.090 recorded_frames=0 written_frames=0 dropped_frames=0 second_samples=0 dropped_second_samples=0
+  events_written=6 events_dropped=0 spike_windows=0
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\artifacts\amelie-qa\audit-debug60b-interior\runs\20260718-231509-20260718-231509-833-36536-0-measure-amelie-interior

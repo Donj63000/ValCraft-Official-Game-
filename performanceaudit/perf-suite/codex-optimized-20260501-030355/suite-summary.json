@@ -1,0 +1,62 @@
+﻿{
+    "schema_version":  1,
+    "configuration":  "RelWithDebInfo",
+    "smoke_frames":  720,
+    "trace_enabled":  false,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-codex",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  4.652628,
+                          "frame_p95":  7.135445,
+                          "frame_max":  52.7989,
+                          "lag_frames_16_7":  4,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  4,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010356-measure-baseline",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\baseline.json"
+                      },
+                      {
+                          "scenario":  "world_stress",
+                          "frame_avg":  6.234839,
+                          "frame_p95":  8.849915,
+                          "frame_max":  45.1957,
+                          "lag_frames_16_7":  11,
+                          "lag_frames_33_3":  3,
+                          "lag_frames_50_0":  0,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  10,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010400-measure-world_stress",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\world_stress.json"
+                      },
+                      {
+                          "scenario":  "no_shadows",
+                          "frame_avg":  3.272748,
+                          "frame_p95":  5.86762,
+                          "frame_max":  32.1056,
+                          "lag_frames_16_7":  1,
+                          "lag_frames_33_3":  0,
+                          "lag_frames_50_0":  0,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  1,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010408-measure-no_shadows",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\no_shadows.json"
+                      },
+                      {
+                          "scenario":  "no_post_process",
+                          "frame_avg":  4.51088,
+                          "frame_p95":  7.19529,
+                          "frame_max":  37.247,
+                          "lag_frames_16_7":  2,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  0,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  2,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\no_post_process.json"
+                      }
+                  ]
+}

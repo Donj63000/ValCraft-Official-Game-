@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260524-012701-532",
+  "label": "baseline",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-water",
+  "arguments": ["--smoke-test", "--smoke-frames=240", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\baseline.json", "--perf-scenario=baseline", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite", "--audit-mode=measure", "--stream-radius=5"],
+  "started_at_utc": "2026-05-24T01:27:01Z",
+  "ended_at_utc": "2026-05-24T01:27:05Z",
+  "duration_seconds": 4.324625,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 242, "render": 0, "performance": 3, "creatures": 12, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 3,
+  "recorded_frames": 240,
+  "written_frames": 9,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\baseline.json"]
+}

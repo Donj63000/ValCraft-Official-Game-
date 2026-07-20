@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "session_id": "20260501-005341-071",
+  "mode": "measure",
+  "spikes": [
+    {
+      "start_frame": 0,
+      "end_frame": 0,
+      "peak_frame": 0,
+      "peak_ms": 49.847300,
+      "dominant_stage": "meshing",
+      "peak_frame_sample": null,
+      "events": [{"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 10083, "frame_index": 0, "second_index": 0, "category": "session", "kind": "session_start", "severity": "info", "payload": {"mode": "measure", "label": "no_post_process", "smoke_test": true, "freeze_time": true, "stream_radius": 5, "shadow_map_size": 1024, "shadows_enabled": true, "post_process_enabled": false}}, {"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 539698, "frame_index": 0, "second_index": 0, "category": "session", "kind": "initialize_complete", "severity": "info", "payload": {"smoke_test": true, "hidden_window": true, "window_width": 1600, "window_height": 900}}, {"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 565480, "frame_index": 0, "second_index": 0, "category": "world", "kind": "world_work", "severity": "info", "payload": {"generated_chunks": 1, "meshed_chunks": 15, "light_nodes_processed": 0, "lighting_jobs_completed": 4, "pending_generation": 87, "pending_mesh": 11, "pending_lighting": 0}}, {"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 589644, "frame_index": 0, "second_index": 0, "category": "performance", "kind": "frame_spike", "severity": "warning", "payload": {"frame_total_ms": 49.847300, "streaming_ms": 0.000500, "generation_ms": 1.546600, "lighting_ms": 3.222300, "meshing_ms": 20.596800, "upload_ms": 0.732200, "shadow_ms": 0.145000, "world_ms": 0.399600}}]
+    },
+    {
+      "start_frame": 25,
+      "end_frame": 25,
+      "peak_frame": 25,
+      "peak_ms": 42.166200,
+      "dominant_stage": "lighting",
+      "peak_frame_sample": null,
+      "events": [{"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 798898, "frame_index": 25, "second_index": 0, "category": "world", "kind": "world_work", "severity": "info", "payload": {"generated_chunks": 1, "meshed_chunks": 1, "light_nodes_processed": 0, "lighting_jobs_completed": 1, "pending_generation": 50, "pending_mesh": 42, "pending_lighting": 0}}, {"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 799693, "frame_index": 25, "second_index": 0, "category": "performance", "kind": "frame_spike", "severity": "warning", "payload": {"frame_total_ms": 42.166200, "streaming_ms": 0.001100, "generation_ms": 2.634300, "lighting_ms": 2.923500, "meshing_ms": 2.807200, "upload_ms": 0.113800, "shadow_ms": 0.070500, "world_ms": 0.241900}}]
+    },
+    {
+      "start_frame": 27,
+      "end_frame": 27,
+      "peak_frame": 27,
+      "peak_ms": 23.917600,
+      "dominant_stage": "meshing",
+      "peak_frame_sample": null,
+      "events": [{"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 812009, "frame_index": 27, "second_index": 0, "category": "world", "kind": "world_work", "severity": "info", "payload": {"generated_chunks": 1, "meshed_chunks": 1, "light_nodes_processed": 0, "lighting_jobs_completed": 1, "pending_generation": 48, "pending_mesh": 44, "pending_lighting": 0}}, {"schema_version": 1, "session_id": "20260501-005341-071", "mode": "measure", "t_us": 831309, "frame_index": 27, "second_index": 0, "category": "performance", "kind": "frame_spike", "severity": "warning", "payload": {"frame_total_ms": 23.917600, "streaming_ms": 0.000300, "generation_ms": 1.450000, "lighting_ms": 0.603200, "meshing_ms": 2.074600, "upload_ms": 0.323300, "shadow_ms": 0.129600, "world_ms": 0.302400}}]
+    }
+  ]
+}

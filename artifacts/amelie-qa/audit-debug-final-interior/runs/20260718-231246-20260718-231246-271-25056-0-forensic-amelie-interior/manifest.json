@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "20260718-231246-271-25056-0",
+  "label": "amelie-interior",
+  "mode": "forensic",
+  "status": "aborted",
+  "platform": "windows",
+  "build_type": "Debug",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft",
+  "arguments": ["--smoke-test", "--smoke-session=sea-new", "--smoke-ship-view=interior", "--smoke-frames=240", "--window-width=1600", "--window-height=900", "--freeze-time", "--capture-frame=artifacts/amelie-qa/interior.bmp", "--audit", "--audit-mode=forensic", "--audit-dir=artifacts/amelie-qa/audit-debug-final-interior", "--audit-label=amelie-interior"],
+  "started_at_utc": "2026-07-18T23:12:46Z",
+  "ended_at_utc": "2026-07-18T23:12:49Z",
+  "duration_seconds": 2.857457,
+  "written_event_counts": {"session": 6, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 0,
+  "dropped_second_samples": 0,
+  "recorded_frames": 0,
+  "written_frames": 0,
+  "dropped_frames": 0,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-final-interior\\runs\\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior\\spikes.json"]
+}

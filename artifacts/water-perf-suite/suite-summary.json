@@ -1,0 +1,36 @@
+﻿{
+    "schema_version":  1,
+    "configuration":  "RelWithDebInfo",
+    "smoke_frames":  240,
+    "trace_enabled":  false,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-water",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  8.541792,
+                          "frame_p95":  14.25986,
+                          "frame_max":  105.1199,
+                          "lag_frames_16_7":  3,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  2,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012701-measure-baseline",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\baseline.json"
+                      },
+                      {
+                          "scenario":  "world_stress",
+                          "frame_avg":  13.06902,
+                          "frame_p95":  15.12252,
+                          "frame_max":  63.102,
+                          "lag_frames_16_7":  7,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  5,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\world_stress.json"
+                      }
+                  ]
+}

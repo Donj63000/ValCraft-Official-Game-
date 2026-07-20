@@ -3137,11 +3137,33 @@ void Renderer::render_loading_screen(const LoadingScreenView& view, int width, i
         const auto ship_center_x = viewport_width * 0.5F;
         const auto ship_hull_y = layout.horizon_y - ship_unit * 0.25F;
         const auto silhouette = HudColor {0.015F, 0.050F, 0.070F, 0.98F};
-        const auto sail_color = HudColor {0.035F, 0.090F, 0.105F, 0.94F};
+        const auto sail_color =
+            HudColor {
+                0.008F,
+                0.010F,
+                0.016F,
+                0.98F,
+            };
+
+        const auto mast_color =
+            HudColor {
+                0.86F,
+                0.60F,
+                0.16F,
+                0.96F,
+            };
         append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 6.8F, ship_hull_y, ship_unit * 13.6F, ship_unit, silhouette);
         append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 5.9F, ship_hull_y + ship_unit, ship_unit * 11.8F, ship_unit, silhouette);
         append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x - ship_unit * 4.6F, ship_hull_y + ship_unit * 2.0F, ship_unit * 9.2F, ship_unit * 0.8F, silhouette);
-        append_hud_rect_top_left(vertices, viewport_width, viewport_height, ship_center_x + ship_unit * 6.5F, ship_hull_y - ship_unit * 0.42F, ship_unit * 2.0F, ship_unit * 0.24F, silhouette);
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            ship_center_x + ship_unit * 6.5F,
+            ship_hull_y - ship_unit * 0.42F,
+            ship_unit * 2.0F,
+            ship_unit * 0.24F,
+            mast_color);
 
         // Je sépare nettement les trois gréements pour garder la silhouette lisible même en petite résolution.
         const auto append_square_rig = [&](float mast_offset,
@@ -3175,7 +3197,7 @@ void Renderer::render_loading_screen(const LoadingScreenView& view, int width, i
                 ship_hull_y - ship_unit * mast_height,
                 mast_width,
                 ship_unit * (mast_height + 0.2F),
-                silhouette);
+                mast_color);
             append_hud_rect_top_left(
                 vertices,
                 viewport_width,
@@ -3184,7 +3206,7 @@ void Renderer::render_loading_screen(const LoadingScreenView& view, int width, i
                 ship_hull_y - ship_unit * yard_height,
                 ship_unit * sail_width * 1.16F,
                 yard_thickness,
-                silhouette);
+                mast_color);
         };
         append_square_rig(-3.8F, 7.1F, 6.2F, 3.0F, 6);
         append_square_rig(0.0F, 9.2F, 8.0F, 3.7F, 8);
@@ -6991,7 +7013,9 @@ void Renderer::draw_maritime_hud(const MaritimeHudView& maritime_hud, int width,
         maritime_hud.thirst_ratio,
         maritime_hud.stamina_ratio,
         maritime_hud.fishing_active,
-        maritime_hud.fishing_ratio);
+        maritime_hud.fishing_ratio,
+        maritime_hud.crew_focus_visible,
+        maritime_hud.crew_progress_ratio);
 
     MaritimeHudCacheKey cache_key {};
     cache_key.width = width;
@@ -7013,6 +7037,18 @@ void Renderer::draw_maritime_hud(const MaritimeHudView& maritime_hud, int width,
     cache_key.food_rations = maritime_hud.food_rations;
     cache_key.water_flasks = maritime_hud.water_flasks;
     cache_key.fish = maritime_hud.fish;
+    cache_key.crew_focus_visible = maritime_hud.crew_focus_visible;
+    cache_key.crew_moving = maritime_hud.crew_moving;
+    cache_key.crew_blocked = maritime_hud.crew_blocked;
+    cache_key.crew_knocked_out = maritime_hud.crew_knocked_out;
+    cache_key.crew_has_progress = maritime_hud.crew_has_progress;
+    cache_key.crew_role = maritime_hud.crew_role;
+    cache_key.crew_activity = maritime_hud.crew_activity;
+    cache_key.crew_cargo = maritime_hud.crew_cargo;
+    cache_key.crew_destination = maritime_hud.crew_destination;
+    cache_key.crew_progress_step = quantize_hud_value(maritime_hud.crew_progress_ratio, 100.0F);
+    cache_key.crew_health_step = quantize_hud_value(maritime_hud.crew_health_ratio, 100.0F);
+    cache_key.crew_distance_step = quantize_hud_value(maritime_hud.crew_distance, 10.0F);
 
     auto& cache = maritime_cache_;
     auto& vertices = cache.vertices;
@@ -7108,6 +7144,99 @@ void Renderer::draw_maritime_hud(const MaritimeHudView& maritime_hud, int width,
         if (maritime_hud.fishing_active) {
             draw_bar(layout.fishing_bar, {0.94F, 0.84F, 0.38F, 0.94F});
             draw_text(layout.fishing_bar.x, layout.fishing_bar.y - 10.0F, layout.body_pixel_size, "PECHE", {0.94F, 0.90F, 0.72F, 0.94F});
+        }
+
+        if (layout.crew_focus.visible) {
+            // Le panneau contextuel rend l'intention du PNJ lisible sans ouvrir de menu.
+            const auto focus_accent =
+                maritime_hud.crew_knocked_out
+                    ? HudColor {0.96F, 0.34F, 0.28F, 1.0F}
+                    : (maritime_hud.crew_blocked
+                           ? HudColor {0.98F, 0.74F, 0.28F, 1.0F}
+                           : HudColor {0.34F, 0.88F, 0.94F, 1.0F});
+            auto focus_palette = make_warm_panel_palette(focus_accent);
+            focus_palette.fill = {0.025F, 0.055F, 0.070F, 0.90F};
+            focus_palette.frame = {0.035F, 0.105F, 0.130F, 0.98F};
+            focus_palette.trim = hud_with_alpha(focus_accent, 0.42F);
+
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                layout.crew_focus.panel_x,
+                layout.crew_focus.panel_y,
+                layout.crew_focus.panel_width,
+                layout.crew_focus.panel_height,
+                3.0F,
+                focus_palette,
+                true);
+
+            auto title =
+                maritime_hud.crew_role.empty()
+                    ? std::string("MARIN")
+                    : std::string(maritime_hud.crew_role);
+
+            auto detail = std::string {};
+            if (maritime_hud.crew_knocked_out) {
+                detail = "ASSOMME - RECUPERATION";
+            } else if (maritime_hud.crew_blocked) {
+                detail = "PASSAGE OCCUPE - PATIENTE";
+            } else if (maritime_hud.crew_moving) {
+                if (!maritime_hud.crew_cargo.empty()) {
+                    detail = std::string(maritime_hud.crew_cargo) + " VERS " +
+                             std::string(maritime_hud.crew_destination);
+                } else {
+                    detail = "VERS ";
+                    detail += maritime_hud.crew_destination;
+                }
+            } else {
+                detail = maritime_hud.crew_activity;
+            }
+
+            auto status = std::to_string(static_cast<int>(std::round(maritime_hud.crew_distance)));
+            status += "M  SANTE ";
+            status += std::to_string(static_cast<int>(std::round(
+                std::clamp(maritime_hud.crew_health_ratio, 0.0F, 1.0F) * 100.0F)));
+            status += "%";
+
+            draw_text(
+                layout.crew_focus.title_x,
+                layout.crew_focus.title_y,
+                layout.text_pixel_size,
+                title,
+                {0.94F, 0.99F, 1.0F, 0.98F});
+            // Les destinations les plus longues doivent rester dans le panneau
+            // meme sur une petite fenetre. La reduction reste quantifiee par
+            // quarts de pixel afin de conserver l'aspect net de la police bitmap.
+            const auto detail_width_limit =
+                layout.crew_focus.panel_width -
+                2.0F * (layout.crew_focus.detail_x -
+                        layout.crew_focus.panel_x);
+            auto detail_pixel_size = layout.body_pixel_size;
+            while (detail_pixel_size > 1.25F &&
+                   measure_pixel_text(detail, detail_pixel_size) >
+                       detail_width_limit) {
+                detail_pixel_size -= 0.25F;
+            }
+
+            draw_text(
+                layout.crew_focus.detail_x,
+                layout.crew_focus.detail_y,
+                detail_pixel_size,
+                detail,
+                maritime_hud.crew_blocked
+                    ? HudColor {1.0F, 0.84F, 0.48F, 0.96F}
+                    : HudColor {0.76F, 0.92F, 0.98F, 0.96F});
+            draw_text(
+                layout.crew_focus.status_x,
+                layout.crew_focus.status_y,
+                layout.body_pixel_size,
+                status,
+                {0.76F, 0.80F, 0.84F, 0.94F});
+
+            if (maritime_hud.crew_has_progress) {
+                draw_bar(layout.crew_focus.progress_bar, focus_accent);
+            }
         }
     }
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "20260718-231139-255-43688-0",
+  "label": "amelie-bow",
+  "mode": "forensic",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft",
+  "arguments": ["--smoke-test", "--smoke-session=sea-new", "--smoke-ship-view=bow", "--smoke-frames=240", "--window-width=1600", "--window-height=900", "--freeze-time", "--capture-frame=artifacts/amelie-qa/bow.bmp", "--audit", "--audit-mode=forensic", "--audit-dir=artifacts/amelie-qa/audit-release-bow", "--audit-label=amelie-bow"],
+  "started_at_utc": "2026-07-18T23:11:39Z",
+  "ended_at_utc": "2026-07-18T23:11:41Z",
+  "duration_seconds": 1.847533,
+  "written_event_counts": {"session": 8, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 240, "render": 0, "performance": 4, "creatures": 5, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 2,
+  "dropped_second_samples": 0,
+  "recorded_frames": 240,
+  "written_frames": 240,
+  "dropped_frames": 0,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-release-bow\\runs\\20260718-231139-20260718-231139-255-43688-0-forensic-amelie-bow\\spikes.json"]
+}

@@ -221,7 +221,7 @@ TEST_CASE("les marins restent exactement dans le repere local du navire") {
     CHECK(crew.render_instances()[0].position.z - world_before.z == doctest::Approx(500'000.0F));
 }
 
-TEST_CASE("la marche oriente le marin dans la direction reelle de son trajet") {
+TEST_CASE("la marche reste alignee avec l'avant reel du corps") {
     ShipEntity ship {};
     ship.set_position({0.5F, 49.0F, 0.5F});
     ShipCrewSystem crew {};
@@ -231,17 +231,203 @@ TEST_CASE("la marche oriente le marin dans la direction reelle de son trajet") {
     place_at_station(fisher, ShipCrewStation::PortFishing);
     fisher.next_station = ShipCrewStation::MidDeckPort;
     fisher.destination_station = ShipCrewStation::MidDeckPort;
+    fisher.yaw_radians = 3.14159265358979323846F;
     crew.load_state(state, 732, ship);
 
-    const auto expected = glm::normalize(station_position(ShipCrewStation::MidDeckPort) -
-                                         station_position(ShipCrewStation::PortFishing));
     std::uint32_t fish = 0U;
     std::uint32_t water = 0U;
-    (void)crew.update(ship, {}, 0.25F, fish, water);
-    const auto yaw = crew.members()[1].yaw_radians;
-    const auto alignment = std::cos(yaw) * expected.x + std::sin(yaw) * expected.z;
-    CHECK(alignment > 0.999F);
+    const auto initial_position = crew.members()[1].local_position;
+
+    // Un angle important doit d'abord provoquer un pivot, jamais un glissement.
+    (void)crew.update(ship, {}, 0.05F, fish, water);
+    CHECK(glm::length(crew.members()[1].local_position - initial_position) < 1.0e-5F);
+
+    auto observed_translation = false;
+    for (int frame = 0; frame < 160; ++frame) {
+        const auto before = crew.members()[1].local_position;
+        (void)crew.update(ship, {}, 0.05F, fish, water);
+        const auto after = crew.members()[1].local_position;
+        auto displacement = after - before;
+        displacement.y = 0.0F;
+        if (glm::dot(displacement, displacement) <= 1.0e-8F) {
+            continue;
+        }
+
+        displacement = glm::normalize(displacement);
+        const auto yaw = crew.members()[1].yaw_radians;
+
+        // Le modele regarde localement vers +X. Apres une rotation GLM autour
+        // de +Y, son avant monde vaut (cos(yaw), 0, -sin(yaw)).
+        const glm::vec3 body_forward {
+            std::cos(yaw),
+            0.0F,
+            -std::sin(yaw),
+        };
+        CHECK(glm::dot(body_forward, displacement) >= 0.939F);
+        observed_translation = true;
+    }
+    CHECK(observed_translation);
 }
+
+
+TEST_CASE("une cargaison reste visible pendant tout le trajet") {
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(733, ship);
+
+    auto state = crew.save_state();
+    auto& fisher = state.members[1];
+    place_at_station(fisher, ShipCrewStation::PortFishing);
+    fisher.cargo = ShipCrewCargo::Fish;
+    fisher.activity = ShipCrewActivity::Carry;
+    fisher.routine_step = 1U;
+    fisher.destination_station = ShipCrewStation::CargoFish;
+    crew.load_state(state, 733, ship);
+
+    std::uint32_t fish = 0U;
+    std::uint32_t water = 0U;
+    auto observed_walk = false;
+    for (int frame = 0; frame < 240; ++frame) {
+        (void)crew.update(ship, {}, 0.05F, fish, water);
+        const auto& render = crew.render_instances()[1];
+        if (render.motion_amount <= 0.05F) {
+            continue;
+        }
+
+        CHECK(render.activity == CrewVisualActivity::Carry);
+        observed_walk = true;
+        break;
+    }
+    CHECK(observed_walk);
+}
+
+TEST_CASE("un marin cede le passage au joueur puis repart") {
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(734, ship);
+
+    auto state = crew.save_state();
+    auto& deckhand = state.members[4];
+    place_at_station(deckhand, ShipCrewStation::AftDeck);
+    deckhand.next_station = ShipCrewStation::MizzenMast;
+    deckhand.destination_station = ShipCrewStation::MizzenMast;
+    deckhand.yaw_radians = -1.57079632679489661923F;
+    crew.load_state(state, 734, ship);
+
+    const auto start = crew.members()[4].local_position;
+    auto direction = station_position(ShipCrewStation::MizzenMast) - start;
+    direction.y = 0.0F;
+    direction = glm::normalize(direction);
+    const auto player_position =
+        ship.world_origin() + start + direction * 0.72F;
+
+    std::uint32_t fish = 0U;
+    std::uint32_t water = 0U;
+    for (int frame = 0; frame < 30; ++frame) {
+        (void)crew.update(
+            ship,
+            {},
+            0.05F,
+            fish,
+            water,
+            player_position);
+    }
+    CHECK(glm::length(crew.members()[4].local_position - start) < 1.0e-4F);
+
+    for (int frame = 0; frame < 30; ++frame) {
+        (void)crew.update(ship, {}, 0.05F, fish, water);
+    }
+    CHECK(glm::length(crew.members()[4].local_position - start) > 0.15F);
+}
+
+TEST_CASE("viser un marin expose son role sa tache et sa progression") {
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(735, ship);
+
+    auto state = crew.save_state();
+    auto& fisher = state.members[1];
+    place_at_station(fisher, ShipCrewStation::PortFishing);
+    fisher.activity = ShipCrewActivity::Fish;
+    fisher.work_progress = kAutomaticFishWorkSeconds * 0.50F;
+    crew.load_state(state, 735, ship);
+
+    std::uint32_t fish = 0U;
+    std::uint32_t water = 0U;
+    (void)crew.update(ship, {}, 0.0F, fish, water);
+
+    const auto target =
+        crew.render_instances()[1].position +
+        glm::vec3 {0.0F, 0.95F, 0.0F};
+    const auto origin =
+        target + glm::vec3 {0.0F, 0.0F, -3.0F};
+    const auto focus = crew.focus_from_ray(
+        ship,
+        origin,
+        {0.0F, 0.0F, 1.0F},
+        5.0F);
+
+    REQUIRE(focus.visible);
+    CHECK(focus.role == ShipCrewRole::Fisher);
+    CHECK(focus.activity == ShipCrewActivity::Fish);
+    CHECK(focus.has_progress);
+    CHECK(focus.progress_ratio == doctest::Approx(0.50F));
+}
+
+TEST_CASE("les reservations de passage ne bloquent pas la production a long terme") {
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(736, ship);
+
+    std::uint32_t fish = 0U;
+    std::uint32_t water = 0U;
+    const auto result = update_for(
+        crew,
+        ship,
+        {},
+        600.0F,
+        fish,
+        water);
+
+    CHECK(result.fish_delivered);
+    CHECK(result.water_delivered);
+    CHECK(fish > 0U);
+    CHECK(water > 0U);
+}
+
+
+TEST_CASE("le pecheur reprend sa production apres une tempete") {
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(737, ship);
+
+    auto state = crew.save_state();
+    auto& fisher = state.members[1];
+    place_at_station(fisher, ShipCrewStation::MessTable);
+    fisher.routine_step = 2U;
+    fisher.activity = ShipCrewActivity::Rest;
+    crew.load_state(state, 737, ship);
+
+    EnvironmentState storm {};
+    storm.storm_intensity = 0.80F;
+    std::uint32_t fish = 0U;
+    std::uint32_t water = 0U;
+    (void)crew.update(ship, storm, 0.25F, fish, water);
+
+    CHECK(crew.members()[1].destination_station == ShipCrewStation::MainMast);
+    CHECK(crew.members()[1].activity == ShipCrewActivity::HaulRope);
+
+    (void)crew.update(ship, {}, 0.25F, fish, water);
+    CHECK(crew.members()[1].destination_station == ShipCrewStation::PortFishing);
+    CHECK(crew.members()[1].activity == ShipCrewActivity::Fish);
+    CHECK(crew.members()[1].routine_step == 0U);
+}
+
 
 TEST_CASE("le poisson est credite uniquement apres son transport dans la cale") {
     ShipEntity ship {};

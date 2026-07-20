@@ -1,0 +1,36 @@
+﻿{
+    "schema_version":  1,
+    "configuration":  "RelWithDebInfo",
+    "smoke_frames":  180,
+    "trace_enabled":  false,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  4.390258,
+                          "frame_p95":  5.840475,
+                          "frame_max":  61.7704,
+                          "lag_frames_16_7":  1,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  1,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  1,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230011-measure-baseline",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\baseline.json"
+                      },
+                      {
+                          "scenario":  "world_stress",
+                          "frame_avg":  5.409333,
+                          "frame_p95":  6.30215,
+                          "frame_max":  36.0843,
+                          "lag_frames_16_7":  1,
+                          "lag_frames_33_3":  1,
+                          "lag_frames_50_0":  0,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  1,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\world_stress.json"
+                      }
+                  ]
+}

@@ -1,0 +1,24 @@
+ValCraft audit summary [baseline]
+  session_id=20260524-012701-532 mode=measure status=completed
+  duration_seconds=4.325 recorded_frames=240 written_frames=9 second_samples=3
+  events_written=260 events_dropped=0 spike_windows=2
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\artifacts\water-perf-suite\runs\20260524-012701-measure-baseline
+ValCraft performance summary [baseline]
+  capture_mode=measure
+  render_flags shadows=on post_process=on shadow_map_size=1024
+  frame_total_ms_avg=8.542 p95=14.260 p99=17.813 max=105.120
+  streaming_ms_avg=0.020 p95=0.001 max=4.793
+  generation_ms_avg=3.269 p95=8.502 max=11.923 chunks_max=1
+  lighting_ms_avg=0.293 p95=0.850 max=4.032 nodes_max=0 jobs_total=112
+  meshing_ms_avg=2.977 p95=4.313 max=22.354 chunks_max=15
+  upload_ms_avg=0.251 p95=0.567 max=1.183 uploads_max=8
+  shadow_ms_avg=0.109 p95=0.198 max=1.781 chunks_max=125
+  world_ms_avg=0.321 p95=0.520 max=1.175 chunks_max=65
+  pending_generation_avg=16.321 max=87
+  pending_mesh_avg=25.046 max=65
+  pending_lighting_avg=0.000 max=0
+  visible_chunks_avg=48.683 max=65
+  lag_frames_16_7=3 lag_frames_33_3=1 lag_frames_50_0=1
+  hotspot_worst_frame=meshing spike_windows=2
+  events_total=0 block_breaks=0 block_places=0
+  scheduler_stream_changes=2 generation_enqueued=22 generation_pruned=0 unloaded_chunks=11

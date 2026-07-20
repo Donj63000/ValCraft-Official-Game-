@@ -1,0 +1,28 @@
+ValCraft audit summary [baseline]
+  session_id=20260718-182508-034-24128-0 mode=measure status=completed
+  duration_seconds=2.947 recorded_frames=300 written_frames=0 dropped_frames=0 second_samples=2 dropped_second_samples=0
+  events_written=7 events_dropped=0 spike_windows=0
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\performancesaudit\perf-suite\codex-final-suite-20260718-202507\runs\20260718-182508-20260718-182508-034-24128-0-measure-baseline
+ValCraft performance summary [baseline]
+  capture_mode=measure
+  render_flags shadows=on post_process=on shadow_map_size=1024
+  frame_total_ms_avg=5.396 p95=6.018 p99=7.311 max=9.483
+  cpu_stages_ms_avg events=0.010 simulation=0.105 audio=0.003 render_prep=0.001 render=0.846 render_overhead=0.084 present=3.310 telemetry=0.021 residual=0.046
+  streaming_ms_avg=0.015 p95=0.002 max=2.611
+  generation_ms_avg=0.128 p95=1.004 max=1.197 chunks_max=1
+  fluid_ms_avg=0.021 p95=0.048 max=0.118 cells_max=10 pending_max=0
+  lighting_ms_avg=0.102 p95=0.729 max=2.345 nodes_max=0 jobs_total=23
+  meshing_ms_avg=0.787 p95=2.138 max=4.156 chunks_max=4
+  upload_ms_avg=0.100 p95=0.760 max=1.404 uploads_max=3
+  shadow_ms_avg=0.160 p95=0.273 max=0.899 chunks_max=125
+  world_ms_avg=0.503 p95=0.654 max=4.671 chunks_max=66
+  gpu_ms_avg frame=5.064 shadow=1.425 world=1.196 sky=0.107 water=1.195 entities=0.008 post=1.103 hud=0.030
+  memory_peak_mib working_set=503.949 private=661.414 world=323.094 mesh=305.397 overrides=0.018 gpu_buffers=83.992 gpu_textures=59.574
+  pending_generation_avg=0.600 max=11
+  pending_mesh_avg=14.278 max=33
+  pending_lighting_avg=0.022 max=2
+  visible_chunks_avg=62.422 max=66
+  lag_frames_16_7=0 lag_frames_33_3=0 lag_frames_50_0=0
+  hotspot_worst_frame=streaming spike_windows=0
+  events_total=0 block_breaks=0 block_places=0
+  scheduler_stream_changes=1 generation_enqueued=11 generation_pruned=0 unloaded_chunks=11

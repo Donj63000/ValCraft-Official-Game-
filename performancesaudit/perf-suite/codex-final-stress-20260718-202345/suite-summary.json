@@ -1,0 +1,60 @@
+﻿{
+    "schema_version":  2,
+    "configuration":  "RelWithDebInfo",
+    "measured_frames":  180,
+    "warmup_frames":  60,
+    "repetitions":  1,
+    "viewport_width":  1920,
+    "viewport_height":  1080,
+    "trace_enabled":  false,
+    "adaptive_quality":  false,
+    "platform":  "windows",
+    "build_type":  "RelWithDebInfo",
+    "thresholds_enforced":  true,
+    "baseline_path":  "",
+    "max_regression_percent":  8,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-final-stress-20260718-202345",
+    "scenarios":  [
+                      {
+                          "scenario":  "world_stress",
+                          "frame_avg":  3.555561,
+                          "frame_p95":  5.333815,
+                          "frame_p99":  7.289993,
+                          "frame_max":  7.5149,
+                          "gpu_frame_p95":  4.783098,
+                          "private_bytes_peak":  1097728000,
+                          "working_set_bytes_peak":  682967040,
+                          "lag_frames_16_7":  0,
+                          "lag_frames_33_3":  0,
+                          "lag_frames_50_0":  0,
+                          "frame_avg_mad":  0,
+                          "frame_p95_mad":  0,
+                          "platform":  "windows",
+                          "build_type":  "RelWithDebInfo",
+                          "vsync_mode":  "disabled",
+                          "repetitions":  [
+                                              {
+                                                  "repetition":  1,
+                                                  "frame_avg":  3.555561,
+                                                  "frame_p95":  5.333815,
+                                                  "frame_p99":  7.289993,
+                                                  "frame_max":  7.5149,
+                                                  "gpu_frame_p95":  4.783098,
+                                                  "private_bytes_peak":  1097728000,
+                                                  "working_set_bytes_peak":  682967040,
+                                                  "lag_frames_16_7":  0,
+                                                  "lag_frames_33_3":  0,
+                                                  "lag_frames_50_0":  0,
+                                                  "worst_frame_stage":  "unattributed",
+                                                  "platform":  "windows",
+                                                  "build_type":  "RelWithDebInfo",
+                                                  "vsync_mode":  "disabled",
+                                                  "spike_windows":  0,
+                                                  "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-final-stress-20260718-202345\\runs\\20260718-182345-20260718-182345-741-19468-0-measure-world_stress",
+                                                  "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-final-stress-20260718-202345\\world_stress-run-1.json"
+                                              }
+                                          ]
+                      }
+                  ]
+}

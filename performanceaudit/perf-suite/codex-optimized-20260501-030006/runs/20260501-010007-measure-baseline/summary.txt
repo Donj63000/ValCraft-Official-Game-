@@ -1,0 +1,5 @@
+ValCraft audit summary [baseline]
+  session_id=20260501-010007-207 mode=measure status=aborted
+  duration_seconds=0.404 recorded_frames=0 written_frames=0 second_samples=0
+  events_written=4 events_dropped=0 spike_windows=0
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\performanceaudit\perf-suite\codex-optimized-20260501-030006\runs\20260501-010007-measure-baseline

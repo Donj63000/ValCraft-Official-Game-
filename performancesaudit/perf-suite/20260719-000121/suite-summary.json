@@ -1,0 +1,60 @@
+﻿{
+    "schema_version":  2,
+    "configuration":  "RelWithDebInfo",
+    "measured_frames":  180,
+    "warmup_frames":  60,
+    "repetitions":  1,
+    "viewport_width":  1920,
+    "viewport_height":  1080,
+    "trace_enabled":  false,
+    "adaptive_quality":  false,
+    "platform":  "windows",
+    "build_type":  "RelWithDebInfo",
+    "thresholds_enforced":  true,
+    "baseline_path":  "",
+    "max_regression_percent":  8,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\build",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260719-000121",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  7.471706,
+                          "frame_p95":  14.81539,
+                          "frame_p99":  21.346535,
+                          "frame_max":  22.4718,
+                          "gpu_frame_p95":  5.141464,
+                          "private_bytes_peak":  344588288,
+                          "working_set_bytes_peak":  311054336,
+                          "lag_frames_16_7":  4,
+                          "lag_frames_33_3":  0,
+                          "lag_frames_50_0":  0,
+                          "frame_avg_mad":  0,
+                          "frame_p95_mad":  0,
+                          "platform":  "windows",
+                          "build_type":  "RelWithDebInfo",
+                          "vsync_mode":  "disabled",
+                          "repetitions":  [
+                                              {
+                                                  "repetition":  1,
+                                                  "frame_avg":  7.471706,
+                                                  "frame_p95":  14.81539,
+                                                  "frame_p99":  21.346535,
+                                                  "frame_max":  22.4718,
+                                                  "gpu_frame_p95":  5.141464,
+                                                  "private_bytes_peak":  344588288,
+                                                  "working_set_bytes_peak":  311054336,
+                                                  "lag_frames_16_7":  4,
+                                                  "lag_frames_33_3":  0,
+                                                  "lag_frames_50_0":  0,
+                                                  "worst_frame_stage":  "telemetry",
+                                                  "platform":  "windows",
+                                                  "build_type":  "RelWithDebInfo",
+                                                  "vsync_mode":  "disabled",
+                                                  "spike_windows":  3,
+                                                  "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260719-000121\\runs\\20260718-220122-20260718-220122-609-13364-0-measure-baseline",
+                                                  "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260719-000121\\baseline-run-1.json"
+                                              }
+                                          ]
+                      }
+                  ]
+}

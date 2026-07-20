@@ -1,0 +1,28 @@
+ValCraft audit summary [amelie-stern]
+  session_id=20260718-231141-352-35780-0 mode=forensic status=completed
+  duration_seconds=2.080 recorded_frames=240 written_frames=240 dropped_frames=0 second_samples=2 dropped_second_samples=0
+  events_written=260 events_dropped=0 spike_windows=6
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\artifacts\amelie-qa\audit-release-stern\runs\20260718-231141-20260718-231141-352-35780-0-forensic-amelie-stern
+ValCraft performance summary [amelie-stern]
+  capture_mode=forensic
+  render_flags shadows=on post_process=on shadow_map_size=1024
+  frame_total_ms_avg=6.741 p95=11.459 p99=22.818 max=46.764
+  cpu_stages_ms_avg events=0.017 simulation=0.165 audio=0.007 render_prep=0.001 render=0.930 render_overhead=0.064 present=1.131 telemetry=0.162 residual=0.165
+  streaming_ms_avg=0.001 p95=0.002 max=0.004
+  generation_ms_avg=0.718 p95=2.049 max=8.184 chunks_max=2
+  fluid_ms_avg=1.211 p95=2.489 max=19.356 cells_max=256 pending_max=46814
+  lighting_ms_avg=0.313 p95=1.353 max=3.103 nodes_max=0 jobs_total=112
+  meshing_ms_avg=1.919 p95=3.469 max=5.067 chunks_max=4
+  upload_ms_avg=0.135 p95=1.039 max=2.193 uploads_max=3
+  shadow_ms_avg=0.122 p95=0.219 max=3.267 chunks_max=42
+  world_ms_avg=0.610 p95=1.547 max=2.852 chunks_max=31
+  gpu_ms_avg frame=5.265 shadow=0.646 world=0.915 sky=0.195 water=2.061 entities=0.000 post=1.335 hud=0.113
+  memory_peak_mib working_set=407.578 private=539.133 world=250.338 mesh=232.852 overrides=0.018 gpu_buffers=35.214 gpu_textures=42.655
+  pending_generation_avg=25.121 max=111
+  pending_mesh_avg=75.188 max=97
+  pending_lighting_avg=0.033 max=1
+  visible_chunks_avg=21.142 max=31
+  lag_frames_16_7=7 lag_frames_33_3=1 lag_frames_50_0=0
+  hotspot_worst_frame=present spike_windows=6
+  events_total=0 block_breaks=0 block_places=0
+  scheduler_stream_changes=0 generation_enqueued=0 generation_pruned=0 unloaded_chunks=0

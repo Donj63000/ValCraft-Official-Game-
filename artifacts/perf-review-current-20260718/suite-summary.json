@@ -1,0 +1,62 @@
+﻿{
+    "schema_version":  1,
+    "configuration":  "RelWithDebInfo",
+    "smoke_frames":  720,
+    "trace_enabled":  false,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718",
+    "scenarios":  [
+                      {
+                          "scenario":  "baseline",
+                          "frame_avg":  13.490683,
+                          "frame_p95":  32.54647,
+                          "frame_max":  448.823,
+                          "lag_frames_16_7":  170,
+                          "lag_frames_33_3":  33,
+                          "lag_frames_50_0":  9,
+                          "worst_frame_stage":  "generation",
+                          "spike_windows":  41,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165902-measure-baseline",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\baseline.json"
+                      },
+                      {
+                          "scenario":  "world_stress",
+                          "frame_avg":  14.633578,
+                          "frame_p95":  29.926445,
+                          "frame_max":  112.4967,
+                          "lag_frames_16_7":  293,
+                          "lag_frames_33_3":  26,
+                          "lag_frames_50_0":  3,
+                          "worst_frame_stage":  "meshing",
+                          "spike_windows":  42,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165925-measure-world_stress",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\world_stress.json"
+                      },
+                      {
+                          "scenario":  "no_shadows",
+                          "frame_avg":  13.882084,
+                          "frame_p95":  35.28703,
+                          "frame_max":  150.9403,
+                          "lag_frames_16_7":  196,
+                          "lag_frames_33_3":  43,
+                          "lag_frames_50_0":  13,
+                          "worst_frame_stage":  "generation",
+                          "spike_windows":  51,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-165959-measure-no_shadows",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\no_shadows.json"
+                      },
+                      {
+                          "scenario":  "no_post_process",
+                          "frame_avg":  17.298667,
+                          "frame_p95":  48.42546,
+                          "frame_max":  714.516,
+                          "lag_frames_16_7":  211,
+                          "lag_frames_33_3":  65,
+                          "lag_frames_50_0":  31,
+                          "worst_frame_stage":  "generation",
+                          "spike_windows":  51,
+                          "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\runs\\20260718-170026-measure-no_post_process",
+                          "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\perf-review-current-20260718\\no_post_process.json"
+                      }
+                  ]
+}

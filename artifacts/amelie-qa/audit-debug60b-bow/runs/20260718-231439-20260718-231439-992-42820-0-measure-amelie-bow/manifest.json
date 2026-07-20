@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "20260718-231439-992-42820-0",
+  "label": "amelie-bow",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "Debug",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft",
+  "arguments": ["--smoke-test", "--smoke-session=sea-new", "--smoke-ship-view=bow", "--smoke-frames=60", "--window-width=1600", "--window-height=900", "--freeze-time", "--capture-frame=artifacts/amelie-qa/bow.bmp", "--audit", "--audit-dir=artifacts/amelie-qa/audit-debug60b-bow", "--audit-label=amelie-bow"],
+  "started_at_utc": "2026-07-18T23:14:39Z",
+  "ended_at_utc": "2026-07-18T23:14:41Z",
+  "duration_seconds": 1.712754,
+  "written_event_counts": {"session": 8, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 10, "creatures": 2, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 2,
+  "dropped_second_samples": 0,
+  "recorded_frames": 60,
+  "written_frames": 26,
+  "dropped_frames": 0,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug60b-bow\\runs\\20260718-231439-20260718-231439-992-42820-0-measure-amelie-bow\\spikes.json"]
+}

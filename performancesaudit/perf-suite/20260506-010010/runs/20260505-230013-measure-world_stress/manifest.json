@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260505-230013-099",
+  "label": "world_stress",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+  "arguments": ["--smoke-test", "--smoke-frames=180", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\world_stress.json", "--perf-scenario=world_stress", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010", "--audit-mode=measure", "--stream-radius=8"],
+  "started_at_utc": "2026-05-05T23:00:13Z",
+  "ended_at_utc": "2026-05-05T23:00:14Z",
+  "duration_seconds": 1.254446,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 178, "render": 0, "performance": 1, "creatures": 0, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 1,
+  "recorded_frames": 180,
+  "written_frames": 3,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\runs\\20260505-230013-measure-world_stress\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260506-010010\\world_stress.json"]
+}

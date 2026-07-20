@@ -2474,6 +2474,20 @@ auto Game::current_maritime_hud_view() const noexcept -> MaritimeHudView {
     view.food_rations = state.food_rations;
     view.water_flasks = state.water_flasks;
     view.fish = state.fish;
+
+    const auto& focus = state.crew_focus;
+    view.crew_focus_visible = focus.visible;
+    view.crew_moving = focus.moving;
+    view.crew_blocked = focus.blocked;
+    view.crew_knocked_out = focus.knocked_out;
+    view.crew_has_progress = focus.has_progress;
+    view.crew_role = ship_crew_role_label(focus.role);
+    view.crew_activity = ship_crew_activity_label(focus.activity);
+    view.crew_cargo = ship_crew_cargo_label(focus.cargo);
+    view.crew_destination = ship_crew_station_label(focus.destination_station);
+    view.crew_progress_ratio = focus.progress_ratio;
+    view.crew_health_ratio = focus.health_ratio;
+    view.crew_distance = focus.distance;
     return view;
 }
 

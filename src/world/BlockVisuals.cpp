@@ -375,6 +375,135 @@ void fill_ship_atlas_tiles(std::vector<std::uint8_t>& pixels) {
             255.0F);
     });
 
+    fill_ship_tile(pixels, ShipAtlasMaterial::BlackCanvas, [](int x, int y) {
+        // Le noir reste volontairement anthracite. Un noir mathématique pur
+        // ferait disparaître les plis, le tissage et le volume pendant la nuit.
+        const auto weave = ((x + y) & 1) == 0 ? 3.0F : -2.5F;
+        const auto warp = x % 4 == 0 ? -3.5F : 0.0F;
+
+        const auto main_fold =
+            std::sin(
+                (static_cast<float>(x) / 15.0F) *
+                kFullTurnRadians) *
+            7.5F;
+
+        const auto cross_fold =
+            std::cos(
+                (static_cast<float>(y) / 15.0F) *
+                kFullTurnRadians *
+                2.0F) *
+            2.0F;
+
+        const auto fiber =
+            (tile_noise(x, y, 521) - 0.5F) * 7.0F;
+
+        const auto reinforced_seam =
+            x == 0 || x == 15;
+
+        const auto golden_stitch =
+            (x == 1 || x == 14) &&
+            y % 4 == 1;
+
+        if (golden_stitch) {
+            const auto sparkle =
+                tile_noise(x + 9, y + 5, 523) * 24.0F;
+
+            return make_rgba(
+                164.0F + sparkle,
+                112.0F + sparkle * 0.72F,
+                31.0F + sparkle * 0.30F,
+                255.0F);
+        }
+
+        const auto seam_shadow =
+            reinforced_seam ? 8.0F : 0.0F;
+
+        return make_rgba(
+            18.0F +
+                weave +
+                warp +
+                main_fold +
+                cross_fold +
+                fiber -
+                seam_shadow,
+
+            20.0F +
+                weave * 0.82F +
+                warp * 0.78F +
+                main_fold * 0.88F +
+                cross_fold * 0.72F +
+                fiber * 0.80F -
+                seam_shadow,
+
+            25.0F +
+                weave * 0.68F +
+                warp * 0.64F +
+                main_fold +
+                cross_fold * 0.86F +
+                fiber -
+                seam_shadow * 0.90F,
+
+            255.0F);
+    });
+
+    fill_ship_tile(pixels, ShipAtlasMaterial::SolidGold, [](int x, int y) {
+        // L'or ne reçoit aucune patine verte. De fines stries, une bande de
+        // réflexion et un martelage discret suggèrent un métal massif poli.
+        const auto brushed =
+            std::sin(
+                static_cast<float>(y) * 1.41F +
+                static_cast<float>(x) * 0.23F) *
+            7.0F;
+
+        const auto hammer =
+            (tile_noise(x * 2, y * 2, 541) - 0.5F) *
+            16.0F;
+
+        const auto highlight_center =
+            4 + (y / 6);
+
+        const auto highlight_distance =
+            std::abs(
+                static_cast<float>(
+                    x - highlight_center));
+
+        const auto reflection =
+            std::max(
+                0.0F,
+                1.0F -
+                    highlight_distance / 2.2F);
+
+        const auto edge =
+            x == 0 || x == 15;
+
+        const auto edge_shadow =
+            edge ? 22.0F : 0.0F;
+
+        const auto shine =
+            reflection * 48.0F;
+
+        return make_rgba(
+            196.0F +
+                brushed +
+                hammer +
+                shine -
+                edge_shadow,
+
+            151.0F +
+                brushed * 0.72F +
+                hammer * 0.62F +
+                shine * 0.86F -
+                edge_shadow * 0.72F,
+
+            55.0F +
+                brushed * 0.28F +
+                hammer * 0.24F +
+                shine * 0.52F -
+                edge_shadow * 0.34F,
+
+            255.0F);
+    });
+
     fill_ship_tile(pixels, ShipAtlasMaterial::Rope, [](int x, int y) {
         const auto braid_phase = (x + y * 2) % 6;
         const auto braid_highlight = braid_phase <= 1 ? 18.0F : (braid_phase >= 4 ? -13.0F : 0.0F);

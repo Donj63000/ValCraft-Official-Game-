@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260614-195814-636",
+  "label": "world_stress",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+  "arguments": ["--smoke-test", "--smoke-frames=180", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\world_stress.json", "--perf-scenario=world_stress", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current", "--audit-mode=measure", "--stream-radius=8"],
+  "started_at_utc": "2026-06-14T19:58:14Z",
+  "ended_at_utc": "2026-06-14T19:58:18Z",
+  "duration_seconds": 3.452309,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 181, "render": 0, "performance": 24, "creatures": 11, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 3,
+  "recorded_frames": 180,
+  "written_frames": 89,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195814-measure-world_stress\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\world_stress.json"]
+}

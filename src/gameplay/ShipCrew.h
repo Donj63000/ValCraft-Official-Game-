@@ -8,7 +8,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string_view>
 
 namespace valcraft {
 
@@ -145,6 +147,13 @@ struct ShipCrewSaveState {
     -> ShipCrewSaveState;
 [[nodiscard]] auto ship_crew_max_health(ShipCrewRole role) noexcept -> float;
 
+// Ces libelles sont centralises ici afin que le gameplay et le HUD decrivent
+// toujours une meme activite avec les memes termes.
+[[nodiscard]] auto ship_crew_role_label(ShipCrewRole role) noexcept -> std::string_view;
+[[nodiscard]] auto ship_crew_activity_label(ShipCrewActivity activity) noexcept -> std::string_view;
+[[nodiscard]] auto ship_crew_cargo_label(ShipCrewCargo cargo) noexcept -> std::string_view;
+[[nodiscard]] auto ship_crew_station_label(ShipCrewStation station) noexcept -> std::string_view;
+
 struct ShipCrewUpdateResult {
     bool fish_delivered = false;
     bool water_delivered = false;
@@ -160,6 +169,25 @@ struct ShipCrewDamageResult {
     float distance = 0.0F;
 };
 
+// Vue purement runtime du marin actuellement vise. Elle ne fait volontairement
+// pas partie de la sauvegarde : le viseur et les temporisations de blocage ne
+// doivent jamais modifier le format v9 des parties existantes.
+struct ShipCrewFocusState {
+    bool visible = false;
+    bool moving = false;
+    bool blocked = false;
+    bool has_progress = false;
+    bool knocked_out = false;
+    std::uint8_t member_id = 0U;
+    ShipCrewRole role = ShipCrewRole::Deckhand;
+    ShipCrewActivity activity = ShipCrewActivity::Idle;
+    ShipCrewCargo cargo = ShipCrewCargo::None;
+    ShipCrewStation destination_station = ShipCrewStation::AftDeck;
+    float progress_ratio = 0.0F;
+    float health_ratio = 1.0F;
+    float distance = 0.0F;
+};
+
 class ShipEntity;
 struct ShipBlueprint;
 
@@ -172,12 +200,18 @@ public:
                               const EnvironmentState& environment,
                               float dt,
                               std::uint32_t& fish,
-                              std::uint32_t& water_flasks) noexcept -> ShipCrewUpdateResult;
+                              std::uint32_t& water_flasks,
+                              std::optional<glm::vec3> player_world_position = std::nullopt) noexcept
+        -> ShipCrewUpdateResult;
     [[nodiscard]] auto try_damage_from_player(const ShipEntity& ship,
                                                const glm::vec3& origin,
                                                const glm::vec3& direction,
                                                float max_distance,
                                                float damage) noexcept -> ShipCrewDamageResult;
+    [[nodiscard]] auto focus_from_ray(const ShipEntity& ship,
+                                      const glm::vec3& origin,
+                                      const glm::vec3& direction,
+                                      float max_distance) const noexcept -> ShipCrewFocusState;
 
     [[nodiscard]] auto save_state() const noexcept -> const ShipCrewSaveState&;
     [[nodiscard]] auto members() const noexcept -> std::span<const ShipCrewMemberSaveState>;
@@ -185,9 +219,16 @@ public:
 
 private:
     struct MemberRuntime {
+        // La vitesse et la distance parcourue pilotent la locomotion visuelle :
+        // un marin arrete ne continue plus a faire glisser ses pieds.
+        float current_speed = 0.0F;
+        float locomotion_distance = 0.0F;
         float motion_amount = 0.0F;
         float activity_phase = 0.0F;
         float recover_timer = 0.0F;
+        float blocked_timer = 0.0F;
+        glm::vec3 visual_offset {0.0F};
+        bool blocked = false;
     };
 
     void initialize_canonical_roster(int world_seed, const ShipEntity& ship) noexcept;

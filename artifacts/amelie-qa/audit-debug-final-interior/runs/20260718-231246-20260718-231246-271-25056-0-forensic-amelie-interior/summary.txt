@@ -1,0 +1,5 @@
+ValCraft audit summary [amelie-interior]
+  session_id=20260718-231246-271-25056-0 mode=forensic status=aborted
+  duration_seconds=2.857 recorded_frames=0 written_frames=0 dropped_frames=0 second_samples=0 dropped_second_samples=0
+  events_written=6 events_dropped=0 spike_windows=0
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\artifacts\amelie-qa\audit-debug-final-interior\runs\20260718-231246-20260718-231246-271-25056-0-forensic-amelie-interior

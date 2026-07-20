@@ -67,9 +67,14 @@ struct MaterialVisual {
     float emissive_light = 0.0F;
 };
 
-[[nodiscard]] inline auto material_visual(ShipMaterial material, BlockVisualFace face) noexcept -> MaterialVisual {
+[[nodiscard]] inline auto material_visual(
+    ShipMaterial material,
+    BlockVisualFace face) noexcept -> MaterialVisual {
+
     if (material == ShipMaterial::Glass) {
-        const auto glass = to_block_id(BlockType::Glass);
+        const auto glass =
+            to_block_id(BlockType::Glass);
+
         return {
             block_atlas_tile(glass, face),
             block_visual_material_value(glass),
@@ -77,35 +82,94 @@ struct MaterialVisual {
         };
     }
 
-    auto atlas_material = ShipAtlasMaterial::DarkHull;
+    auto atlas_material =
+        ShipAtlasMaterial::DarkHull;
+
     switch (material) {
-    case ShipMaterial::DarkHull: atlas_material = ShipAtlasMaterial::DarkHull; break;
-    case ShipMaterial::LightDeck: atlas_material = ShipAtlasMaterial::LightDeck; break;
-    case ShipMaterial::CleanBeam: atlas_material = ShipAtlasMaterial::CleanBeam; break;
-    case ShipMaterial::CreamCanvas: atlas_material = ShipAtlasMaterial::CreamCanvas; break;
-    case ShipMaterial::Rope: atlas_material = ShipAtlasMaterial::Rope; break;
-    case ShipMaterial::Iron: atlas_material = ShipAtlasMaterial::Iron; break;
-    case ShipMaterial::Brass: atlas_material = ShipAtlasMaterial::Brass; break;
-    case ShipMaterial::Lantern: atlas_material = ShipAtlasMaterial::Lantern; break;
-    case ShipMaterial::Glass: break;
+    case ShipMaterial::DarkHull:
+        atlas_material = ShipAtlasMaterial::DarkHull;
+        break;
+
+    case ShipMaterial::LightDeck:
+        atlas_material = ShipAtlasMaterial::LightDeck;
+        break;
+
+    case ShipMaterial::CleanBeam:
+        atlas_material = ShipAtlasMaterial::CleanBeam;
+        break;
+
+    case ShipMaterial::CreamCanvas:
+        atlas_material = ShipAtlasMaterial::CreamCanvas;
+        break;
+
+    case ShipMaterial::Rope:
+        atlas_material = ShipAtlasMaterial::Rope;
+        break;
+
+    case ShipMaterial::Iron:
+        atlas_material = ShipAtlasMaterial::Iron;
+        break;
+
+    case ShipMaterial::Brass:
+        atlas_material = ShipAtlasMaterial::Brass;
+        break;
+
+    case ShipMaterial::Lantern:
+        atlas_material = ShipAtlasMaterial::Lantern;
+        break;
+
+    case ShipMaterial::BlackCanvas:
+        atlas_material = ShipAtlasMaterial::BlackCanvas;
+        break;
+
+    case ShipMaterial::SolidGold:
+        atlas_material = ShipAtlasMaterial::SolidGold;
+        break;
+
+    case ShipMaterial::Glass:
+        // Le verre a déjà été traité au début de la fonction.
+        break;
     }
+
     return {
         ship_atlas_tile(atlas_material),
-        static_cast<float>(static_cast<std::uint8_t>(ship_visual_material(atlas_material))),
-        material == ShipMaterial::Lantern ? 11.0F / 15.0F : 0.0F,
+        static_cast<float>(
+            static_cast<std::uint8_t>(
+                ship_visual_material(atlas_material))),
+        material == ShipMaterial::Lantern
+            ? 11.0F / 15.0F
+            : 0.0F,
     };
 }
 
-[[nodiscard]] inline auto is_volume_shape(ShipPartShape shape) noexcept -> bool {
-    return shape == ShipPartShape::Box || shape == ShipPartShape::Slab || shape == ShipPartShape::Stair;
+[[nodiscard]] inline auto is_volume_shape(
+    ShipPartShape shape) noexcept -> bool {
+
+    return shape == ShipPartShape::Box ||
+           shape == ShipPartShape::Slab ||
+           shape == ShipPartShape::Stair;
 }
 
-[[nodiscard]] inline auto is_sky_occluder(const ShipPart& part) noexcept -> bool {
+[[nodiscard]] constexpr auto is_canvas_material(
+    ShipMaterial material) noexcept -> bool {
+
+    // Les deux toiles partagent la même géométrie souple, tout en gardant
+    // chacune une texture indépendante.
+    return material == ShipMaterial::CreamCanvas ||
+           material == ShipMaterial::BlackCanvas;
+}
+
+[[nodiscard]] inline auto is_sky_occluder(
+    const ShipPart& part) noexcept -> bool {
+
     if (!is_volume_shape(part.shape)) {
         return false;
     }
-    return part.material != ShipMaterial::Glass && part.material != ShipMaterial::CreamCanvas &&
-           part.material != ShipMaterial::Rope && part.material != ShipMaterial::Lantern;
+
+    return part.material != ShipMaterial::Glass &&
+           !is_canvas_material(part.material) &&
+           part.material != ShipMaterial::Rope &&
+           part.material != ShipMaterial::Lantern;
 }
 
 [[nodiscard]] inline auto valid_bounds(const LocalBounds& bounds) noexcept -> bool {
@@ -637,6 +701,16 @@ inline void append_climbable_net(ChunkMeshData& mesh,
     case U'L': return {{0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}};
     case U'\'': return {{0x0C, 0x0C, 0x08, 0x10, 0x00, 0x00, 0x00}};
     case U'A': return {{0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}};
+    case U'a':
+        return {{
+            0x00,
+            0x00,
+            0x0E,
+            0x01,
+            0x0F,
+            0x11,
+            0x0F,
+        }};
     case U'm': return {{0x00, 0x00, 0x1A, 0x15, 0x15, 0x15, 0x15}};
     case U'\u00E9': return {{0x04, 0x08, 0x0E, 0x11, 0x1F, 0x10, 0x0F}};
     case U'l': return {{0x0C, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}};
@@ -736,8 +810,12 @@ inline void append_wheel(ChunkMeshData& mesh,
                 true);
             break;
         case ShipPartShape::Panel:
-            if (part.material == ShipMaterial::CreamCanvas) {
-                ship_mesh_detail::append_canvas_panel(mesh, part, lighting, index);
+            if (ship_mesh_detail::is_canvas_material(part.material)) {
+                ship_mesh_detail::append_canvas_panel(
+                    mesh,
+                    part,
+                    lighting,
+                    index);
             } else {
                 ship_mesh_detail::append_cuboid(
                     mesh,

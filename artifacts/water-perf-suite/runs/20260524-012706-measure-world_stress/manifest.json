@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260524-012706-297",
+  "label": "world_stress",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-water",
+  "arguments": ["--smoke-test", "--smoke-frames=240", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\world_stress.json", "--perf-scenario=world_stress", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite", "--audit-mode=measure", "--stream-radius=8"],
+  "started_at_utc": "2026-05-24T01:27:06Z",
+  "ended_at_utc": "2026-05-24T01:27:10Z",
+  "duration_seconds": 3.915771,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 242, "render": 0, "performance": 7, "creatures": 12, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 4,
+  "recorded_frames": 240,
+  "written_frames": 25,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\runs\\20260524-012706-measure-world_stress\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\water-perf-suite\\world_stress.json"]
+}

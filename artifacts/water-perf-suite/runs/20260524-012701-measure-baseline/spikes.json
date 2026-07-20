@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "session_id": "20260524-012701-532",
+  "mode": "measure",
+  "spikes": [
+    {
+      "start_frame": 0,
+      "end_frame": 1,
+      "peak_frame": 0,
+      "peak_ms": 105.119900,
+      "dominant_stage": "meshing",
+      "peak_frame_sample": null,
+      "events": [{"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 4867, "frame_index": 0, "second_index": 0, "category": "session", "kind": "session_start", "severity": "info", "payload": {"mode": "measure", "label": "baseline", "smoke_test": true, "freeze_time": true, "stream_radius": 5, "shadow_map_size": 1024, "shadows_enabled": true, "post_process_enabled": true}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 2271417, "frame_index": 0, "second_index": 0, "category": "session", "kind": "initialize_complete", "severity": "info", "payload": {"smoke_test": true, "hidden_window": true, "window_width": 1600, "window_height": 900}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 2305243, "frame_index": 0, "second_index": 0, "category": "world", "kind": "world_work", "severity": "info", "payload": {"generated_chunks": 1, "meshed_chunks": 15, "light_nodes_processed": 0, "lighting_jobs_completed": 4, "pending_generation": 87, "pending_mesh": 11, "pending_lighting": 0}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 2376831, "frame_index": 0, "second_index": 0, "category": "performance", "kind": "frame_spike", "severity": "error", "payload": {"frame_total_ms": 105.119900, "streaming_ms": 0.000500, "generation_ms": 7.075500, "lighting_ms": 3.821800, "meshing_ms": 22.354300, "upload_ms": 0.496500, "shadow_ms": 1.781000, "world_ms": 0.944300}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 2377233, "frame_index": 1, "second_index": 0, "category": "creatures", "kind": "creature_activity", "severity": "info", "payload": {"spawned": 1, "despawned": 0, "attacks": 0, "active_creatures": 22}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 2394255, "frame_index": 1, "second_index": 0, "category": "world", "kind": "world_work", "severity": "info", "payload": {"generated_chunks": 1, "meshed_chunks": 4, "light_nodes_processed": 0, "lighting_jobs_completed": 2, "pending_generation": 86, "pending_mesh": 13, "pending_lighting": 0}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 2395462, "frame_index": 1, "second_index": 0, "category": "performance", "kind": "frame_spike", "severity": "warning", "payload": {"frame_total_ms": 18.549200, "streaming_ms": 0.000600, "generation_ms": 8.059900, "lighting_ms": 1.064800, "meshing_ms": 7.669700, "upload_ms": 0.464300, "shadow_ms": 0.049000, "world_ms": 0.372200}}]
+    },
+    {
+      "start_frame": 236,
+      "end_frame": 236,
+      "peak_frame": 236,
+      "peak_ms": 21.257200,
+      "dominant_stage": "generation",
+      "peak_frame_sample": null,
+      "events": [{"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 4264521, "frame_index": 236, "second_index": 1, "category": "creatures", "kind": "creature_activity", "severity": "info", "payload": {"spawned": 4, "despawned": 4, "attacks": 0, "active_creatures": 32}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 4269333, "frame_index": 236, "second_index": 1, "category": "world", "kind": "stream_update", "severity": "info", "payload": {"chunk_changed": true, "generation_enqueued": 11, "generation_pruned": 0, "unloaded_chunks": 11}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 4284748, "frame_index": 236, "second_index": 1, "category": "world", "kind": "world_work", "severity": "info", "payload": {"generated_chunks": 1, "meshed_chunks": 2, "light_nodes_processed": 0, "lighting_jobs_completed": 4, "pending_generation": 10, "pending_mesh": 16, "pending_lighting": 0}}, {"schema_version": 1, "session_id": "20260524-012701-532", "mode": "measure", "t_us": 4285301, "frame_index": 236, "second_index": 1, "category": "performance", "kind": "frame_spike", "severity": "warning", "payload": {"frame_total_ms": 21.257200, "streaming_ms": 4.793500, "generation_ms": 6.894100, "lighting_ms": 4.031900, "meshing_ms": 3.972900, "upload_ms": 0.096100, "shadow_ms": 0.068800, "world_ms": 0.239200}}]
+    }
+  ]
+}

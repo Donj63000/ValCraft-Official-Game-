@@ -16,10 +16,24 @@ namespace valcraft {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846F;
+constexpr float kTwoPi = 2.0F * kPi;
 constexpr float kCrewWalkSpeed = 1.22F;
+constexpr float kCrewCarrySpeed = 1.02F;
+constexpr float kCrewAcceleration = 4.80F;
+constexpr float kCrewDeceleration = 7.20F;
+constexpr float kCrewTurnSpeed = 6.40F;
+constexpr float kCrewStationTurnSpeed = 4.20F;
+constexpr float kCrewMoveAlignment = 0.94F;
+constexpr float kCrewStrideDistance = 1.18F;
+constexpr float kCrewNodeClearance = 0.76F;
+constexpr float kCrewPlayerForwardClearance = 1.05F;
+constexpr float kCrewPlayerSideClearance = 0.72F;
+constexpr float kCrewPlayerVerticalClearance = 1.95F;
+constexpr float kCrewVisualOffsetSpeed = 4.50F;
 constexpr float kCrewHurtSeconds = 0.45F;
 constexpr float kCrewRecoverAnimationSeconds = 1.0F;
 constexpr float kFishingStormStop = 0.65F;
+constexpr float kHeavyCrewStorm = 0.55F;
 constexpr std::size_t kStationCount = static_cast<std::size_t>(ShipCrewStation::Count);
 
 constexpr std::array<ShipCrewRole, kShipCrewMemberCount> kCanonicalRoles {{
@@ -49,7 +63,56 @@ auto hash_u32(std::uint32_t value) noexcept -> std::uint32_t {
 }
 
 auto normalized_angle(float angle) noexcept -> float {
-    return std::remainder(finite_or(angle, 0.0F), 2.0F * kPi);
+    return std::remainder(finite_or(angle, 0.0F), kTwoPi);
+}
+
+auto move_towards(float current, float target, float maximum_delta) noexcept -> float {
+    const auto delta = target - current;
+    if (std::abs(delta) <= maximum_delta) {
+        return target;
+    }
+    return current + std::copysign(maximum_delta, delta);
+}
+
+auto rotate_towards(float current, float target, float maximum_delta) noexcept -> float {
+    const auto delta = normalized_angle(target - current);
+    return normalized_angle(current + std::clamp(delta, -maximum_delta, maximum_delta));
+}
+
+auto yaw_from_local_direction(const glm::vec3& direction) noexcept -> float {
+    // Le modele d'equipage regarde vers +X. Avec les matrices GLM/OpenGL,
+    // une rotation positive autour de Y envoie +X vers -Z : le signe de Z doit
+    // donc etre inverse. C'est la correction centrale du "moonwalk".
+    return normalized_angle(std::atan2(-direction.z, direction.x));
+}
+
+auto forward_from_yaw(float yaw_radians) noexcept -> glm::vec3 {
+    return {std::cos(yaw_radians), 0.0F, -std::sin(yaw_radians)};
+}
+
+auto horizontal_length(const glm::vec3& value) noexcept -> float {
+    return std::sqrt(value.x * value.x + value.z * value.z);
+}
+
+auto horizontal_direction_or(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
+    const auto length = horizontal_length(value);
+    return length > 1.0e-5F
+               ? glm::vec3 {value.x / length, 0.0F, value.z / length}
+               : fallback;
+}
+
+auto approach_vec3(const glm::vec3& current, const glm::vec3& target, float maximum_delta) noexcept -> glm::vec3 {
+    const auto delta = target - current;
+    const auto distance = glm::length(delta);
+    if (distance <= maximum_delta || distance <= 1.0e-6F) {
+        return target;
+    }
+    return current + delta * (maximum_delta / distance);
+}
+
+auto member_is_moving(const ShipCrewMemberSaveState& member) noexcept -> bool {
+    return member.current_station != member.destination_station ||
+           member.next_station != member.current_station;
 }
 
 auto known_activity(ShipCrewActivity activity) noexcept -> bool {
@@ -141,12 +204,14 @@ auto station_yaw(ShipCrewStation station) noexcept -> float {
     case ShipCrewStation::MidDeckStarboard:
     case ShipCrewStation::ForeDeck:
     case ShipCrewStation::CargoSort:
-        return 0.5F * kPi;
+        // Ces postes regardent vers la proue (+Z).
+        return -0.5F * kPi;
     case ShipCrewStation::AftWatch:
     case ShipCrewStation::ForeStairsTop:
     case ShipCrewStation::ForeStairsMid:
     case ShipCrewStation::ForeStairsBottom:
-        return -0.5F * kPi;
+        // Ces postes regardent vers la poupe (-Z).
+        return 0.5F * kPi;
     case ShipCrewStation::PortFishing:
     case ShipCrewStation::Galley:
     case ShipCrewStation::CargoFish:
@@ -183,7 +248,7 @@ auto station_yaw(ShipCrewStation station) noexcept -> float {
     case ShipCrewStation::WaterStillApproach:
     case ShipCrewStation::Count:
     default:
-        return 0.5F * kPi;
+        return -0.5F * kPi;
     }
 }
 
@@ -197,6 +262,12 @@ auto shared_station_visual_offset(const ShipCrewMemberSaveState& member) noexcep
     case ShipCrewStation::Capstan:
         if (member.role == ShipCrewRole::Rigger) return {0.0F, 0.0F, -0.55F};
         if (member.role == ShipCrewRole::Deckhand) return {0.0F, 0.0F, 0.55F};
+        break;
+    case ShipCrewStation::MainMast:
+        // En tempete, le pecheur vient aider le gabier. Les deux silhouettes
+        // restent lisibles au lieu de fusionner au centre du mat.
+        if (member.role == ShipCrewRole::Fisher) return {0.0F, 0.0F, -0.55F};
+        if (member.role == ShipCrewRole::Rigger) return {0.0F, 0.0F, 0.55F};
         break;
     case ShipCrewStation::CargoFish:
         if (member.role == ShipCrewRole::Fisher) return {0.0F, 0.0F, -0.50F};
@@ -212,11 +283,165 @@ auto shared_station_visual_offset(const ShipCrewMemberSaveState& member) noexcep
     return {};
 }
 
+auto station_allows_multiple(ShipCrewStation station) noexcept -> bool {
+    switch (station) {
+    case ShipCrewStation::MessTable:
+    case ShipCrewStation::Capstan:
+    case ShipCrewStation::MainMast:
+    case ShipCrewStation::CargoFish:
+    case ShipCrewStation::CargoWater:
+        return true;
+    default:
+        return false;
+    }
+}
+
+auto movement_priority(const ShipCrewMemberSaveState& member, std::size_t index) noexcept -> int {
+    // Une livraison ne doit pas rester bloquee derriere une ronde cosmetique.
+    // A urgence egale, l'identifiant canonique rend l'arbitrage deterministe.
+    const auto urgency = member.cargo != ShipCrewCargo::None
+                             ? 0
+                             : (member.role == ShipCrewRole::Captain &&
+                                        member.destination_station == ShipCrewStation::Helm
+                                    ? 1
+                                    : 2);
+    return urgency * 16 + static_cast<int>(index);
+}
+
+auto same_undirected_edge(ShipCrewStation first_a,
+                          ShipCrewStation second_a,
+                          ShipCrewStation first_b,
+                          ShipCrewStation second_b) noexcept -> bool {
+    return (first_a == first_b && second_a == second_b) ||
+           (first_a == second_b && second_a == first_b);
+}
+
+auto edge_is_available(const ShipBlueprint& blueprint,
+                       std::span<const ShipCrewMemberSaveState> members,
+                       std::size_t member_index) noexcept -> bool {
+    const auto& member = members[member_index];
+    if (member.current_station == member.next_station) {
+        return true;
+    }
+
+    const auto edge_start = node_position(blueprint, member.current_station);
+    const auto already_inside_edge = glm::length(member.local_position - edge_start) > 0.08F;
+    if (already_inside_edge) {
+        return true;
+    }
+
+    for (std::size_t other_index = 0; other_index < members.size(); ++other_index) {
+        if (other_index == member_index) {
+            continue;
+        }
+        const auto& other = members[other_index];
+        if (other.current_station == other.next_station ||
+            !same_undirected_edge(
+                member.current_station,
+                member.next_station,
+                other.current_station,
+                other.next_station)) {
+            continue;
+        }
+
+        const auto other_start = node_position(blueprint, other.current_station);
+        const auto other_inside_edge = glm::length(other.local_position - other_start) > 0.08F;
+        if (other_inside_edge ||
+            movement_priority(other, other_index) < movement_priority(member, member_index)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto node_is_available(const ShipBlueprint& blueprint,
+                       std::span<const ShipCrewMemberSaveState> members,
+                       std::size_t member_index,
+                       ShipCrewStation target_station) noexcept -> bool {
+    if (station_allows_multiple(target_station)) {
+        return true;
+    }
+
+    const auto target = node_position(blueprint, target_station);
+    const auto& member = members[member_index];
+    for (std::size_t other_index = 0; other_index < members.size(); ++other_index) {
+        if (other_index == member_index) {
+            continue;
+        }
+        const auto& other = members[other_index];
+        if (glm::length(other.local_position - target) >= kCrewNodeClearance) {
+            continue;
+        }
+
+        const auto both_approach_same_node =
+            member.next_station == target_station &&
+            member.current_station != target_station &&
+            other.next_station == target_station &&
+            other.current_station != target_station;
+        if (both_approach_same_node &&
+            movement_priority(member, member_index) < movement_priority(other, other_index)) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+
+auto node_blockers_are_departing(const ShipBlueprint& blueprint,
+                                 std::span<const ShipCrewMemberSaveState> members,
+                                 std::size_t member_index,
+                                 ShipCrewStation target_station) noexcept -> bool {
+    const auto target = node_position(blueprint, target_station);
+    auto found_blocker = false;
+    for (std::size_t other_index = 0; other_index < members.size(); ++other_index) {
+        if (other_index == member_index) {
+            continue;
+        }
+        const auto& other = members[other_index];
+        if (glm::length(other.local_position - target) >= kCrewNodeClearance) {
+            continue;
+        }
+
+        found_blocker = true;
+        const auto leaves_target =
+            other.current_station == target_station &&
+            other.next_station != other.current_station;
+        if (!leaves_target) {
+            return false;
+        }
+    }
+    return found_blocker;
+}
+
+auto player_blocks_path(const ShipCrewMemberSaveState& member,
+                        const glm::vec3& travel_direction,
+                        const std::optional<glm::vec3>& player_local_position) noexcept -> bool {
+    if (!player_local_position.has_value()) {
+        return false;
+    }
+
+    const auto to_player = *player_local_position - member.local_position;
+    if (std::abs(to_player.y) > kCrewPlayerVerticalClearance) {
+        return false;
+    }
+
+    const glm::vec3 horizontal_to_player {to_player.x, 0.0F, to_player.z};
+    const auto forward_distance = glm::dot(horizontal_to_player, travel_direction);
+    const auto lateral = horizontal_to_player - travel_direction * forward_distance;
+    return forward_distance >= -0.12F &&
+           forward_distance <= kCrewPlayerForwardClearance &&
+           horizontal_length(lateral) <= kCrewPlayerSideClearance;
+}
+
 auto next_hop(const ShipBlueprint& blueprint,
               ShipCrewStation start,
-              ShipCrewStation destination) noexcept -> std::optional<ShipCrewStation> {
+              ShipCrewStation destination,
+              std::optional<ShipCrewStation> forbidden_station = std::nullopt) noexcept
+    -> std::optional<ShipCrewStation> {
     if (!known_station(start) || !known_station(destination) ||
-        node_for(blueprint, start) == nullptr || node_for(blueprint, destination) == nullptr) {
+        node_for(blueprint, start) == nullptr || node_for(blueprint, destination) == nullptr ||
+        (forbidden_station.has_value() && *forbidden_station == destination)) {
         return std::nullopt;
     }
     if (start == destination) {
@@ -242,7 +467,10 @@ auto next_hop(const ShipBlueprint& blueprint,
             } else if (edge.second == current) {
                 neighbor = edge.first;
             }
-            if (!known_station(neighbor) || node_for(blueprint, neighbor) == nullptr) {
+            if (!known_station(neighbor) ||
+                node_for(blueprint, neighbor) == nullptr ||
+                (forbidden_station.has_value() &&
+                 neighbor == *forbidden_station)) {
                 continue;
             }
             const auto neighbor_index = static_cast<std::size_t>(neighbor);
@@ -344,6 +572,29 @@ auto routine_task(ShipCrewRole role, std::uint8_t step) noexcept -> RoutineTask 
     return {};
 }
 
+auto situational_task(ShipCrewRole role, float storm_intensity) noexcept -> std::optional<RoutineTask> {
+    if (storm_intensity < kHeavyCrewStorm) {
+        return std::nullopt;
+    }
+
+    // En forte mer, les postes deviennent coherents avec la situation au lieu
+    // de poursuivre une ronde de routine pendant que le navire est en danger.
+    switch (role) {
+    case ShipCrewRole::Captain:
+        return RoutineTask {ShipCrewStation::Helm, ShipCrewActivity::Steer, 8.0F};
+    case ShipCrewRole::Rigger:
+        return RoutineTask {ShipCrewStation::ForeMast, ShipCrewActivity::HaulRope, 8.0F};
+    case ShipCrewRole::Deckhand:
+        return RoutineTask {ShipCrewStation::Capstan, ShipCrewActivity::TurnCapstan, 8.0F};
+    case ShipCrewRole::Quartermaster:
+        return RoutineTask {ShipCrewStation::CargoSort, ShipCrewActivity::SortCargo, 8.0F};
+    case ShipCrewRole::Fisher:
+    case ShipCrewRole::WaterTender:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 auto visual_role(ShipCrewRole role) noexcept -> CrewVisualRole {
     switch (role) {
     case ShipCrewRole::Captain: return CrewVisualRole::Captain;
@@ -367,7 +618,11 @@ auto visual_activity(const ShipCrewMemberSaveState& member,
         return CrewVisualActivity::Recover;
     }
     if (moving) {
-        return CrewVisualActivity::Walk;
+        // Une caisse ne doit pas disparaitre pendant son transport. La pose
+        // Carry anime aussi les jambes lorsque motion_amount est non nul.
+        return member.cargo != ShipCrewCargo::None || member.activity == ShipCrewActivity::Carry
+                   ? CrewVisualActivity::Carry
+                   : CrewVisualActivity::Walk;
     }
     switch (member.activity) {
     case ShipCrewActivity::Steer: return CrewVisualActivity::Steer;
@@ -422,6 +677,84 @@ auto ray_aabb_distance(const glm::vec3& origin,
     return near_distance <= max_distance ? std::optional<float> {near_distance} : std::nullopt;
 }
 
+struct CrewRayHit {
+    std::size_t index = 0U;
+    float distance = 0.0F;
+};
+
+auto find_crew_ray_hit(const ShipEntity& ship,
+                       std::span<const ShipCrewMemberSaveState> members,
+                       std::span<const CrewRenderInstance> render_instances,
+                       const glm::vec3& origin,
+                       const glm::vec3& ray_direction,
+                       float max_distance,
+                       bool include_knocked_out) noexcept -> std::optional<CrewRayHit> {
+    const auto ship_obstacle =
+        ship.raycast_collidable_distance(
+            origin,
+            ray_direction,
+            max_distance);
+    auto best_index = members.size();
+    auto best_distance = std::numeric_limits<float>::max();
+
+    for (std::size_t index = 0; index < members.size(); ++index) {
+        const auto& member = members[index];
+        const auto knocked_out =
+            member.health <= 0.0F ||
+            member.recovery_timer > 0.0F;
+        if (knocked_out && !include_knocked_out) {
+            continue;
+        }
+
+        const auto feet = render_instances[index].position;
+        const auto half_width =
+            knocked_out ? 0.82F : 0.34F;
+        const auto height =
+            knocked_out
+                ? 0.62F
+                : (member.role == ShipCrewRole::Captain
+                       ? 1.88F
+                       : 1.82F);
+        const auto hit = ray_aabb_distance(
+            origin,
+            ray_direction,
+            feet +
+                glm::vec3 {
+                    -half_width,
+                    0.02F,
+                    -half_width,
+                },
+            feet +
+                glm::vec3 {
+                    half_width,
+                    height,
+                    half_width,
+                },
+            max_distance);
+
+        // Le panneau et les coups ne traversent jamais un plancher, une cloison
+        // ou un meuble du navire pour selectionner un marin cache.
+        if (hit.has_value() &&
+            ship_obstacle.has_value() &&
+            *ship_obstacle + 0.02F < *hit) {
+            continue;
+        }
+        if (hit.has_value() &&
+            *hit < best_distance) {
+            best_index = index;
+            best_distance = *hit;
+        }
+    }
+
+    if (best_index >= members.size()) {
+        return std::nullopt;
+    }
+    return CrewRayHit {
+        best_index,
+        best_distance,
+    };
+}
+
 auto cargo_light(const glm::vec3& local_position, std::span<const glm::vec3> lanterns) noexcept -> float {
     auto light = 0.10F;
     for (const auto& lantern : lanterns) {
@@ -435,6 +768,97 @@ auto cargo_light(const glm::vec3& local_position, std::span<const glm::vec3> lan
 
 auto ship_crew_max_health(ShipCrewRole role) noexcept -> float {
     return role == ShipCrewRole::Captain ? 18.0F : 14.0F;
+}
+
+auto ship_crew_role_label(ShipCrewRole role) noexcept -> std::string_view {
+    switch (role) {
+    case ShipCrewRole::Captain: return "CAPITAINE";
+    case ShipCrewRole::Fisher: return "PECHEUR";
+    case ShipCrewRole::Rigger: return "GABIER";
+    case ShipCrewRole::WaterTender: return "MAITRE D'EAU";
+    case ShipCrewRole::Deckhand: return "MATELOT DE PONT";
+    case ShipCrewRole::Quartermaster: return "QUARTIER-MAITRE";
+    }
+    return "MARIN";
+}
+
+auto ship_crew_activity_label(ShipCrewActivity activity) noexcept -> std::string_view {
+    switch (activity) {
+    case ShipCrewActivity::Idle: return "ATTEND SON PROCHAIN ORDRE";
+    case ShipCrewActivity::Steer: return "TIENT LA BARRE";
+    case ShipCrewActivity::Inspect: return "CONTROLE LA ROUTE";
+    case ShipCrewActivity::Fish: return "PECHE POUR LES VIVRES";
+    case ShipCrewActivity::TendWater: return "PREPARE L'EAU POTABLE";
+    case ShipCrewActivity::Carry: return "TRANSPORTE UNE CARGAISON";
+    case ShipCrewActivity::HaulRope: return "SECURISE LE GREEMENT";
+    case ShipCrewActivity::Scrub: return "ENTRETIENT LE PONT";
+    case ShipCrewActivity::TurnCapstan: return "MANOEUVRE LE CABESTAN";
+    case ShipCrewActivity::SortCargo: return "ORGANISE LES RESERVES";
+    case ShipCrewActivity::Socialize: return "ECHANGE AVEC L'EQUIPAGE";
+    case ShipCrewActivity::Rest: return "PREND SON QUART DE REPOS";
+    }
+    return "ACTIVITE INCONNUE";
+}
+
+auto ship_crew_cargo_label(ShipCrewCargo cargo) noexcept -> std::string_view {
+    switch (cargo) {
+    case ShipCrewCargo::Fish: return "POISSON";
+    case ShipCrewCargo::Water: return "EAU";
+    case ShipCrewCargo::None:
+    default:
+        return {};
+    }
+}
+
+auto ship_crew_station_label(ShipCrewStation station) noexcept -> std::string_view {
+    switch (station) {
+    case ShipCrewStation::Helm: return "BARRE";
+    case ShipCrewStation::ChartTable: return "TABLE A CARTES";
+    case ShipCrewStation::CaptainCabin: return "CABINE DU CAPITAINE";
+    case ShipCrewStation::AftWatch: return "VIGIE ARRIERE";
+    case ShipCrewStation::PortFishing: return "PECHE BABORD";
+    case ShipCrewStation::StarboardFishing: return "PECHE TRIBORD";
+    case ShipCrewStation::MainMast: return "GRAND MAT";
+    case ShipCrewStation::ForeMast: return "MAT DE MISAINE";
+    case ShipCrewStation::MizzenMast: return "MAT D'ARTIMON";
+    case ShipCrewStation::WaterStill: return "ALAMBIC A EAU";
+    case ShipCrewStation::Galley: return "CUISINE";
+    case ShipCrewStation::Capstan: return "CABESTAN";
+    case ShipCrewStation::AftDeck: return "PONT ARRIERE";
+    case ShipCrewStation::MidDeckPort: return "PONT BABORD";
+    case ShipCrewStation::MidDeckStarboard: return "PONT TRIBORD";
+    case ShipCrewStation::ForeDeck: return "GAILLARD AVANT";
+    case ShipCrewStation::CargoFish: return "CALE AUX POISSONS";
+    case ShipCrewStation::CargoWater: return "RESERVE D'EAU";
+    case ShipCrewStation::CargoSort: return "CALE PRINCIPALE";
+    case ShipCrewStation::CrewBunks: return "COUCHETTES";
+    case ShipCrewStation::MessTable: return "TABLE D'EQUIPAGE";
+    case ShipCrewStation::AftStairsTop:
+    case ShipCrewStation::AftStairsMid:
+    case ShipCrewStation::AftStairsBottom:
+    case ShipCrewStation::ForeStairsTop:
+    case ShipCrewStation::ForeStairsMid:
+    case ShipCrewStation::ForeStairsBottom:
+    case ShipCrewStation::ForeHatchPortA:
+    case ShipCrewStation::ForeHatchPortB:
+    case ShipCrewStation::HelmBypassPort:
+    case ShipCrewStation::QuarterdeckStepTop:
+    case ShipCrewStation::QuarterdeckStepBottom:
+    case ShipCrewStation::ForecastleStepBottom:
+    case ShipCrewStation::ForecastleStepTop:
+    case ShipCrewStation::ForeStairsExitCenter:
+    case ShipCrewStation::ForeStairsExitPort:
+    case ShipCrewStation::AftCabinDoor:
+    case ShipCrewStation::AftLowerPortA:
+    case ShipCrewStation::AftLowerPortB:
+    case ShipCrewStation::ForeLowerPortA:
+    case ShipCrewStation::ForeLowerPortB:
+    case ShipCrewStation::WaterStillApproach:
+        return "PASSAGE DU NAVIRE";
+    case ShipCrewStation::Count:
+    default:
+        return "POSTE INCONNU";
+    }
 }
 
 auto sanitize_ship_crew_save_state(const ShipCrewSaveState& state) noexcept -> ShipCrewSaveState {
@@ -547,6 +971,8 @@ void ShipCrewSystem::initialize_canonical_roster(int world_seed, const ShipEntit
         if (task.station != member.current_station) {
             route_to(member, blueprint, task.station, task.activity);
         }
+        runtime_[index].visual_offset =
+            member_is_moving(member) ? glm::vec3 {0.0F} : shared_station_visual_offset(member);
     }
     rebuild_render_instances(ship, {});
 }
@@ -554,7 +980,9 @@ void ShipCrewSystem::initialize_canonical_roster(int world_seed, const ShipEntit
 void ShipCrewSystem::restore_runtime_routes(const ShipEntity& ship) noexcept {
     const auto& blueprint = amelie_ship_blueprint();
     runtime_.fill({});
-    for (auto& member : state_.members) {
+    for (std::size_t index = 0; index < state_.members.size(); ++index) {
+        auto& member = state_.members[index];
+        auto& runtime = runtime_[index];
         const auto fallback = fallback_station(member.role);
         if (node_for(blueprint, member.current_station) == nullptr ||
             node_for(blueprint, member.next_station) == nullptr ||
@@ -591,6 +1019,9 @@ void ShipCrewSystem::restore_runtime_routes(const ShipEntity& ship) noexcept {
                    member.current_station == member.next_station) {
             member.yaw_radians = station_yaw(member.current_station);
         }
+
+        runtime.visual_offset =
+            member_is_moving(member) ? glm::vec3 {0.0F} : shared_station_visual_offset(member);
     }
     (void)ship;
 }
@@ -599,7 +1030,10 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
                             const EnvironmentState& environment,
                             float dt,
                             std::uint32_t& fish,
-                            std::uint32_t& water_flasks) noexcept -> ShipCrewUpdateResult {
+                            std::uint32_t& water_flasks,
+                            std::optional<glm::vec3> player_world_position) noexcept
+    -> ShipCrewUpdateResult {
+
     ShipCrewUpdateResult result {};
     dt = std::clamp(finite_or(dt, 0.0F), 0.0F, 0.25F);
     const auto& blueprint = amelie_ship_blueprint();
@@ -610,9 +1044,22 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
         rebuild_render_instances(ship, environment);
         return result;
     }
-    const auto storm_intensity = std::clamp(finite_or(environment.storm_intensity, 0.0F), 0.0F, 1.0F);
+
+    const auto storm_intensity =
+        std::clamp(finite_or(environment.storm_intensity, 0.0F), 0.0F, 1.0F);
     const auto precipitation_intensity =
         std::clamp(finite_or(environment.precipitation_intensity, 0.0F), 0.0F, 1.0F);
+    const auto player_position_is_finite =
+        player_world_position.has_value() &&
+        std::isfinite(player_world_position->x) &&
+        std::isfinite(player_world_position->y) &&
+        std::isfinite(player_world_position->z);
+    const auto player_local_position =
+        player_position_is_finite
+            ? std::optional<glm::vec3> {
+                  *player_world_position - ship.world_origin(),
+              }
+            : std::nullopt;
 
     for (std::size_t index = 0; index < state_.members.size(); ++index) {
         auto& member = state_.members[index];
@@ -620,12 +1067,17 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
         member.animation_time = std::fmod(member.animation_time + dt, 86'400.0F);
         member.hurt_timer = std::max(0.0F, member.hurt_timer - dt);
         runtime.recover_timer = std::max(0.0F, runtime.recover_timer - dt);
+        runtime.blocked = false;
 
         if (member.recovery_timer > 0.0F || member.health <= 0.0F) {
             member.health = 0.0F;
             member.recovery_timer = std::max(0.0F, member.recovery_timer - dt);
+            runtime.current_speed = 0.0F;
             runtime.motion_amount = 0.0F;
-            runtime.activity_phase = 1.0F - member.recovery_timer / kShipCrewKnockoutSeconds;
+            runtime.blocked_timer = 0.0F;
+            runtime.activity_phase =
+                1.0F - member.recovery_timer / kShipCrewKnockoutSeconds;
+
             if (member.recovery_timer <= 0.0F) {
                 member.health = ship_crew_max_health(member.role);
                 runtime.recover_timer = kCrewRecoverAnimationSeconds;
@@ -637,178 +1089,603 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
                 member.yaw_radians = station_yaw(member.current_station);
                 member.activity_timer = 0.0F;
 
-                // Je conserve la cargaison pendant l'assommement, puis je
-                // recrée explicitement son trajet vers la cale au réveil.
-                // Sans cette transition, le marin restait figé à son poste
-                // de repli avec une livraison impossible à terminer.
-                if (member.role == ShipCrewRole::Fisher && member.cargo == ShipCrewCargo::Fish) {
+                // La cargaison survit a l'assommement. Le trajet est reconstruit
+                // depuis un poste valide afin d'eviter un marin reveille mais fige.
+                if (member.role == ShipCrewRole::Fisher &&
+                    member.cargo == ShipCrewCargo::Fish) {
                     member.routine_step = 1U;
-                    route_to(member, blueprint, ShipCrewStation::CargoFish, ShipCrewActivity::Carry);
-                } else if (member.role == ShipCrewRole::WaterTender &&
-                           member.cargo == ShipCrewCargo::Water) {
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::CargoFish,
+                        ShipCrewActivity::Carry);
+                } else if (
+                    member.role == ShipCrewRole::WaterTender &&
+                    member.cargo == ShipCrewCargo::Water) {
                     member.routine_step = 1U;
-                    route_to(member, blueprint, ShipCrewStation::CargoWater, ShipCrewActivity::Carry);
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::CargoWater,
+                        ShipCrewActivity::Carry);
                 }
             }
-            continue;
-        }
-        if (runtime.recover_timer > 0.0F) {
-            // Je laisse au marin une seconde entière pour se relever. Sa pose,
-            // sa position et son travail progressent seulement après cette animation.
-            runtime.motion_amount = 0.0F;
-            runtime.activity_phase = 1.0F - runtime.recover_timer / kCrewRecoverAnimationSeconds;
+
+            const auto visual_target =
+                member_is_moving(member)
+                    ? glm::vec3 {0.0F}
+                    : shared_station_visual_offset(member);
+            runtime.visual_offset = approach_vec3(
+                runtime.visual_offset,
+                visual_target,
+                kCrewVisualOffsetSpeed * dt);
             continue;
         }
 
-        // Je coupe tout accumulateur lorsque la cible est pleine : liberer une
-        // place impose ainsi un nouveau cycle complet, sans gain instantane.
-        if (member.role == ShipCrewRole::Fisher && member.cargo == ShipCrewCargo::None) {
+        if (runtime.recover_timer > 0.0F) {
+            // Le relevage bloque la routine et la locomotion pendant une seconde.
+            runtime.current_speed = 0.0F;
+            runtime.motion_amount = 0.0F;
+            runtime.blocked_timer = 0.0F;
+            runtime.activity_phase =
+                1.0F - runtime.recover_timer / kCrewRecoverAnimationSeconds;
+            runtime.visual_offset = approach_vec3(
+                runtime.visual_offset,
+                shared_station_visual_offset(member),
+                kCrewVisualOffsetSpeed * dt);
+            continue;
+        }
+
+        // Les producteurs cessent d'accumuler du travail lorsque le stock cible
+        // est plein. Une place liberee exige donc bien un nouveau cycle complet.
+        if (member.role == ShipCrewRole::Fisher &&
+            member.cargo == ShipCrewCargo::None) {
             if (fish >= kAutomaticFishTarget) {
                 member.work_progress = 0.0F;
-                route_to(member, blueprint, ShipCrewStation::MessTable, ShipCrewActivity::Socialize);
+                route_to(
+                    member,
+                    blueprint,
+                    ShipCrewStation::MessTable,
+                    ShipCrewActivity::Socialize);
             } else if (storm_intensity >= kFishingStormStop) {
-                route_to(member, blueprint, ShipCrewStation::MainMast, ShipCrewActivity::HaulRope);
-            } else if (member.routine_step == 0U &&
-                       (member.destination_station == ShipCrewStation::MessTable ||
-                        member.destination_station == ShipCrewStation::MainMast)) {
-                route_to(member, blueprint, ShipCrewStation::PortFishing, ShipCrewActivity::Fish);
+                route_to(
+                    member,
+                    blueprint,
+                    ShipCrewStation::MainMast,
+                    ShipCrewActivity::HaulRope);
+            } else if (
+                (member.destination_station == ShipCrewStation::MainMast &&
+                 member.activity == ShipCrewActivity::HaulRope) ||
+                (member.routine_step == 0U &&
+                 member.destination_station == ShipCrewStation::MessTable)) {
+                // Une tempete peut interrompre le repos comme la peche. A son
+                // passage, le pecheur reprend toujours un cycle productif au
+                // lieu de rester indefiniment affecte au grand mat.
+                member.routine_step = 0U;
+                route_to(
+                    member,
+                    blueprint,
+                    ShipCrewStation::PortFishing,
+                    ShipCrewActivity::Fish);
             }
-        } else if (member.role == ShipCrewRole::WaterTender && member.cargo == ShipCrewCargo::None &&
-                   water_flasks >= kAutomaticWaterTarget) {
+        } else if (
+            member.role == ShipCrewRole::WaterTender &&
+            member.cargo == ShipCrewCargo::None &&
+            water_flasks >= kAutomaticWaterTarget) {
             member.work_progress = 0.0F;
-            route_to(member, blueprint, ShipCrewStation::Galley, ShipCrewActivity::Socialize);
-        } else if (member.role == ShipCrewRole::WaterTender && member.cargo == ShipCrewCargo::None &&
-                   water_flasks < kAutomaticWaterTarget && member.routine_step == 0U &&
-                   member.destination_station == ShipCrewStation::Galley) {
-            route_to(member, blueprint, ShipCrewStation::WaterStill, ShipCrewActivity::TendWater);
+            route_to(
+                member,
+                blueprint,
+                ShipCrewStation::Galley,
+                ShipCrewActivity::Socialize);
+        } else if (
+            member.role == ShipCrewRole::WaterTender &&
+            member.cargo == ShipCrewCargo::None &&
+            water_flasks < kAutomaticWaterTarget &&
+            member.routine_step == 0U &&
+            member.destination_station == ShipCrewStation::Galley) {
+            route_to(
+                member,
+                blueprint,
+                ShipCrewStation::WaterStill,
+                ShipCrewActivity::TendWater);
         }
 
-        auto moving = member.current_station != member.destination_station ||
-                      member.next_station != member.current_station;
+        const auto forced_task =
+            member.cargo == ShipCrewCargo::None
+                ? situational_task(member.role, storm_intensity)
+                : std::nullopt;
+        if (forced_task.has_value()) {
+            route_to(
+                member,
+                blueprint,
+                forced_task->station,
+                forced_task->activity);
+        }
+
+        auto moving = member_is_moving(member);
+        auto travelled_distance = 0.0F;
+        auto reference_speed =
+            member.cargo == ShipCrewCargo::None
+                ? kCrewWalkSpeed
+                : kCrewCarrySpeed;
+
         if (moving) {
             if (member.next_station == member.current_station) {
-                member.next_station = next_hop(blueprint, member.current_station, member.destination_station)
-                                          .value_or(member.current_station);
-            }
-            const auto target = node_position(blueprint, member.next_station);
-            const auto delta = target - member.local_position;
-            const auto distance = glm::length(delta);
-            if (distance <= kCrewWalkSpeed * dt + 1.0e-4F) {
-                member.local_position = target;
-                member.current_station = member.next_station;
-                if (member.current_station == member.destination_station) {
-                    member.next_station = member.current_station;
-                    member.activity_timer = 0.0F;
-                    member.yaw_radians = station_yaw(member.current_station);
+                const auto hop =
+                    next_hop(
+                        blueprint,
+                        member.current_station,
+                        member.destination_station);
+                if (hop.has_value() && *hop != member.current_station) {
+                    member.next_station = *hop;
                 } else {
-                    member.next_station = next_hop(blueprint, member.current_station, member.destination_station)
-                                              .value_or(member.current_station);
-                }
-            } else if (distance > 1.0e-5F) {
-                const auto direction = delta / distance;
-                member.local_position += direction * (kCrewWalkSpeed * dt);
-                if (direction.x * direction.x + direction.z * direction.z > 1.0e-5F) {
-                    member.yaw_radians = std::atan2(direction.z, direction.x);
+                    // Le graphe canonique est connexe, mais cette reparation
+                    // empeche une sauvegarde corrompue de boucler indefiniment.
+                    member.destination_station = member.current_station;
+                    member.next_station = member.current_station;
+                    member.activity = ShipCrewActivity::Idle;
+                    moving = false;
                 }
             }
-            runtime.motion_amount = glm::mix(runtime.motion_amount, 1.0F, std::clamp(dt * 9.0F, 0.0F, 1.0F));
-        } else {
-            runtime.motion_amount = glm::mix(runtime.motion_amount, 0.0F, std::clamp(dt * 9.0F, 0.0F, 1.0F));
+
+            if (moving) {
+                const auto edge_start =
+                    node_position(blueprint, member.current_station);
+                const auto starts_edge =
+                    glm::length(member.local_position - edge_start) <= 0.08F;
+
+                // Un waypoint occupe n'impose pas un face-a-face dans un couloir :
+                // avant de s'engager, le marin cherche une route equivalente qui
+                // contourne ce poste. Le graphe ne contient que 42 noeuds, ce BFS
+                // ponctuel reste negligeable et rend les circulations robustes.
+                if (starts_edge &&
+                    member.next_station != member.destination_station &&
+                    !node_is_available(
+                        blueprint,
+                        state_.members,
+                        index,
+                        member.next_station)) {
+                    const auto alternate_hop =
+                        next_hop(
+                            blueprint,
+                            member.current_station,
+                            member.destination_station,
+                            member.next_station);
+                    if (alternate_hop.has_value() &&
+                        *alternate_hop != member.current_station) {
+                        member.next_station = *alternate_hop;
+                    }
+                }
+
+                const auto target =
+                    node_position(blueprint, member.next_station);
+                const auto delta = target - member.local_position;
+                const auto distance = glm::length(delta);
+                const auto travel_direction =
+                    horizontal_direction_or(
+                        delta,
+                        forward_from_yaw(member.yaw_radians));
+                const auto desired_yaw =
+                    yaw_from_local_direction(travel_direction);
+
+                member.yaw_radians = rotate_towards(
+                    member.yaw_radians,
+                    desired_yaw,
+                    kCrewTurnSpeed * dt);
+
+                const auto alignment = std::clamp(
+                    glm::dot(
+                        forward_from_yaw(member.yaw_radians),
+                        travel_direction),
+                    -1.0F,
+                    1.0F);
+                const auto edge_available =
+                    edge_is_available(
+                        blueprint,
+                        state_.members,
+                        index);
+                const auto node_available =
+                    node_is_available(
+                        blueprint,
+                        state_.members,
+                        index,
+                        member.next_station);
+                const auto inside_edge =
+                    glm::length(
+                        member.local_position -
+                        node_position(
+                            blueprint,
+                            member.current_station)) >
+                    0.08F;
+                const auto final_node =
+                    member.next_station ==
+                    member.destination_station;
+                const auto node_is_being_vacated =
+                    !node_available &&
+                    node_blockers_are_departing(
+                        blueprint,
+                        state_.members,
+                        index,
+                        member.next_station);
+                const auto can_enter_reserved_node =
+                    inside_edge &&
+                    (!final_node ||
+                     node_is_being_vacated);
+                const auto near_reserved_node =
+                    !node_available &&
+                    !can_enter_reserved_node &&
+                    distance <=
+                        kCrewNodeClearance +
+                            reference_speed * dt;
+                const auto blocked_by_player =
+                    player_blocks_path(
+                        member,
+                        travel_direction,
+                        player_local_position);
+
+                runtime.blocked =
+                    !edge_available ||
+                    near_reserved_node ||
+                    blocked_by_player;
+                runtime.blocked_timer =
+                    runtime.blocked
+                        ? std::min(10.0F, runtime.blocked_timer + dt)
+                        : std::max(0.0F, runtime.blocked_timer - dt * 4.0F);
+
+                const auto alignment_speed =
+                    std::clamp(
+                        (alignment - kCrewMoveAlignment) /
+                            (1.0F - kCrewMoveAlignment),
+                        0.0F,
+                        1.0F);
+                const auto desired_speed =
+                    !runtime.blocked
+                        ? reference_speed * alignment_speed
+                        : 0.0F;
+                const auto acceleration =
+                    desired_speed > runtime.current_speed
+                        ? kCrewAcceleration
+                        : kCrewDeceleration;
+                runtime.current_speed = move_towards(
+                    runtime.current_speed,
+                    desired_speed,
+                    acceleration * dt);
+
+                // Tant que le torse n'est pas presque aligne, le marin tourne
+                // sur place. Aucune vitesse residuelle ne peut le faire glisser
+                // lateralement ou a reculons.
+                const auto may_translate =
+                    !runtime.blocked &&
+                    alignment >= kCrewMoveAlignment &&
+                    distance > 1.0e-5F;
+                const auto step_distance =
+                    may_translate
+                        ? std::min(
+                              distance,
+                              runtime.current_speed * dt)
+                        : 0.0F;
+
+                if (step_distance > 0.0F) {
+                    member.local_position +=
+                        delta / distance * step_distance;
+                    runtime.locomotion_distance =
+                        std::fmod(
+                            runtime.locomotion_distance +
+                                step_distance,
+                            kCrewStrideDistance * 1024.0F);
+                    travelled_distance = step_distance;
+                }
+
+                const auto remaining_distance =
+                    glm::length(target - member.local_position);
+                if (remaining_distance <= 1.0e-4F &&
+                    (node_available ||
+                     can_enter_reserved_node)) {
+                    member.local_position = target;
+                    member.current_station = member.next_station;
+                    runtime.blocked = false;
+                    runtime.blocked_timer = 0.0F;
+
+                    if (member.current_station ==
+                        member.destination_station) {
+                        member.next_station =
+                            member.current_station;
+                        member.activity_timer = 0.0F;
+                        runtime.current_speed = 0.0F;
+                    } else {
+                        // La vitesse est conservee sur un waypoint intermediaire.
+                        // Si le couloir tourne, l'alignement du prochain tick
+                        // provoquera naturellement un freinage puis un demi-tour.
+                        member.next_station =
+                            next_hop(
+                                blueprint,
+                                member.current_station,
+                                member.destination_station)
+                                .value_or(member.current_station);
+                    }
+                }
+
+                const auto realised_motion =
+                    dt > 0.0F
+                        ? std::clamp(
+                              travelled_distance /
+                                  std::max(reference_speed * dt, 0.001F),
+                              0.0F,
+                              1.0F)
+                        : 0.0F;
+                runtime.motion_amount = glm::mix(
+                    runtime.motion_amount,
+                    realised_motion,
+                    std::clamp(dt * 12.0F, 0.0F, 1.0F));
+            }
         }
 
-        moving = member.current_station != member.destination_station || member.next_station != member.current_station;
+        moving = member_is_moving(member);
+        if (!moving) {
+            runtime.current_speed = move_towards(
+                runtime.current_speed,
+                0.0F,
+                kCrewDeceleration * dt);
+            runtime.motion_amount = glm::mix(
+                runtime.motion_amount,
+                0.0F,
+                std::clamp(dt * 12.0F, 0.0F, 1.0F));
+            runtime.blocked = false;
+            runtime.blocked_timer =
+                std::max(0.0F, runtime.blocked_timer - dt * 4.0F);
+
+            auto desired_yaw =
+                station_yaw(member.current_station);
+
+            // Lors d'un moment social ou d'attente, un marin proche reconnait
+            // la presence du joueur. Les postes de travail conservent en revanche
+            // leur orientation fonctionnelle vers la barre, le mat ou la caisse.
+            if (player_local_position.has_value() &&
+                (member.activity == ShipCrewActivity::Socialize ||
+                 member.activity == ShipCrewActivity::Idle)) {
+                const auto to_player =
+                    *player_local_position -
+                    (member.local_position + runtime.visual_offset);
+                const auto player_distance =
+                    horizontal_length(to_player);
+                if (player_distance > 0.15F &&
+                    player_distance < 3.40F &&
+                    std::abs(to_player.y) < 2.20F) {
+                    desired_yaw =
+                        yaw_from_local_direction(to_player);
+                }
+            }
+
+            member.yaw_radians = rotate_towards(
+                member.yaw_radians,
+                desired_yaw,
+                kCrewStationTurnSpeed * dt);
+        } else {
+            runtime.activity_phase =
+                std::fmod(
+                    runtime.locomotion_distance /
+                        kCrewStrideDistance,
+                    1.0F);
+        }
+
+        const auto visual_target =
+            moving
+                ? glm::vec3 {0.0F}
+                : shared_station_visual_offset(member);
+        runtime.visual_offset = approach_vec3(
+            runtime.visual_offset,
+            visual_target,
+            kCrewVisualOffsetSpeed * dt);
+
         if (moving) {
-            runtime.activity_phase = std::fmod(member.animation_time * 0.85F, 1.0F);
             continue;
         }
 
         if (member.role == ShipCrewRole::Fisher) {
             if (member.cargo == ShipCrewCargo::Fish) {
-                if (member.current_station == ShipCrewStation::CargoFish) {
-                    if (fish < kAutomaticFishTarget) {
-                        ++fish;
-                        result.fish_delivered = true;
-                        member.cargo = ShipCrewCargo::None;
-                        member.routine_step = 2U;
-                        route_to(member, blueprint, ShipCrewStation::MessTable, ShipCrewActivity::Rest);
-                    }
+                if (member.current_station ==
+                        ShipCrewStation::CargoFish &&
+                    fish < kAutomaticFishTarget) {
+                    ++fish;
+                    result.fish_delivered = true;
+                    member.cargo = ShipCrewCargo::None;
+                    member.routine_step = 2U;
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::MessTable,
+                        ShipCrewActivity::Rest);
+                } else {
+                    runtime.activity_phase =
+                        std::fmod(
+                            member.animation_time * 0.18F,
+                            1.0F);
                 }
-            } else if (fish < kAutomaticFishTarget && storm_intensity < kFishingStormStop &&
-                       member.current_station == ShipCrewStation::PortFishing) {
+            } else if (
+                fish < kAutomaticFishTarget &&
+                storm_intensity < kFishingStormStop &&
+                member.current_station ==
+                    ShipCrewStation::PortFishing) {
                 member.activity = ShipCrewActivity::Fish;
-                const auto speed = std::clamp(1.0F - storm_intensity * 0.50F, 0.50F, 1.0F);
-                member.work_progress = std::min(kAutomaticFishWorkSeconds, member.work_progress + dt * speed);
-                runtime.activity_phase = member.work_progress / kAutomaticFishWorkSeconds;
-                if (member.work_progress >= kAutomaticFishWorkSeconds) {
+                const auto speed = std::clamp(
+                    1.0F - storm_intensity * 0.50F,
+                    0.50F,
+                    1.0F);
+                member.work_progress = std::min(
+                    kAutomaticFishWorkSeconds,
+                    member.work_progress + dt * speed);
+                runtime.activity_phase =
+                    member.work_progress /
+                    kAutomaticFishWorkSeconds;
+
+                if (member.work_progress >=
+                    kAutomaticFishWorkSeconds) {
                     member.work_progress = 0.0F;
                     member.cargo = ShipCrewCargo::Fish;
                     member.routine_step = 1U;
-                    route_to(member, blueprint, ShipCrewStation::CargoFish, ShipCrewActivity::Carry);
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::CargoFish,
+                        ShipCrewActivity::Carry);
                 }
-            } else if (member.routine_step == 2U && member.current_station == ShipCrewStation::MessTable) {
+            } else if (
+                member.routine_step == 2U &&
+                member.current_station ==
+                    ShipCrewStation::MessTable) {
                 member.activity_timer += dt;
-                runtime.activity_phase = std::clamp(member.activity_timer / 12.0F, 0.0F, 1.0F);
-                if (member.activity_timer >= 12.0F && fish < kAutomaticFishTarget) {
+                runtime.activity_phase =
+                    std::clamp(
+                        member.activity_timer / 12.0F,
+                        0.0F,
+                        1.0F);
+                if (member.activity_timer >= 12.0F &&
+                    fish < kAutomaticFishTarget) {
                     member.routine_step = 0U;
-                    route_to(member, blueprint, ShipCrewStation::PortFishing, ShipCrewActivity::Fish);
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::PortFishing,
+                        ShipCrewActivity::Fish);
                 }
             } else {
-                runtime.activity_phase = std::fmod(member.animation_time * 0.18F, 1.0F);
+                runtime.activity_phase =
+                    std::fmod(
+                        member.animation_time * 0.18F,
+                        1.0F);
             }
             continue;
         }
 
         if (member.role == ShipCrewRole::WaterTender) {
             if (member.cargo == ShipCrewCargo::Water) {
-                if (member.current_station == ShipCrewStation::CargoWater) {
-                    if (water_flasks < kAutomaticWaterTarget) {
-                        ++water_flasks;
-                        result.water_delivered = true;
-                        member.cargo = ShipCrewCargo::None;
-                        member.routine_step = 2U;
-                        route_to(member, blueprint, ShipCrewStation::Galley, ShipCrewActivity::Rest);
-                    }
+                if (member.current_station ==
+                        ShipCrewStation::CargoWater &&
+                    water_flasks < kAutomaticWaterTarget) {
+                    ++water_flasks;
+                    result.water_delivered = true;
+                    member.cargo = ShipCrewCargo::None;
+                    member.routine_step = 2U;
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::Galley,
+                        ShipCrewActivity::Rest);
+                } else {
+                    runtime.activity_phase =
+                        std::fmod(
+                            member.animation_time * 0.18F,
+                            1.0F);
                 }
-            } else if (water_flasks < kAutomaticWaterTarget &&
-                       member.current_station == ShipCrewStation::WaterStill) {
-                member.activity = ShipCrewActivity::TendWater;
-                const auto rain_bonus = 1.0F + 0.5F * precipitation_intensity;
+            } else if (
+                water_flasks < kAutomaticWaterTarget &&
+                member.current_station ==
+                    ShipCrewStation::WaterStill) {
+                member.activity =
+                    ShipCrewActivity::TendWater;
+                const auto rain_bonus =
+                    1.0F +
+                    0.5F * precipitation_intensity;
                 member.work_progress = std::min(
                     kAutomaticWaterWorkSeconds,
-                    member.work_progress + dt * rain_bonus);
-                runtime.activity_phase = std::fmod(member.work_progress, 8.0F) / 8.0F;
-                if (member.work_progress >= kAutomaticWaterWorkSeconds) {
+                    member.work_progress +
+                        dt * rain_bonus);
+                runtime.activity_phase =
+                    std::fmod(
+                        member.work_progress,
+                        8.0F) /
+                    8.0F;
+
+                if (member.work_progress >=
+                    kAutomaticWaterWorkSeconds) {
                     member.work_progress = 0.0F;
                     member.cargo = ShipCrewCargo::Water;
                     member.routine_step = 1U;
-                    route_to(member, blueprint, ShipCrewStation::CargoWater, ShipCrewActivity::Carry);
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::CargoWater,
+                        ShipCrewActivity::Carry);
                 }
-            } else if (member.routine_step == 2U && member.current_station == ShipCrewStation::Galley) {
+            } else if (
+                member.routine_step == 2U &&
+                member.current_station ==
+                    ShipCrewStation::Galley) {
                 member.activity_timer += dt;
-                runtime.activity_phase = std::clamp(member.activity_timer / 10.0F, 0.0F, 1.0F);
-                if (member.activity_timer >= 10.0F && water_flasks < kAutomaticWaterTarget) {
+                runtime.activity_phase =
+                    std::clamp(
+                        member.activity_timer / 10.0F,
+                        0.0F,
+                        1.0F);
+                if (member.activity_timer >= 10.0F &&
+                    water_flasks <
+                        kAutomaticWaterTarget) {
                     member.routine_step = 0U;
-                    route_to(member, blueprint, ShipCrewStation::WaterStill, ShipCrewActivity::TendWater);
+                    route_to(
+                        member,
+                        blueprint,
+                        ShipCrewStation::WaterStill,
+                        ShipCrewActivity::TendWater);
                 }
             } else {
-                runtime.activity_phase = std::fmod(member.animation_time * 0.18F, 1.0F);
+                runtime.activity_phase =
+                    std::fmod(
+                        member.animation_time * 0.18F,
+                        1.0F);
             }
             continue;
         }
 
-        const auto task = routine_task(member.role, member.routine_step);
-        if (member.destination_station != task.station || member.activity != task.activity) {
-            route_to(member, blueprint, task.station, task.activity);
+        if (forced_task.has_value()) {
+            // Une tache de tempete reste active tant que la pression meteo
+            // subsiste ; elle ne consomme pas l'etape normale de la ronde.
+            member.activity_timer =
+                std::fmod(
+                    member.activity_timer + dt,
+                    std::max(forced_task->duration, 0.001F));
+            runtime.activity_phase =
+                member.activity_timer /
+                std::max(forced_task->duration, 0.001F);
             continue;
         }
+
+        const auto task =
+            routine_task(
+                member.role,
+                member.routine_step);
+        if (member.destination_station != task.station ||
+            member.activity != task.activity) {
+            route_to(
+                member,
+                blueprint,
+                task.station,
+                task.activity);
+            continue;
+        }
+
         member.activity_timer += dt;
-        runtime.activity_phase = task.duration > 0.0F
-                                     ? std::clamp(member.activity_timer / task.duration, 0.0F, 1.0F)
-                                     : 0.0F;
+        runtime.activity_phase =
+            task.duration > 0.0F
+                ? std::clamp(
+                      member.activity_timer /
+                          task.duration,
+                      0.0F,
+                      1.0F)
+                : 0.0F;
         if (member.activity_timer >= task.duration) {
-            member.routine_step = static_cast<std::uint8_t>((member.routine_step + 1U) % 4U);
-            const auto next_task = routine_task(member.role, member.routine_step);
-            route_to(member, blueprint, next_task.station, next_task.activity);
+            member.routine_step =
+                static_cast<std::uint8_t>(
+                    (member.routine_step + 1U) % 4U);
+            const auto next_task =
+                routine_task(
+                    member.role,
+                    member.routine_step);
+            route_to(
+                member,
+                blueprint,
+                next_task.station,
+                next_task.activity);
         }
     }
 
@@ -820,65 +1697,63 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
                                              const glm::vec3& origin,
                                              const glm::vec3& direction,
                                              float max_distance,
-                                             float damage) noexcept -> ShipCrewDamageResult {
-    if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z) ||
-        !std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) ||
-        !std::isfinite(max_distance) || !std::isfinite(damage) || max_distance <= 0.0F || damage <= 0.0F ||
+                                             float damage) noexcept
+    -> ShipCrewDamageResult {
+
+    if (!std::isfinite(origin.x) ||
+        !std::isfinite(origin.y) ||
+        !std::isfinite(origin.z) ||
+        !std::isfinite(direction.x) ||
+        !std::isfinite(direction.y) ||
+        !std::isfinite(direction.z) ||
+        !std::isfinite(max_distance) ||
+        !std::isfinite(damage) ||
+        max_distance <= 0.0F ||
+        damage <= 0.0F ||
         glm::dot(direction, direction) <= 1.0e-6F) {
         return {};
     }
 
     const auto ray_direction = glm::normalize(direction);
-    const auto origin_world = ship.world_origin();
-    const auto ship_obstacle = ship.raycast_collidable_distance(origin, ray_direction, max_distance);
-    auto best_index = state_.members.size();
-    auto best_distance = std::numeric_limits<float>::max();
-    for (std::size_t index = 0; index < state_.members.size(); ++index) {
-        const auto& member = state_.members[index];
-        if (member.health <= 0.0F || member.recovery_timer > 0.0F) {
-            continue;
-        }
-        const auto moving = member.current_station != member.destination_station ||
-                            member.next_station != member.current_station;
-        const auto feet = origin_world + member.local_position +
-                          (moving ? glm::vec3 {0.0F} : shared_station_visual_offset(member));
-        const auto height = member.role == ShipCrewRole::Captain ? 1.88F : 1.82F;
-        const auto hit = ray_aabb_distance(
-            origin,
-            ray_direction,
-            feet + glm::vec3 {-0.34F, 0.02F, -0.34F},
-            feet + glm::vec3 {0.34F, height, 0.34F},
-            max_distance);
-        if (hit.has_value() && ship_obstacle.has_value() && *ship_obstacle + 0.02F < *hit) {
-            continue;
-        }
-        if (hit.has_value() && *hit < best_distance) {
-            best_index = index;
-            best_distance = *hit;
-        }
-    }
-    if (best_index >= state_.members.size()) {
+    const auto hit = find_crew_ray_hit(
+        ship,
+        state_.members,
+        render_instances_,
+        origin,
+        ray_direction,
+        max_distance,
+        false);
+    if (!hit.has_value()) {
         return {};
     }
 
-    auto& member = state_.members[best_index];
-    const auto moving = member.current_station != member.destination_station ||
-                        member.next_station != member.current_station;
-    const auto hit_position = origin_world + member.local_position +
-                              (moving ? glm::vec3 {0.0F} : shared_station_visual_offset(member));
-    const auto applied_damage = std::min(member.health, damage);
-    member.health = std::max(0.0F, member.health - applied_damage);
+    auto& member = state_.members[hit->index];
+    auto& runtime = runtime_[hit->index];
+    const auto hit_position =
+        render_instances_[hit->index].position;
+    const auto applied_damage =
+        std::min(member.health, damage);
+    member.health =
+        std::max(0.0F, member.health - applied_damage);
     member.hurt_timer = kCrewHurtSeconds;
     const auto knocked_out = member.health <= 0.0F;
+
     if (knocked_out) {
         member.health = 0.0F;
-        member.recovery_timer = kShipCrewKnockoutSeconds;
-        runtime_[best_index].motion_amount = 0.0F;
-        runtime_[best_index].recover_timer = 0.0F;
-        render_instances_[best_index].activity = CrewVisualActivity::KnockedOut;
-        render_instances_[best_index].knockout_amount = 1.0F;
+        member.recovery_timer =
+            kShipCrewKnockoutSeconds;
+        runtime.current_speed = 0.0F;
+        runtime.motion_amount = 0.0F;
+        runtime.blocked = false;
+        runtime.blocked_timer = 0.0F;
+        runtime.recover_timer = 0.0F;
+        render_instances_[hit->index].activity =
+            CrewVisualActivity::KnockedOut;
+        render_instances_[hit->index].knockout_amount =
+            1.0F;
     } else {
-        render_instances_[best_index].hurt_amount = 1.0F;
+        render_instances_[hit->index].hurt_amount =
+            1.0F;
     }
 
     return {
@@ -888,8 +1763,93 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
         hit_position,
         applied_damage,
         member.health,
-        best_distance,
+        hit->distance,
     };
+}
+
+auto ShipCrewSystem::focus_from_ray(const ShipEntity& ship,
+                                    const glm::vec3& origin,
+                                    const glm::vec3& direction,
+                                    float max_distance) const noexcept
+    -> ShipCrewFocusState {
+
+    if (!std::isfinite(origin.x) ||
+        !std::isfinite(origin.y) ||
+        !std::isfinite(origin.z) ||
+        !std::isfinite(direction.x) ||
+        !std::isfinite(direction.y) ||
+        !std::isfinite(direction.z) ||
+        !std::isfinite(max_distance) ||
+        max_distance <= 0.0F ||
+        glm::dot(direction, direction) <= 1.0e-6F) {
+        return {};
+    }
+
+    const auto hit = find_crew_ray_hit(
+        ship,
+        state_.members,
+        render_instances_,
+        origin,
+        glm::normalize(direction),
+        max_distance,
+        true);
+    if (!hit.has_value()) {
+        return {};
+    }
+
+    const auto& member =
+        state_.members[hit->index];
+    const auto& runtime =
+        runtime_[hit->index];
+    ShipCrewFocusState focus {};
+    focus.visible = true;
+    focus.moving = member_is_moving(member);
+    focus.blocked =
+        focus.moving &&
+        runtime.blocked_timer >= 0.12F;
+    focus.knocked_out =
+        member.health <= 0.0F ||
+        member.recovery_timer > 0.0F;
+    focus.member_id = member.id;
+    focus.role = member.role;
+    focus.activity = member.activity;
+    focus.cargo = member.cargo;
+    focus.destination_station =
+        member.destination_station;
+    focus.health_ratio = std::clamp(
+        member.health /
+            std::max(
+                ship_crew_max_health(member.role),
+                0.001F),
+        0.0F,
+        1.0F);
+    focus.distance = hit->distance;
+
+    if (!focus.moving &&
+        !focus.knocked_out &&
+        member.cargo == ShipCrewCargo::None) {
+        if (member.role == ShipCrewRole::Fisher &&
+            member.activity == ShipCrewActivity::Fish) {
+            focus.has_progress = true;
+            focus.progress_ratio = std::clamp(
+                member.work_progress /
+                    kAutomaticFishWorkSeconds,
+                0.0F,
+                1.0F);
+        } else if (
+            member.role == ShipCrewRole::WaterTender &&
+            member.activity ==
+                ShipCrewActivity::TendWater) {
+            focus.has_progress = true;
+            focus.progress_ratio = std::clamp(
+                member.work_progress /
+                    kAutomaticWaterWorkSeconds,
+                0.0F,
+                1.0F);
+        }
+    }
+
+    return focus;
 }
 
 auto ShipCrewSystem::save_state() const noexcept -> const ShipCrewSaveState& {
@@ -910,9 +1870,8 @@ void ShipCrewSystem::rebuild_render_instances(const ShipEntity& ship, const Envi
     for (std::size_t index = 0; index < state_.members.size(); ++index) {
         const auto& member = state_.members[index];
         const auto& runtime = runtime_[index];
-        const auto moving = member.current_station != member.destination_station ||
-                            member.next_station != member.current_station;
-        const auto visual_offset = moving ? glm::vec3 {0.0F} : shared_station_visual_offset(member);
+        const auto moving = member_is_moving(member);
+        const auto visual_offset = runtime.visual_offset;
         const auto exterior = station_is_exterior(blueprint, member.current_station) && member.local_position.y >= 3.70F;
         auto& render = render_instances_[index];
         render.position = world_origin + member.local_position + visual_offset;

@@ -446,16 +446,20 @@ void add_panel(std::vector<ShipPart>& parts,
     });
 }
 
-void add_glyph(std::vector<ShipPart>& parts,
-               char32_t glyph,
-               const glm::vec3& min_corner,
-               const glm::vec3& max_corner) {
+void add_glyph(
+    std::vector<ShipPart>& parts,
+    char32_t glyph,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner,
+    ShipMaterial material = ShipMaterial::Brass,
+    const glm::vec3& orientation = {0.0F, 0.0F, -1.0F}) {
+
     parts.push_back({
         ShipPartShape::Glyph,
-        ShipMaterial::Brass,
+        material,
         min_corner,
         max_corner,
-        {0.0F, 0.0F, -1.0F},
+        orientation,
         0.06F,
         false,
         false,
@@ -1323,6 +1327,262 @@ void add_deck_equipment(std::vector<ShipPart>& parts) {
     }
 }
 
+constexpr float kBlackSailThickness = 0.07F;
+constexpr float kGoldSailTrimDiameter = 0.045F;
+
+void add_black_square_sail(
+    std::vector<ShipPart>& parts,
+    float mast_z,
+    float bottom_y,
+    float top_y,
+    float bottom_half_width) {
+
+    const auto top_half_width =
+        bottom_half_width * 0.78F;
+
+    const auto panel_min_z =
+        mast_z + 0.16F;
+
+    const auto panel_max_z =
+        mast_z + 0.25F;
+
+    const auto trim_z =
+        mast_z + 0.255F;
+
+    // Le panneau conserve exactement l'enveloppe de l'ancienne voile.
+    // Le cadre doré se place légèrement devant la toile et reste décoratif.
+    add_panel(
+        parts,
+        ShipMaterial::BlackCanvas,
+        {
+            -bottom_half_width,
+            bottom_y,
+            panel_min_z,
+        },
+        {
+            bottom_half_width,
+            top_y,
+            panel_max_z,
+        },
+        {0.0F, 0.0F, 1.0F},
+        kBlackSailThickness);
+
+    // Bord inférieur.
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        {
+            -bottom_half_width,
+            bottom_y,
+            trim_z,
+        },
+        {
+            bottom_half_width,
+            bottom_y,
+            trim_z,
+        },
+        kGoldSailTrimDiameter);
+
+    // Bord supérieur.
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        {
+            -top_half_width,
+            top_y,
+            trim_z,
+        },
+        {
+            top_half_width,
+            top_y,
+            trim_z,
+        },
+        kGoldSailTrimDiameter);
+
+    // Bord latéral gauche.
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        {
+            -bottom_half_width,
+            bottom_y,
+            trim_z,
+        },
+        {
+            -top_half_width,
+            top_y,
+            trim_z,
+        },
+        kGoldSailTrimDiameter);
+
+    // Bord latéral droit.
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        {
+            bottom_half_width,
+            bottom_y,
+            trim_z,
+        },
+        {
+            top_half_width,
+            top_y,
+            trim_z,
+        },
+        kGoldSailTrimDiameter);
+}
+
+void add_black_triangular_sail(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner,
+    const glm::vec3& normal) {
+
+    add_panel(
+        parts,
+        ShipMaterial::BlackCanvas,
+        min_corner,
+        max_corner,
+        normal,
+        kBlackSailThickness);
+
+    // Je reproduis les trois sommets utilisés par le maillage afin que le
+    // liseré suive réellement le triangle sans flotter à côté de la voile.
+    const auto sign =
+        normal.x >= 0.0F
+            ? 1.0F
+            : -1.0F;
+
+    const auto center_x =
+        (min_corner.x + max_corner.x) *
+        0.5F;
+
+    const auto trim_x =
+        center_x +
+        sign *
+            (kBlackSailThickness * 0.5F + 0.01F);
+
+    const auto apex_z =
+        sign > 0.0F
+            ? min_corner.z
+            : max_corner.z;
+
+    const auto first = glm::vec3 {
+        trim_x,
+        min_corner.y,
+        min_corner.z,
+    };
+
+    const auto second = glm::vec3 {
+        trim_x,
+        min_corner.y,
+        max_corner.z,
+    };
+
+    const auto apex = glm::vec3 {
+        trim_x,
+        max_corner.y,
+        apex_z,
+    };
+
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        first,
+        second,
+        kGoldSailTrimDiameter);
+
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        second,
+        apex,
+        kGoldSailTrimDiameter);
+
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        apex,
+        first,
+        kGoldSailTrimDiameter);
+}
+
+void add_gold_mast_collar(
+    std::vector<ShipPart>& parts,
+    float mast_z,
+    float center_y,
+    float diameter) {
+
+    // Une courte surépaisseur casse la silhouette trop uniforme du mât sans
+    // modifier sa collision, son axe ou son emplacement historique.
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        {
+            0.0F,
+            center_y - 0.10F,
+            mast_z,
+        },
+        {
+            0.0F,
+            center_y + 0.10F,
+            mast_z,
+        },
+        diameter);
+}
+
+void add_main_mast_engraving(
+    std::vector<ShipPart>& parts) {
+
+    constexpr std::array<char32_t, 8> name {
+        U'L',
+        U'\'',
+        U'a',
+        U'm',
+        U'\u00E9',
+        U'l',
+        U'i',
+        U'e',
+    };
+
+    constexpr float kTopY = 18.95F;
+    constexpr float kGlyphHeight = 0.52F;
+    constexpr float kGlyphAdvance = 0.63F;
+    constexpr float kGlyphHalfWidth = 0.18F;
+
+    // Les glyphes pénètrent légèrement la face arrière du grand mât.
+    // Seule leur surface sombre reste visible, simulant une incision remplie
+    // d'ombre plutôt que des lettres simplement collées sur l'or.
+    for (std::size_t index = 0;
+         index < name.size();
+         ++index) {
+
+        const auto max_y =
+            kTopY -
+            static_cast<float>(index) *
+                kGlyphAdvance;
+
+        const auto min_y =
+            max_y -
+            kGlyphHeight;
+
+        add_glyph(
+            parts,
+            name[index],
+            {
+                -kGlyphHalfWidth,
+                min_y,
+                -0.232F,
+            },
+            {
+                kGlyphHalfWidth,
+                max_y,
+                -0.205F,
+            },
+            ShipMaterial::Iron);
+    }
+}
+
 void add_rigging(std::vector<ShipPart>& parts) {
     struct MastDefinition {
         float z = 0.0F;
@@ -1332,53 +1592,302 @@ void add_rigging(std::vector<ShipPart>& parts) {
         float lower_half_width = 0.0F;
         float upper_half_width = 0.0F;
     };
+
+    // Ces valeurs sont exactement celles du gréement historique.
     constexpr std::array<MastDefinition, 3> masts {{
-        {-17.5F, 20.0F, 11.5F, 16.2F, 4.9F, 3.6F},
-        {0.0F, 26.0F, 13.4F, 19.5F, 7.3F, 5.2F},
-        {18.0F, 22.5F, 12.3F, 17.4F, 6.1F, 4.3F},
+        {
+            -17.5F,
+            20.0F,
+            11.5F,
+            16.2F,
+            4.9F,
+            3.6F,
+        },
+        {
+            0.0F,
+            26.0F,
+            13.4F,
+            19.5F,
+            7.3F,
+            5.2F,
+        },
+        {
+            18.0F,
+            22.5F,
+            12.3F,
+            17.4F,
+            6.1F,
+            4.3F,
+        },
     }};
 
     for (const auto& mast : masts) {
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-0.30F, kAmelieMainDeckUnderside, mast.z - 0.30F},
-                {0.30F, 8.0F, mast.z + 0.30F},
-                true);
-        add_segment(parts, ShipMaterial::CleanBeam, {0.0F, 4.0F, mast.z}, {0.0F, mast.top, mast.z}, 0.42F);
-        add_segment(parts, ShipMaterial::CleanBeam, {-mast.lower_half_width, mast.lower_yard, mast.z}, {mast.lower_half_width, mast.lower_yard, mast.z}, 0.28F);
-        add_segment(parts, ShipMaterial::CleanBeam, {-mast.upper_half_width, mast.upper_yard, mast.z}, {mast.upper_half_width, mast.upper_yard, mast.z}, 0.23F);
+        // Le pied collidable garde exactement son ancienne enveloppe.
+        add_box(
+            parts,
+            ShipMaterial::SolidGold,
+            {
+                -0.30F,
+                kAmelieMainDeckUnderside,
+                mast.z - 0.30F,
+            },
+            {
+                0.30F,
+                8.0F,
+                mast.z + 0.30F,
+            },
+            true);
 
-        add_panel(parts,
-                  ShipMaterial::CreamCanvas,
-                  {-mast.lower_half_width + 0.35F, mast.lower_yard + 0.35F, mast.z + 0.16F},
-                  {mast.lower_half_width - 0.35F, mast.upper_yard - 0.35F, mast.z + 0.25F},
-                  {0.0F, 0.0F, 1.0F},
-                  0.07F);
-        add_panel(parts,
-                  ShipMaterial::CreamCanvas,
-                  {-mast.upper_half_width + 0.30F, mast.upper_yard + 0.30F, mast.z + 0.16F},
-                  {mast.upper_half_width - 0.30F, mast.top - 0.75F, mast.z + 0.25F},
-                  {0.0F, 0.0F, 1.0F},
-                  0.07F);
+        // Axe vertical du mât.
+        add_segment(
+            parts,
+            ShipMaterial::SolidGold,
+            {
+                0.0F,
+                4.0F,
+                mast.z,
+            },
+            {
+                0.0F,
+                mast.top,
+                mast.z,
+            },
+            0.42F);
 
-        const auto shroud_half_width = std::min(7.5F, amelie_half_width(mast.z - 3.0F) - 0.35F);
-        add_segment(parts, ShipMaterial::Rope, {0.0F, mast.top, mast.z}, {-shroud_half_width, 4.35F, mast.z - 3.0F}, 0.055F);
-        add_segment(parts, ShipMaterial::Rope, {0.0F, mast.top, mast.z}, {shroud_half_width, 4.35F, mast.z - 3.0F}, 0.055F);
+        // Vergue inférieure.
+        add_segment(
+            parts,
+            ShipMaterial::SolidGold,
+            {
+                -mast.lower_half_width,
+                mast.lower_yard,
+                mast.z,
+            },
+            {
+                mast.lower_half_width,
+                mast.lower_yard,
+                mast.z,
+            },
+            0.28F);
+
+        // Vergue supérieure.
+        add_segment(
+            parts,
+            ShipMaterial::SolidGold,
+            {
+                -mast.upper_half_width,
+                mast.upper_yard,
+                mast.z,
+            },
+            {
+                mast.upper_half_width,
+                mast.upper_yard,
+                mast.z,
+            },
+            0.23F);
+
+        // Bagues décoratives de renfort.
+        add_gold_mast_collar(
+            parts,
+            mast.z,
+            8.0F,
+            0.56F);
+
+        add_gold_mast_collar(
+            parts,
+            mast.z,
+            mast.lower_yard,
+            0.52F);
+
+        add_gold_mast_collar(
+            parts,
+            mast.z,
+            mast.upper_yard,
+            0.46F);
+
+        // Voile carrée inférieure.
+        add_black_square_sail(
+            parts,
+            mast.z,
+            mast.lower_yard + 0.35F,
+            mast.upper_yard - 0.35F,
+            mast.lower_half_width - 0.35F);
+
+        // Voile carrée supérieure.
+        add_black_square_sail(
+            parts,
+            mast.z,
+            mast.upper_yard + 0.30F,
+            mast.top - 0.75F,
+            mast.upper_half_width - 0.30F);
+
+        const auto shroud_half_width =
+            std::min(
+                7.5F,
+                amelie_half_width(
+                    mast.z - 3.0F) -
+                    0.35F);
+
+        // Hauban gauche inchangé.
+        add_segment(
+            parts,
+            ShipMaterial::Rope,
+            {
+                0.0F,
+                mast.top,
+                mast.z,
+            },
+            {
+                -shroud_half_width,
+                4.35F,
+                mast.z - 3.0F,
+            },
+            0.055F);
+
+        // Hauban droit inchangé.
+        add_segment(
+            parts,
+            ShipMaterial::Rope,
+            {
+                0.0F,
+                mast.top,
+                mast.z,
+            },
+            {
+                shroud_half_width,
+                4.35F,
+                mast.z - 3.0F,
+            },
+            0.055F);
     }
 
-    // Je relie les tetes de mats et le beaupre par des etais plausibles.
-    add_segment(parts, ShipMaterial::Rope, {0.0F, 20.0F, -17.5F}, {0.0F, 26.0F, 0.0F}, 0.055F);
-    add_segment(parts, ShipMaterial::Rope, {0.0F, 26.0F, 0.0F}, {0.0F, 22.5F, 18.0F}, 0.055F);
-    add_panel(parts, ShipMaterial::CreamCanvas, {0.12F, 8.6F, -15.4F}, {0.20F, 22.4F, -1.8F}, {-1.0F, 0.0F, 0.0F}, 0.07F);
-    add_panel(parts, ShipMaterial::CreamCanvas, {0.12F, 8.4F, 2.2F}, {0.20F, 21.4F, 16.2F}, {1.0F, 0.0F, 0.0F}, 0.07F);
-    add_segment(parts, ShipMaterial::CleanBeam, {0.0F, 4.50F, 34.0F}, {0.0F, 7.65F, 46.0F}, 0.38F);
-    add_segment(parts, ShipMaterial::Rope, {0.0F, 22.5F, 18.0F}, {0.0F, 7.65F, 46.0F}, 0.055F);
-    add_panel(parts, ShipMaterial::CreamCanvas, {0.18F, 7.80F, 34.0F}, {0.27F, 17.2F, 44.4F}, {1.0F, 0.0F, 0.0F}, 0.07F);
+    // La gravure est uniquement posée sur le grand mât central.
+    add_main_mast_engraving(parts);
+
+    // Les étais conservent leurs coordonnées historiques.
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {
+            0.0F,
+            20.0F,
+            -17.5F,
+        },
+        {
+            0.0F,
+            26.0F,
+            0.0F,
+        },
+        0.055F);
+
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {
+            0.0F,
+            26.0F,
+            0.0F,
+        },
+        {
+            0.0F,
+            22.5F,
+            18.0F,
+        },
+        0.055F);
+
+    // Voile d'étai arrière.
+    add_black_triangular_sail(
+        parts,
+        {
+            0.12F,
+            8.6F,
+            -15.4F,
+        },
+        {
+            0.20F,
+            22.4F,
+            -1.8F,
+        },
+        {
+            -1.0F,
+            0.0F,
+            0.0F,
+        });
+
+    // Voile d'étai centrale.
+    add_black_triangular_sail(
+        parts,
+        {
+            0.12F,
+            8.4F,
+            2.2F,
+        },
+        {
+            0.20F,
+            21.4F,
+            16.2F,
+        },
+        {
+            1.0F,
+            0.0F,
+            0.0F,
+        });
+
+    // Beaupré doré, avec coordonnées et longueur inchangées.
+    add_segment(
+        parts,
+        ShipMaterial::SolidGold,
+        {
+            0.0F,
+            4.50F,
+            34.0F,
+        },
+        {
+            0.0F,
+            7.65F,
+            46.0F,
+        },
+        0.38F);
+
+    // Étai du beaupré inchangé.
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {
+            0.0F,
+            22.5F,
+            18.0F,
+        },
+        {
+            0.0F,
+            7.65F,
+            46.0F,
+        },
+        0.055F);
+
+    // Voile triangulaire avant.
+    add_black_triangular_sail(
+        parts,
+        {
+            0.18F,
+            7.80F,
+            34.0F,
+        },
+        {
+            0.27F,
+            17.2F,
+            44.4F,
+        },
+        {
+            1.0F,
+            0.0F,
+            0.0F,
+        });
 }
 
 void add_stern_identity_and_hardware(std::vector<ShipPart>& parts) {
-    // Je fixe la plaque sur la face exterieure de la poupe, puis je grave
-    // exactement le nom demande, accent compris, sans dupliquer ce texte ailleurs.
+    // Je conserve la plaque historique de poupe. La seconde gravure demandée
+    // appartient au grand mât et ne modifie donc aucun élément de coque.
     add_panel(parts,
               ShipMaterial::CleanBeam,
               {-4.25F, 4.52F, kAmelieSternZ - 0.72F},
@@ -2141,6 +2650,15 @@ auto SeaAdventureSystem::hud_state(const PlayerController& player) const noexcep
     hud.food_rations = state_.food_rations;
     hud.water_flasks = state_.water_flasks;
     hud.fish = state_.fish;
+    if (!player.is_dead()) {
+        // Le panneau n'apparait que sur une cible reellement visible ; le
+        // raycast de l'equipage tient compte des cloisons du navire.
+        hud.crew_focus = crew_.focus_from_ray(
+            ship_,
+            player.eye_position(),
+            player.look_direction(),
+            6.5F);
+    }
     return hud;
 }
 
@@ -2619,7 +3137,8 @@ auto SeaAdventureSystem::update(
             safe_environment,
             dt,
             state_.fish,
-            state_.water_flasks);
+            state_.water_flasks,
+            player.position());
 
     result.crew_fish_delivered =
         crew_result.fish_delivered;

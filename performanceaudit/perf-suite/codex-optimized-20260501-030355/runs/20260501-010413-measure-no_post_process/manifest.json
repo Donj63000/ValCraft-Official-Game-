@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260501-010413-189",
+  "label": "no_post_process",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf-codex",
+  "arguments": ["--smoke-test", "--smoke-frames=720", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\no_post_process.json", "--perf-scenario=no_post_process", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355", "--audit-mode=measure", "--stream-radius=5", "--disable-post-process"],
+  "started_at_utc": "2026-05-01T01:04:13Z",
+  "ended_at_utc": "2026-05-01T01:04:16Z",
+  "duration_seconds": 3.622850,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 289, "render": 0, "performance": 2, "creatures": 4, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 4,
+  "recorded_frames": 720,
+  "written_frames": 6,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\runs\\20260501-010413-measure-no_post_process\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performanceaudit\\perf-suite\\codex-optimized-20260501-030355\\no_post_process.json"]
+}

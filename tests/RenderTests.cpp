@@ -444,7 +444,7 @@ TEST_CASE("ship canvas keeps repeated detail across a large trapezoidal sail") {
     const std::array<ShipPart, 1> parts {{
         {
             ShipPartShape::Panel,
-            ShipMaterial::CreamCanvas,
+            ShipMaterial::BlackCanvas,
             {-6.0F, 0.0F, 0.0F},
             {6.0F, 14.0F, 0.10F},
             {0.0F, 0.0F, 1.0F},
@@ -637,6 +637,36 @@ TEST_CASE("stern glyph bitmap follows the outward face orientation") {
     }
     CHECK(top_min_x == doctest::Approx(4.0F));
     CHECK(top_max_x == doctest::Approx(4.82F));
+}
+
+TEST_CASE("main mast engraving renders the lowercase a used by L'amelie") {
+    const std::array<ShipPart, 1> parts {{
+        {
+            ShipPartShape::Glyph,
+            ShipMaterial::Iron,
+            {-0.18F, 0.0F, -0.232F},
+            {0.18F, 0.52F, -0.205F},
+            {0.0F, 0.0F, -1.0F},
+            0.06F,
+            false,
+            false,
+            U'a',
+        },
+    }};
+
+    const auto mesh =
+        build_ship_mesh_data(parts);
+
+    REQUIRE_FALSE(mesh.empty());
+    CHECK(mesh.face_count > 0U);
+
+    for (const auto& vertex : mesh.vertices) {
+        CHECK(
+            vertex.material_class ==
+            doctest::Approx(
+                static_cast<float>(
+                    BlockVisualMaterial::Metal)));
+    }
 }
 
 TEST_CASE("L'Amelie mesh renders every maritime family with interior and lantern lighting") {
@@ -1165,8 +1195,11 @@ TEST_CASE("block atlas supports the antique Greek village material palette") {
     CHECK(roof_seam[0] < roof_center[0]);
 }
 
-TEST_CASE("L'Amelie ship atlas owns eight deterministic and distinct maritime materials") {
-    const std::array<ShipAtlasMaterial, kShipAtlasMaterialCount> materials {{
+TEST_CASE("L'Amelie ship atlas owns ten deterministic and distinct maritime materials") {
+    const std::array<
+        ShipAtlasMaterial,
+        kShipAtlasMaterialCount
+    > materials {{
         ShipAtlasMaterial::DarkHull,
         ShipAtlasMaterial::LightDeck,
         ShipAtlasMaterial::CleanBeam,
@@ -1175,40 +1208,177 @@ TEST_CASE("L'Amelie ship atlas owns eight deterministic and distinct maritime ma
         ShipAtlasMaterial::Iron,
         ShipAtlasMaterial::Brass,
         ShipAtlasMaterial::Lantern,
+        ShipAtlasMaterial::BlackCanvas,
+        ShipAtlasMaterial::SolidGold,
     }};
-    const auto first_pixels = build_block_atlas_pixels();
-    const auto second_pixels = build_block_atlas_pixels();
+
+    const auto first_pixels =
+        build_block_atlas_pixels();
+
+    const auto second_pixels =
+        build_block_atlas_pixels();
+
     REQUIRE(first_pixels == second_pixels);
 
-    std::array<std::uint64_t, kShipAtlasMaterialCount> checksums {};
-    for (std::size_t material_index = 0; material_index < materials.size(); ++material_index) {
-        const auto tile = ship_atlas_tile(materials[material_index]);
-        CHECK(tile.x == static_cast<int>(material_index));
-        CHECK(tile.y == kShipAtlasRow);
+    std::array<
+        std::uint64_t,
+        kShipAtlasMaterialCount
+    > checksums {};
 
-        auto checksum = std::uint64_t {1469598103934665603ULL};
-        for (int y = 0; y < kBlockAtlasTileSize; ++y) {
-            for (int x = 0; x < kBlockAtlasTileSize; ++x) {
-                const auto pixel = sample_block_atlas_pixel(first_pixels, tile.x, tile.y, x, y);
+    std::set<std::pair<int, int>>
+        occupied_tiles;
+
+    for (std::size_t material_index = 0;
+         material_index < materials.size();
+         ++material_index) {
+
+        const auto tile =
+            ship_atlas_tile(
+                materials[material_index]);
+
+        CHECK(tile.x >= 0);
+        CHECK(
+            tile.x <
+            static_cast<int>(
+                kBlockAtlasTilesPerAxis));
+
+        CHECK(tile.y >= 0);
+        CHECK(
+            tile.y <
+            static_cast<int>(
+                kBlockAtlasTilesPerAxis));
+
+        CHECK(
+            occupied_tiles
+                .emplace(tile.x, tile.y)
+                .second);
+
+        // Les huit matériaux historiques ne doivent jamais changer de case.
+        if (material_index < 8U) {
+            CHECK(
+                tile.x ==
+                static_cast<int>(
+                    material_index));
+
+            CHECK(
+                tile.y ==
+                kShipAtlasRow);
+        }
+
+        auto checksum =
+            std::uint64_t {
+                1469598103934665603ULL,
+            };
+
+        for (int y = 0;
+             y < kBlockAtlasTileSize;
+             ++y) {
+
+            for (int x = 0;
+                 x < kBlockAtlasTileSize;
+                 ++x) {
+
+                const auto pixel =
+                    sample_block_atlas_pixel(
+                        first_pixels,
+                        tile.x,
+                        tile.y,
+                        x,
+                        y);
+
                 REQUIRE(pixel[3] == 255U);
+
                 for (const auto channel : pixel) {
-                    checksum ^= static_cast<std::uint64_t>(channel);
-                    checksum *= 1099511628211ULL;
+                    checksum ^=
+                        static_cast<
+                            std::uint64_t>(
+                            channel);
+
+                    checksum *=
+                        1099511628211ULL;
                 }
             }
         }
-        checksums[material_index] = checksum;
+
+        checksums[material_index] =
+            checksum;
     }
 
-    for (std::size_t left = 0; left < checksums.size(); ++left) {
-        for (std::size_t right = left + 1U; right < checksums.size(); ++right) {
-            CHECK(checksums[left] != checksums[right]);
+    for (std::size_t left = 0;
+         left < checksums.size();
+         ++left) {
+
+        for (std::size_t right = left + 1U;
+             right < checksums.size();
+             ++right) {
+
+            CHECK(
+                checksums[left] !=
+                checksums[right]);
         }
     }
-    CHECK(ship_visual_material(ShipAtlasMaterial::CreamCanvas) == BlockVisualMaterial::Fabric);
-    CHECK(ship_visual_material(ShipAtlasMaterial::Iron) == BlockVisualMaterial::Metal);
-    CHECK(ship_visual_material(ShipAtlasMaterial::Brass) == BlockVisualMaterial::Brass);
-    CHECK(ship_visual_material(ShipAtlasMaterial::Lantern) == BlockVisualMaterial::Emissive);
+
+    const auto black_tile =
+        ship_atlas_tile(
+            ShipAtlasMaterial::BlackCanvas);
+
+    const auto gold_tile =
+        ship_atlas_tile(
+            ShipAtlasMaterial::SolidGold);
+
+    const auto black_center =
+        sample_block_atlas_pixel(
+            first_pixels,
+            black_tile.x,
+            black_tile.y,
+            8,
+            8);
+
+    const auto gold_center =
+        sample_block_atlas_pixel(
+            first_pixels,
+            gold_tile.x,
+            gold_tile.y,
+            8,
+            8);
+
+    CHECK(black_center[0] < 80U);
+    CHECK(black_center[1] < 80U);
+    CHECK(black_center[2] < 90U);
+
+    CHECK(gold_center[0] > 150U);
+    CHECK(gold_center[0] > gold_center[1]);
+    CHECK(gold_center[1] > gold_center[2]);
+
+    CHECK(
+        ship_visual_material(
+            ShipAtlasMaterial::CreamCanvas) ==
+        BlockVisualMaterial::Fabric);
+
+    CHECK(
+        ship_visual_material(
+            ShipAtlasMaterial::BlackCanvas) ==
+        BlockVisualMaterial::Fabric);
+
+    CHECK(
+        ship_visual_material(
+            ShipAtlasMaterial::Iron) ==
+        BlockVisualMaterial::Metal);
+
+    CHECK(
+        ship_visual_material(
+            ShipAtlasMaterial::Brass) ==
+        BlockVisualMaterial::Brass);
+
+    CHECK(
+        ship_visual_material(
+            ShipAtlasMaterial::SolidGold) ==
+        BlockVisualMaterial::Brass);
+
+    CHECK(
+        ship_visual_material(
+            ShipAtlasMaterial::Lantern) ==
+        BlockVisualMaterial::Emissive);
 }
 
 } // namespace valcraft

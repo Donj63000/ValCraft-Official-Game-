@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "session_id": "20260614-195823-646",
+  "label": "no_post_process",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-perf",
+  "arguments": ["--smoke-test", "--smoke-frames=180", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\no_post_process.json", "--perf-scenario=no_post_process", "--audit-dir=C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current", "--audit-mode=measure", "--stream-radius=5", "--disable-post-process"],
+  "started_at_utc": "2026-06-14T19:58:23Z",
+  "ended_at_utc": "2026-06-14T19:58:26Z",
+  "duration_seconds": 2.935303,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 181, "render": 0, "performance": 31, "creatures": 11, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 3,
+  "recorded_frames": 180,
+  "written_frames": 56,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\runs\\20260614-195823-measure-no_post_process\\spikes.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\codex-plan-perf-current\\no_post_process.json"]
+}

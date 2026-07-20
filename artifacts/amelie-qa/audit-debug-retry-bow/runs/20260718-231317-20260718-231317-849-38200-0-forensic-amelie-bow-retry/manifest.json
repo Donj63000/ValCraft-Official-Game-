@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "20260718-231317-849-38200-0",
+  "label": "amelie-bow-retry",
+  "mode": "forensic",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "Debug",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft",
+  "arguments": ["--smoke-test", "--smoke-session=sea-new", "--smoke-ship-view=bow", "--smoke-frames=240", "--window-width=1600", "--window-height=900", "--freeze-time", "--capture-frame=artifacts/amelie-qa/bow.bmp", "--audit", "--audit-mode=forensic", "--audit-dir=artifacts/amelie-qa/audit-debug-retry-bow", "--audit-label=amelie-bow-retry"],
+  "started_at_utc": "2026-07-18T23:13:17Z",
+  "ended_at_utc": "2026-07-18T23:13:23Z",
+  "duration_seconds": 5.625160,
+  "written_event_counts": {"session": 8, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 240, "render": 0, "performance": 49, "creatures": 5, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 4,
+  "dropped_second_samples": 0,
+  "recorded_frames": 240,
+  "written_frames": 240,
+  "dropped_frames": 0,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\artifacts\\amelie-qa\\audit-debug-retry-bow\\runs\\20260718-231317-20260718-231317-849-38200-0-forensic-amelie-bow-retry\\spikes.json"]
+}

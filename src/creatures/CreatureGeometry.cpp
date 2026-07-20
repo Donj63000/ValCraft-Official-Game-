@@ -1484,10 +1484,17 @@ struct CrewPose {
 auto build_crew_pose(const CrewRenderInstance& crew, CrewVisualActivity activity, float phase) noexcept -> CrewPose {
     const auto animation_time = finite_or(crew.animation_time, 0.0F);
     const auto motion = saturate(finite_or(crew.motion_amount, 0.0F));
-    const auto cycle = std::sin(animation_time * 5.4F + phase * kTwoPi);
+    const auto locomotion_activity =
+        activity == CrewVisualActivity::Walk ||
+        activity == CrewVisualActivity::Carry;
+    // En marche, la phase vient de la distance reellement parcourue. Les pieds
+    // s'immobilisent donc lorsqu'un marin cede le passage, y compris avec une caisse.
+    const auto cycle = locomotion_activity
+                           ? std::sin(phase * kTwoPi)
+                           : std::sin(animation_time * 5.4F + phase * kTwoPi);
     const auto slow_cycle = std::sin(animation_time * 2.2F + phase * kTwoPi);
     CrewPose pose {};
-    pose.stride = activity == CrewVisualActivity::Walk ? cycle * motion : 0.0F;
+    pose.stride = locomotion_activity ? cycle * motion : 0.0F;
     pose.head_yaw = slow_cycle * 0.035F;
     for (std::size_t index = 0; index < kSides.size(); ++index) {
         const auto side = kSides[index];

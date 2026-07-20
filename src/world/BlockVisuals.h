@@ -12,7 +12,7 @@ constexpr int kBlockAtlasTileSize = 16;
 constexpr float kBlockAtlasTilesPerAxis = 8.0F;
 constexpr int kBlockBreakCrackAtlasRow = 5;
 constexpr int kShipAtlasRow = 7;
-constexpr int kShipAtlasMaterialCount = 8;
+constexpr int kShipAtlasMaterialCount = 10;
 constexpr int kAccentAtlasSize = 64;
 constexpr int kAccentAtlasTileSize = 16;
 constexpr float kAccentAtlasTilesPerAxis = 4.0F;
@@ -75,43 +75,72 @@ enum class ShipAtlasMaterial : std::uint8_t {
     Iron = 5,
     Brass = 6,
     Lantern = 7,
+    BlackCanvas = 8,
+    SolidGold = 9,
 };
 
-[[nodiscard]] constexpr auto ship_atlas_tile(ShipAtlasMaterial material) noexcept -> BlockAtlasTile {
+[[nodiscard]] constexpr auto ship_atlas_tile(
+    ShipAtlasMaterial material) noexcept -> BlockAtlasTile {
+
     switch (material) {
     case ShipAtlasMaterial::DarkHull:
         return {0, kShipAtlasRow};
+
     case ShipAtlasMaterial::LightDeck:
         return {1, kShipAtlasRow};
+
     case ShipAtlasMaterial::CleanBeam:
         return {2, kShipAtlasRow};
+
     case ShipAtlasMaterial::CreamCanvas:
         return {3, kShipAtlasRow};
+
     case ShipAtlasMaterial::Rope:
         return {4, kShipAtlasRow};
+
     case ShipAtlasMaterial::Iron:
         return {5, kShipAtlasRow};
+
     case ShipAtlasMaterial::Brass:
         return {6, kShipAtlasRow};
+
     case ShipAtlasMaterial::Lantern:
-    default:
         return {7, kShipAtlasRow};
+
+    case ShipAtlasMaterial::BlackCanvas:
+        // Cette case de la rangée 2 est libre dans l'atlas actuel.
+        return {2, 2};
+
+    case ShipAtlasMaterial::SolidGold:
+    default:
+        // Cette seconde case est également libre et ne déplace aucune texture.
+        return {3, 2};
     }
 }
 
-[[nodiscard]] constexpr auto ship_visual_material(ShipAtlasMaterial material) noexcept -> BlockVisualMaterial {
+[[nodiscard]] constexpr auto ship_visual_material(
+    ShipAtlasMaterial material) noexcept -> BlockVisualMaterial {
+
     switch (material) {
     case ShipAtlasMaterial::DarkHull:
     case ShipAtlasMaterial::LightDeck:
     case ShipAtlasMaterial::CleanBeam:
     case ShipAtlasMaterial::Rope:
         return BlockVisualMaterial::Wood;
+
     case ShipAtlasMaterial::CreamCanvas:
+    case ShipAtlasMaterial::BlackCanvas:
         return BlockVisualMaterial::Fabric;
+
     case ShipAtlasMaterial::Iron:
         return BlockVisualMaterial::Metal;
+
     case ShipAtlasMaterial::Brass:
+    case ShipAtlasMaterial::SolidGold:
+        // L'or emploie la réponse lumineuse métallique et spéculaire déjà
+        // éprouvée pour le laiton. Sa couleur provient de sa propre texture.
         return BlockVisualMaterial::Brass;
+
     case ShipAtlasMaterial::Lantern:
     default:
         return BlockVisualMaterial::Emissive;

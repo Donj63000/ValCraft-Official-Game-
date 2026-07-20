@@ -184,6 +184,20 @@ struct MaritimeHudView {
     std::uint32_t water_flasks = 0U;
     std::uint32_t fish = 0U;
 
+    // Informations contextuelles du marin place sous le viseur.
+    bool crew_focus_visible = false;
+    bool crew_moving = false;
+    bool crew_blocked = false;
+    bool crew_knocked_out = false;
+    bool crew_has_progress = false;
+    std::string_view crew_role {};
+    std::string_view crew_activity {};
+    std::string_view crew_cargo {};
+    std::string_view crew_destination {};
+    float crew_progress_ratio = 0.0F;
+    float crew_health_ratio = 1.0F;
+    float crew_distance = 0.0F;
+
     auto operator==(const MaritimeHudView&) const -> bool = default;
 };
 
@@ -544,6 +558,18 @@ private:
         std::uint32_t food_rations = 0U;
         std::uint32_t water_flasks = 0U;
         std::uint32_t fish = 0U;
+        bool crew_focus_visible = false;
+        bool crew_moving = false;
+        bool crew_blocked = false;
+        bool crew_knocked_out = false;
+        bool crew_has_progress = false;
+        std::string_view crew_role {};
+        std::string_view crew_activity {};
+        std::string_view crew_cargo {};
+        std::string_view crew_destination {};
+        int crew_progress_step = 0;
+        int crew_health_step = 0;
+        int crew_distance_step = 0;
 
         auto operator==(const MaritimeHudCacheKey&) const -> bool = default;
     };
