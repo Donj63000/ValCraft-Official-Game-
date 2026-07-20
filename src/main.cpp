@@ -8,7 +8,7 @@
 
 #include <iostream>
 #include <memory>
-// Game made by V.GIDON
+// Game dev by V.GIDON FR63500
 namespace {
 
 auto run_valcraft(const valcraft::GameOptions& options) -> int {
