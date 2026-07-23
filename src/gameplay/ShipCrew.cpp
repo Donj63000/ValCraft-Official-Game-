@@ -1,5 +1,6 @@
 #include "gameplay/ShipCrew.h"
 
+#include "creatures/CrewAnimation.h"
 #include "gameplay/SeaAdventure.h"
 
 #include <glm/common.hpp>
@@ -24,7 +25,6 @@ constexpr float kCrewDeceleration = 7.20F;
 constexpr float kCrewTurnSpeed = 6.40F;
 constexpr float kCrewStationTurnSpeed = 4.20F;
 constexpr float kCrewMoveAlignment = 0.94F;
-constexpr float kCrewStrideDistance = 1.18F;
 constexpr float kCrewNodeClearance = 0.76F;
 constexpr float kCrewPlayerForwardClearance = 1.05F;
 constexpr float kCrewPlayerSideClearance = 0.72F;
@@ -694,6 +694,15 @@ auto find_crew_ray_hit(const ShipEntity& ship,
             origin,
             ray_direction,
             max_distance);
+
+    // Les volumes de selection sont definis dans le repere du navire. Une
+    // transformation rigide conserve le parametre de distance du rayon.
+    const auto local_origin =
+        ship.world_to_local_point(origin);
+    const auto local_direction =
+        ship.world_to_local_direction(
+            ray_direction);
+
     auto best_index = members.size();
     auto best_distance = std::numeric_limits<float>::max();
 
@@ -706,7 +715,13 @@ auto find_crew_ray_hit(const ShipEntity& ship,
             continue;
         }
 
-        const auto feet = render_instances[index].position;
+        if (index >= render_instances.size()) {
+            break;
+        }
+
+        const auto feet =
+            ship.world_to_local_point(
+                render_instances[index].position);
         const auto half_width =
             knocked_out ? 0.82F : 0.34F;
         const auto height =
@@ -716,8 +731,8 @@ auto find_crew_ray_hit(const ShipEntity& ship,
                        ? 1.88F
                        : 1.82F);
         const auto hit = ray_aabb_distance(
-            origin,
-            ray_direction,
+            local_origin,
+            local_direction,
             feet +
                 glm::vec3 {
                     -half_width,
@@ -1057,7 +1072,8 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
     const auto player_local_position =
         player_position_is_finite
             ? std::optional<glm::vec3> {
-                  *player_world_position - ship.world_origin(),
+                  ship.world_to_local_point(
+                      *player_world_position),
               }
             : std::nullopt;
 
@@ -1373,7 +1389,7 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
                         std::fmod(
                             runtime.locomotion_distance +
                                 step_distance,
-                            kCrewStrideDistance * 1024.0F);
+                            kCrewLocomotionCycleDistance * 1024.0F);
                     travelled_distance = step_distance;
                 }
 
@@ -1461,12 +1477,6 @@ auto ShipCrewSystem::update(const ShipEntity& ship,
                 member.yaw_radians,
                 desired_yaw,
                 kCrewStationTurnSpeed * dt);
-        } else {
-            runtime.activity_phase =
-                std::fmod(
-                    runtime.locomotion_distance /
-                        kCrewStrideDistance,
-                    1.0F);
         }
 
         const auto visual_target =
@@ -1866,21 +1876,49 @@ auto ShipCrewSystem::render_instances() const noexcept -> std::span<const CrewRe
 
 void ShipCrewSystem::rebuild_render_instances(const ShipEntity& ship, const EnvironmentState& environment) noexcept {
     const auto& blueprint = amelie_ship_blueprint();
-    const auto world_origin = ship.world_origin();
     for (std::size_t index = 0; index < state_.members.size(); ++index) {
         const auto& member = state_.members[index];
         const auto& runtime = runtime_[index];
         const auto moving = member_is_moving(member);
+        // Je conserve visuellement la locomotion pendant la deceleration : le
+        // sampler peut ainsi ramener les deux semelles au pont avant d'afficher
+        // l'animation de tache au poste suivant.
+        const auto visually_moving =
+            moving || runtime.motion_amount > 0.02F;
         const auto visual_offset = runtime.visual_offset;
         const auto exterior = station_is_exterior(blueprint, member.current_station) && member.local_position.y >= 3.70F;
         auto& render = render_instances_[index];
-        render.position = world_origin + member.local_position + visual_offset;
+        render.position =
+            ship.local_to_world_point(
+                member.local_position +
+                visual_offset);
         render.yaw_radians = member.yaw_radians;
+        render.platform_orientation =
+            ship.orientation();
         render.animation_time = member.animation_time;
         render.appearance_seed = hash_u32(appearance_seed_ ^ (0x9E3779B9U * static_cast<std::uint32_t>(index + 1U)));
         render.role = visual_role(member.role);
-        render.activity = visual_activity(member, runtime.activity_phase, runtime.recover_timer, moving);
+        render.activity = visual_activity(
+            member,
+            runtime.activity_phase,
+            runtime.recover_timer,
+            visually_moving);
         render.motion_amount = runtime.motion_amount;
+        // Je derive la phase visuelle de la distance effectivement parcourue.
+        // Le modulo positif garantit une valeur finie dans [0, 1), meme si un
+        // etat runtime invalide est rencontre avant sa reconstruction.
+        const auto locomotion_distance =
+            finite_or(runtime.locomotion_distance, 0.0F);
+        const auto wrapped_locomotion_distance =
+            std::fmod(
+                std::fmod(
+                    locomotion_distance,
+                    kCrewLocomotionCycleDistance) +
+                    kCrewLocomotionCycleDistance,
+                kCrewLocomotionCycleDistance);
+        render.locomotion_phase =
+            wrapped_locomotion_distance /
+            kCrewLocomotionCycleDistance;
         render.activity_phase = runtime.activity_phase;
         render.hurt_amount = std::clamp(member.hurt_timer / kCrewHurtSeconds, 0.0F, 1.0F);
         render.knockout_amount = member.recovery_timer > 0.0F || member.health <= 0.0F ? 1.0F : 0.0F;

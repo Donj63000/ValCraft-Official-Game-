@@ -224,6 +224,8 @@ private:
         float current_speed = 0.0F;
         float locomotion_distance = 0.0F;
         float motion_amount = 0.0F;
+        // Je reserve cette phase aux animations de tache et de recuperation ;
+        // la locomotion est derivee separement de la distance parcourue.
         float activity_phase = 0.0F;
         float recover_timer = 0.0F;
         float blocked_timer = 0.0F;

@@ -298,16 +298,22 @@ TEST_CASE("renderer quality profiles bound expensive passes predictably") {
     CHECK(high.cloud_detail == doctest::Approx(1.0F));
     CHECK(high.glow_downsample == 2);
     CHECK(high.high_precision_hdr);
+    CHECK(high.ocean_wave_count == 6);
+    CHECK(high.ocean_detail_scale == doctest::Approx(1.0F));
 
     CHECK(medium.cloud_steps == 4);
     CHECK(medium.cloud_detail < high.cloud_detail);
     CHECK(medium.glow_downsample == 3);
     CHECK_FALSE(medium.high_precision_hdr);
+    CHECK(medium.ocean_wave_count == 4);
+    CHECK(medium.ocean_detail_scale == doctest::Approx(0.70F));
 
     CHECK(low.cloud_steps == 2);
     CHECK(low.cloud_detail == doctest::Approx(0.0F));
     CHECK(low.post_detail_scale == doctest::Approx(0.0F));
     CHECK(low.glow_downsample == 4);
+    CHECK(low.ocean_wave_count == 3);
+    CHECK(low.ocean_detail_scale == doctest::Approx(0.0F));
 
     CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 1920, 1080).resolved_quality == RendererQuality::High);
     CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 2560, 1440).resolved_quality == RendererQuality::Medium);

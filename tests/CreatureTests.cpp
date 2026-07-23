@@ -5,7 +5,11 @@
 #include "TestUtils.h"
 
 #include <doctest/doctest.h>
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec4.hpp>
 
@@ -1779,6 +1783,343 @@ TEST_CASE("every maritime crew activity remains finite animated and inside its p
     }
 }
 
+TEST_CASE("la marche maritime leve les bottes articulees sans traverser le pont") {
+    constexpr std::array<CrewVisualRole, kCrewVisualRenderCapacity> kRoles {{
+        CrewVisualRole::Captain,
+        CrewVisualRole::Fisher,
+        CrewVisualRole::Rigger,
+        CrewVisualRole::WaterTender,
+        CrewVisualRole::Deckhand,
+        CrewVisualRole::Quartermaster,
+    }};
+    struct GaitCase {
+        CrewVisualActivity activity;
+        float minimum_clearance;
+    };
+    constexpr std::array<GaitCase, 2> kGaits {{
+        {CrewVisualActivity::Walk, 0.10F},
+        {CrewVisualActivity::Carry, 0.08F},
+    }};
+
+    for (std::size_t role_index = 0; role_index < kRoles.size(); ++role_index) {
+        for (const auto& gait : kGaits) {
+            std::array<float, 2> maximum_sole_height {{0.0F, 0.0F}};
+            for (std::size_t sample_index = 0; sample_index < 32U; ++sample_index) {
+                CrewRenderInstance crew {};
+                crew.role = kRoles[role_index];
+                crew.activity = gait.activity;
+                crew.motion_amount = 1.0F;
+                crew.locomotion_phase =
+                    static_cast<float>(sample_index) / 32.0F;
+                crew.activity_phase = 0.37F;
+                crew.appearance_seed =
+                    0xA11CEU + static_cast<std::uint32_t>(role_index) * 97U;
+
+                const auto parts = build_crew_parts(crew);
+                CAPTURE(role_index);
+                CAPTURE(static_cast<int>(gait.activity));
+                CAPTURE(sample_index);
+                REQUIRE_FALSE(parts.empty());
+                CHECK(parts.size() <= kCrewVisualPartBudget);
+                CHECK(all_part_transforms_are_finite(parts));
+
+                std::array<float, 2> sole_height {{
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max(),
+                }};
+                std::array<std::size_t, 2> boot_part_count {{0U, 0U}};
+                for (const auto& part : parts) {
+                    if (!part_uses_tile(part, CreatureAtlasTile::CrewLeather)) {
+                        continue;
+                    }
+                    const auto bounds = part_bounds(part);
+                    if (bounds.max.y >= 0.35F) {
+                        continue;
+                    }
+
+                    const auto center_z = (bounds.min.z + bounds.max.z) * 0.5F;
+                    const auto leg_index = center_z < 0.0F ? 0U : 1U;
+                    ++boot_part_count[leg_index];
+                    sole_height[leg_index] =
+                        std::min(sole_height[leg_index], bounds.min.y);
+
+                    CHECK(bounds.min.y >= -0.01F);
+                    // Je preserve le demi-volume longitudinal de selection
+                    // historique de 0,34 m, mise a l'echelle comprise.
+                    CHECK(bounds.min.x >= -0.34F);
+                    CHECK(bounds.max.x <= 0.34F);
+                }
+
+                REQUIRE(boot_part_count[0] == 2U);
+                REQUIRE(boot_part_count[1] == 2U);
+                CHECK((sole_height[0] <= 0.025F ||
+                       sole_height[1] <= 0.025F));
+                for (std::size_t leg_index = 0; leg_index < 2U; ++leg_index) {
+                    maximum_sole_height[leg_index] =
+                        std::max(maximum_sole_height[leg_index], sole_height[leg_index]);
+                }
+            }
+
+            CHECK(maximum_sole_height[0] >= gait.minimum_clearance);
+            CHECK(maximum_sole_height[1] >= gait.minimum_clearance);
+        }
+    }
+}
+
+TEST_CASE("les bottes restent posees dans le repere d'un navire incline") {
+    const auto platform_orientation = glm::normalize(
+        glm::angleAxis(0.11F, glm::vec3 {1.0F, 0.0F, 0.0F}) *
+        glm::angleAxis(-0.085F, glm::vec3 {0.0F, 0.0F, 1.0F}));
+    const glm::vec3 platform_origin {12.0F, 7.0F, -18.0F};
+    const auto world_to_platform = glm::inverse(
+        glm::translate(glm::mat4 {1.0F}, platform_origin) *
+        glm::mat4_cast(platform_orientation));
+    static constexpr std::array<glm::vec3, 8> kCorners {{
+        {-0.5F, -0.5F, -0.5F},
+        {-0.5F, -0.5F, 0.5F},
+        {-0.5F, 0.5F, -0.5F},
+        {-0.5F, 0.5F, 0.5F},
+        {0.5F, -0.5F, -0.5F},
+        {0.5F, -0.5F, 0.5F},
+        {0.5F, 0.5F, -0.5F},
+        {0.5F, 0.5F, 0.5F},
+    }};
+
+    for (const auto activity : {
+             CrewVisualActivity::Walk,
+             CrewVisualActivity::Carry,
+         }) {
+        for (std::size_t sample_index = 0; sample_index < 32U; ++sample_index) {
+            CrewRenderInstance crew {};
+            crew.position = platform_origin;
+            crew.platform_orientation = platform_orientation;
+            crew.yaw_radians = 0.63F;
+            crew.activity = activity;
+            crew.motion_amount = 1.0F;
+            crew.locomotion_phase =
+                static_cast<float>(sample_index) / 32.0F;
+            crew.role = CrewVisualRole::Rigger;
+            crew.appearance_seed = 0xC0FFEEU;
+            const auto parts = build_crew_parts(crew);
+
+            auto boot_part_count = 0U;
+            auto lowest_sole = std::numeric_limits<float>::max();
+            for (const auto& part : parts) {
+                if (!part_uses_tile(part, CreatureAtlasTile::CrewLeather)) {
+                    continue;
+                }
+                auto minimum = glm::vec3 {std::numeric_limits<float>::max()};
+                auto maximum = glm::vec3 {std::numeric_limits<float>::lowest()};
+                for (const auto& corner : kCorners) {
+                    const auto local =
+                        world_to_platform *
+                        part.transform *
+                        glm::vec4 {corner, 1.0F};
+                    minimum = glm::min(minimum, glm::vec3 {local});
+                    maximum = glm::max(maximum, glm::vec3 {local});
+                }
+                if (maximum.y >= 0.35F) {
+                    continue;
+                }
+                ++boot_part_count;
+                lowest_sole = std::min(lowest_sole, minimum.y);
+                CHECK(minimum.y >= -0.01F);
+            }
+
+            CAPTURE(static_cast<int>(activity));
+            CAPTURE(sample_index);
+            REQUIRE(boot_part_count == 4U);
+            CHECK(lowest_sole <= 0.025F);
+            CHECK(all_part_transforms_are_finite(parts));
+        }
+    }
+}
+
+TEST_CASE("les segments de jambe rendus gardent leur longueur et leur genou jointif") {
+    constexpr std::array<CrewVisualActivity, 7> kActivities {{
+        CrewVisualActivity::Walk,
+        CrewVisualActivity::Carry,
+        CrewVisualActivity::TendWater,
+        CrewVisualActivity::HaulRope,
+        CrewVisualActivity::Scrub,
+        CrewVisualActivity::TurnCapstan,
+        CrewVisualActivity::SortCargo,
+    }};
+
+    for (const auto activity : kActivities) {
+        CrewRenderInstance crew {};
+        crew.role = CrewVisualRole::Quartermaster;
+        crew.activity = activity;
+        crew.motion_amount = 1.0F;
+        crew.locomotion_phase = 0.37F;
+        crew.activity_phase = 0.42F;
+        crew.appearance_seed = 0x1C0DEU;
+        const auto parts = build_crew_parts(crew);
+
+        std::array<std::vector<const CreaturePartInstance*>, 2> leg_segments {};
+        for (const auto& part : parts) {
+            if (!part_uses_tile(part, CreatureAtlasTile::CrewNavyCloth)) {
+                continue;
+            }
+            const auto axis_length = glm::length(glm::vec3 {part.transform[1]});
+            if (axis_length <= 0.30F) {
+                continue;
+            }
+            const auto center = glm::vec3 {part.transform[3]};
+            leg_segments[center.z < 0.0F ? 0U : 1U].push_back(&part);
+        }
+
+        CAPTURE(static_cast<int>(activity));
+        for (auto& segments : leg_segments) {
+            REQUIRE(segments.size() == 2U);
+            std::sort(
+                segments.begin(),
+                segments.end(),
+                [](const auto* lhs, const auto* rhs) {
+                    return lhs->transform[3].y > rhs->transform[3].y;
+                });
+
+            const auto& thigh = *segments[0];
+            const auto& shin = *segments[1];
+            const auto thigh_scale =
+                glm::length(glm::vec3 {thigh.transform[0]}) / 0.124F;
+            const auto shin_scale =
+                glm::length(glm::vec3 {shin.transform[0]}) / 0.112F;
+            const auto thigh_visual_length =
+                glm::length(glm::vec3 {thigh.transform[1]});
+            const auto shin_visual_length =
+                glm::length(glm::vec3 {shin.transform[1]});
+            const auto thigh_length =
+                thigh_visual_length / thigh_scale - 0.018F;
+            const auto shin_length =
+                shin_visual_length / shin_scale - 0.018F;
+            CHECK(std::abs(thigh_length - 0.37F) <= 0.0037F);
+            CHECK(std::abs(shin_length - 0.36F) <= 0.0036F);
+            CHECK(std::abs(thigh_scale - shin_scale) <= 1.0e-4F);
+
+            const auto thigh_axis =
+                glm::normalize(glm::vec3 {thigh.transform[1]});
+            const auto shin_axis =
+                glm::normalize(glm::vec3 {shin.transform[1]});
+            const auto thigh_center = glm::vec3 {thigh.transform[3]};
+            const auto shin_center = glm::vec3 {shin.transform[3]};
+            const auto rendered_knee_from_thigh =
+                thigh_center +
+                thigh_axis * (thigh_length * thigh_scale * 0.5F);
+            const auto rendered_knee_from_shin =
+                shin_center -
+                shin_axis * (shin_length * shin_scale * 0.5F);
+            CHECK(glm::length(
+                      rendered_knee_from_thigh -
+                      rendered_knee_from_shin) <= 0.025F);
+        }
+    }
+}
+
+TEST_CASE("l'inclinaison du haut du corps ne deplace jamais les pieds") {
+    CrewRenderInstance walk {};
+    walk.role = CrewVisualRole::Quartermaster;
+    walk.activity = CrewVisualActivity::Walk;
+    walk.motion_amount = 0.0F;
+    walk.locomotion_phase = 0.37F;
+    walk.appearance_seed = 0xC011ABU;
+    auto carry = walk;
+    carry.activity = CrewVisualActivity::Carry;
+
+    const auto collect_boots = [](const auto& parts) {
+        std::vector<const CreaturePartInstance*> boots {};
+        for (const auto& part : parts) {
+            if (!part_uses_tile(part, CreatureAtlasTile::CrewLeather)) {
+                continue;
+            }
+            const auto bounds = part_bounds(part);
+            if (bounds.max.y < 0.35F) {
+                boots.push_back(&part);
+            }
+        }
+        std::sort(
+            boots.begin(),
+            boots.end(),
+            [](const auto* lhs, const auto* rhs) {
+                const auto lhs_center = glm::vec3 {lhs->transform[3]};
+                const auto rhs_center = glm::vec3 {rhs->transform[3]};
+                if (lhs_center.z != rhs_center.z) {
+                    return lhs_center.z < rhs_center.z;
+                }
+                return lhs_center.x < rhs_center.x;
+            });
+        return boots;
+    };
+
+    const auto walk_parts = build_crew_parts(walk);
+    const auto carry_parts = build_crew_parts(carry);
+    const auto walk_boots = collect_boots(walk_parts);
+    const auto carry_boots = collect_boots(carry_parts);
+    REQUIRE(walk_boots.size() == 4U);
+    REQUIRE(carry_boots.size() == 4U);
+    for (std::size_t boot_index = 0; boot_index < walk_boots.size(); ++boot_index) {
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                CHECK(std::abs(
+                          (*walk_boots[boot_index]).transform[column][row] -
+                          (*carry_boots[boot_index]).transform[column][row]) <=
+                      1.0e-6F);
+            }
+        }
+    }
+}
+
+TEST_CASE("les deux mains restent verrouillees sur la caisse en transport") {
+    const auto expected_hand_distance =
+        std::sqrt(0.095F * 0.095F +
+                  0.040F * 0.040F +
+                  0.185F * 0.185F);
+    for (const auto phase : {0.0F, 0.25F, 0.50F, 0.75F}) {
+        CrewRenderInstance crew {};
+        crew.role = CrewVisualRole::Fisher;
+        crew.activity = CrewVisualActivity::Carry;
+        crew.motion_amount = 1.0F;
+        crew.locomotion_phase = phase;
+        crew.appearance_seed = 0xCA55EU;
+        const auto parts = build_crew_parts(crew);
+
+        const CreaturePartInstance* crate = nullptr;
+        std::vector<const CreaturePartInstance*> hands {};
+        for (const auto& part : parts) {
+            const auto x_length = glm::length(glm::vec3 {part.transform[0]});
+            const auto y_length = glm::length(glm::vec3 {part.transform[1]});
+            const auto z_length = glm::length(glm::vec3 {part.transform[2]});
+            const auto center = glm::vec3 {part.transform[3]};
+            if (part_uses_tile(part, CreatureAtlasTile::CrewWood) &&
+                x_length > 0.30F &&
+                y_length > 0.24F &&
+                z_length > 0.42F) {
+                crate = &part;
+            }
+            if (center.y > 0.75F && center.y < 1.25F &&
+                x_length > 0.09F && x_length < 0.102F &&
+                y_length > 0.095F && y_length < 0.108F &&
+                z_length > 0.09F && z_length < 0.102F) {
+                hands.push_back(&part);
+            }
+        }
+
+        CAPTURE(phase);
+        REQUIRE(crate != nullptr);
+        REQUIRE(hands.size() == 2U);
+        const auto scale =
+            glm::length(glm::vec3 {crate->transform[0]}) / 0.35F;
+        const auto crate_center = glm::vec3 {crate->transform[3]};
+        for (const auto* hand : hands) {
+            const auto distance =
+                glm::length(glm::vec3 {hand->transform[3]} - crate_center);
+            CHECK(std::abs(
+                      distance -
+                      expected_hand_distance * scale) <= 1.0e-4F);
+        }
+    }
+}
+
 TEST_CASE("crew fishing reveal knockout and malformed render inputs fail safely") {
     CrewRenderInstance fisher {};
     fisher.role = CrewVisualRole::Fisher;
@@ -1809,9 +2150,16 @@ TEST_CASE("crew fishing reveal knockout and malformed render inputs fail safely"
     malformed.yaw_radians = std::numeric_limits<float>::quiet_NaN();
     malformed.animation_time = std::numeric_limits<float>::infinity();
     malformed.motion_amount = std::numeric_limits<float>::quiet_NaN();
+    malformed.locomotion_phase = std::numeric_limits<float>::infinity();
     malformed.activity_phase = std::numeric_limits<float>::infinity();
     malformed.sky_light = std::numeric_limits<float>::quiet_NaN();
     malformed.local_light = std::numeric_limits<float>::infinity();
+    malformed.platform_orientation = {
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity(),
+        0.0F,
+        0.0F,
+    };
     malformed.role = static_cast<CrewVisualRole>(255U);
     malformed.activity = static_cast<CrewVisualActivity>(255U);
     const auto safe_parts = build_crew_parts(malformed);

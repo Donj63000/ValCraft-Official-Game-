@@ -8,6 +8,7 @@
 #include "creatures/CreatureGeometry.h"
 #include "render/HotbarLayout.h"
 #include "world/BlockVisuals.h"
+#include "world/OceanSimulation.h"
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
@@ -2593,7 +2594,37 @@ void Renderer::render_frame(World& world,
             destroy_glow_targets();
         }
     }
-    const auto quality_settings = active_quality_settings_;
+    const auto quality_settings =
+        active_quality_settings_;
+
+    const auto ocean =
+        OceanSimulation::evaluate(environment);
+
+    std::array<glm::vec4, kOceanMaxWaveCount>
+        ocean_wave_uniforms {};
+
+    std::array<glm::vec2, kOceanMaxWaveCount>
+        ocean_phase_uniforms {};
+
+    for (std::size_t index = 0;
+         index < ocean.waves.size();
+         ++index) {
+
+        const auto& wave = ocean.waves[index];
+
+        ocean_wave_uniforms[index] = {
+            wave.direction.x,
+            wave.direction.y,
+            wave.wave_number,
+            wave.amplitude,
+        };
+
+        ocean_phase_uniforms[index] = {
+            wave.phase,
+            wave.steepness,
+        };
+    }
+
     const auto adaptive_state = adaptive_quality_controller_.state();
     frame_stats.resolved_quality = quality_settings.resolved_quality;
     frame_stats.adaptive_frame_ema_ms = adaptive_state.frame_time_ema_ms;
@@ -2682,8 +2713,28 @@ void Renderer::render_frame(World& world,
             continue;
         }
 
+        auto draw_bounds = gpu_mesh.bounds;
+
+        if (gpu_mesh.water_index_count > 0) {
+            // La géométrie CPU décrit la surface au repos. Cette marge évite que les
+            // crêtes disparaissent prématurément au bord du frustum.
+            const auto water_margin =
+                std::max(
+                    ocean.maximum_displacement,
+                    0.0F) +
+                0.02F;
+
+            draw_bounds.min_corner.y -= water_margin;
+            draw_bounds.max_corner.y += water_margin;
+
+            draw_bounds.center =
+                (draw_bounds.min_corner +
+                 draw_bounds.max_corner) *
+                0.5F;
+        }
+
         const auto visibility = classify_chunk_visibility(
-            gpu_mesh.bounds,
+            draw_bounds,
             frustum_planes,
             eye,
             forward,
@@ -2709,9 +2760,11 @@ void Renderer::render_frame(World& world,
         // Je transforme les limites exactes du plan en espace monde pour ne
         // conserver le navire que dans les passes camera et ombre utiles.
         const ChunkBounds ship_world_bounds {
-            ship.local_bounds.min + ship.world_origin,
-            ship.local_bounds.max + ship.world_origin,
-            (ship.local_bounds.min + ship.local_bounds.max) * 0.5F + ship.world_origin,
+            ship.world_bounds.min,
+            ship.world_bounds.max,
+            (ship.world_bounds.min +
+             ship.world_bounds.max) *
+                0.5F,
         };
         ship_visibility = classify_large_bounds_visibility(
             ship_world_bounds,
@@ -2754,8 +2807,12 @@ void Renderer::render_frame(World& world,
             ++frame_stats.shadow_chunks;
         }
         if (ship_visibility.shadow) {
-            const auto ship_model = glm::translate(identity_model, ship.world_origin);
-            glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(ship_model));
+            glUniformMatrix4fv(
+                shadow_uniforms_.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(
+                    ship.model_matrix));
             glBindVertexArray(ship_gpu_mesh_.vao);
             glDrawElements(GL_TRIANGLES, ship_gpu_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
             record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
@@ -2803,6 +2860,45 @@ void Renderer::render_frame(World& world,
     begin_gpu_pass(GpuTimedPass::Opaque);
 
     glUseProgram(world_program_);
+    glUniform4fv(
+        world_uniforms_.ocean_waves,
+        static_cast<GLsizei>(
+            ocean_wave_uniforms.size()),
+        glm::value_ptr(
+            ocean_wave_uniforms.front()));
+
+    glUniform2fv(
+        world_uniforms_.ocean_wave_phases,
+        static_cast<GLsizei>(
+            ocean_phase_uniforms.size()),
+        glm::value_ptr(
+            ocean_phase_uniforms.front()));
+
+    glUniform1i(
+        world_uniforms_.ocean_wave_count,
+        std::clamp(
+            quality_settings.ocean_wave_count,
+            1,
+            static_cast<int>(
+                kOceanMaxWaveCount)));
+
+    glUniform1f(
+        world_uniforms_.ocean_foam_threshold,
+        ocean.foam_threshold);
+
+    glUniform1f(
+        world_uniforms_.ocean_detail_strength,
+        ocean.detail_strength *
+            quality_settings.ocean_detail_scale);
+
+    glUniform1f(
+        world_uniforms_.ocean_detail_phase,
+        ocean.detail_phase);
+
+    glUniform1f(
+        world_uniforms_.ocean_severity,
+        ocean.severity);
+
     glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
@@ -2861,8 +2957,12 @@ void Renderer::render_frame(World& world,
         ++frame_stats.world_chunks;
     }
     if (ship_visibility.camera) {
-        const auto ship_model = glm::translate(identity_model, ship.world_origin);
-        glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(ship_model));
+        glUniformMatrix4fv(
+            world_uniforms_.model,
+            1,
+            GL_FALSE,
+            glm::value_ptr(
+                ship.model_matrix));
         glBindVertexArray(ship_gpu_mesh_.vao);
         glDrawElements(GL_TRIANGLES, ship_gpu_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
         record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
@@ -4172,6 +4272,10 @@ auto Renderer::link_program(GLuint vertex_shader, GLuint fragment_shader) -> GLu
 }
 
 void Renderer::create_programs() {
+    static_assert(
+        kOceanMaxWaveCount == 6U,
+        "Mettre a jour la taille des tableaux d'ondes dans le shader GLSL.");
+
     static constexpr auto* world_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
@@ -4189,6 +4293,9 @@ uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
 uniform float u_time_of_day;
 uniform float u_wind_strength;
+uniform vec4 u_ocean_waves[6];
+uniform vec2 u_ocean_wave_phases[6];
+uniform int u_ocean_wave_count;
 
 out vec2 v_uv;
 out vec3 v_normal;
@@ -4201,16 +4308,81 @@ out float v_wave_weight;
 out float v_distance;
 out vec3 v_world_position;
 out vec4 v_light_position;
+out vec3 v_ocean_normal;
+out float v_ocean_crest;
 
 float material_mask(float material, float expected) {
     return 1.0 - step(0.25, abs(material - expected));
 }
 
-float water_wave_height(vec2 world_xz, float time_phase) {
-    float wave_a = sin(world_xz.x * 0.42 + world_xz.y * 0.18 + time_phase * 1.20);
-    float wave_b = cos(world_xz.y * 0.37 - world_xz.x * 0.23 + time_phase * 1.55);
-    float wave_c = sin((world_xz.x + world_xz.y) * 0.29 + time_phase * 0.95);
-    return wave_a * 0.020 + wave_b * 0.012 + wave_c * 0.008;
+void sample_ocean(
+    vec2 world_xz,
+    out float height,
+    out vec2 gradient,
+    out float crest
+) {
+    height = 0.0;
+    gradient = vec2(0.0);
+    crest = 0.0;
+
+    float amplitude_sum = 0.0;
+
+    // La boucle possède une limite compile-time compatible OpenGL 3.3.
+    // u_ocean_wave_count sélectionne le niveau de qualité.
+    for (int index = 0; index < 6; ++index) {
+        if (index >= u_ocean_wave_count) {
+            break;
+        }
+
+        vec4 geometry = u_ocean_waves[index];
+        vec2 phase_data = u_ocean_wave_phases[index];
+
+        vec2 direction = geometry.xy;
+        float wave_number = geometry.z;
+        float amplitude = geometry.w;
+
+        float theta =
+            dot(direction, world_xz) *
+                wave_number +
+            phase_data.x;
+
+        float harmonic =
+            0.14 *
+            clamp(phase_data.y, 0.0, 1.0);
+
+        float sine = sin(theta);
+        float cosine = cos(theta);
+        float double_sine = sin(theta * 2.0);
+        float double_cosine = cos(theta * 2.0);
+
+        height +=
+            amplitude *
+            (sine +
+             harmonic * double_sine);
+
+        float derivative =
+            amplitude *
+            wave_number *
+            (cosine +
+             2.0 * harmonic * double_cosine);
+
+        gradient +=
+            direction * derivative;
+
+        crest +=
+            amplitude *
+            (0.5 + 0.5 * sine);
+
+        amplitude_sum += amplitude;
+    }
+
+    crest =
+        amplitude_sum > 0.000001
+            ? clamp(
+                  crest / amplitude_sum,
+                  0.0,
+                  1.0)
+            : 0.0;
 }
 
 vec2 vegetation_wind_offset(vec3 world_position, float material_class, float time_phase) {
@@ -4234,16 +4406,44 @@ void main() {
     vec4 world_position = u_model * vec4(a_position, 1.0);
     world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
 
-    float water_mask = material_mask(a_material_class, 6.0);
-    float wave_weight = clamp(a_wave_weight, 0.0, 1.0) * water_mask;
+    float water_mask =
+        material_mask(a_material_class, 6.0);
+
+    float wave_weight =
+        clamp(a_wave_weight, 0.0, 1.0) *
+        water_mask;
+
+    vec2 ocean_gradient = vec2(0.0);
+    float ocean_crest = 0.0;
+
     if (wave_weight > 0.0) {
-        float wave_time = u_time_of_day * 36.0;
-        world_position.y += water_wave_height(world_position.xz, wave_time) * wave_weight;
+        float ocean_height = 0.0;
+
+        sample_ocean(
+            world_position.xz,
+            ocean_height,
+            ocean_gradient,
+            ocean_crest);
+
+        // Déplacement vertical uniquement : les limites entre chunks restent
+        // parfaitement raccordées et les côtes voxelisées sont conservées.
+        world_position.y +=
+            ocean_height * wave_weight;
     }
+
+    v_normal =
+        normalize(mat3(u_model) * a_normal);
+
+    v_ocean_normal = normalize(
+        vec3(
+            -ocean_gradient.x,
+            1.0,
+            -ocean_gradient.y));
+
+    v_ocean_crest = ocean_crest;
 
     gl_Position = u_view_projection * world_position;
     v_uv = a_uv;
-    v_normal = a_normal;
     v_face_shade = a_face_shade;
     v_ao = a_ao;
     v_sky_light = a_sky_light;
@@ -4287,6 +4487,8 @@ out float v_wave_weight;
 out float v_distance;
 out vec3 v_world_position;
 out vec4 v_light_position;
+out vec3 v_ocean_normal;
+out float v_ocean_crest;
 
 vec4 atlas_uv_rect(vec2 tile) {
     float uv_step = 1.0 / 8.0;
@@ -4356,10 +4558,12 @@ void main() {
     v_distance = distance(world_position3, u_camera_position);
     v_world_position = world_position3;
     v_light_position = u_light_view_projection * world_position;
+    v_ocean_normal = world_normal;
+    v_ocean_crest = 0.0;
 }
 )";
 
-    static constexpr auto* world_fragment_shader = R"(#version 330 core
+static constexpr auto* world_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
 in vec3 v_normal;
 in float v_face_shade;
@@ -4371,6 +4575,13 @@ in float v_wave_weight;
 in float v_distance;
 in vec3 v_world_position;
 in vec4 v_light_position;
+in vec3 v_ocean_normal;
+in float v_ocean_crest;
+
+uniform float u_ocean_foam_threshold;
+uniform float u_ocean_detail_strength;
+uniform float u_ocean_detail_phase;
+uniform float u_ocean_severity;
 
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadow_map;
@@ -4467,33 +4678,38 @@ float sample_cloud_shadow(vec3 world_position, vec3 sun_direction) {
     return 1.0 - cloud * coverage * u_cloud_shadow_strength;
 }
 
-vec2 water_wave_gradient(vec2 world_xz, float time_phase) {
-    float phase_a = world_xz.x * 0.42 + world_xz.y * 0.18 + time_phase * 1.20;
-    float phase_b = world_xz.y * 0.37 - world_xz.x * 0.23 + time_phase * 1.55;
-    float phase_c = (world_xz.x + world_xz.y) * 0.29 + time_phase * 0.95;
+vec2 water_detail_gradient(
+    vec2 world_xz,
+    float time_phase
+) {
+    // Multiplicateurs entiers afin que le bouclage de phase à 2*pi soit
+    // parfaitement continu après une longue session.
+    float phase_d =
+        world_xz.x * 1.08 -
+        world_xz.y * 0.74 +
+        time_phase * 2.0;
+
+    float phase_e =
+        world_xz.x * 0.72 +
+        world_xz.y * 1.16 -
+        time_phase * 3.0;
+
+    float strength =
+        max(u_ocean_detail_strength, 0.0);
 
     float d_height_dx =
-        cos(phase_a) * 0.020 * 0.42 +
-        sin(phase_b) * 0.012 * 0.23 +
-        cos(phase_c) * 0.008 * 0.29;
-    float d_height_dz =
-        cos(phase_a) * 0.020 * 0.18 -
-        sin(phase_b) * 0.012 * 0.37 +
-        cos(phase_c) * 0.008 * 0.29;
-    return vec2(d_height_dx, d_height_dz);
-}
+        (cos(phase_d) * 1.08 +
+         cos(phase_e) * 0.72 * 0.68) *
+        strength;
 
-vec2 water_detail_gradient(vec2 world_xz, float time_phase) {
-    float phase_d = world_xz.x * 1.08 - world_xz.y * 0.74 + time_phase * 2.05;
-    float phase_e = world_xz.x * 0.72 + world_xz.y * 1.16 - time_phase * 1.64;
-
-    float d_height_dx =
-        cos(phase_d) * 0.0035 * 1.08 +
-        cos(phase_e) * 0.0022 * 0.72;
     float d_height_dz =
-        -cos(phase_d) * 0.0035 * 0.74 +
-        cos(phase_e) * 0.0022 * 1.16;
-    return vec2(d_height_dx, d_height_dz);
+        (-cos(phase_d) * 0.74 +
+         cos(phase_e) * 1.16 * 0.68) *
+        strength;
+
+    return vec2(
+        d_height_dx,
+        d_height_dz);
 }
 
 vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
@@ -4548,12 +4764,29 @@ void main() {
 
     vec3 albedo = sampled.rgb;
     vec3 normal = normalize(v_normal);
+
     if (water_surface_mask > 0.001) {
-        vec2 wave_gradient = water_wave_gradient(v_world_position.xz, u_time_of_day * 36.0);
-        wave_gradient += water_detail_gradient(v_world_position.xz, u_time_of_day * 52.0) * 0.65;
-        wave_gradient *= water_surface_mask;
-        vec3 wave_normal = normalize(vec3(-wave_gradient.x, 1.0, -wave_gradient.y));
-        normal = normalize(mix(normal, wave_normal, water_surface_mask));
+        vec2 detail_gradient = vec2(0.0);
+
+        if (u_ocean_detail_strength > 0.000001) {
+            // La condition dépend d'un uniform. En qualité basse, le pilote peut
+            // éliminer entièrement ces évaluations trigonométriques.
+            detail_gradient = water_detail_gradient(
+                v_world_position.xz,
+                u_ocean_detail_phase);
+        }
+
+        vec3 ocean_normal = normalize(
+            vec3(
+                v_ocean_normal.x - detail_gradient.x,
+                max(v_ocean_normal.y, 0.08),
+                v_ocean_normal.z - detail_gradient.y));
+
+        normal = normalize(
+            mix(
+                normal,
+                ocean_normal,
+                water_surface_mask));
     }
     if (!gl_FrontFacing && water_mask > 0.5) {
         normal = -normal;
@@ -4702,15 +4935,59 @@ void main() {
         reflection += u_sun_color * sparkle * shadow * cloud_shadow * (0.12 + 0.18 * daylight);
 
         float shallow_foam = (1.0 - smoothstep(0.08, 0.70, body_depth)) * (0.40 + 0.60 * water_surface_mask);
-        float crest_noise = value_noise2(v_world_position.xz * 0.54 + vec2(u_time_of_day * 0.34, -u_time_of_day * 0.27));
-        float crest_wave =
-            0.5 + 0.5 * sin(v_world_position.x * 0.76 - v_world_position.z * 0.62 + u_time_of_day * 17.0);
+
+        float crest_noise = 0.5;
+
+        if (u_ocean_detail_strength > 0.000001) {
+            crest_noise = value_noise2(
+                v_world_position.xz * 0.54 +
+                vec2(
+                    cos(u_ocean_detail_phase),
+                    sin(u_ocean_detail_phase * 2.0)) *
+                0.34);
+        }
+
+        float slope_energy =
+            clamp(
+                (1.0 - normal.y) * 3.4,
+                0.0,
+                1.0);
+
+        float crest_signal =
+            v_ocean_crest * 0.76 +
+            slope_energy * 0.30 +
+            crest_noise * 0.10;
+
         float crest_foam =
-            smoothstep(0.78, 0.96, crest_noise * 0.58 + crest_wave * 0.42) *
+            smoothstep(
+                clamp(
+                    u_ocean_foam_threshold,
+                    0.55,
+                    0.98),
+                1.06,
+                crest_signal) *
             water_surface_mask *
-            (0.18 + 0.82 * fresnel);
-        vec3 foam_color = mix(u_fog_color, vec3(0.86, 0.94, 1.0), 0.65);
-        vec3 foam = foam_color * (shallow_foam * (0.10 + 0.06 * daylight) + crest_foam * (0.035 + 0.045 * daylight));
+            (0.24 + 0.76 * fresnel) *
+            (0.20 +
+             0.80 *
+                 clamp(
+                     u_ocean_severity,
+                     0.0,
+                     1.0));
+
+        vec3 foam_color = mix(
+            u_fog_color,
+            vec3(0.86, 0.94, 1.0),
+            0.65);
+
+        vec3 foam =
+            foam_color *
+            (
+                shallow_foam *
+                    (0.10 + 0.06 * daylight) +
+                crest_foam *
+                    (0.12 + 0.11 * daylight)
+            );
 
         float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.26 + v_world_position.z * 0.30 + u_time_of_day * 21.0);
         lit_color = water_body + reflection + foam;
@@ -5429,6 +5706,60 @@ void main() {
     world_uniforms_.precipitation_intensity = glGetUniformLocation(world_program_, "u_precipitation_intensity");
     world_uniforms_.storm_intensity = glGetUniformLocation(world_program_, "u_storm_intensity");
     world_uniforms_.lightning_intensity = glGetUniformLocation(world_program_, "u_lightning_intensity");
+    world_uniforms_.ocean_waves =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_waves[0]");
+
+    world_uniforms_.ocean_wave_phases =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_wave_phases[0]");
+
+    world_uniforms_.ocean_wave_count =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_wave_count");
+
+    world_uniforms_.ocean_foam_threshold =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_foam_threshold");
+
+    world_uniforms_.ocean_detail_strength =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_detail_strength");
+
+    world_uniforms_.ocean_detail_phase =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_detail_phase");
+
+    world_uniforms_.ocean_severity =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_severity");
+    const std::array<GLint, 7> ocean_uniform_locations {{
+        world_uniforms_.ocean_waves,
+        world_uniforms_.ocean_wave_phases,
+        world_uniforms_.ocean_wave_count,
+        world_uniforms_.ocean_foam_threshold,
+        world_uniforms_.ocean_detail_strength,
+        world_uniforms_.ocean_detail_phase,
+        world_uniforms_.ocean_severity,
+    }};
+    // Je refuse une initialisation partielle : un uniform optimise ou mal
+    // orthographie rendrait l'ocean visuellement incoherent sans erreur OpenGL.
+    if (std::any_of(
+            ocean_uniform_locations.begin(),
+            ocean_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Ocean shader is missing one or more required uniforms");
+    }
     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
     world_uniforms_.scene_color = glGetUniformLocation(world_program_, "u_scene_color");

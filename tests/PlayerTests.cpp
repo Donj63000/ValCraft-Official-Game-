@@ -10,7 +10,9 @@
 #include "TestUtils.h"
 
 #include <doctest/doctest.h>
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
+#include <glm/vec4.hpp>
 
 #include <algorithm>
 #include <array>
@@ -1467,6 +1469,488 @@ TEST_CASE("loaded Amelie occupants are reconciled only when the new layout requi
     CHECK(ship.support_height(offset_legacy_result.position).has_value());
 }
 
+TEST_CASE("ship ocean pose keeps transforms collisions supports and raycasts coherent") {
+    constexpr float kRadiansPerDegree =
+        0.01745329251994329577F;
+
+    ShipEntity ship {};
+    ship.set_position({12.5F, 49.0F, 23.5F});
+    ship.set_ocean_pose(0.0F, 0.0F, 0.0F);
+    ship.synchronize_motion_history();
+
+    const glm::vec3 tracked_local_point {
+        2.35F,
+        4.10F,
+        -8.25F,
+    };
+    const auto previous_world_point =
+        ship.local_to_world_point(
+            tracked_local_point);
+
+    ship.begin_motion_step();
+    ship.set_position({13.25F, 49.0F, 25.0F});
+    ship.set_ocean_pose(
+        0.42F,
+        7.0F * kRadiansPerDegree,
+        -11.0F * kRadiansPerDegree);
+
+    const auto expected_world_point =
+        ship.local_to_world_point(
+            tracked_local_point);
+    // Je verrouille directement le contrat des matrices transmis au rendu :
+    // elles doivent produire les memes points que l'API physique du navire.
+    const auto matrix_world_point =
+        glm::vec3 {
+            ship.model_matrix() *
+            glm::vec4 {tracked_local_point, 1.0F},
+        };
+    const auto previous_matrix_world_point =
+        glm::vec3 {
+            ship.previous_model_matrix() *
+            glm::vec4 {tracked_local_point, 1.0F},
+        };
+    const auto render_matrix_world_point =
+        glm::vec3 {
+            ship.render_state(true).model_matrix *
+            glm::vec4 {tracked_local_point, 1.0F},
+        };
+    CHECK(matrix_world_point.x ==
+          doctest::Approx(expected_world_point.x).epsilon(0.0001F));
+    CHECK(matrix_world_point.y ==
+          doctest::Approx(expected_world_point.y).epsilon(0.0001F));
+    CHECK(matrix_world_point.z ==
+          doctest::Approx(expected_world_point.z).epsilon(0.0001F));
+    CHECK(previous_matrix_world_point.x ==
+          doctest::Approx(previous_world_point.x).epsilon(0.0001F));
+    CHECK(previous_matrix_world_point.y ==
+          doctest::Approx(previous_world_point.y).epsilon(0.0001F));
+    CHECK(previous_matrix_world_point.z ==
+          doctest::Approx(previous_world_point.z).epsilon(0.0001F));
+    CHECK(render_matrix_world_point.x ==
+          doctest::Approx(expected_world_point.x).epsilon(0.0001F));
+    CHECK(render_matrix_world_point.y ==
+          doctest::Approx(expected_world_point.y).epsilon(0.0001F));
+    CHECK(render_matrix_world_point.z ==
+          doctest::Approx(expected_world_point.z).epsilon(0.0001F));
+    const auto carried_world_point =
+        previous_world_point +
+        ship.motion_delta_at(
+            previous_world_point);
+    CHECK(carried_world_point.x ==
+          doctest::Approx(expected_world_point.x).epsilon(0.0001F));
+    CHECK(carried_world_point.y ==
+          doctest::Approx(expected_world_point.y).epsilon(0.0001F));
+    CHECK(carried_world_point.z ==
+          doctest::Approx(expected_world_point.z).epsilon(0.0001F));
+
+    const auto round_trip =
+        ship.world_to_local_point(
+            expected_world_point);
+    CHECK(round_trip.x ==
+          doctest::Approx(tracked_local_point.x).epsilon(0.0001F));
+    CHECK(round_trip.y ==
+          doctest::Approx(tracked_local_point.y).epsilon(0.0001F));
+    CHECK(round_trip.z ==
+          doctest::Approx(tracked_local_point.z).epsilon(0.0001F));
+
+    const glm::vec3 local_direction {
+        0.25F,
+        -0.35F,
+        0.90F,
+    };
+    const auto direction_round_trip =
+        ship.world_to_local_direction(
+            ship.local_to_world_direction(
+                local_direction));
+    CHECK(direction_round_trip.x ==
+          doctest::Approx(local_direction.x).epsilon(0.0001F));
+    CHECK(direction_round_trip.y ==
+          doctest::Approx(local_direction.y).epsilon(0.0001F));
+    CHECK(direction_round_trip.z ==
+          doctest::Approx(local_direction.z).epsilon(0.0001F));
+
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto bounds =
+        ship.world_bounds();
+    const std::array<glm::vec3, 8> local_corners {{
+        {blueprint.bounds.min.x, blueprint.bounds.min.y, blueprint.bounds.min.z},
+        {blueprint.bounds.max.x, blueprint.bounds.min.y, blueprint.bounds.min.z},
+        {blueprint.bounds.min.x, blueprint.bounds.max.y, blueprint.bounds.min.z},
+        {blueprint.bounds.max.x, blueprint.bounds.max.y, blueprint.bounds.min.z},
+        {blueprint.bounds.min.x, blueprint.bounds.min.y, blueprint.bounds.max.z},
+        {blueprint.bounds.max.x, blueprint.bounds.min.y, blueprint.bounds.max.z},
+        {blueprint.bounds.min.x, blueprint.bounds.max.y, blueprint.bounds.max.z},
+        {blueprint.bounds.max.x, blueprint.bounds.max.y, blueprint.bounds.max.z},
+    }};
+    for (const auto& local_corner : local_corners) {
+        const auto world_corner =
+            ship.local_to_world_point(
+                local_corner);
+        CHECK(world_corner.x >= bounds.min.x - 0.0001F);
+        CHECK(world_corner.x <= bounds.max.x + 0.0001F);
+        CHECK(world_corner.y >= bounds.min.y - 0.0001F);
+        CHECK(world_corner.y <= bounds.max.y + 0.0001F);
+        CHECK(world_corner.z >= bounds.min.z - 0.0001F);
+        CHECK(world_corner.z <= bounds.max.z + 0.0001F);
+    }
+
+    const auto collidable_part =
+        std::find_if(
+            blueprint.parts.begin(),
+            blueprint.parts.end(),
+            [](const ShipPart& part) {
+                const auto extent =
+                    glm::abs(
+                        part.local_end -
+                        part.local_start);
+                return part.collidable &&
+                       extent.x >= 0.20F &&
+                       extent.y >= 0.20F &&
+                       extent.z >= 0.20F;
+            });
+    REQUIRE(collidable_part != blueprint.parts.end());
+
+    const auto local_part_center =
+        (collidable_part->local_start +
+         collidable_part->local_end) *
+        0.5F;
+    const auto world_part_center =
+        ship.local_to_world_point(
+            local_part_center);
+    CHECK(ship.intersects_aabb(
+        world_part_center - glm::vec3 {0.02F},
+        world_part_center + glm::vec3 {0.02F}));
+
+    const auto current_support =
+        ship.support_height(
+            expected_world_point);
+    REQUIRE(current_support.has_value());
+
+    const auto previous_support =
+        ship.previous_support_height(
+            previous_world_point);
+    REQUIRE(previous_support.has_value());
+
+    // Le meme rayon est lance une fois sur une pose plate et une fois sur la
+    // pose inclinee. Une transformation rigide doit conserver sa distance.
+    ShipEntity reference_ship {};
+    reference_ship.set_position({0.5F, 49.0F, 0.5F});
+    reference_ship.set_ocean_pose(0.0F, 0.0F, 0.0F);
+    reference_ship.synchronize_motion_history();
+
+    const glm::vec3 local_ray_origin =
+        local_part_center -
+        glm::vec3 {3.0F, 0.0F, 0.0F};
+    const glm::vec3 local_ray_direction {
+        1.0F,
+        0.0F,
+        0.0F,
+    };
+    const auto reference_hit =
+        reference_ship.raycast_collidable_distance(
+            reference_ship.local_to_world_point(
+                local_ray_origin),
+            reference_ship.local_to_world_direction(
+                local_ray_direction),
+            6.0F);
+    const auto transformed_hit =
+        ship.raycast_collidable_distance(
+            ship.local_to_world_point(
+                local_ray_origin),
+            ship.local_to_world_direction(
+                local_ray_direction),
+            6.0F);
+    REQUIRE(reference_hit.has_value());
+    REQUIRE(transformed_hit.has_value());
+    CHECK(*transformed_hit ==
+          doctest::Approx(*reference_hit).epsilon(0.0001F));
+}
+
+TEST_CASE("ship oriented collision rejects broad phase false positives and keeps exact support height") {
+    ShipEntity ship {};
+    ship.set_position({12.5F, 49.0F, 23.5F});
+    ship.set_ocean_pose(0.35F, 0.31F, -0.43F);
+    ship.synchronize_motion_history();
+
+    // Je place cette petite AABB dans l'enveloppe monde du pied de mat, mais
+    // hors de sa boite orientee : le SAT doit rejeter le faux positif large.
+    const auto query_center =
+        ship.local_to_world_point(
+            {-0.370F, 8.090F, 0.066F});
+    const glm::vec3 query_half_extents {0.080F};
+    CHECK_FALSE(ship.intersects_aabb(
+        query_center - query_half_extents,
+        query_center + query_half_extents));
+
+    // Je limite la plage a la hauteur analytique du pont pour isoler la sonde
+    // centrale des quatre sondes laterales de l'empreinte du joueur.
+    const auto deck_point =
+        ship.local_to_world_point(
+            {0.0F, 4.0F, 2.5F});
+    const auto support =
+        ship.support_height_in_range(
+            {deck_point.x, deck_point.y + 0.10F, deck_point.z},
+            deck_point.y,
+            deck_point.y);
+    REQUIRE(support.has_value());
+    CHECK(*support ==
+          doctest::Approx(deck_point.y).epsilon(0.0001F));
+}
+
+TEST_CASE("sea adventure ocean probes and critical springs stay bounded and continuous") {
+    constexpr float kStep = 1.0F / 60.0F;
+    constexpr float kRadiansPerDegree =
+        0.01745329251994329577F;
+
+    World world(5516, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+    EnvironmentState environment {};
+
+    auto previous_heave = 0.0F;
+    auto previous_pitch = 0.0F;
+    auto previous_roll = 0.0F;
+    for (int frame = 0; frame < 240; ++frame) {
+        const auto ratio =
+            static_cast<float>(frame) / 239.0F;
+        environment.weather_time_seconds =
+            static_cast<float>(frame) * kStep;
+        environment.wind_strength = ratio;
+        environment.precipitation_intensity = ratio;
+        environment.storm_intensity = ratio;
+
+        (void)sea_adventure.update(
+            world,
+            player,
+            environment,
+            kStep,
+            false);
+
+        const auto& ship = sea_adventure.ship_entity();
+        const auto forward =
+            ship.local_to_world_direction(
+                {0.0F, 0.0F, 1.0F});
+        const auto right =
+            ship.local_to_world_direction(
+                {1.0F, 0.0F, 0.0F});
+        const auto up =
+            ship.local_to_world_direction(
+                {0.0F, 1.0F, 0.0F});
+        const auto heave =
+            ship.world_origin().y -
+            ship.position().y;
+        const auto pitch =
+            std::atan2(-forward.y, forward.z);
+        const auto roll =
+            std::atan2(-up.x, right.x);
+
+        REQUIRE(std::isfinite(heave));
+        REQUIRE(std::isfinite(pitch));
+        REQUIRE(std::isfinite(roll));
+        CHECK(std::abs(heave) <= 1.385F);
+        CHECK(std::abs(pitch) <=
+              10.5F * kRadiansPerDegree + 0.0001F);
+        CHECK(std::abs(roll) <=
+              16.0F * kRadiansPerDegree + 0.0001F);
+
+        if (frame > 0) {
+            CHECK(std::abs(heave - previous_heave) < 0.04F);
+            CHECK(std::abs(pitch - previous_pitch) < 0.01F);
+            CHECK(std::abs(roll - previous_roll) < 0.01F);
+        }
+        previous_heave = heave;
+        previous_pitch = pitch;
+        previous_roll = roll;
+    }
+}
+
+TEST_CASE("ship save normalization round trips supported occupants from both ends of a tilted deck") {
+    constexpr float kRadiansPerDegree =
+        0.01745329251994329577F;
+
+    ShipEntity tilted_ship {};
+    tilted_ship.set_position({41.5F, 49.0F, 208.5F});
+    tilted_ship.set_ocean_pose(
+        0.63F,
+        9.0F * kRadiansPerDegree,
+        -12.0F * kRadiansPerDegree);
+    tilted_ship.synchronize_motion_history();
+
+    ShipEntity restored_ship {};
+    restored_ship.set_position(tilted_ship.position());
+    restored_ship.set_ocean_pose(0.0F, 0.0F, 0.0F);
+    restored_ship.synchronize_motion_history();
+
+    // Je couvre la dunette et le gaillard avant : le tangage y produit les
+    // plus grands ecarts entre la pose runtime et la pose neutre sauvegardee.
+    constexpr std::array<glm::vec3, 2> deck_ends {{
+        {0.0F, 4.51F, -30.55F},
+        {0.0F, 4.51F, 29.0F},
+    }};
+    for (const auto& local_position : deck_ends) {
+        auto current_position =
+            tilted_ship.local_to_world_point(local_position);
+        const auto current_support =
+            tilted_ship.support_height(current_position);
+        REQUIRE(current_support.has_value());
+        current_position.y = *current_support;
+
+        auto expected_persisted_position =
+            restored_ship.local_to_world_point(
+                tilted_ship.world_to_local_point(current_position));
+        const auto expected_persisted_support =
+            restored_ship.support_height(expected_persisted_position);
+        REQUIRE(expected_persisted_support.has_value());
+        expected_persisted_position.y =
+            *expected_persisted_support;
+
+        PlayerState player_state {};
+        player_state.position = current_position;
+        player_state.velocity = {1.4F, 0.0F, -0.6F};
+        player_state.fall_start_y = current_position.y - 6.0F;
+        player_state.airborne_time = 0.8F;
+        player_state.landing_impact = 0.7F;
+        player_state.on_ground = true;
+
+        REQUIRE(normalize_supported_player_for_ship_save(
+            tilted_ship,
+            player_state,
+            false));
+        CHECK(glm::distance(player_state.position, current_position) > 0.10F);
+        CHECK(player_state.position.x ==
+              doctest::Approx(expected_persisted_position.x).epsilon(0.0001F));
+        CHECK(player_state.position.y ==
+              doctest::Approx(expected_persisted_position.y).epsilon(0.0001F));
+        CHECK(player_state.position.z ==
+              doctest::Approx(expected_persisted_position.z).epsilon(0.0001F));
+        CHECK(player_state.velocity == glm::vec3 {1.4F, 0.0F, -0.6F});
+        CHECK(player_state.fall_start_y ==
+              doctest::Approx(player_state.position.y));
+        CHECK(player_state.airborne_time == doctest::Approx(0.0F));
+        CHECK(player_state.landing_impact == doctest::Approx(0.7F));
+        CHECK(player_state.on_ground);
+        const auto restored_player_support =
+            restored_ship.support_height(player_state.position);
+        REQUIRE(restored_player_support.has_value());
+        CHECK(std::abs(player_state.position.y - *restored_player_support) <= 0.02F);
+
+        ItemDrop drop {};
+        drop.position = current_position + glm::vec3 {0.0F, 0.001F, 0.0F};
+        drop.velocity = {0.4F, -0.2F, 0.3F};
+        drop.grounded = true;
+        drop.sleeping = true;
+        drop.sleep_support_valid = true;
+        drop.sleep_candidate_seconds = 0.9F;
+        drop.sleep_support_check_timer = 0.4F;
+        drop.sleep_support_block = {7, 48, -3};
+        auto expected_drop_position =
+            restored_ship.local_to_world_point(
+                tilted_ship.world_to_local_point(drop.position));
+        const auto expected_drop_support =
+            restored_ship.support_height(expected_drop_position);
+        REQUIRE(expected_drop_support.has_value());
+        expected_drop_position.y =
+            *expected_drop_support + 0.001F;
+
+        REQUIRE(normalize_supported_item_drop_for_ship_save(
+            tilted_ship,
+            drop));
+        CHECK(drop.position.x ==
+              doctest::Approx(expected_drop_position.x).epsilon(0.0001F));
+        CHECK(drop.position.y ==
+              doctest::Approx(expected_drop_position.y).epsilon(0.0001F));
+        CHECK(drop.position.z ==
+              doctest::Approx(expected_drop_position.z).epsilon(0.0001F));
+        CHECK(drop.velocity == glm::vec3 {0.0F});
+        CHECK(drop.grounded);
+        CHECK_FALSE(drop.sleeping);
+        CHECK_FALSE(drop.sleep_support_valid);
+        CHECK(drop.sleep_candidate_seconds == doctest::Approx(0.0F));
+        CHECK(drop.sleep_support_check_timer == doctest::Approx(0.0F));
+        CHECK(drop.sleep_support_block == BlockCoord {});
+        const auto restored_drop_support =
+            restored_ship.support_height(drop.position);
+        REQUIRE(restored_drop_support.has_value());
+        CHECK(std::abs(drop.position.y - *restored_drop_support) <= 0.02F);
+    }
+
+    const auto current_spawn =
+        tilted_ship.local_to_world_point(
+            amelie_ship_blueprint().anchors.safe_spawn);
+    const auto persisted_spawn =
+        tilted_ship.world_point_in_persisted_neutral_pose(current_spawn);
+    const auto expected_spawn =
+        restored_ship.local_to_world_point(
+            amelie_ship_blueprint().anchors.safe_spawn);
+    CHECK(persisted_spawn.x == doctest::Approx(expected_spawn.x).epsilon(0.0001F));
+    CHECK(persisted_spawn.y == doctest::Approx(expected_spawn.y).epsilon(0.0001F));
+    CHECK(persisted_spawn.z == doctest::Approx(expected_spawn.z).epsilon(0.0001F));
+
+    PlayerState swimmer {};
+    swimmer.position =
+        tilted_ship.local_to_world_point(deck_ends.front());
+    swimmer.velocity = {0.2F, 0.0F, 0.3F};
+    swimmer.on_ground = true;
+    swimmer.swimming = true;
+    const auto swimmer_before = swimmer;
+    CHECK_FALSE(normalize_supported_player_for_ship_save(
+        tilted_ship,
+        swimmer,
+        false));
+    CHECK(swimmer.position == swimmer_before.position);
+    CHECK(swimmer.velocity == swimmer_before.velocity);
+    CHECK(swimmer.swimming == swimmer_before.swimming);
+
+    PlayerState distant_player {};
+    distant_player.position =
+        tilted_ship.position() +
+        glm::vec3 {90.0F, 3.0F, 90.0F};
+    distant_player.on_ground = true;
+    const auto distant_player_before = distant_player.position;
+    CHECK_FALSE(normalize_supported_player_for_ship_save(
+        tilted_ship,
+        distant_player,
+        false));
+    CHECK(distant_player.position == distant_player_before);
+
+    PlayerState climber {};
+    climber.position =
+        tilted_ship.local_to_world_point(deck_ends.front());
+    climber.on_ground = true;
+    const auto climber_before = climber.position;
+    CHECK_FALSE(normalize_supported_player_for_ship_save(
+        tilted_ship,
+        climber,
+        true));
+    CHECK(climber.position == climber_before);
+
+    ItemDrop falling_drop {};
+    falling_drop.position =
+        tilted_ship.local_to_world_point(deck_ends.back());
+    falling_drop.velocity = {0.0F, -2.0F, 0.0F};
+    falling_drop.grounded = false;
+    const auto falling_drop_before = falling_drop.position;
+    CHECK_FALSE(normalize_supported_item_drop_for_ship_save(
+        tilted_ship,
+        falling_drop));
+    CHECK(falling_drop.position == falling_drop_before);
+    CHECK(falling_drop.velocity == glm::vec3 {0.0F, -2.0F, 0.0F});
+
+    ItemDrop distant_drop {};
+    distant_drop.position =
+        tilted_ship.position() +
+        glm::vec3 {-90.0F, 2.0F, 90.0F};
+    distant_drop.grounded = true;
+    const auto distant_drop_before = distant_drop.position;
+    CHECK_FALSE(normalize_supported_item_drop_for_ship_save(
+        tilted_ship,
+        distant_drop));
+    CHECK(distant_drop.position == distant_drop_before);
+}
+
 TEST_CASE("sea adventure ship entity carries players standing on its deck") {
     EnvironmentState environment {};
     World world(5501, 1, WorldGenerationProfile::OceanAdventure);
@@ -1475,35 +1959,51 @@ TEST_CASE("sea adventure ship entity carries players standing on its deck") {
     place_sea_adventure_underway(sea_adventure, world.seed());
     sea_adventure.stamp_ship(world);
 
-    PlayerController deck_player(sea_adventure.ship_position() + glm::vec3 {0.0F, 4.10F, -8.0F});
-    const auto initial_deck_relative = deck_player.position() - sea_adventure.ship_position();
+    const auto& moving_ship = sea_adventure.ship_entity();
+    const glm::vec3 initial_deck_local {0.0F, 4.10F, -8.0F};
+    PlayerController deck_player(moving_ship.local_to_world_point(initial_deck_local));
     for (int frame = 0; frame < 8; ++frame) {
         const auto before_player = deck_player.position();
         const auto before_ship = sea_adventure.ship_position();
         const auto result = sea_adventure.update(world, deck_player, environment, 0.25F, false);
+        const auto expected_carried_position =
+            before_player + moving_ship.motion_delta_at(before_player);
 
         CHECK(result.ship_moved_player);
-        CHECK(deck_player.position().x == doctest::Approx(before_player.x + result.ship_delta.x));
-        CHECK(deck_player.position().y == doctest::Approx(before_player.y + result.ship_delta.y));
-        CHECK(deck_player.position().z == doctest::Approx(before_player.z + result.ship_delta.z));
-        CHECK(sea_adventure.ship_position().z == doctest::Approx(before_ship.z + result.ship_delta.z));
+        // Le controleur reste vertical : une eventuelle correction de support
+        // ne modifie que Y, alors que X/Z suivent exactement la pose rigide.
+        CHECK(deck_player.position().x ==
+              doctest::Approx(expected_carried_position.x).epsilon(0.001F));
+        CHECK(deck_player.position().z ==
+              doctest::Approx(expected_carried_position.z).epsilon(0.001F));
+        const auto support = moving_ship.support_height(deck_player.position());
+        REQUIRE(support.has_value());
+        CHECK(std::abs(deck_player.position().y - *support) <= 0.12F);
+        CHECK(sea_adventure.ship_position().z ==
+              doctest::Approx(before_ship.z + result.ship_delta.z));
     }
-    const auto final_deck_relative = deck_player.position() - sea_adventure.ship_position();
-    CHECK(final_deck_relative.x == doctest::Approx(initial_deck_relative.x));
-    CHECK(final_deck_relative.y == doctest::Approx(initial_deck_relative.y));
-    CHECK(final_deck_relative.z == doctest::Approx(initial_deck_relative.z));
+    const auto expected_final_position =
+        moving_ship.local_to_world_point(initial_deck_local);
+    CHECK(deck_player.position().x ==
+          doctest::Approx(expected_final_position.x).epsilon(0.001F));
+    CHECK(deck_player.position().z ==
+          doctest::Approx(expected_final_position.z).epsilon(0.001F));
 
     SeaAdventureSystem support_sea {};
     support_sea.reset(5502);
     place_sea_adventure_underway(support_sea, 5502);
     support_sea.stamp_ship(world);
+    const auto& support_ship = support_sea.ship_entity();
     const auto& anchors = amelie_ship_blueprint().anchors;
-    PlayerController raised_deck_player(support_sea.ship_entity().world_origin() + anchors.helm);
+    PlayerController raised_deck_player(support_ship.local_to_world_point(anchors.helm));
     const auto support_result = support_sea.update(world, raised_deck_player, environment, 0.25F, false);
     CHECK(support_result.ship_moved_player);
     CHECK(support_result.on_ship);
+    const auto expected_helm = support_ship.local_to_world_point(anchors.helm);
+    CHECK(raised_deck_player.position().x ==
+          doctest::Approx(expected_helm.x).epsilon(0.001F));
     CHECK(raised_deck_player.position().z ==
-          doctest::Approx(support_sea.ship_entity().world_origin().z + anchors.helm.z));
+          doctest::Approx(expected_helm.z).epsilon(0.001F));
 
     SeaAdventureSystem distant_sea {};
     distant_sea.reset(5503);
@@ -1686,10 +2186,17 @@ TEST_CASE("sea adventure moving hull pushes a player without leaving an overlap"
     REQUIRE_FALSE(player.overlaps_dynamic_obstacle(ship));
     const auto player_before = player.position();
     const auto result = sea_adventure.update(world, player, environment, 0.25F, false);
+    const auto expected_position =
+        player_before + ship.motion_delta_at(player_before);
 
     CHECK(result.ship_moved_player);
     CHECK_FALSE(result.on_ship);
-    CHECK(player.position().z == doctest::Approx(player_before.z + result.ship_delta.z));
+    CHECK(player.position().x ==
+          doctest::Approx(expected_position.x).epsilon(0.001F));
+    CHECK(player.position().y ==
+          doctest::Approx(expected_position.y).epsilon(0.001F));
+    CHECK(player.position().z ==
+          doctest::Approx(expected_position.z).epsilon(0.001F));
     CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
 }
 
@@ -1715,8 +2222,11 @@ TEST_CASE("sea adventure ship entity moves without rewriting world chunks") {
         render_before.parts.end(),
         [](const ShipPart& part) { return part.collidable; });
     REQUIRE(collidable_part != render_before.parts.end());
-    const auto part_center = render_before.world_origin +
-                             (collidable_part->local_start + collidable_part->local_end) * 0.5F;
+    const auto part_center =
+        sea_adventure.ship_entity().local_to_world_point(
+            (collidable_part->local_start +
+             collidable_part->local_end) *
+            0.5F);
     CHECK(sea_adventure.ship_entity().intersects_aabb(
         part_center - glm::vec3 {0.02F},
         part_center + glm::vec3 {0.02F}));
@@ -1829,13 +2339,17 @@ TEST_CASE("sea adventure HUD reports the weather adjusted dynamic ship speed") {
 
     const auto result = sea_adventure.update(world, player, environment, 0.1F, false);
     const auto hud = sea_adventure.hud_state(player);
-    const auto spawn_offset = sea_adventure.deck_spawn_position() - sea_adventure.ship_position();
+    const auto spawn_local =
+        sea_adventure.ship_entity().world_to_local_point(
+            sea_adventure.deck_spawn_position());
+    const auto& expected_spawn =
+        amelie_ship_blueprint().anchors.safe_spawn;
 
     CHECK(std::abs(result.ship_speed - 1.18F) > 0.001F);
     CHECK(hud.ship_speed == doctest::Approx(result.ship_speed));
-    CHECK(spawn_offset.x == doctest::Approx(0.0F));
-    CHECK(spawn_offset.y == doctest::Approx(4.10F));
-    CHECK(spawn_offset.z == doctest::Approx(-8.0F));
+    CHECK(spawn_local.x == doctest::Approx(expected_spawn.x).epsilon(0.0001F));
+    CHECK(spawn_local.y == doctest::Approx(expected_spawn.y).epsilon(0.0001F));
+    CHECK(spawn_local.z == doctest::Approx(expected_spawn.z).epsilon(0.0001F));
 }
 
 TEST_CASE("sea adventure resource counters saturate instead of wrapping") {
@@ -2453,7 +2967,9 @@ TEST_CASE("climber follows a moving Amelie without becoming on ship before the d
         player.update(climb, 1.0F / 60.0F, world, &ship);
         REQUIRE(player.is_climbing_dynamic_obstacle());
 
-        const auto initial_relative = player.position() - sea_adventure.ship_position();
+        const auto initial_local =
+            ship.world_to_local_point(
+                player.position());
         for (int frame = 0; frame < 8; ++frame) {
             player.update(PlayerInput {}, 1.0F / 60.0F, world, &ship);
             const auto result = sea_adventure.update(
@@ -2468,10 +2984,19 @@ TEST_CASE("climber follows a moving Amelie without becoming on ship before the d
             if (frame == 0) {
                 CHECK(result.fishing_failed);
             }
-            const auto relative = player.position() - sea_adventure.ship_position();
-            CHECK(relative.x == doctest::Approx(initial_relative.x).epsilon(0.001F));
-            CHECK(relative.y == doctest::Approx(initial_relative.y).epsilon(0.001F));
-            CHECK(relative.z == doctest::Approx(initial_relative.z).epsilon(0.001F));
+
+            const auto current_local =
+                ship.world_to_local_point(
+                    player.position());
+            // L'AABB du joueur reste verticale, donc son rayon projete sur le
+            // filet change legerement avec le roulis. La prise reste toutefois
+            // au meme barreau et ne derive pas le long de la coque.
+            CHECK(current_local.x ==
+                  doctest::Approx(initial_local.x).epsilon(0.01F));
+            CHECK(current_local.y ==
+                  doctest::Approx(initial_local.y).epsilon(0.01F));
+            CHECK(current_local.z ==
+                  doctest::Approx(initial_local.z).epsilon(0.01F));
         }
 
         auto reached_deck = false;
@@ -2491,7 +3016,16 @@ TEST_CASE("climber follows a moving Amelie without becoming on ship before the d
         }
         REQUIRE(reached_deck);
         CHECK_FALSE(player.is_climbing_dynamic_obstacle());
-        CHECK(player.position().x == doctest::Approx(ship.world_origin().x + side * 7.45F).epsilon(0.002F));
+        const auto expected_exit =
+            ship.local_to_world_point({
+                side * 7.45F,
+                4.01F,
+                -7.50F,
+            });
+        CHECK(player.position().x ==
+              doctest::Approx(expected_exit.x).epsilon(0.002F));
+        CHECK(player.position().z ==
+              doctest::Approx(expected_exit.z).epsilon(0.002F));
         CHECK(ship.support_height(player.position()).has_value());
     }
 }
@@ -2745,7 +3279,9 @@ TEST_CASE("sea adventure keeps precise movement at large world coordinates") {
     CHECK(boundary.ship_position() == boundary_position);
     CHECK(boundary_result.ship_delta == glm::vec3 {});
     CHECK(boundary_result.ship_speed == doctest::Approx(0.0F));
-    CHECK_FALSE(boundary_result.ship_moved_player);
+    // La limite de route ne doit pas faire perdre le contact avec le pont ;
+    // la houle peut, elle, produire ou non un petit mouvement a cette phase.
+    CHECK(boundary_result.on_ship);
 }
 
 TEST_CASE("player jump from the ground increases vertical position") {
@@ -3324,30 +3860,45 @@ TEST_CASE("item drops stay grounded on the moving sea adventure deck") {
         initial_drop_position,
         {});
 
-    const auto initial_relative = initial_drop_position - sea_adventure.ship_position();
+    const auto initial_local =
+        sea_adventure.ship_entity().world_to_local_point(
+            initial_drop_position);
     constexpr float kStep = 1.0F / 60.0F;
     for (int frame = 0; frame < 60; ++frame) {
-        const auto sea_result = sea_adventure.update(world, off_ship_player, environment, kStep, false);
+        (void)sea_adventure.update(
+            world,
+            off_ship_player,
+            environment,
+            kStep,
+            false);
         drop_system.update(
             kStep,
             world,
             {1000.0F, 80.0F, 1000.0F},
             inventory,
             hotbar,
-            &sea_adventure.ship_entity(),
-            sea_result.ship_delta);
+            &sea_adventure.ship_entity());
     }
 
     REQUIRE(drop_system.active_drop_count() == 1U);
     const auto& drop = drop_system.drops().front();
-    const auto final_relative = drop.position - sea_adventure.ship_position();
-    const auto support_height = sea_adventure.ship_entity().support_height(drop.position);
+    const auto& ship = sea_adventure.ship_entity();
+    const auto expected_position =
+        ship.local_to_world_point(
+            initial_local);
+    const auto support_height =
+        ship.support_height(
+            drop.position);
     REQUIRE(support_height.has_value());
     CHECK(drop.grounded);
     CHECK_FALSE(drop.sleeping);
     CHECK(drop.position.y == doctest::Approx(*support_height + 0.001F));
-    CHECK(final_relative.x == doctest::Approx(initial_relative.x));
-    CHECK(final_relative.z == doctest::Approx(initial_relative.z));
+    // Le recalage de support est vertical : la projection X/Z doit conserver
+    // exactement le point local du pont, meme en tangage et en roulis.
+    CHECK(drop.position.x ==
+          doctest::Approx(expected_position.x).epsilon(0.001F));
+    CHECK(drop.position.z ==
+          doctest::Approx(expected_position.z).epsilon(0.001F));
 }
 
 TEST_CASE("settled item drops sleep and skip steady state physics") {

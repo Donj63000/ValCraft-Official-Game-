@@ -293,33 +293,98 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     };
 
     const auto climb_normal = [](const ShipClimbContact& contact) noexcept {
-        auto normal = glm::vec3 {contact.outward_normal.x, 0.0F, contact.outward_normal.z};
-        const auto length = glm::length(normal);
-        return length > 1.0e-5F ? normal / length : glm::vec3 {0.0F};
+        const auto normal =
+            finite_vec3_or(
+                contact.outward_normal,
+                {});
+        const auto length =
+            glm::length(normal);
+        return length > 1.0e-5F
+                   ? normal / length
+                   : glm::vec3 {0.0F};
     };
 
-    const auto align_outside_climb_contact = [&climb_normal](
-                                                  glm::vec3& feet_position,
-                                                  const ShipClimbContact& contact) noexcept {
-        constexpr float half_width = kPlayerWidth * 0.5F;
-        const auto normal = climb_normal(contact);
-        if (glm::dot(normal, normal) <= 1.0e-5F) {
-            return false;
-        }
+    const auto climb_up =
+        [&climb_normal](
+            const ShipClimbContact& contact) noexcept {
+            const auto normal =
+                climb_normal(contact);
+            auto up =
+                finite_vec3_or(
+                    contact.up_direction,
+                    {0.0F, 1.0F, 0.0F});
+            // Je projette l'axe vertical du navire dans le plan du filet pour
+            // neutraliser toute petite erreur numerique d'orthogonalite.
+            up -= normal *
+                  glm::dot(up, normal);
+            const auto length =
+                glm::length(up);
+            return length > 1.0e-5F
+                       ? up / length
+                       : glm::vec3 {
+                             0.0F,
+                             1.0F,
+                             0.0F,
+                         };
+        };
 
-        // Je garde le volume du joueur juste a l'exterieur du filet : la coque
-        // reste ainsi bloquante et aucun ajustement ne teleporte a travers elle.
-        if (std::abs(normal.x) >= std::abs(normal.z)) {
-            feet_position.x = normal.x > 0.0F
-                                  ? contact.bounds.max.x + half_width + kDynamicClimbAlignmentEpsilon
-                                  : contact.bounds.min.x - half_width - kDynamicClimbAlignmentEpsilon;
-        } else {
-            feet_position.z = normal.z > 0.0F
-                                  ? contact.bounds.max.z + half_width + kDynamicClimbAlignmentEpsilon
-                                  : contact.bounds.min.z - half_width - kDynamicClimbAlignmentEpsilon;
-        }
-        return true;
-    };
+    const auto align_outside_climb_contact =
+        [&climb_normal](
+            glm::vec3& feet_position,
+            const ShipClimbContact& contact) noexcept {
+            const auto normal =
+                climb_normal(contact);
+            if (glm::dot(normal, normal) <=
+                1.0e-5F) {
+                return false;
+            }
+
+            constexpr auto half_width =
+                kPlayerWidth * 0.5F;
+            const glm::vec3 half_extents {
+                half_width,
+                kPlayerHeight * 0.5F,
+                half_width,
+            };
+            const auto player_center =
+                feet_position +
+                glm::vec3 {
+                    0.0F,
+                    kPlayerHeight * 0.5F,
+                    0.0F,
+                };
+
+            // Rayon de projection de l'AABB verticale du joueur sur la normale
+            // du filet. Cette formule reste exacte meme avec roulis/tangage.
+            const auto projected_radius =
+                glm::dot(
+                    glm::abs(normal),
+                    half_extents);
+            const auto target_projection =
+                glm::dot(
+                    finite_vec3_or(
+                        contact.plane_point,
+                        player_center),
+                    normal) +
+                projected_radius +
+                kDynamicClimbAlignmentEpsilon;
+            const auto correction =
+                target_projection -
+                glm::dot(
+                    player_center,
+                    normal);
+
+            // Un contact valide ne requiert jamais un grand teleport. Cette
+            // garde bloque une pose corrompue ou une normale incoherente.
+            if (!std::isfinite(correction) ||
+                std::abs(correction) > 1.0F) {
+                return false;
+            }
+
+            feet_position +=
+                normal * correction;
+            return true;
+        };
 
     auto active_climb_contact = std::optional<ShipClimbContact> {};
     if (climbed_dynamic_obstacle_ != nullptr) {
@@ -388,15 +453,34 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     const auto sprinting = input.sprint && move_forward > 0.0F && glm::dot(wish, wish) > 1.0e-5F;
 
     if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value()) {
-        const auto normal = climb_normal(*active_climb_contact);
-        auto tangential_wish = wish - normal * glm::dot(wish, normal);
-        if (glm::dot(tangential_wish, tangential_wish) > 1.0F) {
-            tangential_wish = glm::normalize(tangential_wish);
-        }
+        const auto normal =
+            climb_normal(
+                *active_climb_contact);
+        const auto up =
+            climb_up(
+                *active_climb_contact);
+        auto side =
+            glm::cross(up, normal);
+        const auto side_length =
+            glm::length(side);
+        side = side_length > 1.0e-5F
+                   ? side / side_length
+                   : glm::vec3 {};
 
-        const auto climb_speed = kDynamicClimbSpeed * movement_speed_multiplier_;
-        state_.velocity = tangential_wish * climb_speed;
-        state_.velocity.y = move_up * climb_speed;
+        const auto climb_speed =
+            kDynamicClimbSpeed *
+            movement_speed_multiplier_;
+        const auto lateral_input =
+            std::clamp(
+                glm::dot(wish, side),
+                -1.0F,
+                1.0F);
+        state_.velocity =
+            (
+                side * lateral_input +
+                up * move_up
+            ) *
+            climb_speed;
         state_.on_ground = false;
         state_.fall_start_y = state_.position.y;
         state_.airborne_time = 0.0F;
@@ -464,12 +548,40 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     auto exited_dynamic_climb_at_top = false;
     auto exited_dynamic_climb_at_bottom = false;
 
-    if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value() &&
-        state_.velocity.y > 0.0F &&
-        state_.position.y + state_.velocity.y * clamped_dt >=
-            active_climb_contact->deck_exit.y - kDynamicClimbExitTolerance) {
-        constexpr float half_width = kPlayerWidth * 0.5F;
-        const auto deck_exit = finite_vec3_or(active_climb_contact->deck_exit, state_.position);
+    const auto active_climb_local_position =
+        climbed_dynamic_obstacle_ != nullptr &&
+                active_climb_contact.has_value()
+            ? dynamic_obstacle->world_to_local_point(
+                  state_.position)
+            : glm::vec3 {};
+    const auto active_climb_local_velocity =
+        climbed_dynamic_obstacle_ != nullptr &&
+                active_climb_contact.has_value()
+            ? dynamic_obstacle->world_to_local_direction(
+                  state_.velocity)
+            : glm::vec3 {};
+    const auto deck_exit_local_y =
+        climbed_dynamic_obstacle_ != nullptr &&
+                active_climb_contact.has_value()
+            ? dynamic_obstacle->world_to_local_point(
+                  active_climb_contact->deck_exit)
+                  .y
+            : 0.0F;
+
+    if (climbed_dynamic_obstacle_ != nullptr &&
+        active_climb_contact.has_value() &&
+        active_climb_local_velocity.y > 0.0F &&
+        active_climb_local_position.y +
+                active_climb_local_velocity.y *
+                    clamped_dt >=
+            deck_exit_local_y -
+                kDynamicClimbExitTolerance) {
+        constexpr float half_width =
+            kPlayerWidth * 0.5F;
+        const auto deck_exit =
+            finite_vec3_or(
+                active_climb_contact->deck_exit,
+                state_.position);
         const auto deck_exit_min = glm::vec3 {
             deck_exit.x - half_width,
             deck_exit.y,
@@ -506,9 +618,20 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         } else {
             // Si la sortie est obstruee, je reste au dernier barreau sans
             // accumuler de vitesse verticale ni de distance de chute.
-            state_.position.y = std::min(
-                state_.position.y,
-                active_climb_contact->deck_exit.y - kDynamicClimbExitTolerance);
+            auto clamped_local_position =
+                dynamic_obstacle->world_to_local_point(
+                    state_.position);
+            clamped_local_position.y =
+                std::min(
+                    clamped_local_position.y,
+                    deck_exit_local_y -
+                        kDynamicClimbExitTolerance);
+            state_.position =
+                dynamic_obstacle->local_to_world_point(
+                    clamped_local_position);
+            (void)align_outside_climb_contact(
+                state_.position,
+                *active_climb_contact);
             state_.velocity = {};
             state_.fall_start_y = state_.position.y;
             state_.airborne_time = 0.0F;
@@ -520,14 +643,34 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         move_axis_safely(state_.velocity.z * clamped_dt, 2);
 
         if (climbed_dynamic_obstacle_ != nullptr && active_climb_contact.has_value()) {
-            if (state_.velocity.y < 0.0F &&
-                state_.position.y <= active_climb_contact->bounds.min.y + kDynamicClimbExitTolerance) {
-                // Au dernier barreau je rends la main a la nage ou a la chute;
-                // le verrou evite une re-accroche chaque frame si Ctrl reste tenu.
-                state_.position.y = std::min(
-                    state_.position.y,
-                    active_climb_contact->bounds.min.y - kCollisionEpsilon);
-                state_.velocity.y = 0.0F;
+            const auto local_position_after_move =
+                dynamic_obstacle->world_to_local_point(
+                    state_.position);
+            const auto local_velocity_after_move =
+                dynamic_obstacle->world_to_local_direction(
+                    state_.velocity);
+            if (local_velocity_after_move.y < 0.0F &&
+                local_position_after_move.y <=
+                    active_climb_contact->local_bounds.min.y +
+                        kDynamicClimbExitTolerance) {
+                // La limite basse est mesuree dans le repere du navire. Elle
+                // reste donc correcte lorsque le filet monte d'un cote et
+                // descend de l'autre pendant le roulis.
+                auto released_local_position =
+                    local_position_after_move;
+                released_local_position.y =
+                    std::min(
+                        released_local_position.y,
+                        active_climb_contact->local_bounds.min.y -
+                            kCollisionEpsilon);
+                state_.position =
+                    dynamic_obstacle->local_to_world_point(
+                        released_local_position);
+                state_.velocity -=
+                    active_climb_contact->up_direction *
+                    glm::dot(
+                        state_.velocity,
+                        active_climb_contact->up_direction);
                 state_.fall_start_y = state_.position.y;
                 climbed_dynamic_obstacle_ = nullptr;
                 dynamic_climb_regrab_locked_ = true;

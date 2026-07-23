@@ -39,9 +39,12 @@ constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
 constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
-constexpr int kWaterSurfaceSubdivisions = 4;
-constexpr int kWaterSideVerticalSubdivisions = 2;
-constexpr int kWaterSideHorizontalSubdivisions = 4;
+// Une maille de 0,5 m suffit pour le spectre choisi, dont la plus petite
+// longueur d'onde géométrique est de 2,4 m. Cela réduit fortement le trafic
+// GPU sans rendre les crêtes anguleuses.
+constexpr int kWaterSurfaceSubdivisions = 2;
+constexpr int kWaterSideVerticalSubdivisions = 1;
+constexpr int kWaterSideHorizontalSubdivisions = 2;
 constexpr float kBlockAtlasHalfTexelUv = 0.5F / static_cast<float>(kBlockAtlasSize);
 
 using Float2 = std::array<float, 2>;

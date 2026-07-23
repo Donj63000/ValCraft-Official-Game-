@@ -339,6 +339,13 @@ private:
         GLint precipitation_intensity = -1;
         GLint storm_intensity = -1;
         GLint lightning_intensity = -1;
+        GLint ocean_waves = -1;
+        GLint ocean_wave_phases = -1;
+        GLint ocean_wave_count = -1;
+        GLint ocean_foam_threshold = -1;
+        GLint ocean_detail_strength = -1;
+        GLint ocean_detail_phase = -1;
+        GLint ocean_severity = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint scene_color = -1;

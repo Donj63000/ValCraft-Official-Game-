@@ -380,7 +380,49 @@ auto Game::run() -> int {
             const auto audio_begin = clock::now();
             const auto environment_state = environment_.current_state();
             const auto creature_cycle = environment_.current_creature_cycle();
-            music_.sync_environment(environment_state, creature_cycle, has_active_session_, front_end_visible());
+            const auto front_end_is_visible = front_end_visible();
+            const auto maritime_gameplay_active =
+                active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active();
+            float voyage_motion = 0.0F;
+            float maritime_danger = 0.0F;
+
+            if (has_active_session_ && maritime_gameplay_active) {
+                const auto maritime_state = sea_adventure_.hud_state(player_);
+
+                // Je traduis ici le voyage en intensite musicale pour garder
+                // le syntheseur independant des types propres au gameplay.
+                switch (maritime_state.phase) {
+                case SeaVoyagePhase::Moored:
+                    voyage_motion = 0.0F;
+                    break;
+                case SeaVoyagePhase::Departing:
+                    voyage_motion = maritime_state.departure_ratio;
+                    break;
+                case SeaVoyagePhase::Underway:
+                    voyage_motion = 1.0F;
+                    break;
+                }
+
+                maritime_danger = maritime_state.danger
+                    ? 1.0F
+                    : environment_state.storm_intensity;
+            }
+
+            const auto music_context = make_game_music_context({
+                .has_active_session = has_active_session_,
+                .front_end_visible = front_end_is_visible,
+                .maritime_gameplay_active = maritime_gameplay_active,
+                .voyage_motion = voyage_motion,
+                .danger = maritime_danger,
+                .world_seed = world_.seed(),
+            });
+
+            music_.sync_environment(
+                environment_state,
+                creature_cycle,
+                has_active_session_,
+                front_end_is_visible,
+                music_context);
             music_.pump();
             frame_stats.audio_ms =
                 std::chrono::duration<double, std::milli>(clock::now() - audio_begin).count();
@@ -1399,8 +1441,6 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                 ? &sea_adventure_.ship_entity()
                 : nullptr;
 
-        auto dynamic_ship_delta = glm::vec3 {0.0F};
-
         player_.update(
             input,
             dt,
@@ -1414,7 +1454,6 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                 environment_state,
                 dt,
                 std::exchange(pending_fishing_, false));
-            dynamic_ship_delta = sea_result.ship_delta;
             if (sea_result.fishing_started) {
                 queue_gameplay_announcement("PECHE", "LA LIGNE EST A L'EAU", 2.4F);
             } else if (sea_result.fishing_failed) {
@@ -1604,8 +1643,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             player_.position(),
             inventory_menu_,
             hotbar_,
-            dynamic_ship,
-            dynamic_ship_delta);
+            dynamic_ship);
         if (const auto item_stats = item_drops_.consume_audit_stats();
             audit_ && audit_->enabled() &&
             (item_stats.spawned != 0 || item_stats.merged != 0 || item_stats.picked_up != 0 ||
@@ -2729,11 +2767,16 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     snapshot.metadata.weather_time_seconds = environment_.weather_time_seconds();
     snapshot.metadata.has_starting_village = starting_village_enabled_;
     snapshot.metadata.game_mode = active_game_mode_;
-    // Je sauvegarde le point de retour avec le navire courant, pas avec son
-    // emplacement de depart devenu obsolete apres plusieurs minutes de route.
-    snapshot.spawn_position = active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active()
-                                  ? sea_adventure_.deck_spawn_position()
-                                  : spawn_position_;
+    const auto save_active_ship =
+        active_game_mode_ == GameMode::SeaAdventure &&
+        sea_adventure_.active();
+    // Je sauvegarde le point de retour avec le navire courant, mais dans sa
+    // pose neutre persistante afin qu'il reste exact apres le rechargement.
+    snapshot.spawn_position =
+        save_active_ship
+            ? sea_adventure_.ship_entity().world_point_in_persisted_neutral_pose(
+                  sea_adventure_.deck_spawn_position())
+            : spawn_position_;
     snapshot.player_state = player_.state();
     snapshot.progression = progression_.state();
     snapshot.sea_adventure = sea_adventure_.save_state();
@@ -2743,6 +2786,18 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     snapshot.inventory.hovered_slot.reset();
     snapshot.creatures.assign(creatures_.active_creatures().begin(), creatures_.active_creatures().end());
     snapshot.item_drops = item_drops_.drops();
+    if (save_active_ship) {
+        const auto& ship = sea_adventure_.ship_entity();
+        (void)normalize_supported_player_for_ship_save(
+            ship,
+            snapshot.player_state,
+            player_.is_climbing_dynamic_obstacle());
+        for (auto& drop : snapshot.item_drops) {
+            (void)normalize_supported_item_drop_for_ship_save(
+                ship,
+                drop);
+        }
+    }
     return snapshot;
 }
 
@@ -4485,10 +4540,20 @@ void Game::update_menu_preview_camera(float dt) {
     const auto& ship_bounds = amelie_ship_blueprint().bounds;
     const auto ship_extent = ship_bounds.max - ship_bounds.min;
     const auto ship_local_center = (ship_bounds.min + ship_bounds.max) * 0.5F;
-    const auto focus = maritime_preview
-                           ? sea_adventure_.ship_entity().world_origin() +
-                                 glm::vec3 {ship_local_center.x, 9.0F, ship_local_center.z}
-                           : spawn_position_ + glm::vec3 {0.0F, 5.0F, 0.0F};
+    const auto focus =
+        maritime_preview
+            ? sea_adventure_.ship_entity()
+                  .local_to_world_point({
+                      ship_local_center.x,
+                      9.0F,
+                      ship_local_center.z,
+                  })
+            : spawn_position_ +
+                  glm::vec3 {
+                      0.0F,
+                      5.0F,
+                      0.0F,
+                  };
     // Je derive le recul des limites reelles : une future evolution de la
     // coque ne pourra plus sortir silencieusement du cadre du menu.
     const auto radius = maritime_preview ? std::max(ship_extent.x, ship_extent.z) * 0.78F + 8.0F : 26.0F;
@@ -4529,72 +4594,224 @@ void Game::update_smoke_player(float dt) {
 }
 
 void Game::update_smoke_ship_camera() {
-    if (!options_.smoke_test || options_.smoke_ship_view == SmokeShipView::None ||
-        active_game_mode_ != GameMode::SeaAdventure || !sea_adventure_.active()) {
+    if (!options_.smoke_test ||
+        options_.smoke_ship_view ==
+            SmokeShipView::None ||
+        active_game_mode_ !=
+            GameMode::SeaAdventure ||
+        !sea_adventure_.active()) {
         return;
     }
 
-    const auto world_origin = sea_adventure_.ship_entity().world_origin();
-    const auto& blueprint = amelie_ship_blueprint();
-    const auto extent = blueprint.bounds.max - blueprint.bounds.min;
-    const auto local_center = (blueprint.bounds.min + blueprint.bounds.max) * 0.5F;
-    const auto ship_center = world_origin + glm::vec3 {local_center.x, 0.0F, local_center.z};
-    auto camera_position = ship_center;
-    auto camera_focus = world_origin;
+    const auto& ship =
+        sea_adventure_.ship_entity();
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto extent =
+        blueprint.bounds.max -
+        blueprint.bounds.min;
+    const auto local_center =
+        (blueprint.bounds.min +
+         blueprint.bounds.max) *
+        0.5F;
+    const auto to_world =
+        [&ship](
+            const glm::vec3& local_point) noexcept {
+            return ship.local_to_world_point(
+                local_point);
+        };
 
-    // Je derive les vues des limites et ancres du blueprint agrandi afin que
-    // chaque capture reste cadrée si la silhouette évolue encore.
+    const auto ship_center =
+        to_world({
+            local_center.x,
+            0.0F,
+            local_center.z,
+        });
+    auto camera_position =
+        ship_center;
+    auto camera_focus =
+        to_world({0.0F, 0.0F, 0.0F});
+
+    // Toutes les positions sont exprimees dans le repere du blueprint puis
+    // transformees par la pose du navire. L'horizon reste toutefois vertical,
+    // car la matrice de vue du PlayerController conserve l'axe monde Y.
     switch (options_.smoke_ship_view) {
     case SmokeShipView::Deck:
-        camera_position = world_origin + glm::vec3 {extent.x * 1.05F, 15.0F, blueprint.anchors.aft_hatch.z - 12.0F};
-        camera_focus = world_origin + glm::vec3 {0.0F, 4.8F, blueprint.anchors.galley.z};
+        camera_position = to_world({
+            extent.x * 1.05F,
+            15.0F,
+            blueprint.anchors.aft_hatch.z -
+                12.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            4.8F,
+            blueprint.anchors.galley.z,
+        });
         break;
+
     case SmokeShipView::Bow:
-        camera_position = world_origin + glm::vec3 {-extent.x * 0.55F, 12.0F, blueprint.bounds.max.z + 10.0F};
-        camera_focus = world_origin + glm::vec3 {0.0F, 6.8F, blueprint.bounds.max.z - extent.z * 0.38F};
+        camera_position = to_world({
+            -extent.x * 0.55F,
+            12.0F,
+            blueprint.bounds.max.z +
+                10.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            6.8F,
+            blueprint.bounds.max.z -
+                extent.z * 0.38F,
+        });
         break;
+
     case SmokeShipView::Stern:
-        camera_position = world_origin + glm::vec3 {0.0F, 9.0F, blueprint.bounds.min.z - 11.0F};
-        camera_focus = world_origin + glm::vec3 {0.0F, 6.5F, blueprint.anchors.helm.z + 9.0F};
+        camera_position = to_world({
+            0.0F,
+            9.0F,
+            blueprint.bounds.min.z -
+                11.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            6.5F,
+            blueprint.anchors.helm.z +
+                9.0F,
+        });
         break;
+
     case SmokeShipView::Port:
-        camera_position = ship_center + glm::vec3 {-std::min(15.0F, extent.x * 1.05F), 24.0F, -5.0F};
-        camera_focus = world_origin + glm::vec3 {0.0F, 7.0F, local_center.z};
+        camera_position = to_world({
+            local_center.x -
+                std::min(
+                    15.0F,
+                    extent.x * 1.05F),
+            24.0F,
+            local_center.z - 5.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            7.0F,
+            local_center.z,
+        });
         break;
+
     case SmokeShipView::Starboard:
-        camera_position = ship_center + glm::vec3 {std::min(15.0F, extent.x * 1.05F), 24.0F, 5.0F};
-        camera_focus = world_origin + glm::vec3 {0.0F, 7.0F, local_center.z};
+        camera_position = to_world({
+            local_center.x +
+                std::min(
+                    15.0F,
+                    extent.x * 1.05F),
+            24.0F,
+            local_center.z + 5.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            7.0F,
+            local_center.z,
+        });
         break;
+
     case SmokeShipView::Interior:
-        camera_position = world_origin + blueprint.anchors.crew_quarters + glm::vec3 {0.70F, 0.0F, -3.0F};
-        camera_focus = world_origin + blueprint.anchors.galley + glm::vec3 {0.15F, 1.0F, 5.0F};
+        camera_position = to_world(
+            blueprint.anchors.crew_quarters +
+            glm::vec3 {
+                0.70F,
+                0.0F,
+                -3.0F,
+            });
+        camera_focus = to_world(
+            blueprint.anchors.galley +
+            glm::vec3 {
+                0.15F,
+                1.0F,
+                5.0F,
+            });
         break;
+
     case SmokeShipView::CaptainCabin:
-        camera_position = world_origin + glm::vec3 {-0.40F, 1.01F, -32.30F};
-        camera_focus = world_origin + blueprint.anchors.captain_cabin + glm::vec3 {0.0F, 1.10F, 1.5F};
+        camera_position = to_world({
+            -0.40F,
+            1.01F,
+            -32.30F,
+        });
+        camera_focus = to_world(
+            blueprint.anchors.captain_cabin +
+            glm::vec3 {
+                0.0F,
+                1.10F,
+                1.5F,
+            });
         break;
+
     case SmokeShipView::CargoHold:
-        camera_position = world_origin + blueprint.anchors.cargo_hold + glm::vec3 {0.0F, 0.0F, -7.0F};
-        camera_focus = world_origin + blueprint.anchors.cargo_hold + glm::vec3 {0.0F, 1.10F, 6.0F};
+        camera_position = to_world(
+            blueprint.anchors.cargo_hold +
+            glm::vec3 {
+                0.0F,
+                0.0F,
+                -7.0F,
+            });
+        camera_focus = to_world(
+            blueprint.anchors.cargo_hold +
+            glm::vec3 {
+                0.0F,
+                1.10F,
+                6.0F,
+            });
         break;
+
     case SmokeShipView::CrewDeck:
-        camera_position = world_origin + glm::vec3 {7.0F, 4.90F, -27.0F};
-        camera_focus = world_origin + glm::vec3 {-0.5F, 5.35F, -28.0F};
+        camera_position = to_world({
+            7.0F,
+            4.90F,
+            -27.0F,
+        });
+        camera_focus = to_world({
+            -0.5F,
+            5.35F,
+            -28.0F,
+        });
         break;
+
     case SmokeShipView::None:
     default:
         return;
     }
 
-    constexpr float kPlayerEyeHeight = 1.62F;
-    const auto eye_position = camera_position + glm::vec3 {0.0F, kPlayerEyeHeight, 0.0F};
-    const auto direction = glm::normalize(camera_focus - eye_position);
-    auto camera_state = preview_player_.state();
-    camera_state.position = camera_position;
+    constexpr float kPlayerEyeHeight =
+        1.62F;
+    const auto eye_position =
+        camera_position +
+        glm::vec3 {
+            0.0F,
+            kPlayerEyeHeight,
+            0.0F,
+        };
+    const auto direction =
+        glm::normalize(
+            camera_focus -
+            eye_position);
+
+    auto camera_state =
+        preview_player_.state();
+    camera_state.position =
+        camera_position;
     camera_state.velocity = {};
-    camera_state.yaw_degrees = glm::degrees(std::atan2(direction.z, direction.x));
-    camera_state.pitch_degrees = glm::degrees(std::asin(std::clamp(direction.y, -1.0F, 1.0F)));
-    camera_state.body_yaw_degrees = camera_state.yaw_degrees;
+    camera_state.yaw_degrees =
+        glm::degrees(
+            std::atan2(
+                direction.z,
+                direction.x));
+    camera_state.pitch_degrees =
+        glm::degrees(
+            std::asin(
+                std::clamp(
+                    direction.y,
+                    -1.0F,
+                    1.0F)));
+    camera_state.body_yaw_degrees =
+        camera_state.yaw_degrees;
     camera_state.animation_time = 0.0F;
     camera_state.step_phase = 0.0F;
     camera_state.look_sway_yaw = 0.0F;
@@ -4604,7 +4821,8 @@ void Game::update_smoke_ship_camera() {
     camera_state.dead = false;
     camera_state.head_underwater = false;
     camera_state.swimming = false;
-    preview_player_.load_state(camera_state);
+    preview_player_.load_state(
+        camera_state);
 }
 
 void Game::validate_smoke_frame(const WorldWorkBudget& budget, const WorldWorkStats& stats) const {

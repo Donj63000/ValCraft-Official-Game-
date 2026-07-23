@@ -75,13 +75,14 @@ void GameMusic::shutdown() noexcept {
 void GameMusic::sync_environment(const EnvironmentState& environment,
                                  const CreatureCycleState& cycle,
                                  bool has_active_session,
-                                 bool front_end_visible) noexcept {
+                                 bool front_end_visible,
+                                 const ProceduralMusicContext& context) noexcept {
     if (device_id_ == 0) {
         return;
     }
 
     SDL_LockAudioDevice(device_id_);
-    composer_.set_environment(environment, cycle, has_active_session, front_end_visible);
+    composer_.set_environment(environment, cycle, has_active_session, front_end_visible, context);
     SDL_UnlockAudioDevice(device_id_);
 }
 

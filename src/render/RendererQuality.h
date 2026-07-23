@@ -22,6 +22,8 @@ struct RendererQualitySettings {
     int glow_downsample = 2;
     float post_detail_scale = 1.0F;
     bool high_precision_hdr = true;
+    int ocean_wave_count = 6;
+    float ocean_detail_scale = 1.0F;
 
     auto operator==(const RendererQualitySettings&) const -> bool = default;
 };
@@ -46,13 +48,42 @@ struct RendererQualitySettings {
 
     switch (resolved) {
     case RendererQuality::Medium:
-        return {resolved, 4, 0.60F, 3, 0.65F, false};
+        return {
+            resolved,
+            4,
+            0.60F,
+            3,
+            0.65F,
+            false,
+            4,      // Quatre vagues géométriques.
+            0.70F,  // Petites rides réduites.
+        };
+
     case RendererQuality::Low:
-        return {resolved, 2, 0.0F, 4, 0.0F, false};
+        return {
+            resolved,
+            2,
+            0.0F,
+            4,
+            0.0F,
+            false,
+            3,      // Uniquement les trois grandes vagues.
+            0.0F,   // Aucun calcul de ride par fragment.
+        };
+
     case RendererQuality::High:
     case RendererQuality::Dynamic:
     default:
-        return {RendererQuality::High, 7, 1.0F, 2, 1.0F, true};
+        return {
+            RendererQuality::High,
+            7,
+            1.0F,
+            2,
+            1.0F,
+            true,
+            6,
+            1.0F,
+        };
     }
 }
 

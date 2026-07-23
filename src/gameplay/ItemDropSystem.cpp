@@ -355,10 +355,8 @@ void ItemDropSystem::update(float dt,
                             const glm::vec3& player_position,
                             InventoryMenuState& inventory,
                             HotbarState& hotbar,
-                            const ShipEntity* dynamic_platform,
-                            glm::vec3 platform_delta) {
+                            const ShipEntity* dynamic_platform) {
     const auto clamped_dt = non_negative_finite(dt);
-    platform_delta = finite_vec3_or(platform_delta, {});
     const auto pickup_radius_sq = kPickupRadius * kPickupRadius;
     const auto magnet_radius_sq = kMagnetRadius * kMagnetRadius;
     const auto player_position_is_finite = is_finite_vec3(player_position);
@@ -380,19 +378,35 @@ void ItemDropSystem::update(float dt,
         drop.age_seconds = normalized_drop_age(drop.age_seconds + clamped_dt);
         drop.pickup_cooldown = std::max(0.0F, drop.pickup_cooldown - clamped_dt);
 
-        if (dynamic_platform != nullptr && glm::dot(platform_delta, platform_delta) > 1.0e-10F) {
-            auto carried_position = drop.position + platform_delta;
-            const auto support_height = dynamic_platform->support_height(carried_position);
-            if (support_height.has_value() &&
-                std::abs(drop.position.y - *support_height) <= 0.03F) {
-                // Je conserve la position relative d'un drop pose sur le pont;
-                // il reste actif car un support mobile invalide le sommeil monde.
-                carried_position.y = *support_height + kDropCollisionEpsilon;
-                drop.position = carried_position;
-                drop.sleeping = false;
-                drop.grounded = true;
-                drop.sleep_support_valid = false;
-                drop.sleep_candidate_seconds = 0.0F;
+        if (dynamic_platform != nullptr) {
+            const auto previous_support =
+                dynamic_platform->previous_support_height(
+                    drop.position);
+            if (previous_support.has_value() &&
+                std::abs(
+                    drop.position.y -
+                    *previous_support) <= 0.03F) {
+                // Le point est d'abord transporte par la pose rigide complete.
+                // Un second sondage le recale ensuite sur le pont incline.
+                auto carried_position =
+                    drop.position +
+                    dynamic_platform->motion_delta_at(
+                        drop.position);
+                if (const auto current_support =
+                        dynamic_platform->support_height(
+                            carried_position);
+                    current_support.has_value()) {
+                    carried_position.y =
+                        *current_support +
+                        kDropCollisionEpsilon;
+                    drop.position =
+                        carried_position;
+                    drop.velocity = {};
+                    drop.sleeping = false;
+                    drop.grounded = true;
+                    drop.sleep_support_valid = false;
+                    drop.sleep_candidate_seconds = 0.0F;
+                }
             }
         }
 

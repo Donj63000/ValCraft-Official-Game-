@@ -6,6 +6,8 @@
 #include "world/Block.h"
 #include "world/Environment.h"
 
+#include <glm/gtc/quaternion.hpp>
+#include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
 
 #include <cstddef>
@@ -19,6 +21,8 @@ namespace valcraft {
 
 class PlayerController;
 class World;
+struct ItemDrop;
+struct PlayerState;
 
 enum class SeaVoyagePhase : std::uint8_t {
     Moored = 0,
@@ -157,10 +161,14 @@ struct ShipBounds {
 };
 
 struct ShipClimbContact {
-    // Je fournis toutes les donnees en coordonnees monde pour que le controleur
-    // puisse s'accrocher au filet sans connaitre l'origine locale du navire.
+    // L'AABB monde reste pratique pour les diagnostics et les tests historiques.
+    // Les donnees locales et la base orientee permettent au controleur de suivre
+    // exactement un filet incline par le tangage et le roulis du navire.
     ShipBounds bounds {};
+    ShipBounds local_bounds {};
     glm::vec3 outward_normal {0.0F};
+    glm::vec3 plane_point {0.0F};
+    glm::vec3 up_direction {0.0F, 1.0F, 0.0F};
     glm::vec3 deck_exit {0.0F};
 };
 
@@ -197,9 +205,11 @@ struct ShipBlueprint {
 struct ShipRenderState {
     bool visible = false;
     glm::vec3 world_origin {0.0F};
+    glm::mat4 model_matrix {1.0F};
     const ShipBlueprint* blueprint = nullptr;
     std::span<const ShipPart> parts {};
     ShipBounds local_bounds {};
+    ShipBounds world_bounds {};
     std::uint64_t geometry_revision = 0U;
 };
 
@@ -215,18 +225,43 @@ public:
     void set_position(const glm::vec3& position) noexcept;
     void set_velocity(const glm::vec3& velocity) noexcept;
 
+    // La pose precedente est capturee une seule fois avant chaque pas physique.
+    // Tous les occupants utilisent ensuite la meme transformation rigide.
+    void begin_motion_step() noexcept;
+    void synchronize_motion_history() noexcept;
+    void set_ocean_pose(float heave,
+                        float pitch_radians,
+                        float roll_radians) noexcept;
+
     [[nodiscard]] auto position() const noexcept -> const glm::vec3&;
     [[nodiscard]] auto velocity() const noexcept -> const glm::vec3&;
+    [[nodiscard]] auto orientation() const noexcept -> const glm::quat&;
     [[nodiscard]] auto world_origin() const noexcept -> glm::vec3;
+    [[nodiscard]] auto previous_world_origin() const noexcept -> glm::vec3;
+    [[nodiscard]] auto model_matrix() const noexcept -> glm::mat4;
+    [[nodiscard]] auto previous_model_matrix() const noexcept -> glm::mat4;
+    [[nodiscard]] auto world_bounds() const noexcept -> ShipBounds;
+
+    [[nodiscard]] auto local_to_world_point(const glm::vec3& local_point) const noexcept -> glm::vec3;
+    [[nodiscard]] auto world_to_local_point(const glm::vec3& world_point) const noexcept -> glm::vec3;
+    [[nodiscard]] auto world_point_in_persisted_neutral_pose(
+        const glm::vec3& current_world_point) const noexcept -> glm::vec3;
+    [[nodiscard]] auto local_to_world_direction(const glm::vec3& local_direction) const noexcept -> glm::vec3;
+    [[nodiscard]] auto world_to_local_direction(const glm::vec3& world_direction) const noexcept -> glm::vec3;
+    [[nodiscard]] auto motion_delta_at(const glm::vec3& previous_world_point) const noexcept -> glm::vec3;
+
     [[nodiscard]] auto render_state(bool visible) const noexcept -> ShipRenderState;
     [[nodiscard]] auto support_height(const glm::vec3& feet_position) const noexcept -> std::optional<float>;
+    [[nodiscard]] auto previous_support_height(const glm::vec3& feet_position) const noexcept
+        -> std::optional<float>;
     [[nodiscard]] auto support_height_in_range(const glm::vec3& feet_position,
                                                float min_height,
                                                float max_height) const noexcept -> std::optional<float>;
     [[nodiscard]] auto climb_contact(const glm::vec3& min_corner,
                                      const glm::vec3& max_corner) const noexcept
         -> std::optional<ShipClimbContact>;
-    [[nodiscard]] auto intersects_aabb(const glm::vec3& min_corner, const glm::vec3& max_corner) const noexcept -> bool;
+    [[nodiscard]] auto intersects_aabb(const glm::vec3& min_corner,
+                                       const glm::vec3& max_corner) const noexcept -> bool;
     [[nodiscard]] auto raycast_collidable_distance(const glm::vec3& origin,
                                                    const glm::vec3& direction,
                                                    float max_distance) const noexcept -> std::optional<float>;
@@ -234,7 +269,24 @@ public:
 private:
     glm::vec3 position_ {0.5F, 49.0F, 0.5F};
     glm::vec3 velocity_ {0.0F};
+    float ocean_heave_ = 0.0F;
+    glm::quat orientation_ {1.0F, 0.0F, 0.0F, 0.0F};
+
+    glm::vec3 previous_position_ {0.5F, 49.0F, 0.5F};
+    float previous_ocean_heave_ = 0.0F;
+    glm::quat previous_orientation_ {1.0F, 0.0F, 0.0F, 0.0F};
+    bool motion_history_valid_ = false;
 };
+
+// Je normalise uniquement les occupants dont les pieds reposent reellement
+// sur le navire afin de conserver sans alteration les nageurs et les objets en vol.
+[[nodiscard]] auto normalize_supported_player_for_ship_save(
+    const ShipEntity& ship,
+    PlayerState& player_state,
+    bool player_is_climbing_ship) noexcept -> bool;
+[[nodiscard]] auto normalize_supported_item_drop_for_ship_save(
+    const ShipEntity& ship,
+    ItemDrop& drop) noexcept -> bool;
 
 struct ShipOccupantReconciliation {
     glm::vec3 position {0.0F};
@@ -317,6 +369,15 @@ private:
     double precise_route_distance_ = 0.0;
     std::uint32_t route_seed_ = 0U;
     std::optional<LegacyShipMigrationState> legacy_ship_migration_ {};
+
+    // Ces valeurs sont volontairement transitoires : elles sont reconstruites
+    // depuis la meteo et ne modifient pas le format des sauvegardes existantes.
+    float ocean_heave_ = 0.0F;
+    float ocean_heave_velocity_ = 0.0F;
+    float ocean_pitch_ = 0.0F;
+    float ocean_pitch_velocity_ = 0.0F;
+    float ocean_roll_ = 0.0F;
+    float ocean_roll_velocity_ = 0.0F;
 };
 
 } // namespace valcraft

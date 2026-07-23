@@ -2,6 +2,7 @@
 
 #include "creatures/CreatureTypes.h"
 
+#include <glm/gtc/quaternion.hpp>
 #include <glm/mat4x4.hpp>
 
 #include <array>
@@ -112,6 +113,9 @@ struct CrewRenderInstance {
     CrewVisualRole role = CrewVisualRole::Deckhand;
     CrewVisualActivity activity = CrewVisualActivity::Idle;
     float motion_amount = 0.0F;
+    // Je separe la phase de marche de la progression de la tache afin qu'une
+    // arrivee a un poste ne transforme jamais brutalement une pose de jambe.
+    float locomotion_phase = 0.0F;
     float activity_phase = 0.0F;
     float hurt_amount = 0.0F;
     float knockout_amount = 0.0F;
@@ -119,6 +123,10 @@ struct CrewRenderInstance {
     float sky_light = 1.0F;
     float local_light = 0.0F;
     float precipitation_exposure = 1.0F;
+
+    // Orientation de la plateforme sous les pieds. Elle reste separee du lacet
+    // propre du marin afin que ses animations soient exprimees dans le navire.
+    glm::quat platform_orientation {1.0F, 0.0F, 0.0F, 0.0F};
 };
 
 struct CreatureVertex {

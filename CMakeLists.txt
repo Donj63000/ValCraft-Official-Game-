@@ -175,6 +175,7 @@ add_library(valcraft_core
     src/app/ProcessMemory.cpp
     src/app/SaveGame.cpp
     src/audio/ProceduralMusic.cpp
+    src/creatures/CrewAnimation.cpp
     src/creatures/CreatureGeometry.cpp
     src/creatures/CreatureSystem.cpp
     src/world/Chunk.cpp
@@ -183,6 +184,7 @@ add_library(valcraft_core
     src/world/WorldGenerator.cpp
     src/world/ChunkMesher.cpp
     src/world/Environment.cpp
+    src/world/OceanSimulation.cpp
     src/gameplay/PlayerController.cpp
     src/gameplay/PlayerProgression.cpp
     src/gameplay/SeaAdventure.cpp
@@ -257,6 +259,7 @@ add_executable(valcraft_tests
     tests/main.cpp
     tests/AppTests.cpp
     tests/AudioTests.cpp
+    tests/CrewAnimationTests.cpp
     tests/CreatureTests.cpp
     tests/RenderTests.cpp
     tests/ShipCrewTests.cpp

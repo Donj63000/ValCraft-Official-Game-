@@ -1,3 +1,4 @@
+#include "creatures/CrewAnimation.h"
 #include "gameplay/SeaAdventure.h"
 #include "gameplay/ShipCrew.h"
 
@@ -203,22 +204,66 @@ TEST_CASE("le roster canonique contient un capitaine et cinq matelots distincts"
 }
 
 TEST_CASE("les marins restent exactement dans le repere local du navire") {
+    constexpr float kRadiansPerDegree =
+        0.01745329251994329577F;
+
     ShipEntity ship {};
     ship.set_position({0.5F, 49.0F, 0.5F});
+    ship.set_ocean_pose(0.0F, 0.0F, 0.0F);
+    ship.synchronize_motion_history();
+
     ShipCrewSystem crew {};
     crew.reset(731, ship);
     std::uint32_t fish = 0U;
     std::uint32_t water = 0U;
     (void)crew.update(ship, {}, 0.0F, fish, water);
-    const auto local_before = crew.members()[0].local_position;
-    const auto world_before = crew.render_instances()[0].position;
+    const auto local_before =
+        crew.members()[0].local_position;
+    const auto visual_local_before =
+        ship.world_to_local_point(
+            crew.render_instances()[0].position);
 
+    ship.begin_motion_step();
     ship.set_position({0.5F, 49.0F, 500'000.5F});
+    ship.set_ocean_pose(
+        0.45F,
+        6.0F * kRadiansPerDegree,
+        -9.0F * kRadiansPerDegree);
     (void)crew.update(ship, {}, 0.0F, fish, water);
-    CHECK(crew.members()[0].local_position.x == doctest::Approx(local_before.x));
-    CHECK(crew.members()[0].local_position.y == doctest::Approx(local_before.y));
-    CHECK(crew.members()[0].local_position.z == doctest::Approx(local_before.z));
-    CHECK(crew.render_instances()[0].position.z - world_before.z == doctest::Approx(500'000.0F));
+
+    CHECK(crew.members()[0].local_position.x ==
+          doctest::Approx(local_before.x));
+    CHECK(crew.members()[0].local_position.y ==
+          doctest::Approx(local_before.y));
+    CHECK(crew.members()[0].local_position.z ==
+          doctest::Approx(local_before.z));
+
+    const auto expected_world =
+        ship.local_to_world_point(
+            visual_local_before);
+    const auto& render =
+        crew.render_instances()[0];
+    CHECK(render.position.x ==
+          doctest::Approx(expected_world.x).epsilon(0.0001F));
+    CHECK(render.position.y ==
+          doctest::Approx(expected_world.y).epsilon(0.0001F));
+    CHECK(render.position.z ==
+          doctest::Approx(expected_world.z).epsilon(0.0001F));
+
+    const auto& expected_orientation =
+        ship.orientation();
+    const auto quaternion_alignment =
+        std::abs(
+            render.platform_orientation.w *
+                expected_orientation.w +
+            render.platform_orientation.x *
+                expected_orientation.x +
+            render.platform_orientation.y *
+                expected_orientation.y +
+            render.platform_orientation.z *
+                expected_orientation.z);
+    CHECK(quaternion_alignment ==
+          doctest::Approx(1.0F).epsilon(0.0001F));
 }
 
 TEST_CASE("la marche reste alignee avec l'avant reel du corps") {
@@ -267,6 +312,391 @@ TEST_CASE("la marche reste alignee avec l'avant reel du corps") {
         observed_translation = true;
     }
     CHECK(observed_translation);
+}
+
+TEST_CASE("la phase spatiale verrouille le pied puis se fige et reprend sans saut") {
+    constexpr float kFrameSeconds = 1.0F / 60.0F;
+    struct LocomotionCase {
+        ShipCrewCargo cargo;
+        CrewVisualActivity activity;
+        CrewGaitStyle style;
+    };
+    constexpr std::array<LocomotionCase, 2> kCases {{
+        {ShipCrewCargo::None, CrewVisualActivity::Walk, CrewGaitStyle::Walk},
+        {ShipCrewCargo::Fish, CrewVisualActivity::Carry, CrewGaitStyle::Carry},
+    }};
+
+    for (std::size_t case_index = 0; case_index < kCases.size(); ++case_index) {
+        ShipEntity ship {};
+        ship.set_position({0.5F, 49.0F, 0.5F});
+        ShipCrewSystem crew {};
+        crew.reset(8'100 + static_cast<std::uint32_t>(case_index), ship);
+
+        auto state = crew.save_state();
+        auto& fisher = state.members[1];
+        place_at_station(fisher, ShipCrewStation::PortFishing);
+        fisher.cargo = kCases[case_index].cargo;
+        fisher.activity = kCases[case_index].cargo == ShipCrewCargo::None
+                              ? ShipCrewActivity::Idle
+                              : ShipCrewActivity::Carry;
+        fisher.next_station = ShipCrewStation::MidDeckPort;
+        fisher.destination_station = ShipCrewStation::MidDeckPort;
+        auto route_direction =
+            station_position(ShipCrewStation::MidDeckPort) -
+            station_position(ShipCrewStation::PortFishing);
+        route_direction.y = 0.0F;
+        route_direction = glm::normalize(route_direction);
+        fisher.yaw_radians =
+            std::atan2(-route_direction.z, route_direction.x);
+        crew.load_state(
+            state,
+            8'100 + static_cast<std::uint32_t>(case_index),
+            ship);
+
+        std::uint32_t fish = 0U;
+        std::uint32_t water = 0U;
+        auto travelled_distance = 0.0F;
+        auto support_checks = 0U;
+        const auto initial_activity_phase =
+            crew.render_instances()[1].activity_phase;
+        auto previous_member = crew.members()[1];
+        const auto initial_render = crew.render_instances()[1];
+        auto previous_pose = sample_crew_locomotion(
+            initial_render.locomotion_phase,
+            initial_render.motion_amount,
+            kCases[case_index].style);
+
+        const auto foot_position = [](
+                                       const ShipCrewMemberSaveState& member,
+                                       const CrewLegPose& leg,
+                                       std::size_t leg_index) {
+            const glm::vec3 forward {
+                std::cos(member.yaw_radians),
+                0.0F,
+                -std::sin(member.yaw_radians),
+            };
+            const glm::vec3 lateral {
+                std::sin(member.yaw_radians),
+                0.0F,
+                std::cos(member.yaw_radians),
+            };
+            const auto side = leg_index == 0U ? -1.0F : 1.0F;
+            return member.local_position +
+                   forward * (leg.foot_center.x + leg.foot_pivot.x) +
+                   lateral * (side * 0.10F);
+        };
+
+        for (int frame = 0; frame < 240 && travelled_distance < 0.75F; ++frame) {
+            (void)crew.update(ship, {}, kFrameSeconds, fish, water);
+            const auto& current_member = crew.members()[1];
+            const auto& current_render = crew.render_instances()[1];
+            const auto step_distance =
+                glm::length(current_member.local_position - previous_member.local_position);
+            travelled_distance += step_distance;
+
+            CAPTURE(case_index);
+            CAPTURE(frame);
+            CHECK(current_render.activity == kCases[case_index].activity);
+            CHECK(std::abs(
+                      current_render.activity_phase -
+                      initial_activity_phase) <= 1.0e-6F);
+            CHECK(current_render.locomotion_phase >= 0.0F);
+            CHECK(current_render.locomotion_phase < 1.0F);
+            const auto expected_phase =
+                std::fmod(travelled_distance, kCrewLocomotionCycleDistance) /
+                kCrewLocomotionCycleDistance;
+            CHECK(std::abs(
+                      current_render.locomotion_phase -
+                      expected_phase) <= 2.0e-4F);
+
+            const auto current_pose = sample_crew_locomotion(
+                current_render.locomotion_phase,
+                current_render.motion_amount,
+                kCases[case_index].style);
+            for (std::size_t leg_index = 0; leg_index < 2U; ++leg_index) {
+                if (!previous_pose.legs[leg_index].supporting ||
+                    !current_pose.legs[leg_index].supporting ||
+                    glm::length(
+                        previous_pose.legs[leg_index].foot_pivot -
+                        current_pose.legs[leg_index].foot_pivot) > 1.0e-5F ||
+                    step_distance <= 0.0F) {
+                    continue;
+                }
+                auto foot_delta =
+                    foot_position(current_member, current_pose.legs[leg_index], leg_index) -
+                    foot_position(previous_member, previous_pose.legs[leg_index], leg_index);
+                foot_delta.y = 0.0F;
+                CHECK(glm::length(foot_delta) <= 0.03F);
+                ++support_checks;
+            }
+
+            previous_member = current_member;
+            previous_pose = current_pose;
+        }
+        REQUIRE(travelled_distance >= 0.75F);
+        REQUIRE(support_checks > 10U);
+
+        const auto frozen_position = crew.members()[1].local_position;
+        const auto frozen_phase = crew.render_instances()[1].locomotion_phase;
+        auto remaining_direction =
+            station_position(ShipCrewStation::MidDeckPort) - frozen_position;
+        remaining_direction.y = 0.0F;
+        remaining_direction = glm::normalize(remaining_direction);
+        const auto blocker_world_position = ship.local_to_world_point(
+            frozen_position + remaining_direction * 0.72F);
+
+        for (int frame = 0; frame < 75; ++frame) {
+            (void)crew.update(
+                ship,
+                {},
+                kFrameSeconds,
+                fish,
+                water,
+                blocker_world_position);
+            CAPTURE(case_index);
+            CAPTURE(frame);
+            CHECK(glm::length(crew.members()[1].local_position - frozen_position) <
+                  1.0e-5F);
+            CHECK(std::abs(
+                      crew.render_instances()[1].locomotion_phase -
+                      frozen_phase) <= 1.0e-6F);
+        }
+
+        const auto stopped_render = crew.render_instances()[1];
+        const auto stopped_pose = sample_crew_locomotion(
+            stopped_render.locomotion_phase,
+            stopped_render.motion_amount,
+            kCases[case_index].style);
+        CHECK(stopped_render.motion_amount < 1.0e-4F);
+        for (const auto& leg : stopped_pose.legs) {
+            CHECK(leg.supporting);
+            CHECK(leg.sole_height <= 0.025F);
+        }
+
+        auto resumed = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            const auto before = crew.members()[1].local_position;
+            const auto phase_before = crew.render_instances()[1].locomotion_phase;
+            (void)crew.update(ship, {}, kFrameSeconds, fish, water);
+            const auto moved = glm::length(crew.members()[1].local_position - before);
+            if (moved <= 0.0F) {
+                continue;
+            }
+            const auto phase_after = crew.render_instances()[1].locomotion_phase;
+            const auto phase_advance =
+                std::fmod(phase_after - phase_before + 1.0F, 1.0F);
+            CHECK(std::abs(
+                      phase_advance -
+                      moved / kCrewLocomotionCycleDistance) <= 2.0e-4F);
+            CHECK(phase_advance < 0.01F);
+            resumed = true;
+            break;
+        }
+        CHECK(resumed);
+    }
+}
+
+TEST_CASE("un chargement reprend en double appui sans sauvegarder la phase") {
+    constexpr std::array<ShipCrewCargo, 2> kCargoCases {{
+        ShipCrewCargo::None,
+        ShipCrewCargo::Fish,
+    }};
+    for (std::size_t case_index = 0; case_index < kCargoCases.size(); ++case_index) {
+        ShipEntity ship {};
+        ship.set_position({0.5F, 49.0F, 0.5F});
+        const auto seed = 8'250U + static_cast<std::uint32_t>(case_index);
+        ShipCrewSystem source {};
+        source.reset(seed, ship);
+        auto state = source.save_state();
+        auto& fisher = state.members[1];
+        place_at_station(fisher, ShipCrewStation::PortFishing);
+        fisher.cargo = kCargoCases[case_index];
+        fisher.activity = kCargoCases[case_index] == ShipCrewCargo::None
+                              ? ShipCrewActivity::Idle
+                              : ShipCrewActivity::Carry;
+        fisher.next_station = ShipCrewStation::MidDeckPort;
+        fisher.destination_station = ShipCrewStation::MidDeckPort;
+        auto direction =
+            station_position(ShipCrewStation::MidDeckPort) -
+            station_position(ShipCrewStation::PortFishing);
+        direction.y = 0.0F;
+        direction = glm::normalize(direction);
+        fisher.yaw_radians = std::atan2(-direction.z, direction.x);
+        source.load_state(state, seed, ship);
+
+        std::uint32_t fish = 0U;
+        std::uint32_t water = 0U;
+        for (int frame = 0; frame < 180; ++frame) {
+            (void)source.update(ship, {}, 1.0F / 60.0F, fish, water);
+            if (source.render_instances()[1].locomotion_phase > 0.15F &&
+                source.render_instances()[1].motion_amount > 0.50F) {
+                break;
+            }
+        }
+        REQUIRE(source.render_instances()[1].locomotion_phase > 0.15F);
+        const auto saved_position = source.members()[1].local_position;
+        const auto saved = source.save_state();
+
+        ShipCrewSystem restored {};
+        restored.load_state(saved, seed, ship);
+        const auto& initial_render = restored.render_instances()[1];
+        CAPTURE(case_index);
+        CHECK(glm::length(restored.members()[1].local_position - saved_position) <
+              1.0e-5F);
+        CHECK(std::abs(initial_render.locomotion_phase) <= 1.0e-6F);
+        CHECK(std::abs(initial_render.motion_amount) <= 1.0e-6F);
+        const auto style = kCargoCases[case_index] == ShipCrewCargo::None
+                               ? CrewGaitStyle::Walk
+                               : CrewGaitStyle::Carry;
+        const auto initial_pose = sample_crew_locomotion(
+            initial_render.locomotion_phase,
+            initial_render.motion_amount,
+            style);
+        for (const auto& leg : initial_pose.legs) {
+            CHECK(leg.supporting);
+            CHECK(leg.sole_height <= 0.025F);
+        }
+
+        auto resumed = false;
+        for (int frame = 0; frame < 30; ++frame) {
+            const auto before = restored.members()[1].local_position;
+            (void)restored.update(ship, {}, 1.0F / 60.0F, fish, water);
+            const auto moved =
+                glm::length(restored.members()[1].local_position - before);
+            if (moved <= 0.0F) {
+                continue;
+            }
+            CHECK(std::abs(
+                      restored.render_instances()[1].locomotion_phase -
+                      moved / kCrewLocomotionCycleDistance) <= 2.0e-4F);
+            CHECK(restored.render_instances()[1].locomotion_phase < 0.01F);
+            resumed = true;
+            break;
+        }
+        CHECK(resumed);
+    }
+}
+
+TEST_CASE("les deux escaliers conservent la demarche sous tangage et roulis") {
+    struct StairRoute {
+        ShipCrewStation start;
+        ShipCrewStation middle;
+        ShipCrewStation destination;
+    };
+    constexpr std::array<StairRoute, 2> kRoutes {{
+        {
+            ShipCrewStation::AftStairsTop,
+            ShipCrewStation::AftStairsMid,
+            ShipCrewStation::AftStairsBottom,
+        },
+        {
+            ShipCrewStation::ForeStairsTop,
+            ShipCrewStation::ForeStairsMid,
+            ShipCrewStation::ForeStairsBottom,
+        },
+    }};
+    constexpr std::array<ShipCrewStation, 5> kParkingStations {{
+        ShipCrewStation::Helm,
+        ShipCrewStation::PortFishing,
+        ShipCrewStation::WaterStill,
+        ShipCrewStation::Capstan,
+        ShipCrewStation::CargoFish,
+    }};
+
+    for (std::size_t route_index = 0; route_index < kRoutes.size(); ++route_index) {
+        ShipEntity ship {};
+        ship.set_position({0.5F, 49.0F, 0.5F});
+        ship.set_ocean_pose(0.38F, 0.085F, -0.11F);
+        ship.synchronize_motion_history();
+
+        ShipCrewSystem crew {};
+        const auto seed = 8'300U + static_cast<std::uint32_t>(route_index);
+        crew.reset(seed, ship);
+        auto state = crew.save_state();
+        for (std::size_t member_index = 0; member_index < state.members.size(); ++member_index) {
+            if (member_index == 4U) {
+                continue;
+            }
+            const auto parking_index = member_index < 4U ? member_index : 4U;
+            place_at_station(state.members[member_index], kParkingStations[parking_index]);
+            state.members[member_index].health = 0.0F;
+            state.members[member_index].recovery_timer = 60.0F;
+        }
+
+        auto& deckhand = state.members[4];
+        place_at_station(deckhand, kRoutes[route_index].start);
+        deckhand.next_station = kRoutes[route_index].middle;
+        deckhand.destination_station = kRoutes[route_index].destination;
+        deckhand.activity = ShipCrewActivity::Idle;
+        auto first_direction =
+            station_position(kRoutes[route_index].middle) -
+            station_position(kRoutes[route_index].start);
+        first_direction.y = 0.0F;
+        first_direction = glm::normalize(first_direction);
+        deckhand.yaw_radians =
+            std::atan2(-first_direction.z, first_direction.x);
+        crew.load_state(state, seed, ship);
+
+        std::uint32_t fish = 0U;
+        std::uint32_t water = 0U;
+        auto travelled_distance = 0.0F;
+        auto minimum_height = deckhand.local_position.y;
+        auto maximum_height = deckhand.local_position.y;
+        auto visited_middle = false;
+        auto reached_destination = false;
+        auto previous_position = crew.members()[4].local_position;
+
+        for (int frame = 0; frame < 720; ++frame) {
+            (void)crew.update(ship, {}, 1.0F / 60.0F, fish, water);
+            const auto& member = crew.members()[4];
+            const auto& render = crew.render_instances()[4];
+            const auto step_distance =
+                glm::length(member.local_position - previous_position);
+            travelled_distance += step_distance;
+            previous_position = member.local_position;
+            minimum_height = std::min(minimum_height, member.local_position.y);
+            maximum_height = std::max(maximum_height, member.local_position.y);
+            visited_middle =
+                visited_middle || member.current_station == kRoutes[route_index].middle;
+
+            CAPTURE(route_index);
+            CAPTURE(frame);
+            CHECK(std::isfinite(render.locomotion_phase));
+            CHECK(render.locomotion_phase >= 0.0F);
+            CHECK(render.locomotion_phase < 1.0F);
+            const auto expected_phase =
+                std::fmod(travelled_distance, kCrewLocomotionCycleDistance) /
+                kCrewLocomotionCycleDistance;
+            CHECK(std::abs(render.locomotion_phase - expected_phase) <= 2.0e-4F);
+
+            const auto pose = sample_crew_locomotion(
+                render.locomotion_phase,
+                render.motion_amount,
+                CrewGaitStyle::Walk);
+            CHECK(pose.legs[0].sole_height >= -0.01F);
+            CHECK(pose.legs[1].sole_height >= -0.01F);
+            CHECK((pose.legs[0].sole_height <= 0.025F ||
+                   pose.legs[1].sole_height <= 0.025F));
+
+            const auto& orientation = ship.orientation();
+            const auto orientation_alignment = std::abs(
+                render.platform_orientation.w * orientation.w +
+                render.platform_orientation.x * orientation.x +
+                render.platform_orientation.y * orientation.y +
+                render.platform_orientation.z * orientation.z);
+            CHECK(orientation_alignment ==
+                  doctest::Approx(1.0F).epsilon(0.0001F));
+
+            if (member.current_station == kRoutes[route_index].destination) {
+                reached_destination = true;
+                break;
+            }
+        }
+
+        CHECK(visited_middle);
+        CHECK(reached_destination);
+        CHECK(maximum_height - minimum_height >= 2.95F);
+    }
 }
 
 

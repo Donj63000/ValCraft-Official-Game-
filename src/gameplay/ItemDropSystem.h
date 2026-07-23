@@ -69,8 +69,7 @@ public:
                 const glm::vec3& player_position,
                 InventoryMenuState& inventory,
                 HotbarState& hotbar,
-                const ShipEntity* dynamic_platform = nullptr,
-                glm::vec3 platform_delta = {});
+                const ShipEntity* dynamic_platform = nullptr);
     void build_render_instances(const World& world, std::vector<ItemDropRenderInstance>& out) const;
 
     [[nodiscard]] auto active_drop_count() const noexcept -> std::size_t;

@@ -1,11 +1,15 @@
 #include "gameplay/SeaAdventure.h"
 
+#include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
 #include "world/World.h"
+#include "world/OceanSimulation.h"
 #include "world/WorldGenerator.h"
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
 #include <array>
@@ -33,6 +37,7 @@ constexpr float kShipSupportSampleRadius = 0.28F;
 constexpr float kShipSupportProbeDepth = 0.22F;
 constexpr float kShipRideContactTolerance = 0.12F;
 constexpr float kShipRideVerticalSpeedTolerance = 1.0e-4F;
+constexpr float kShipDropSaveContactTolerance = 0.03F;
 constexpr float kStrandedWarningDistance = 170.0F;
 constexpr float kStrandedLossDistance = 245.0F;
 constexpr float kFishingBaseSeconds = 6.5F;
@@ -116,6 +121,69 @@ auto smoothstep_motion_seconds(float elapsed_before, float elapsed_after) noexce
     const auto after_ratio = elapsed_after / kDepartureAccelerationSeconds;
     return kDepartureAccelerationSeconds *
            (smoothstep_primitive(after_ratio) - smoothstep_primitive(before_ratio));
+}
+
+void integrate_critical_spring(float& value,
+                               float& velocity,
+                               float target,
+                               float frequency_hz,
+                               float dt) noexcept {
+    if (dt <= 0.0F) {
+        return;
+    }
+
+    constexpr float kTwoPi = 6.28318530717958647692F;
+    const auto angular_frequency =
+        kTwoPi * std::max(frequency_hz, 0.01F);
+    const auto frequency_squared =
+        angular_frequency * angular_frequency;
+    const auto damping_term =
+        1.0F + 2.0F * dt * angular_frequency;
+    const auto position_term =
+        dt * dt * frequency_squared;
+    const auto inverse_determinant =
+        1.0F / (damping_term + position_term);
+
+    const auto previous_value = value;
+    const auto previous_velocity = velocity;
+    value =
+        (damping_term * previous_value +
+         dt * previous_velocity +
+         position_term * target) *
+        inverse_determinant;
+    velocity =
+        (previous_velocity +
+         dt * frequency_squared *
+             (target - previous_value)) *
+        inverse_determinant;
+
+    if (!std::isfinite(value)) {
+        value = target;
+    }
+    if (!std::isfinite(velocity)) {
+        velocity = 0.0F;
+    }
+}
+
+auto sea_motion_scale(const SeaAdventureSaveState& state) noexcept -> float {
+    switch (state.voyage_phase) {
+    case SeaVoyagePhase::Moored:
+        // Les amarres absorbent une grande partie du roulis au port.
+        return 0.38F;
+
+    case SeaVoyagePhase::Departing:
+        return std::clamp(
+            0.38F +
+                0.62F *
+                    (state.voyage_phase_elapsed /
+                     kDepartureAccelerationSeconds),
+            0.38F,
+            1.0F);
+
+    case SeaVoyagePhase::Underway:
+    default:
+        return 1.0F;
+    }
 }
 
 auto advance_voyage_phase(SeaAdventureSaveState& state,
@@ -2028,6 +2096,7 @@ auto amelie_parts() -> const std::vector<ShipPart>& {
 
 struct ShipCollisionIndex {
     std::unordered_map<BlockCoord, std::vector<std::uint32_t>, BlockCoordHash> cells {};
+    std::unordered_map<BlockCoord, std::vector<std::uint32_t>, BlockCoordHash> support_columns {};
 };
 
 auto ship_collision_index() -> const ShipCollisionIndex& {
@@ -2036,9 +2105,6 @@ auto ship_collision_index() -> const ShipCollisionIndex& {
         const auto& parts = amelie_parts();
         for (std::size_t part_index = 0; part_index < parts.size(); ++part_index) {
             const auto& part = parts[part_index];
-            if (!part.collidable) {
-                continue;
-            }
             const auto bounds = part_bounds(part);
             const auto min_x = static_cast<int>(std::floor(bounds.min.x));
             const auto min_y = static_cast<int>(std::floor(bounds.min.y));
@@ -2046,10 +2112,26 @@ auto ship_collision_index() -> const ShipCollisionIndex& {
             const auto max_x = static_cast<int>(std::floor(bounds.max.x - kCollisionEpsilon));
             const auto max_y = static_cast<int>(std::floor(bounds.max.y - kCollisionEpsilon));
             const auto max_z = static_cast<int>(std::floor(bounds.max.z - kCollisionEpsilon));
-            for (int y = min_y; y <= max_y; ++y) {
+
+            if (part.collidable) {
+                for (int y = min_y; y <= max_y; ++y) {
+                    for (int z = min_z; z <= max_z; ++z) {
+                        for (int x = min_x; x <= max_x; ++x) {
+                            output.cells[{x, y, z}].push_back(
+                                static_cast<std::uint32_t>(part_index));
+                        }
+                    }
+                }
+            }
+
+            if (part.supports_player) {
+                // Une colonne 2D suffit pour les faces de support. Cela evite
+                // de reparcourir les quelque 1 280 pieces du blueprint a chaque
+                // sondage des pieds du joueur ou d'un objet depose.
                 for (int z = min_z; z <= max_z; ++z) {
                     for (int x = min_x; x <= max_x; ++x) {
-                        output.cells[{x, y, z}].push_back(static_cast<std::uint32_t>(part_index));
+                        output.support_columns[{x, 0, z}].push_back(
+                            static_cast<std::uint32_t>(part_index));
                     }
                 }
             }
@@ -2063,6 +2145,388 @@ auto aabbs_overlap(const ShipBounds& lhs, const ShipBounds& rhs) noexcept -> boo
     return lhs.min.x < rhs.max.x - kCollisionEpsilon && lhs.max.x > rhs.min.x + kCollisionEpsilon &&
            lhs.min.y < rhs.max.y - kCollisionEpsilon && lhs.max.y > rhs.min.y + kCollisionEpsilon &&
            lhs.min.z < rhs.max.z - kCollisionEpsilon && lhs.max.z > rhs.min.z + kCollisionEpsilon;
+}
+
+auto normalized_quaternion_or_identity(const glm::quat& value) noexcept -> glm::quat {
+    const auto length_squared =
+        value.w * value.w +
+        value.x * value.x +
+        value.y * value.y +
+        value.z * value.z;
+
+    if (!std::isfinite(value.w) ||
+        !std::isfinite(value.x) ||
+        !std::isfinite(value.y) ||
+        !std::isfinite(value.z) ||
+        !std::isfinite(length_squared) ||
+        length_squared <= 1.0e-10F) {
+        return {1.0F, 0.0F, 0.0F, 0.0F};
+    }
+
+    return glm::normalize(value);
+}
+
+auto transform_point(const glm::vec3& origin,
+                     const glm::quat& orientation,
+                     const glm::vec3& local_point) noexcept -> glm::vec3 {
+    return origin + orientation * local_point;
+}
+
+auto inverse_transform_point(const glm::vec3& origin,
+                             const glm::quat& orientation,
+                             const glm::vec3& world_point) noexcept -> glm::vec3 {
+    return glm::conjugate(orientation) * (world_point - origin);
+}
+
+auto transformed_bounds(const ShipBounds& local_bounds,
+                        const glm::vec3& origin,
+                        const glm::quat& orientation) noexcept -> ShipBounds {
+    const std::array<glm::vec3, 8> corners {{
+        {local_bounds.min.x, local_bounds.min.y, local_bounds.min.z},
+        {local_bounds.max.x, local_bounds.min.y, local_bounds.min.z},
+        {local_bounds.min.x, local_bounds.max.y, local_bounds.min.z},
+        {local_bounds.max.x, local_bounds.max.y, local_bounds.min.z},
+        {local_bounds.min.x, local_bounds.min.y, local_bounds.max.z},
+        {local_bounds.max.x, local_bounds.min.y, local_bounds.max.z},
+        {local_bounds.min.x, local_bounds.max.y, local_bounds.max.z},
+        {local_bounds.max.x, local_bounds.max.y, local_bounds.max.z},
+    }};
+
+    auto result = ShipBounds {
+        transform_point(origin, orientation, corners.front()),
+        transform_point(origin, orientation, corners.front()),
+    };
+    for (const auto& corner : corners) {
+        const auto world_corner =
+            transform_point(origin, orientation, corner);
+        result.min = glm::min(result.min, world_corner);
+        result.max = glm::max(result.max, world_corner);
+    }
+    return result;
+}
+
+auto inverse_transformed_bounds(const ShipBounds& world_bounds,
+                                const glm::vec3& origin,
+                                const glm::quat& orientation) noexcept -> ShipBounds {
+    const std::array<glm::vec3, 8> corners {{
+        {world_bounds.min.x, world_bounds.min.y, world_bounds.min.z},
+        {world_bounds.max.x, world_bounds.min.y, world_bounds.min.z},
+        {world_bounds.min.x, world_bounds.max.y, world_bounds.min.z},
+        {world_bounds.max.x, world_bounds.max.y, world_bounds.min.z},
+        {world_bounds.min.x, world_bounds.min.y, world_bounds.max.z},
+        {world_bounds.max.x, world_bounds.min.y, world_bounds.max.z},
+        {world_bounds.min.x, world_bounds.max.y, world_bounds.max.z},
+        {world_bounds.max.x, world_bounds.max.y, world_bounds.max.z},
+    }};
+
+    auto result = ShipBounds {
+        inverse_transform_point(origin, orientation, corners.front()),
+        inverse_transform_point(origin, orientation, corners.front()),
+    };
+    for (const auto& corner : corners) {
+        const auto local_corner =
+            inverse_transform_point(origin, orientation, corner);
+        result.min = glm::min(result.min, local_corner);
+        result.max = glm::max(result.max, local_corner);
+    }
+    return result;
+}
+
+auto oriented_box_intersects_aabb(const ShipBounds& local_box,
+                                  const glm::vec3& ship_origin,
+                                  const glm::quat& ship_orientation,
+                                  const ShipBounds& world_query) noexcept -> bool {
+    const auto query_center =
+        (world_query.min + world_query.max) * 0.5F;
+    const auto query_half_extents =
+        glm::max(
+            (world_query.max - world_query.min) * 0.5F,
+            glm::vec3 {0.0F});
+
+    const auto local_center =
+        (local_box.min + local_box.max) * 0.5F;
+    const auto box_half_extents =
+        glm::max(
+            (local_box.max - local_box.min) * 0.5F,
+            glm::vec3 {0.0F});
+    const auto box_center =
+        transform_point(
+            ship_origin,
+            ship_orientation,
+            local_center);
+
+    const std::array<glm::vec3, 3> world_axes {{
+        {1.0F, 0.0F, 0.0F},
+        {0.0F, 1.0F, 0.0F},
+        {0.0F, 0.0F, 1.0F},
+    }};
+    const std::array<glm::vec3, 3> box_axes {{
+        ship_orientation * world_axes[0],
+        ship_orientation * world_axes[1],
+        ship_orientation * world_axes[2],
+    }};
+    const auto center_delta =
+        box_center - query_center;
+
+    const auto separates =
+        [&](const glm::vec3& axis) noexcept {
+            const auto axis_length_squared =
+                glm::dot(axis, axis);
+            if (axis_length_squared <= 1.0e-10F) {
+                return false;
+            }
+
+            const auto query_radius =
+                glm::dot(
+                    query_half_extents,
+                    glm::abs(axis));
+            auto box_radius = 0.0F;
+            for (int index = 0;
+                 index < 3;
+                 ++index) {
+                box_radius +=
+                    box_half_extents[index] *
+                    std::abs(
+                        glm::dot(
+                            box_axes[static_cast<std::size_t>(index)],
+                            axis));
+            }
+
+            const auto distance =
+                std::abs(
+                    glm::dot(
+                        center_delta,
+                        axis));
+            const auto epsilon =
+                kCollisionEpsilon *
+                std::sqrt(axis_length_squared);
+
+            // Un simple contact de surface ne compte pas comme penetration.
+            return distance >=
+                   query_radius +
+                       box_radius -
+                       epsilon;
+        };
+
+    for (const auto& axis : world_axes) {
+        if (separates(axis)) {
+            return false;
+        }
+    }
+    for (const auto& axis : box_axes) {
+        if (separates(axis)) {
+            return false;
+        }
+    }
+    for (const auto& world_axis : world_axes) {
+        for (const auto& box_axis : box_axes) {
+            if (separates(
+                    glm::cross(
+                        world_axis,
+                        box_axis))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+auto support_height_for_pose(const glm::vec3& feet_position,
+                             float min_height,
+                             float max_height,
+                             const glm::vec3& ship_origin,
+                             const glm::quat& ship_orientation) noexcept
+    -> std::optional<float> {
+    if (!std::isfinite(feet_position.x) ||
+        !std::isfinite(feet_position.y) ||
+        !std::isfinite(feet_position.z) ||
+        !std::isfinite(min_height) ||
+        !std::isfinite(max_height) ||
+        min_height > max_height) {
+        return std::nullopt;
+    }
+
+    const auto up_normal =
+        ship_orientation *
+        glm::vec3 {0.0F, 1.0F, 0.0F};
+    if (!std::isfinite(up_normal.y) ||
+        up_normal.y <= 0.05F) {
+        return std::nullopt;
+    }
+
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto& index =
+        ship_collision_index();
+    constexpr std::array<glm::vec2, 5> samples {{
+        {0.0F, 0.0F},
+        {kShipSupportSampleRadius, kShipSupportSampleRadius},
+        {-kShipSupportSampleRadius, kShipSupportSampleRadius},
+        {kShipSupportSampleRadius, -kShipSupportSampleRadius},
+        {-kShipSupportSampleRadius, -kShipSupportSampleRadius},
+    }};
+
+    std::optional<float> best_height;
+    for (const auto& sample : samples) {
+        const auto sample_x =
+            feet_position.x + sample.x;
+        const auto sample_z =
+            feet_position.z + sample.y;
+        const auto local_low =
+            inverse_transform_point(
+                ship_origin,
+                ship_orientation,
+                {
+                    sample_x,
+                    min_height,
+                    sample_z,
+                });
+        const auto local_high =
+            inverse_transform_point(
+                ship_origin,
+                ship_orientation,
+                {
+                    sample_x,
+                    max_height,
+                    sample_z,
+                });
+
+        const auto local_min_x =
+            std::max(
+                std::min(local_low.x, local_high.x),
+                blueprint.bounds.min.x);
+        const auto local_max_x =
+            std::min(
+                std::max(local_low.x, local_high.x),
+                blueprint.bounds.max.x);
+        const auto local_min_z =
+            std::max(
+                std::min(local_low.z, local_high.z),
+                blueprint.bounds.min.z);
+        const auto local_max_z =
+            std::min(
+                std::max(local_low.z, local_high.z),
+                blueprint.bounds.max.z);
+
+        if (local_min_x >
+                local_max_x +
+                    kCollisionEpsilon ||
+            local_min_z >
+                local_max_z +
+                    kCollisionEpsilon) {
+            continue;
+        }
+
+        const auto first_x =
+            static_cast<int>(
+                std::floor(
+                    local_min_x -
+                    kCollisionEpsilon));
+        const auto last_x =
+            static_cast<int>(
+                std::floor(
+                    local_max_x +
+                    kCollisionEpsilon));
+        const auto first_z =
+            static_cast<int>(
+                std::floor(
+                    local_min_z -
+                    kCollisionEpsilon));
+        const auto last_z =
+            static_cast<int>(
+                std::floor(
+                    local_max_z +
+                    kCollisionEpsilon));
+
+        for (int z = first_z; z <= last_z; ++z) {
+            for (int x = first_x; x <= last_x; ++x) {
+                const auto column =
+                    index.support_columns.find(
+                        {x, 0, z});
+                if (column ==
+                    index.support_columns.end()) {
+                    continue;
+                }
+
+                for (const auto part_index :
+                     column->second) {
+                    const auto& part =
+                        blueprint.parts[part_index];
+                    if (!part.supports_player) {
+                        continue;
+                    }
+
+                    const auto bounds =
+                        part_bounds(part);
+                    const auto local_plane_point =
+                        glm::vec3 {
+                            (bounds.min.x +
+                             bounds.max.x) *
+                                0.5F,
+                            bounds.max.y,
+                            (bounds.min.z +
+                             bounds.max.z) *
+                                0.5F,
+                        };
+                    const auto world_plane_point =
+                        transform_point(
+                            ship_origin,
+                            ship_orientation,
+                            local_plane_point);
+                    const auto candidate_height =
+                        (
+                            glm::dot(
+                                up_normal,
+                                world_plane_point) -
+                            up_normal.x * sample_x -
+                            up_normal.z * sample_z
+                        ) /
+                        up_normal.y;
+
+                    if (candidate_height <
+                            min_height -
+                                kCollisionEpsilon ||
+                        candidate_height >
+                            max_height +
+                                kCollisionEpsilon) {
+                        continue;
+                    }
+
+                    const auto local_hit =
+                        inverse_transform_point(
+                            ship_origin,
+                            ship_orientation,
+                            {
+                                sample_x,
+                                candidate_height,
+                                sample_z,
+                            });
+                    if (local_hit.x <
+                            bounds.min.x -
+                                kCollisionEpsilon ||
+                        local_hit.x >
+                            bounds.max.x +
+                                kCollisionEpsilon ||
+                        local_hit.z <
+                            bounds.min.z -
+                                kCollisionEpsilon ||
+                        local_hit.z >
+                            bounds.max.z +
+                                kCollisionEpsilon) {
+                        continue;
+                    }
+
+                    if (!best_height.has_value() ||
+                        candidate_height >
+                            *best_height) {
+                        best_height =
+                            candidate_height;
+                    }
+                }
+            }
+        }
+    }
+    return best_height;
 }
 
 auto ray_aabb_distance(const glm::vec3& origin,
@@ -2257,6 +2721,52 @@ void ShipEntity::set_velocity(const glm::vec3& velocity) noexcept {
     velocity_ = finite_vec3_or(velocity, {});
 }
 
+void ShipEntity::begin_motion_step() noexcept {
+    // Tous les passagers, objets et marins doivent comparer exactement les
+    // memes deux poses pendant une frame. La copie est donc centralisee ici.
+    previous_position_ = position_;
+    previous_ocean_heave_ = ocean_heave_;
+    previous_orientation_ = orientation_;
+    motion_history_valid_ = true;
+}
+
+void ShipEntity::synchronize_motion_history() noexcept {
+    // Apres un chargement ou un reset, la pose precedente doit etre identique
+    // a la pose courante afin de ne jamais produire un faux bond de plateforme.
+    previous_position_ = position_;
+    previous_ocean_heave_ = ocean_heave_;
+    previous_orientation_ = orientation_;
+    motion_history_valid_ = true;
+}
+
+void ShipEntity::set_ocean_pose(float heave,
+                                float pitch_radians,
+                                float roll_radians) noexcept {
+    ocean_heave_ = std::clamp(
+        finite_or(heave, ocean_heave_),
+        -4.0F,
+        4.0F);
+
+    const auto pitch = std::clamp(
+        finite_or(pitch_radians, 0.0F),
+        -0.55F,
+        0.55F);
+    const auto roll = std::clamp(
+        finite_or(roll_radians, 0.0F),
+        -0.65F,
+        0.65F);
+
+    // Le navire n'a pas encore de lacet pilotable : le tangage s'applique
+    // autour de son axe local X et le roulis autour de son axe local Z.
+    orientation_ = normalized_quaternion_or_identity(
+        glm::angleAxis(
+            pitch,
+            glm::vec3 {1.0F, 0.0F, 0.0F}) *
+        glm::angleAxis(
+            roll,
+            glm::vec3 {0.0F, 0.0F, 1.0F}));
+}
+
 auto ShipEntity::position() const noexcept -> const glm::vec3& {
     return position_;
 }
@@ -2265,141 +2775,292 @@ auto ShipEntity::velocity() const noexcept -> const glm::vec3& {
     return velocity_;
 }
 
+auto ShipEntity::orientation() const noexcept -> const glm::quat& {
+    return orientation_;
+}
+
 auto ShipEntity::world_origin() const noexcept -> glm::vec3 {
-    return position_ - glm::vec3 {0.5F, 0.0F, 0.5F};
+    return position_ -
+           glm::vec3 {0.5F, 0.0F, 0.5F} +
+           glm::vec3 {0.0F, ocean_heave_, 0.0F};
+}
+
+auto ShipEntity::previous_world_origin() const noexcept -> glm::vec3 {
+    if (!motion_history_valid_) {
+        return world_origin();
+    }
+
+    return previous_position_ -
+           glm::vec3 {0.5F, 0.0F, 0.5F} +
+           glm::vec3 {0.0F, previous_ocean_heave_, 0.0F};
+}
+
+auto ShipEntity::model_matrix() const noexcept -> glm::mat4 {
+    return glm::translate(
+               glm::mat4 {1.0F},
+               world_origin()) *
+           glm::mat4_cast(orientation_);
+}
+
+auto ShipEntity::previous_model_matrix() const noexcept -> glm::mat4 {
+    const auto previous_orientation =
+        motion_history_valid_
+            ? previous_orientation_
+            : orientation_;
+
+    return glm::translate(
+               glm::mat4 {1.0F},
+               previous_world_origin()) *
+           glm::mat4_cast(previous_orientation);
+}
+
+auto ShipEntity::world_bounds() const noexcept -> ShipBounds {
+    return transformed_bounds(
+        amelie_ship_blueprint().bounds,
+        world_origin(),
+        orientation_);
+}
+
+auto ShipEntity::local_to_world_point(
+    const glm::vec3& local_point) const noexcept -> glm::vec3 {
+
+    return transform_point(
+        world_origin(),
+        orientation_,
+        finite_vec3_or(local_point, {}));
+}
+
+auto ShipEntity::world_to_local_point(
+    const glm::vec3& world_point) const noexcept -> glm::vec3 {
+
+    return inverse_transform_point(
+        world_origin(),
+        orientation_,
+        finite_vec3_or(world_point, world_origin()));
+}
+
+auto ShipEntity::world_point_in_persisted_neutral_pose(
+    const glm::vec3& current_world_point) const noexcept -> glm::vec3 {
+
+    if (!std::isfinite(current_world_point.x) ||
+        !std::isfinite(current_world_point.y) ||
+        !std::isfinite(current_world_point.z)) {
+        return current_world_point;
+    }
+
+    // Je conserve la translation logique du navire dans la sauvegarde, tandis
+    // que je reconstruis la houle et son orientation a zero au chargement.
+    const auto persisted_world_origin =
+        position_ -
+        glm::vec3 {0.5F, 0.0F, 0.5F};
+    return persisted_world_origin +
+           world_to_local_point(current_world_point);
+}
+
+auto ShipEntity::local_to_world_direction(
+    const glm::vec3& local_direction) const noexcept -> glm::vec3 {
+
+    return orientation_ *
+           finite_vec3_or(local_direction, {});
+}
+
+auto ShipEntity::world_to_local_direction(
+    const glm::vec3& world_direction) const noexcept -> glm::vec3 {
+
+    return glm::conjugate(orientation_) *
+           finite_vec3_or(world_direction, {});
+}
+
+auto ShipEntity::motion_delta_at(
+    const glm::vec3& previous_world_point) const noexcept -> glm::vec3 {
+
+    if (!motion_history_valid_ ||
+        !std::isfinite(previous_world_point.x) ||
+        !std::isfinite(previous_world_point.y) ||
+        !std::isfinite(previous_world_point.z)) {
+        return {};
+    }
+
+    const auto previous_local_point =
+        inverse_transform_point(
+            previous_world_origin(),
+            previous_orientation_,
+            previous_world_point);
+    const auto current_world_point =
+        transform_point(
+            world_origin(),
+            orientation_,
+            previous_local_point);
+
+    return current_world_point -
+           previous_world_point;
 }
 
 auto ShipEntity::render_state(bool visible) const noexcept -> ShipRenderState {
     const auto& blueprint = amelie_ship_blueprint();
+
     return {
         visible,
         world_origin(),
+        model_matrix(),
         &blueprint,
         blueprint.parts,
         blueprint.bounds,
+        world_bounds(),
         blueprint.geometry_revision,
     };
 }
 
-auto ShipEntity::support_height(const glm::vec3& feet_position) const noexcept -> std::optional<float> {
+auto ShipEntity::support_height(
+    const glm::vec3& feet_position) const noexcept
+    -> std::optional<float> {
+
     return support_height_in_range(
         feet_position,
         feet_position.y - kShipSupportProbeDepth,
         feet_position.y + kShipSupportProbeDepth);
 }
 
-auto ShipEntity::support_height_in_range(const glm::vec3& feet_position,
-                                         float min_height,
-                                         float max_height) const noexcept -> std::optional<float> {
-    if (!std::isfinite(feet_position.x) || !std::isfinite(feet_position.y) || !std::isfinite(feet_position.z) ||
-        !std::isfinite(min_height) || !std::isfinite(max_height) || min_height > max_height) {
-        return std::nullopt;
-    }
-    const auto origin = world_origin();
-    const auto& blueprint = amelie_ship_blueprint();
-    const auto& index = ship_collision_index();
-    constexpr std::array<glm::vec2, 5> samples {{
-        {0.0F, 0.0F},
-        {kShipSupportSampleRadius, kShipSupportSampleRadius},
-        {-kShipSupportSampleRadius, kShipSupportSampleRadius},
-        {kShipSupportSampleRadius, -kShipSupportSampleRadius},
-        {-kShipSupportSampleRadius, -kShipSupportSampleRadius},
-    }};
+auto ShipEntity::previous_support_height(
+    const glm::vec3& feet_position) const noexcept
+    -> std::optional<float> {
 
-    std::optional<float> best_height;
-    for (const auto& sample : samples) {
-        const auto sample_x = feet_position.x + sample.x - origin.x;
-        const auto sample_z = feet_position.z + sample.y - origin.z;
-        if (sample_x < blueprint.bounds.min.x - kCollisionEpsilon ||
-            sample_x > blueprint.bounds.max.x + kCollisionEpsilon ||
-            sample_z < blueprint.bounds.min.z - kCollisionEpsilon ||
-            sample_z > blueprint.bounds.max.z + kCollisionEpsilon) {
-            continue;
-        }
-        const auto local_x = static_cast<int>(std::floor(sample_x));
-        const auto local_z = static_cast<int>(std::floor(sample_z));
-        // Je sonde aussi la cellule situee juste sous une hauteur exacte : les
-        // surfaces sont indexees dans le volume qu'elles terminent, pas au-dessus.
-        const auto first_y = static_cast<int>(std::floor(
-            std::max(min_height - origin.y, blueprint.bounds.min.y) - kCollisionEpsilon));
-        const auto last_y = static_cast<int>(std::floor(
-            std::min(max_height - origin.y, blueprint.bounds.max.y)));
-
-        for (int y = first_y; y <= last_y; ++y) {
-            const auto cell = index.cells.find({local_x, y, local_z});
-            if (cell == index.cells.end()) {
-                continue;
-            }
-            for (const auto part_index : cell->second) {
-                const auto& part = blueprint.parts[part_index];
-                if (!part.supports_player) {
-                    continue;
-                }
-                const auto bounds = part_bounds(part);
-                if (sample_x < bounds.min.x - kCollisionEpsilon || sample_x > bounds.max.x + kCollisionEpsilon ||
-                    sample_z < bounds.min.z - kCollisionEpsilon || sample_z > bounds.max.z + kCollisionEpsilon) {
-                    continue;
-                }
-                const auto candidate_height = origin.y + bounds.max.y;
-                if (candidate_height < min_height - kCollisionEpsilon ||
-                    candidate_height > max_height + kCollisionEpsilon) {
-                    continue;
-                }
-                if (!best_height.has_value() || candidate_height > *best_height) {
-                    best_height = candidate_height;
-                }
-            }
-        }
-    }
-    return best_height;
+    return support_height_for_pose(
+        feet_position,
+        feet_position.y - kShipSupportProbeDepth,
+        feet_position.y + kShipSupportProbeDepth,
+        previous_world_origin(),
+        motion_history_valid_
+            ? previous_orientation_
+            : orientation_);
 }
 
-auto ShipEntity::climb_contact(const glm::vec3& min_corner,
-                               const glm::vec3& max_corner) const noexcept
+auto ShipEntity::support_height_in_range(
+    const glm::vec3& feet_position,
+    float min_height,
+    float max_height) const noexcept -> std::optional<float> {
+
+    return support_height_for_pose(
+        feet_position,
+        min_height,
+        max_height,
+        world_origin(),
+        orientation_);
+}
+
+auto ShipEntity::climb_contact(
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner) const noexcept
     -> std::optional<ShipClimbContact> {
-    if (!std::isfinite(min_corner.x) || !std::isfinite(min_corner.y) || !std::isfinite(min_corner.z) ||
-        !std::isfinite(max_corner.x) || !std::isfinite(max_corner.y) || !std::isfinite(max_corner.z) ||
-        min_corner.x >= max_corner.x || min_corner.y >= max_corner.y || min_corner.z >= max_corner.z) {
+
+    if (!std::isfinite(min_corner.x) ||
+        !std::isfinite(min_corner.y) ||
+        !std::isfinite(min_corner.z) ||
+        !std::isfinite(max_corner.x) ||
+        !std::isfinite(max_corner.y) ||
+        !std::isfinite(max_corner.z) ||
+        min_corner.x >= max_corner.x ||
+        min_corner.y >= max_corner.y ||
+        min_corner.z >= max_corner.z) {
         return std::nullopt;
     }
 
-    const auto origin = world_origin();
-    const ShipBounds local_query {
-        min_corner - origin,
-        max_corner - origin,
+    const ShipBounds world_query {
+        min_corner,
+        max_corner,
     };
+    const auto ship_origin = world_origin();
 
-    for (const auto& part : amelie_ship_blueprint().parts) {
-        if (part.shape != ShipPartShape::ClimbableNet) {
+    for (const auto& part :
+         amelie_ship_blueprint().parts) {
+        if (part.shape !=
+            ShipPartShape::ClimbableNet) {
             continue;
         }
 
         auto local_bounds = ShipBounds {
-            glm::min(part.local_start, part.local_end),
-            glm::max(part.local_start, part.local_end),
+            glm::min(
+                part.local_start,
+                part.local_end),
+            glm::max(
+                part.local_start,
+                part.local_end),
         };
-        const auto outward_normal = glm::normalize(part.orientation);
 
-        // Je rends la prise legerement plus genereuse que l'epaisseur visuelle
-        // de la corde, sans etendre la zone au-dessus ou a cote du filet.
-        const auto grab_padding = glm::abs(outward_normal) *
-                                  std::max(kAmelieBoardingNetGrabHalfDepth, part.thickness * 0.5F);
+        const auto raw_normal =
+            finite_vec3_or(
+                part.orientation,
+                {1.0F, 0.0F, 0.0F});
+        const auto local_normal =
+            glm::dot(raw_normal, raw_normal) >
+                    1.0e-8F
+                ? glm::normalize(raw_normal)
+                : glm::vec3 {1.0F, 0.0F, 0.0F};
+
+        // La prise est plus genereuse que la corde visible, tout en restant
+        // une boite orientee avec le navire et non une AABB monde grossiere.
+        const auto grab_padding =
+            glm::abs(local_normal) *
+            std::max(
+                kAmelieBoardingNetGrabHalfDepth,
+                part.thickness * 0.5F);
         local_bounds.min -= grab_padding;
         local_bounds.max += grab_padding;
 
-        if (!aabbs_overlap(local_query, local_bounds)) {
+        if (!oriented_box_intersects_aabb(
+                local_bounds,
+                ship_origin,
+                orientation_,
+                world_query)) {
             continue;
         }
 
-        const auto deck_exit = glm::vec3 {
-            outward_normal.x * kAmelieBoardingDeckExitX,
+        const auto local_center =
+            (local_bounds.min +
+             local_bounds.max) *
+            0.5F;
+        const auto local_half_extents =
+            (local_bounds.max -
+             local_bounds.min) *
+            0.5F;
+        const auto local_plane_point =
+            local_center +
+            local_normal *
+                glm::dot(
+                    glm::abs(local_normal),
+                    local_half_extents);
+
+        auto deck_exit = local_to_world_point({
+            local_normal.x *
+                kAmelieBoardingDeckExitX,
             kAmelieMainDeckTop + 0.01F,
-            (kAmelieBoardingNetMinZ + kAmelieBoardingNetMaxZ) * 0.5F,
-        } + origin;
+            (kAmelieBoardingNetMinZ +
+             kAmelieBoardingNetMaxZ) *
+                0.5F,
+        });
+
+        // Le point de sortie est pose sur la face de pont reelle. Cette
+        // correction evite un decalage vertical quand le pont est incline.
+        if (const auto support =
+                support_height_in_range(
+                    deck_exit,
+                    deck_exit.y - 0.75F,
+                    deck_exit.y + 0.75F);
+            support.has_value()) {
+            deck_exit.y = *support + 0.01F;
+        }
 
         return ShipClimbContact {
-            {local_bounds.min + origin, local_bounds.max + origin},
-            outward_normal,
+            transformed_bounds(
+                local_bounds,
+                ship_origin,
+                orientation_),
+            local_bounds,
+            local_to_world_direction(local_normal),
+            local_to_world_point(
+                local_plane_point),
+            local_to_world_direction(
+                {0.0F, 1.0F, 0.0F}),
             deck_exit,
         };
     }
@@ -2407,74 +3068,316 @@ auto ShipEntity::climb_contact(const glm::vec3& min_corner,
     return std::nullopt;
 }
 
-auto ShipEntity::intersects_aabb(const glm::vec3& min_corner, const glm::vec3& max_corner) const noexcept -> bool {
-    if (!std::isfinite(min_corner.x) || !std::isfinite(min_corner.y) || !std::isfinite(min_corner.z) ||
-        !std::isfinite(max_corner.x) || !std::isfinite(max_corner.y) || !std::isfinite(max_corner.z) ||
-        min_corner.x >= max_corner.x || min_corner.y >= max_corner.y || min_corner.z >= max_corner.z) {
+auto ShipEntity::intersects_aabb(
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner) const noexcept -> bool {
+
+    if (!std::isfinite(min_corner.x) ||
+        !std::isfinite(min_corner.y) ||
+        !std::isfinite(min_corner.z) ||
+        !std::isfinite(max_corner.x) ||
+        !std::isfinite(max_corner.y) ||
+        !std::isfinite(max_corner.z) ||
+        min_corner.x >= max_corner.x ||
+        min_corner.y >= max_corner.y ||
+        min_corner.z >= max_corner.z) {
         return false;
     }
 
-    const auto origin = world_origin();
-    const auto& blueprint = amelie_ship_blueprint();
-    const ShipBounds query {
-        min_corner - origin,
-        max_corner - origin,
+    const ShipBounds world_query {
+        min_corner,
+        max_corner,
     };
-    if (!aabbs_overlap(query, blueprint.bounds)) {
+    if (!aabbs_overlap(
+            world_query,
+            world_bounds())) {
         return false;
     }
+
+    const auto ship_origin = world_origin();
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto local_query =
+        inverse_transformed_bounds(
+            world_query,
+            ship_origin,
+            orientation_);
+    if (!aabbs_overlap(
+            local_query,
+            blueprint.bounds)) {
+        return false;
+    }
+
     const ShipBounds clipped {
-        glm::max(query.min, blueprint.bounds.min),
-        glm::min(query.max, blueprint.bounds.max),
+        glm::max(
+            local_query.min,
+            blueprint.bounds.min),
+        glm::min(
+            local_query.max,
+            blueprint.bounds.max),
     };
-    const auto min_x = static_cast<int>(std::floor(clipped.min.x));
-    const auto min_y = static_cast<int>(std::floor(clipped.min.y));
-    const auto min_z = static_cast<int>(std::floor(clipped.min.z));
-    const auto max_x = static_cast<int>(std::floor(clipped.max.x - kCollisionEpsilon));
-    const auto max_y = static_cast<int>(std::floor(clipped.max.y - kCollisionEpsilon));
-    const auto max_z = static_cast<int>(std::floor(clipped.max.z - kCollisionEpsilon));
-    const auto& index = ship_collision_index();
+    const auto min_x =
+        static_cast<int>(
+            std::floor(clipped.min.x));
+    const auto min_y =
+        static_cast<int>(
+            std::floor(clipped.min.y));
+    const auto min_z =
+        static_cast<int>(
+            std::floor(clipped.min.z));
+    const auto max_x =
+        static_cast<int>(
+            std::floor(
+                clipped.max.x -
+                kCollisionEpsilon));
+    const auto max_y =
+        static_cast<int>(
+            std::floor(
+                clipped.max.y -
+                kCollisionEpsilon));
+    const auto max_z =
+        static_cast<int>(
+            std::floor(
+                clipped.max.z -
+                kCollisionEpsilon));
+    const auto& index =
+        ship_collision_index();
 
-    for (int y = min_y; y <= max_y; ++y) {
-        for (int z = min_z; z <= max_z; ++z) {
-            for (int x = min_x; x <= max_x; ++x) {
-                const auto cell = index.cells.find({x, y, z});
-                if (cell == index.cells.end()) {
+    // Une piece peut appartenir a plusieurs cellules. Ce tableau de generation
+    // evite les tests SAT dupliques sans allocation dynamique par requete.
+    thread_local std::vector<std::uint32_t>
+        visit_generations;
+    thread_local std::uint32_t visit_generation = 0U;
+    if (visit_generations.size() <
+        blueprint.parts.size()) {
+        visit_generations.assign(
+            blueprint.parts.size(),
+            0U);
+        visit_generation = 0U;
+    }
+    ++visit_generation;
+    if (visit_generation == 0U) {
+        std::fill(
+            visit_generations.begin(),
+            visit_generations.end(),
+            0U);
+        visit_generation = 1U;
+    }
+
+    for (int y = min_y;
+         y <= max_y;
+         ++y) {
+        for (int z = min_z;
+             z <= max_z;
+             ++z) {
+            for (int x = min_x;
+                 x <= max_x;
+                 ++x) {
+                const auto cell =
+                    index.cells.find(
+                        {x, y, z});
+                if (cell ==
+                    index.cells.end()) {
                     continue;
                 }
-                for (const auto part_index : cell->second) {
-                    if (aabbs_overlap(query, part_bounds(blueprint.parts[part_index]))) {
+
+                for (const auto part_index :
+                     cell->second) {
+                    if (part_index >=
+                        visit_generations.size() ||
+                        visit_generations[part_index] ==
+                            visit_generation) {
+                        continue;
+                    }
+                    visit_generations[part_index] =
+                        visit_generation;
+
+                    if (oriented_box_intersects_aabb(
+                            part_bounds(
+                                blueprint.parts[
+                                    part_index]),
+                            ship_origin,
+                            orientation_,
+                            world_query)) {
                         return true;
                     }
                 }
             }
         }
     }
+
     return false;
 }
 
-auto ShipEntity::raycast_collidable_distance(const glm::vec3& origin,
-                                             const glm::vec3& direction,
-                                             float max_distance) const noexcept -> std::optional<float> {
-    if (!std::isfinite(origin.x) || !std::isfinite(origin.y) || !std::isfinite(origin.z) ||
-        !std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) ||
-        !std::isfinite(max_distance) || max_distance <= 0.0F || glm::dot(direction, direction) <= 1.0e-6F) {
+auto ShipEntity::raycast_collidable_distance(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float max_distance) const noexcept
+    -> std::optional<float> {
+
+    if (!std::isfinite(origin.x) ||
+        !std::isfinite(origin.y) ||
+        !std::isfinite(origin.z) ||
+        !std::isfinite(direction.x) ||
+        !std::isfinite(direction.y) ||
+        !std::isfinite(direction.z) ||
+        !std::isfinite(max_distance) ||
+        max_distance <= 0.0F ||
+        glm::dot(direction, direction) <=
+            1.0e-6F) {
         return std::nullopt;
     }
 
-    const auto ray_direction = glm::normalize(direction);
-    const auto local_origin = origin - world_origin();
-    auto closest = std::optional<float> {};
-    for (const auto& part : amelie_ship_blueprint().parts) {
+    // Une rotation rigide conserve les distances : le parametre t obtenu
+    // dans l'espace local est directement reutilisable dans l'espace monde.
+    const auto ray_direction =
+        glm::normalize(direction);
+    const auto local_origin =
+        world_to_local_point(origin);
+    const auto local_direction =
+        world_to_local_direction(
+            ray_direction);
+
+    auto closest =
+        std::optional<float> {};
+    for (const auto& part :
+         amelie_ship_blueprint().parts) {
         if (!part.collidable) {
             continue;
         }
-        const auto hit = ray_aabb_distance(local_origin, ray_direction, part_bounds(part), max_distance);
-        if (hit.has_value() && (!closest.has_value() || *hit < *closest)) {
+
+        const auto hit =
+            ray_aabb_distance(
+                local_origin,
+                local_direction,
+                part_bounds(part),
+                max_distance);
+        if (hit.has_value() &&
+            (!closest.has_value() ||
+             *hit < *closest)) {
             closest = hit;
         }
     }
+
     return closest;
+}
+
+namespace {
+
+auto supported_world_point_in_persisted_neutral_pose(
+    const ShipEntity& ship,
+    const glm::vec3& current_world_point,
+    float current_support_height) noexcept
+    -> std::optional<glm::vec3> {
+
+    auto persisted_position =
+        ship.world_point_in_persisted_neutral_pose(
+            current_world_point);
+    const auto persisted_origin =
+        ship.position() -
+        glm::vec3 {0.5F, 0.0F, 0.5F};
+
+    // Je tiens compte du point le plus haut sous l'empreinte runtime, puis je
+    // recale Y sur le pont plat sans perdre le petit ecart de contact.
+    const auto persisted_support =
+        support_height_for_pose(
+            persisted_position,
+            persisted_position.y - 0.50F,
+            persisted_position.y +
+                kShipSupportProbeDepth,
+            persisted_origin,
+            glm::quat {1.0F, 0.0F, 0.0F, 0.0F});
+    if (!persisted_support.has_value()) {
+        return std::nullopt;
+    }
+
+    persisted_position.y =
+        *persisted_support +
+        (current_world_point.y -
+         current_support_height);
+    return persisted_position;
+}
+
+} // namespace
+
+auto normalize_supported_player_for_ship_save(
+    const ShipEntity& ship,
+    PlayerState& player_state,
+    bool player_is_climbing_ship) noexcept -> bool {
+
+    if (!player_state.on_ground ||
+        player_state.dead ||
+        player_state.fly_mode ||
+        player_is_climbing_ship ||
+        player_state.head_underwater ||
+        player_state.swimming ||
+        !std::isfinite(player_state.velocity.y) ||
+        std::abs(player_state.velocity.y) >
+            kShipRideVerticalSpeedTolerance) {
+        return false;
+    }
+
+    const auto support =
+        ship.support_height(player_state.position);
+    if (!support.has_value() ||
+        std::abs(player_state.position.y - *support) >
+            kShipRideContactTolerance) {
+        return false;
+    }
+
+    const auto persisted_position =
+        supported_world_point_in_persisted_neutral_pose(
+            ship,
+            player_state.position,
+            *support);
+    if (!persisted_position.has_value()) {
+        return false;
+    }
+
+    player_state.position = *persisted_position;
+    // Je conserve l'impulsion horizontale du joueur et retire uniquement la
+    // composante verticale incompatible avec un chargement pose sur le pont.
+    player_state.velocity.y = 0.0F;
+    player_state.fall_start_y = player_state.position.y;
+    player_state.airborne_time = 0.0F;
+    player_state.on_ground = true;
+    return true;
+}
+
+auto normalize_supported_item_drop_for_ship_save(
+    const ShipEntity& ship,
+    ItemDrop& drop) noexcept -> bool {
+
+    if (!drop.grounded) {
+        return false;
+    }
+
+    const auto support =
+        ship.support_height(drop.position);
+    if (!support.has_value() ||
+        std::abs(drop.position.y - *support) >
+            kShipDropSaveContactTolerance) {
+        return false;
+    }
+
+    const auto persisted_position =
+        supported_world_point_in_persisted_neutral_pose(
+            ship,
+            drop.position,
+            *support);
+    if (!persisted_position.has_value()) {
+        return false;
+    }
+
+    drop.position = *persisted_position;
+    drop.velocity = {};
+    drop.grounded = true;
+    drop.sleeping = false;
+    drop.sleep_support_valid = false;
+    drop.sleep_candidate_seconds = 0.0F;
+    drop.sleep_support_check_timer = 0.0F;
+    drop.sleep_support_block = {};
+    return true;
 }
 
 auto reconcile_loaded_ship_occupant(const ShipEntity& ship,
@@ -2494,10 +3397,17 @@ auto reconcile_loaded_ship_occupant(const ShipEntity& ship,
     const auto safe_half_width = std::clamp(finite_or(half_width, 0.30F), 0.05F, 2.0F);
     const auto safe_height = std::clamp(finite_or(height, 1.80F), 0.10F, 4.0F);
     const auto origin = ship.world_origin();
-    const auto local = sane_position ? saved_position - origin : glm::vec3 {0.0F};
-    const auto legacy_local = sane_position
-                                  ? saved_position - legacy_world_origin.value_or(origin)
-                                  : glm::vec3 {0.0F};
+    const auto local =
+        sane_position
+            ? ship.world_to_local_point(
+                  saved_position)
+            : glm::vec3 {0.0F};
+    const auto legacy_local =
+        sane_position
+            ? saved_position -
+                  legacy_world_origin.value_or(
+                      origin)
+            : glm::vec3 {0.0F};
 
     // Je ne recale que les occupants plausiblement poses dans le navire. Un
     // nageur sous la coque ou un joueur deja eloigne conserve donc sa position.
@@ -2524,10 +3434,14 @@ auto reconcile_loaded_ship_occupant(const ShipEntity& ship,
         anchors.aft_hatch,
         anchors.fore_hatch,
     }};
-    auto best_position = origin + anchors.safe_spawn;
+    auto best_position =
+        ship.local_to_world_point(
+            anchors.safe_spawn);
     auto best_distance_squared = std::numeric_limits<float>::max();
     for (const auto& local_candidate : candidates) {
-        const auto candidate = origin + local_candidate;
+        const auto candidate =
+            ship.local_to_world_point(
+                local_candidate);
         const auto candidate_min = candidate + glm::vec3 {-safe_half_width, 0.0F, -safe_half_width};
         const auto candidate_max = candidate + glm::vec3 {safe_half_width, safe_height, safe_half_width};
         const auto support = ship.support_height_in_range(candidate, candidate.y - 0.25F, candidate.y + 0.25F);
@@ -2562,6 +3476,14 @@ void SeaAdventureSystem::reset(int seed) noexcept {
     precise_route_distance_ = static_cast<double>(state_.route_distance);
     ship_.set_position(state_.ship_position);
     ship_.set_velocity({});
+    ocean_heave_ = 0.0F;
+    ocean_heave_velocity_ = 0.0F;
+    ocean_pitch_ = 0.0F;
+    ocean_pitch_velocity_ = 0.0F;
+    ocean_roll_ = 0.0F;
+    ocean_roll_velocity_ = 0.0F;
+    ship_.set_ocean_pose(0.0F, 0.0F, 0.0F);
+    ship_.synchronize_motion_history();
     crew_.reset(seed, ship_);
     state_.crew = crew_.save_state();
     legacy_ship_migration_.reset();
@@ -2576,6 +3498,14 @@ void SeaAdventureSystem::load_state(const SeaAdventureSaveState& state, int worl
     precise_route_distance_ = static_cast<double>(state_.route_distance);
     ship_.set_position(state_.ship_position);
     ship_.set_velocity({});
+    ocean_heave_ = 0.0F;
+    ocean_heave_velocity_ = 0.0F;
+    ocean_pitch_ = 0.0F;
+    ocean_pitch_velocity_ = 0.0F;
+    ocean_roll_ = 0.0F;
+    ocean_roll_velocity_ = 0.0F;
+    ship_.set_ocean_pose(0.0F, 0.0F, 0.0F);
+    ship_.synchronize_motion_history();
     crew_.load_state(state_.crew, world_seed, ship_);
     state_.crew = crew_.save_state();
     legacy_ship_migration_.reset();
@@ -2594,7 +3524,8 @@ auto SeaAdventureSystem::ship_position() const noexcept -> glm::vec3 {
 }
 
 auto SeaAdventureSystem::deck_spawn_position() const noexcept -> glm::vec3 {
-    return ship_.world_origin() + amelie_ship_blueprint().anchors.safe_spawn;
+    return ship_.local_to_world_point(
+        amelie_ship_blueprint().anchors.safe_spawn);
 }
 
 auto SeaAdventureSystem::ship_entity() const noexcept -> const ShipEntity& {
@@ -2778,8 +3709,15 @@ auto SeaAdventureSystem::update(
         return result;
     }
 
-    const auto safe_environment = sanitize_sea_environment(environment);
-    dt = std::clamp(finite_or(dt, 0.0F), 0.0F, 0.25F);
+    const auto safe_environment =
+        sanitize_sea_environment(environment);
+    const auto ocean =
+        OceanSimulation::evaluate(
+            safe_environment);
+    dt = std::clamp(
+        finite_or(dt, 0.0F),
+        0.0F,
+        0.25F);
 
     // Je repare aussi les invariants purement runtime. Une valeur invalide ne
     // doit jamais survivre assez longtemps pour contaminer une sauvegarde.
@@ -2787,48 +3725,49 @@ auto SeaAdventureSystem::update(
         finite_or(state_.hunger, 100.0F),
         0.0F,
         100.0F);
-
     state_.thirst = std::clamp(
         finite_or(state_.thirst, 100.0F),
         0.0F,
         100.0F);
-
     state_.stamina = std::clamp(
         finite_or(state_.stamina, 100.0F),
         0.0F,
         100.0F);
 
-    if (!std::isfinite(state_.fishing_progress) ||
-        !std::isfinite(state_.fishing_target_seconds) ||
+    if (!std::isfinite(
+            state_.fishing_progress) ||
+        !std::isfinite(
+            state_.fishing_target_seconds) ||
         (state_.fishing_active &&
-         state_.fishing_target_seconds <= 0.0F)) {
+         state_.fishing_target_seconds <=
+             0.0F)) {
         cancel_fishing();
     }
 
-    const auto support_height_before_move =
-        ship_.support_height(player.position());
-
+    // Ces trois tests sont effectues avant de modifier la pose. Le joueur est
+    // ensuite transporte par la transformation rigide correspondant au point
+    // exact ou se trouvent ses pieds, et non par le delta du centre du bateau.
     const auto player_was_on_ship =
         player_should_ride_ship(player);
-
     const auto player_was_climbing_ship =
         !player_was_on_ship &&
         !player.is_dead() &&
         !player.state().fly_mode &&
         player.is_climbing_dynamic_obstacle();
-
     const auto player_intersected_ship_before_move =
-        player.overlaps_dynamic_obstacle(ship_);
+        player.overlaps_dynamic_obstacle(
+            ship_);
 
     const auto requested_speed =
         kShipBaseSpeed *
         std::clamp(
             0.92F +
-                safe_environment.wind_strength * 0.24F -
-                safe_environment.storm_intensity * 0.16F,
+                safe_environment.wind_strength *
+                    0.24F -
+                safe_environment.storm_intensity *
+                    0.16F,
             0.72F,
             1.28F);
-
     const auto motion_seconds =
         advance_voyage_phase(
             state_,
@@ -2836,109 +3775,307 @@ auto SeaAdventureSystem::update(
             player_was_on_ship,
             result);
 
-    const auto previous_ship_position = ship_.position();
+    const auto previous_ship_position =
+        ship_.position();
     const auto maximum_position_z =
-        static_cast<double>(maximum_ship_position_z());
+        static_cast<double>(
+            maximum_ship_position_z());
 
     // Les doubles prives conservent les fractions de mouvement a grande
     // distance. Je les recale sur l'etat public si une ancienne execution les
     // a contamines avec NaN ou l'infini.
     precise_ship_position_z_ = std::clamp(
-        std::isfinite(precise_ship_position_z_)
+        std::isfinite(
+            precise_ship_position_z_)
             ? precise_ship_position_z_
-            : static_cast<double>(previous_ship_position.z),
+            : static_cast<double>(
+                  previous_ship_position.z),
         0.5,
         maximum_position_z);
-
-    const auto previous_precise_z = precise_ship_position_z_;
-
+    const auto previous_precise_z =
+        precise_ship_position_z_;
     const auto requested_position_z =
         previous_precise_z +
-        static_cast<double>(requested_speed) *
-            static_cast<double>(motion_seconds);
-
+        static_cast<double>(
+            requested_speed) *
+            static_cast<double>(
+                motion_seconds);
     precise_ship_position_z_ = std::clamp(
-        std::isfinite(requested_position_z)
+        std::isfinite(
+            requested_position_z)
             ? requested_position_z
             : previous_precise_z,
         0.5,
         maximum_position_z);
 
-    auto next_ship_position = previous_ship_position;
+    auto next_ship_position =
+        previous_ship_position;
     next_ship_position.z =
-        static_cast<float>(precise_ship_position_z_);
+        static_cast<float>(
+            precise_ship_position_z_);
 
+    // La pose precedente doit etre capturee juste avant la premiere mutation.
+    // Elle reste valable jusqu'au prochain appel de update().
+    ship_.begin_motion_step();
+    ship_.set_position(
+        next_ship_position);
+
+    const auto& ship_bounds =
+        amelie_ship_blueprint().bounds;
+    const auto local_center_x =
+        (ship_bounds.min.x +
+         ship_bounds.max.x) *
+        0.5F;
+    const auto local_center_z =
+        (ship_bounds.min.z +
+         ship_bounds.max.z) *
+        0.5F;
+    const auto longitudinal_half_span =
+        std::max(
+            4.0F,
+            (ship_bounds.max.z -
+             ship_bounds.min.z) *
+                0.32F);
+    const auto lateral_half_span =
+        std::max(
+            2.0F,
+            (ship_bounds.max.x -
+             ship_bounds.min.x) *
+                0.34F);
+
+    // Le navire n'a actuellement aucun lacet : les cinq sondes peuvent donc
+    // etre placees directement autour de son origine horizontale. Cette
+    // methode evite une boucle de retroaction avec l'inclinaison precedente.
+    const auto base_origin =
+        next_ship_position -
+        glm::vec3 {
+            0.5F,
+            0.0F,
+            0.5F,
+        };
+    const auto sample_ocean =
+        [&](float local_x,
+            float local_z) noexcept {
+            return OceanSimulation::sample(
+                ocean,
+                {
+                    base_origin.x + local_x,
+                    base_origin.z + local_z,
+                },
+                kOceanBuoyancyWaveCount);
+        };
+
+    const auto center_sample =
+        sample_ocean(
+            local_center_x,
+            local_center_z);
+    const auto bow_sample =
+        sample_ocean(
+            local_center_x,
+            local_center_z +
+                longitudinal_half_span);
+    const auto stern_sample =
+        sample_ocean(
+            local_center_x,
+            local_center_z -
+                longitudinal_half_span);
+    const auto starboard_sample =
+        sample_ocean(
+            local_center_x +
+                lateral_half_span,
+            local_center_z);
+    const auto port_sample =
+        sample_ocean(
+            local_center_x -
+                lateral_half_span,
+            local_center_z);
+
+    const auto motion_scale =
+        sea_motion_scale(state_);
+    auto target_heave =
+        (
+            center_sample.height * 0.44F +
+            bow_sample.height * 0.14F +
+            stern_sample.height * 0.14F +
+            starboard_sample.height * 0.14F +
+            port_sample.height * 0.14F
+        ) *
+        motion_scale;
+    auto target_pitch =
+        -std::atan2(
+            bow_sample.height -
+                stern_sample.height,
+            longitudinal_half_span *
+                2.0F) *
+        motion_scale;
+    auto target_roll =
+        std::atan2(
+            starboard_sample.height -
+                port_sample.height,
+            lateral_half_span *
+                2.0F) *
+        motion_scale;
+
+    constexpr float kRadiansPerDegree =
+        0.01745329251994329577F;
+    const auto maximum_heave =
+        std::clamp(
+            ocean.total_amplitude *
+                    0.95F +
+                0.05F,
+            0.08F,
+            1.55F) *
+        motion_scale;
+    const auto maximum_pitch =
+        (2.5F +
+         ocean.severity * 8.0F) *
+        kRadiansPerDegree *
+        motion_scale;
+    const auto maximum_roll =
+        (4.0F +
+         ocean.severity * 12.0F) *
+        kRadiansPerDegree *
+        motion_scale;
+
+    target_heave = std::clamp(
+        target_heave,
+        -maximum_heave,
+        maximum_heave);
+    target_pitch = std::clamp(
+        target_pitch,
+        -maximum_pitch,
+        maximum_pitch);
+    target_roll = std::clamp(
+        target_roll,
+        -maximum_roll,
+        maximum_roll);
+
+    // Les ressorts critiques filtrent les hautes frequences qui ne peuvent pas
+    // deplacer instantanement une coque lourde et restent stables quel que soit
+    // le framerate dans l'intervalle de dt autorise.
+    integrate_critical_spring(
+        ocean_heave_,
+        ocean_heave_velocity_,
+        target_heave,
+        0.50F +
+            ocean.severity * 0.08F,
+        dt);
+    integrate_critical_spring(
+        ocean_pitch_,
+        ocean_pitch_velocity_,
+        target_pitch,
+        0.38F +
+            ocean.severity * 0.06F,
+        dt);
+    integrate_critical_spring(
+        ocean_roll_,
+        ocean_roll_velocity_,
+        target_roll,
+        0.31F +
+            ocean.severity * 0.06F,
+        dt);
+    ship_.set_ocean_pose(
+        ocean_heave_,
+        ocean_pitch_,
+        ocean_roll_);
+
+    // Je conserve le contrat historique de ship_delta : il decrit uniquement
+    // la translation de route persistante. Le pilonnement et la rotation sont
+    // transitoires et les occupants les recuperent via motion_delta_at().
     result.ship_delta =
-        next_ship_position - previous_ship_position;
+        next_ship_position -
+        previous_ship_position;
+    const auto pose_origin_delta =
+        ship_.world_origin() -
+        ship_.previous_world_origin();
 
     const auto precise_delta_z =
-        precise_ship_position_z_ - previous_precise_z;
-
+        precise_ship_position_z_ -
+        previous_precise_z;
     result.ship_speed =
         dt > 0.0F
             ? static_cast<float>(
-                  std::abs(precise_delta_z) /
+                  std::abs(
+                      precise_delta_z) /
                   static_cast<double>(dt))
             : 0.0F;
 
-    ship_.set_velocity({
-        0.0F,
-        0.0F,
-        result.ship_speed,
-    });
-
-    ship_.set_position(next_ship_position);
-    state_.ship_position = ship_.position();
+    ship_.set_velocity(
+        dt > 0.0F
+            ? pose_origin_delta / dt
+            : glm::vec3 {});
+    state_.ship_position =
+        ship_.position();
 
     precise_route_distance_ = std::clamp(
-        std::isfinite(precise_route_distance_)
+        std::isfinite(
+            precise_route_distance_)
             ? precise_route_distance_
-            : static_cast<double>(state_.route_distance),
+            : static_cast<double>(
+                  state_.route_distance),
         0.0,
-        static_cast<double>(kShipCoordinateLimit));
-
+        static_cast<double>(
+            kShipCoordinateLimit));
     const auto requested_route_distance =
         precise_route_distance_ +
         std::abs(precise_delta_z);
-
     precise_route_distance_ = std::clamp(
-        std::isfinite(requested_route_distance)
+        std::isfinite(
+            requested_route_distance)
             ? requested_route_distance
             : precise_route_distance_,
         0.0,
-        static_cast<double>(kShipCoordinateLimit));
-
+        static_cast<double>(
+            kShipCoordinateLimit));
     state_.route_distance =
-        static_cast<float>(precise_route_distance_);
+        static_cast<float>(
+            precise_route_distance_);
 
-    // Je distingue un deplacement reel d'une simple vitesse demandee : meme un
-    // petit delta representable doit suivre le joueur, tandis qu'au bord du
-    // monde un delta nul ne doit jamais annoncer un transport fictif.
-    const auto ship_translated =
-        glm::dot(result.ship_delta, result.ship_delta) > 0.0F;
+    const auto move_player_with_ship =
+        [&](bool resolve_support) {
+            const auto platform_delta =
+                ship_.motion_delta_at(
+                    player.position());
+            const auto moved =
+                glm::dot(
+                    platform_delta,
+                    platform_delta) >
+                1.0e-12F;
+
+            if (moved) {
+                player.translate_platform_delta(
+                    platform_delta);
+            }
+
+            if (resolve_support) {
+                if (const auto support =
+                        ship_.support_height(
+                            player.position());
+                    support.has_value()) {
+                    player.resolve_dynamic_platform_support(
+                        *support);
+                }
+            }
+
+            result.ship_moved_player =
+                result.ship_moved_player ||
+                moved;
+        };
 
     if (player_was_on_ship) {
-        player.translate_platform_delta(result.ship_delta);
-        result.ship_moved_player = ship_translated;
-
-        if (support_height_before_move.has_value()) {
-            player.resolve_dynamic_platform_support(
-                *support_height_before_move +
-                result.ship_delta.y);
-        }
+        move_player_with_ship(true);
     } else if (player_was_climbing_ship) {
-        // Je transporte le grimpeur avec le filet sans le declarer embarque :
-        // seuls les pieds poses sur un support de pont activent on_ship.
-        player.translate_platform_delta(result.ship_delta);
-        result.ship_moved_player = ship_translated;
+        // Le grimpeur suit le point du filet auquel il est accroche, sans etre
+        // considere comme embarque tant que ses pieds ne touchent pas le pont.
+        move_player_with_ship(false);
     } else if (
         !player_intersected_ship_before_move &&
-        player.overlaps_dynamic_obstacle(ship_)) {
-
-        // Je pousse le joueur avec la coque lorsqu'elle entre dans son volume,
-        // sans pour autant le declarer embarque ou le coller au pont.
-        player.translate_platform_delta(result.ship_delta);
-        result.ship_moved_player = ship_translated;
+        player.overlaps_dynamic_obstacle(
+            ship_)) {
+        // Si la coque penetre le joueur durant ce pas, on applique le mouvement
+        // local de la coque. La resolution AABB du controleur terminera le
+        // depoussage au prochain sous-pas sans coller le joueur au navire.
+        move_player_with_ship(false);
     }
 
     state_.stamped_ship_x = ship_origin_x(state_);

@@ -5,6 +5,7 @@
 #include "world/BlockVisuals.h"
 #include "world/ChunkMesher.h"
 #include "world/Environment.h"
+#include "world/OceanSimulation.h"
 #include "world/WorldGenerator.h"
 
 #include "TestUtils.h"
@@ -19,6 +20,7 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace valcraft {
@@ -2458,8 +2460,8 @@ TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
     CHECK(mesh.vertices.empty());
     CHECK(mesh.indices.empty());
     CHECK(mesh.water_face_count == 6);
-    CHECK(mesh.water_vertices.size() == 89);
-    CHECK(mesh.water_indices.size() == 294);
+    CHECK(mesh.water_vertices.size() == 37);
+    CHECK(mesh.water_indices.size() == 78);
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.ao == doctest::Approx(1.0F);
     }));
@@ -2489,7 +2491,7 @@ TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") 
         }
     }
 
-    REQUIRE(top_vertices.size() == 50);
+    REQUIRE(top_vertices.size() == 18);
 
     const auto vertices_at = [&](float x, float z) {
         std::vector<WaterTopVertex> matches;
@@ -2551,7 +2553,7 @@ TEST_CASE("chunk mesher keeps water top texel density stable across the repeat b
         }
     }
 
-    REQUIRE(top_vertices.size() == 50);
+    REQUIRE(top_vertices.size() == 18);
 
     const auto vertices_at = [&](float x, float z) {
         std::vector<WaterTopVertex> matches;
@@ -2647,7 +2649,7 @@ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animat
         return vertex.wave_weight > 0.5F;
     });
 
-    CHECK(animated_vertex_count == 65);
+    CHECK(animated_vertex_count == 21);
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight == 0.0F || vertex.wave_weight == 1.0F;
     }));
@@ -2665,7 +2667,7 @@ TEST_CASE("stacked water only animates the topmost surface block") {
     const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight > 0.5F;
     });
-    CHECK(animated_vertex_count == 65);
+    CHECK(animated_vertex_count == 21);
 
     CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         if (vertex.wave_weight <= 0.5F) {
@@ -4416,6 +4418,302 @@ TEST_CASE("environment clock respects freeze mode") {
     running_clock.update(30.0F);
     CHECK(running_clock.time_of_day() == doctest::Approx(9.0F).epsilon(0.01));
     CHECK(running_clock.weather_time_seconds() == doctest::Approx(30.0F));
+}
+
+TEST_CASE("ocean spectrum maps weather severity to bounded physical states") {
+    std::array<EnvironmentState, 5> environments {};
+    for (auto& environment : environments) {
+        environment.wind_strength = 0.0F;
+        environment.storm_intensity = 0.0F;
+        environment.precipitation_intensity = 0.0F;
+        environment.weather_time_seconds = 123.25F;
+    }
+
+    environments[1].storm_intensity = 0.50F;
+    environments[2].storm_intensity = 0.70F;
+    environments[3].storm_intensity = 0.90F;
+    environments[4].wind_strength = 1.0F;
+    environments[4].storm_intensity = 1.0F;
+    environments[4].precipitation_intensity = 1.0F;
+
+    constexpr std::array<OceanSeaState, 5> expected_states {{
+        OceanSeaState::Calm,
+        OceanSeaState::Moderate,
+        OceanSeaState::Rough,
+        OceanSeaState::Storm,
+        OceanSeaState::Tempest,
+    }};
+
+    auto previous_severity = -1.0F;
+    auto previous_amplitude = -1.0F;
+    for (std::size_t state_index = 0; state_index < environments.size(); ++state_index) {
+        const auto ocean = OceanSimulation::evaluate(environments[state_index]);
+        CAPTURE(state_index);
+
+        CHECK(ocean.sea_state == expected_states[state_index]);
+        CHECK(std::isfinite(ocean.severity));
+        CHECK(std::isfinite(ocean.total_amplitude));
+        CHECK(std::isfinite(ocean.maximum_displacement));
+        CHECK(std::isfinite(ocean.foam_threshold));
+        CHECK(std::isfinite(ocean.detail_strength));
+        CHECK(std::isfinite(ocean.detail_phase));
+        CHECK(ocean.severity >= 0.0F);
+        CHECK(ocean.severity <= 1.0F);
+        CHECK(ocean.total_amplitude >= 0.09F);
+        CHECK(ocean.total_amplitude <= 1.4051F);
+        CHECK(ocean.maximum_displacement >= ocean.total_amplitude);
+        CHECK(ocean.foam_threshold >= 0.67F);
+        CHECK(ocean.foam_threshold <= 0.93F);
+        CHECK(ocean.detail_strength >= 0.0028F);
+        CHECK(ocean.detail_strength <= 0.0153F);
+        CHECK(ocean.detail_phase >= 0.0F);
+        CHECK(ocean.detail_phase < 6.283186F);
+        CHECK(ocean.severity > previous_severity);
+        CHECK(ocean.total_amplitude > previous_amplitude);
+
+        auto amplitude_sum = 0.0F;
+        auto displacement_bound = 0.0F;
+        for (const auto& wave : ocean.waves) {
+            CHECK(std::isfinite(wave.direction.x));
+            CHECK(std::isfinite(wave.direction.y));
+            CHECK(std::isfinite(wave.amplitude));
+            CHECK(std::isfinite(wave.wave_number));
+            CHECK(std::isfinite(wave.phase));
+            CHECK(std::isfinite(wave.steepness));
+            CHECK(glm::length(wave.direction) == doctest::Approx(1.0F).epsilon(0.0001));
+            CHECK(wave.amplitude > 0.0F);
+            CHECK(wave.wave_number > 0.0F);
+            CHECK(wave.phase >= 0.0F);
+            CHECK(wave.phase < 6.283186F);
+            CHECK(wave.steepness >= 0.12F);
+            CHECK(wave.steepness <= 0.86F);
+
+            amplitude_sum += wave.amplitude;
+            displacement_bound += wave.amplitude * (1.0F + 0.14F * wave.steepness);
+        }
+
+        CHECK(amplitude_sum == doctest::Approx(ocean.total_amplitude).epsilon(0.0001));
+        CHECK(displacement_bound == doctest::Approx(ocean.maximum_displacement).epsilon(0.0001));
+        previous_severity = ocean.severity;
+        previous_amplitude = ocean.total_amplitude;
+    }
+
+    CHECK(std::string_view {OceanSimulation::state_label(OceanSeaState::Calm)} == "calme");
+    CHECK(std::string_view {OceanSimulation::state_label(OceanSeaState::Moderate)} == "moderee");
+    CHECK(std::string_view {OceanSimulation::state_label(OceanSeaState::Rough)} == "agitee");
+    CHECK(std::string_view {OceanSimulation::state_label(OceanSeaState::Storm)} == "tempete");
+    CHECK(std::string_view {OceanSimulation::state_label(OceanSeaState::Tempest)} == "tempete majeure");
+    CHECK(std::string_view {OceanSimulation::state_label(static_cast<OceanSeaState>(255U))} == "calme");
+}
+
+TEST_CASE("ocean sampling bounds wave counts and rejects non finite inputs") {
+    EnvironmentState environment {};
+    environment.wind_strength = 0.82F;
+    environment.storm_intensity = 0.64F;
+    environment.precipitation_intensity = 0.35F;
+    environment.weather_time_seconds = 934.5F;
+
+    const auto ocean = OceanSimulation::evaluate(environment);
+    const glm::vec2 point {13.25F, -7.75F};
+    const auto full_sample = OceanSimulation::sample(ocean, point);
+    const auto oversized_sample = OceanSimulation::sample(ocean, point, kOceanMaxWaveCount + 17U);
+    const auto buoyancy_sample = OceanSimulation::sample(ocean, point, kOceanBuoyancyWaveCount);
+    const auto empty_sample = OceanSimulation::sample(ocean, point, 0U);
+
+    CHECK(full_sample.height == doctest::Approx(oversized_sample.height));
+    CHECK(full_sample.gradient.x == doctest::Approx(oversized_sample.gradient.x));
+    CHECK(full_sample.gradient.y == doctest::Approx(oversized_sample.gradient.y));
+    CHECK(full_sample.crest == doctest::Approx(oversized_sample.crest));
+    CHECK(std::abs(full_sample.height) <= ocean.maximum_displacement + 0.0001F);
+    CHECK(full_sample.crest >= 0.0F);
+    CHECK(full_sample.crest <= 1.0F);
+    const auto detail_waves_change_sample =
+        std::abs(full_sample.height - buoyancy_sample.height) > 0.00001F ||
+        glm::length(full_sample.gradient - buoyancy_sample.gradient) > 0.00001F;
+    CHECK(detail_waves_change_sample);
+    CHECK(empty_sample.height == 0.0F);
+    CHECK(empty_sample.gradient == glm::vec2 {0.0F});
+    CHECK(empty_sample.crest == 0.0F);
+
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    const auto infinity = std::numeric_limits<float>::infinity();
+    const auto nan_position_sample = OceanSimulation::sample(ocean, {nan, 0.0F});
+    const auto infinite_position_sample = OceanSimulation::sample(ocean, {0.0F, infinity});
+    CHECK(nan_position_sample.height == 0.0F);
+    CHECK(nan_position_sample.gradient == glm::vec2 {0.0F});
+    CHECK(nan_position_sample.crest == 0.0F);
+    CHECK(infinite_position_sample.height == 0.0F);
+    CHECK(infinite_position_sample.gradient == glm::vec2 {0.0F});
+    CHECK(infinite_position_sample.crest == 0.0F);
+
+    auto malformed_ocean = ocean;
+    malformed_ocean.waves[0].direction.x = nan;
+    malformed_ocean.waves[1].amplitude = infinity;
+    malformed_ocean.waves[2].wave_number = -1.0F;
+    const auto malformed_sample = OceanSimulation::sample(malformed_ocean, point, 3U);
+    CHECK(malformed_sample.height == 0.0F);
+    CHECK(malformed_sample.gradient == glm::vec2 {0.0F});
+    CHECK(malformed_sample.crest == 0.0F);
+}
+
+TEST_CASE("ocean evaluation sanitizes non finite weather values") {
+    EnvironmentState environment {};
+    environment.wind_strength = std::numeric_limits<float>::quiet_NaN();
+    environment.storm_intensity = std::numeric_limits<float>::infinity();
+    environment.precipitation_intensity = -std::numeric_limits<float>::infinity();
+    environment.weather_time_seconds = std::numeric_limits<float>::quiet_NaN();
+
+    const auto ocean = OceanSimulation::evaluate(environment);
+    CHECK(ocean.sea_state == OceanSeaState::Calm);
+    CHECK(ocean.severity == 0.0F);
+    CHECK(ocean.total_amplitude == doctest::Approx(0.09F));
+    CHECK(ocean.detail_phase == 0.0F);
+
+    for (const auto& wave : ocean.waves) {
+        CHECK(std::isfinite(wave.direction.x));
+        CHECK(std::isfinite(wave.direction.y));
+        CHECK(std::isfinite(wave.amplitude));
+        CHECK(std::isfinite(wave.wave_number));
+        CHECK(std::isfinite(wave.phase));
+        CHECK(std::isfinite(wave.steepness));
+    }
+
+    environment.wind_strength = -12.0F;
+    environment.storm_intensity = 7.0F;
+    environment.precipitation_intensity = 4.0F;
+    environment.weather_time_seconds = std::numeric_limits<float>::infinity();
+    const auto clamped = OceanSimulation::evaluate(environment);
+    CHECK(clamped.severity <= 1.0F);
+    CHECK(clamped.total_amplitude <= 1.4051F);
+    CHECK(clamped.detail_phase == 0.0F);
+}
+
+TEST_CASE("ocean keeps a visible swell from the start without strengthening tempests") {
+    EnvironmentState calm {};
+    calm.wind_strength = 0.0F;
+    calm.storm_intensity = 0.0F;
+    calm.precipitation_intensity = 0.0F;
+
+    const auto calm_ocean =
+        OceanSimulation::evaluate(calm);
+
+    CHECK(calm_ocean.sea_state == OceanSeaState::Calm);
+    CHECK(calm_ocean.total_amplitude ==
+          doctest::Approx(0.09F));
+    CHECK(calm_ocean.maximum_displacement >
+          calm_ocean.total_amplitude);
+
+    EnvironmentState tempest {};
+    tempest.wind_strength = 1.0F;
+    tempest.storm_intensity = 1.0F;
+    tempest.precipitation_intensity = 1.0F;
+
+    const auto tempest_ocean =
+        OceanSimulation::evaluate(tempest);
+
+    CHECK(tempest_ocean.sea_state ==
+          OceanSeaState::Tempest);
+    CHECK(tempest_ocean.total_amplitude ==
+          doctest::Approx(1.405F));
+}
+
+TEST_CASE("ocean analytical gradient matches a centered finite difference") {
+    EnvironmentState environment {};
+    environment.wind_strength = 0.86F;
+    environment.storm_intensity = 0.72F;
+    environment.precipitation_intensity = 0.41F;
+    environment.weather_time_seconds = 1'234.5F;
+    const auto ocean = OceanSimulation::evaluate(environment);
+
+    constexpr float step = 0.005F;
+    constexpr std::array<glm::vec2, 5> points {{
+        {0.0F, 0.0F},
+        {1.25F, -2.75F},
+        {-18.5F, 7.125F},
+        {83.0F, 41.0F},
+        {-127.75F, -96.25F},
+    }};
+
+    for (const auto& point : points) {
+        const auto sample = OceanSimulation::sample(ocean, point);
+        const auto height_x_positive = OceanSimulation::sample(ocean, point + glm::vec2 {step, 0.0F}).height;
+        const auto height_x_negative = OceanSimulation::sample(ocean, point - glm::vec2 {step, 0.0F}).height;
+        const auto height_z_positive = OceanSimulation::sample(ocean, point + glm::vec2 {0.0F, step}).height;
+        const auto height_z_negative = OceanSimulation::sample(ocean, point - glm::vec2 {0.0F, step}).height;
+        const auto finite_difference_x = (height_x_positive - height_x_negative) / (2.0F * step);
+        const auto finite_difference_z = (height_z_positive - height_z_negative) / (2.0F * step);
+
+        CAPTURE(point.x);
+        CAPTURE(point.y);
+        CHECK(std::abs(sample.gradient.x - finite_difference_x) < 0.004F);
+        CHECK(std::abs(sample.gradient.y - finite_difference_z) < 0.004F);
+    }
+}
+
+TEST_CASE("ocean samples remain continuous across time and wrapped phases") {
+    EnvironmentState environment {};
+    environment.wind_strength = 0.68F;
+    environment.storm_intensity = 0.52F;
+    environment.precipitation_intensity = 0.27F;
+    environment.weather_time_seconds = 8'921.25F;
+
+    auto next_environment = environment;
+    next_environment.weather_time_seconds += 0.001F;
+    const auto ocean = OceanSimulation::evaluate(environment);
+    const auto next_ocean = OceanSimulation::evaluate(next_environment);
+    const glm::vec2 point {37.25F, -19.75F};
+    const auto sample = OceanSimulation::sample(ocean, point);
+    const auto next_sample = OceanSimulation::sample(next_ocean, point);
+
+    CHECK(next_ocean.severity == doctest::Approx(ocean.severity));
+    CHECK(next_ocean.total_amplitude == doctest::Approx(ocean.total_amplitude));
+    CHECK(std::abs(next_sample.height - sample.height) < 0.005F);
+    CHECK(glm::length(next_sample.gradient - sample.gradient) < 0.005F);
+
+    // Je place volontairement la premiere onde de part et d'autre de son
+    // bouclage 2*pi pour verifier la continuite de l'equation echantillonnee.
+    EnvironmentState phase_environment = environment;
+    phase_environment.weather_time_seconds = 0.0F;
+    const auto initial_ocean = OceanSimulation::evaluate(phase_environment);
+    const auto first_angular_frequency = std::sqrt(9.80665F * initial_ocean.waves[0].wave_number);
+    const auto first_phase_wrap_time = initial_ocean.waves[0].phase / first_angular_frequency;
+    phase_environment.weather_time_seconds = first_phase_wrap_time - 0.0001F;
+    const auto before_wrap = OceanSimulation::sample(OceanSimulation::evaluate(phase_environment), point);
+    phase_environment.weather_time_seconds = first_phase_wrap_time + 0.0001F;
+    const auto after_wrap = OceanSimulation::sample(OceanSimulation::evaluate(phase_environment), point);
+    CHECK(std::abs(after_wrap.height - before_wrap.height) < 0.001F);
+    CHECK(glm::length(after_wrap.gradient - before_wrap.gradient) < 0.001F);
+
+    auto nearby_weather = environment;
+    auto nearby_ocean = OceanSimulation::evaluate(nearby_weather);
+
+    // Je cherche le premier changement representable qui modifie reellement
+    // le spectre afin que ce controle local ne puisse pas devenir vacu.
+    for (std::size_t step = 0U;
+         step < 32U &&
+         nearby_ocean.total_amplitude == ocean.total_amplitude;
+         ++step) {
+        nearby_weather.wind_strength =
+            std::nextafter(
+                nearby_weather.wind_strength,
+                1.0F);
+        nearby_ocean = OceanSimulation::evaluate(nearby_weather);
+    }
+
+    REQUIRE(nearby_ocean.total_amplitude > ocean.total_amplitude);
+    const auto nearby_sample = OceanSimulation::sample(nearby_ocean, point);
+    CHECK(std::abs(nearby_sample.height - sample.height) < 0.001F);
+    CHECK(glm::length(nearby_sample.gradient - sample.gradient) < 0.001F);
+
+    environment.weather_time_seconds = 1.0e9F;
+    const auto long_session_ocean = OceanSimulation::evaluate(environment);
+    const auto long_session_sample = OceanSimulation::sample(long_session_ocean, point);
+    CHECK(long_session_ocean.detail_phase >= 0.0F);
+    CHECK(long_session_ocean.detail_phase < 6.283186F);
+    CHECK(std::isfinite(long_session_sample.height));
+    CHECK(std::isfinite(long_session_sample.gradient.x));
+    CHECK(std::isfinite(long_session_sample.gradient.y));
+    CHECK(std::isfinite(long_session_sample.crest));
 }
 
 TEST_CASE("performance report formatting includes frame and scheduler counters") {
