@@ -635,6 +635,25 @@ auto World::local_to_world(const ChunkCoord& chunk_coord, const BlockCoord& loca
 }
 
 auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float max_distance) const -> RaycastHit {
+    return raycast(origin, direction, max_distance, WorldRaycastMode::Selection);
+}
+
+auto World::raycast_visibility(const glm::vec3& origin,
+                               const glm::vec3& direction,
+                               float max_distance) const -> RaycastHit {
+    return raycast(origin, direction, max_distance, WorldRaycastMode::VisibilityOpaque);
+}
+
+auto World::raycast_collidable(const glm::vec3& origin,
+                               const glm::vec3& direction,
+                               float max_distance) const -> RaycastHit {
+    return raycast(origin, direction, max_distance, WorldRaycastMode::ProjectileCollidable);
+}
+
+auto World::raycast(const glm::vec3& origin,
+                    const glm::vec3& direction,
+                    float max_distance,
+                    WorldRaycastMode mode) const -> RaycastHit {
     if (!is_finite_vec3(origin) || !is_finite_vec3(direction) || !std::isfinite(max_distance) || max_distance <= 0.0F) {
         return {};
     }
@@ -651,8 +670,20 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
     };
     BlockCoord previous = current;
 
+    const auto blocks_ray = [mode](BlockId block_id) noexcept -> bool {
+        switch (mode) {
+        case WorldRaycastMode::VisibilityOpaque:
+            return is_block_opaque(block_id);
+        case WorldRaycastMode::ProjectileCollidable:
+            return is_block_collidable(block_id);
+        case WorldRaycastMode::Selection:
+        default:
+            return is_block_targetable(block_id);
+        }
+    };
+
     const auto starting_block = get_block(current.x, current.y, current.z);
-    if (is_block_targetable(starting_block)) {
+    if (blocks_ray(starting_block)) {
         return {
             true,
             current,
@@ -715,7 +746,7 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
         }
 
         const auto block_id = get_block(current.x, current.y, current.z);
-        if (is_block_targetable(block_id)) {
+        if (blocks_ray(block_id)) {
             return {
                 true,
                 current,
@@ -725,7 +756,9 @@ auto World::raycast(const glm::vec3& origin, const glm::vec3& direction, float m
             };
         }
 
-        if (has_water(current.x, current.y, current.z)) {
+        // Je conserve le comportement historique de la selection : l'eau est
+        // ciblable, mais elle ne masque ni la vision ni une balle.
+        if (mode == WorldRaycastMode::Selection && has_water(current.x, current.y, current.z)) {
             return {
                 true,
                 current,

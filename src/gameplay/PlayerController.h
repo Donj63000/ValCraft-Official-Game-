@@ -13,6 +13,7 @@ namespace valcraft {
 
 class World;
 class ShipEntity;
+struct OceanState;
 
 enum class PlayerDeathCause : std::uint8_t {
     None = 0,
@@ -114,7 +115,12 @@ class PlayerController {
 public:
     explicit PlayerController(glm::vec3 spawn_position = {0.0F, 70.0F, 0.0F});
 
-    void update(const PlayerInput& input, float dt, const World& world, const ShipEntity* dynamic_obstacle = nullptr);
+    void update(
+        const PlayerInput& input,
+        float dt,
+        const World& world,
+        const ShipEntity* dynamic_obstacle = nullptr,
+        const OceanState* dynamic_ocean = nullptr);
 
     [[nodiscard]] auto state() const noexcept -> const PlayerState&;
     [[nodiscard]] auto position() const noexcept -> const glm::vec3&;
@@ -195,8 +201,16 @@ private:
     void reset_dynamic_climb_state() noexcept;
     [[nodiscard]] auto block_overlaps_player(const BlockCoord& block_coord) const noexcept -> bool;
     [[nodiscard]] auto point_block(const World& world, const glm::vec3& point) const noexcept -> BlockId;
-    [[nodiscard]] auto is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool;
-    [[nodiscard]] auto sample_water_contact(const World& world, const glm::vec3& feet_position) const noexcept -> WaterContactState;
+    [[nodiscard]] auto is_liquid_at(
+        const World& world,
+        const glm::vec3& point) const noexcept
+        -> bool;
+    [[nodiscard]] auto sample_water_contact(
+        const World& world,
+        const glm::vec3& feet_position,
+        const ShipEntity* dynamic_obstacle,
+        const OceanState* dynamic_ocean) const noexcept
+        -> WaterContactState;
 
     PlayerState state_ {};
     BlockBreakProgress block_break_progress_ {};

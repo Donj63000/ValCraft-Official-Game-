@@ -5,6 +5,7 @@
 #include "render/RendererQuality.h"
 #include "render/Renderer.h"
 #include "render/ShipMesh.h"
+#include "render/ShipProtectionShaderSource.h"
 #include "render/SkyShaderSource.h"
 #include "world/BlockVisuals.h"
 
@@ -17,8 +18,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <set>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -240,12 +245,16 @@ using RenderFrameWithCrew = void (Renderer::*)(
     const ConfirmDialogState&,
     std::span<const CreatureRenderInstance>,
     std::span<const CrewRenderInstance>,
+    std::span<const OldGuardRenderInstance>,
+    std::span<const OldGuardMuzzleFlashInstance>,
+    std::span<const OldGuardSmokeInstance>,
     std::span<const ItemDropRenderInstance>,
     const ShipRenderState&,
     const PlayerProgressionState&,
     bool,
     const GameplayHudAnnouncementView&,
     const MaritimeHudView&,
+    const CommandConsoleView&,
     const EnvironmentState&,
     int,
     int);
@@ -277,7 +286,15 @@ TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     CHECK(shader_source.find("value_noise3(p)") != std::string_view::npos);
     CHECK(shader_source.find("u_overcast_intensity") != std::string_view::npos);
     CHECK(shader_source.find("u_precipitation_intensity") != std::string_view::npos);
-    CHECK(shader_source.find("u_lightning_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("uniform float u_violent_storm_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("uniform float u_lightning_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("uniform float u_lightning_bolt_intensity") != std::string_view::npos);
+    CHECK(shader_source.find("uniform vec3 u_lightning_direction") != std::string_view::npos);
+    CHECK(shader_source.find("uniform float u_lightning_shape_seed") != std::string_view::npos);
+    CHECK(shader_source.find("float lightning_bolt_mask(vec3 view_direction)") != std::string_view::npos);
+    CHECK(shader_source.find("u_lightning_direction.xz") != std::string_view::npos);
+    CHECK(shader_source.find("u_lightning_direction.y") != std::string_view::npos);
+    CHECK(shader_source.find("lightning_bolt_mask(direction)") != std::string_view::npos);
     CHECK(shader_source.find("volumetric_cloud_minimum") != std::string_view::npos);
     CHECK(shader_source.find("max(cloud_factor, overcast_factor) > volumetric_cloud_minimum") != std::string_view::npos);
     CHECK(shader_source.find("star_spawn") != std::string_view::npos);
@@ -286,6 +303,74 @@ TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     CHECK(shader_source.find("uniform float u_cloud_detail") != std::string_view::npos);
     CHECK(shader_source.find("step >= cloud_steps") != std::string_view::npos);
     CHECK(vertex_source.find("vec4(clip, 1.0, 1.0)") != std::string_view::npos);
+}
+
+TEST_CASE("ship protection GLSL keeps water and weather masks on one contract") {
+    const auto shader_source = kShipProtectionGlslSource;
+
+    CHECK(shader_source.find("uniform int u_ship_protection_enabled") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform mat4 u_ship_inverse_model") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform vec3 u_ship_bounds_min") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform vec3 u_ship_bounds_max") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform vec4 u_ship_profile_longitudinal") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform vec4 u_ship_profile_taper") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform vec4 u_ship_profile_heights") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform vec4 u_ship_profile_widths") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("uniform float u_ship_sheltered_floor") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("u_ship_protection_enabled == 0") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("bool ship_excludes_ocean") !=
+          std::string_view::npos);
+    CHECK(shader_source.find("bool ship_shelters_weather") !=
+          std::string_view::npos);
+}
+
+TEST_CASE("renderer precipitation pass keeps its shader and OpenGL contracts") {
+    const auto renderer_path =
+        std::filesystem::path {
+            __FILE__,
+        }
+            .parent_path()
+            .parent_path() /
+        "src" /
+        "render" /
+        "Renderer.cpp";
+    std::ifstream input(
+        renderer_path,
+        std::ios::binary);
+    REQUIRE(input.is_open());
+    const std::string source {
+        std::istreambuf_iterator<char> {
+            input,
+        },
+        std::istreambuf_iterator<char> {},
+    };
+
+    CHECK(source.find("rain_streak_layer") ==
+          std::string::npos);
+    CHECK(source.find("glDrawArraysInstanced") !=
+          std::string::npos);
+    CHECK(source.find("ScopedPrecipitationGlState") !=
+          std::string::npos);
+    CHECK(source.find("GL_DEPTH_WRITEMASK") !=
+          std::string::npos);
+    CHECK(source.find("glBlendFuncSeparate") !=
+          std::string::npos);
+    CHECK(source.find("precipitation_uniforms_.ship_protection_enabled") !=
+          std::string::npos);
+    CHECK(source.find("post_process_uniforms_.weather_exposure") !=
+          std::string::npos);
+    CHECK(source.find("ship_excludes_ocean(v_world_position)") !=
+          std::string::npos);
 }
 
 TEST_CASE("renderer quality profiles bound expensive passes predictably") {

@@ -1,0 +1,60 @@
+﻿{
+    "schema_version":  2,
+    "configuration":  "Release",
+    "measured_frames":  180,
+    "warmup_frames":  60,
+    "repetitions":  1,
+    "viewport_width":  1920,
+    "viewport_height":  1080,
+    "trace_enabled":  false,
+    "adaptive_quality":  false,
+    "platform":  "windows",
+    "build_type":  "Release",
+    "thresholds_enforced":  true,
+    "baseline_path":  "",
+    "max_regression_percent":  8,
+    "build_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\cmake-build-codex-msvc-release",
+    "artifact_dir":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260725-034519",
+    "scenarios":  [
+                      {
+                          "scenario":  "sea_tempest",
+                          "frame_avg":  8.617108,
+                          "frame_p95":  11.867525,
+                          "frame_p99":  14.533101,
+                          "frame_max":  15.8553,
+                          "gpu_frame_p95":  7.643926,
+                          "private_bytes_peak":  503910400,
+                          "working_set_bytes_peak":  415924224,
+                          "lag_frames_16_7":  0,
+                          "lag_frames_33_3":  0,
+                          "lag_frames_50_0":  0,
+                          "frame_avg_mad":  0,
+                          "frame_p95_mad":  0,
+                          "platform":  "windows",
+                          "build_type":  "Release",
+                          "vsync_mode":  "disabled",
+                          "repetitions":  [
+                                              {
+                                                  "repetition":  1,
+                                                  "frame_avg":  8.617108,
+                                                  "frame_p95":  11.867525,
+                                                  "frame_p99":  14.533101,
+                                                  "frame_max":  15.8553,
+                                                  "gpu_frame_p95":  7.643926,
+                                                  "private_bytes_peak":  503910400,
+                                                  "working_set_bytes_peak":  415924224,
+                                                  "lag_frames_16_7":  0,
+                                                  "lag_frames_33_3":  0,
+                                                  "lag_frames_50_0":  0,
+                                                  "worst_frame_stage":  "generation",
+                                                  "platform":  "windows",
+                                                  "build_type":  "Release",
+                                                  "vsync_mode":  "disabled",
+                                                  "spike_windows":  0,
+                                                  "run_directory":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260725-034519\\runs\\20260725-014519-20260725-014519-715-17696-0-measure-sea_tempest",
+                                                  "output":  "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\20260725-034519\\sea_tempest-run-1.json"
+                                              }
+                                          ]
+                      }
+                  ]
+}

@@ -1,6 +1,7 @@
 #include "world/ChunkMesher.h"
 
 #include "world/BlockVisuals.h"
+#include "world/OceanAdventureLayout.h"
 #include "world/World.h"
 
 #include <algorithm>
@@ -869,7 +870,13 @@ void append_water_face(ChunkMeshData& mesh,
             }
 
             float wave_weight = 0.0F;
-            if (surface_block) {
+            // Je reserve la houle geante a la surface marine. Une source
+            // placee sur une ile ou un pont conserve ainsi sa surface locale
+            // au lieu de recevoir plusieurs metres de deplacement oceanique.
+            const auto ocean_surface_block =
+                surface_block &&
+                local_coord.y == kSeaLevel;
+            if (ocean_surface_block) {
                 if (face == Face::PositiveY) {
                     wave_weight = 1.0F;
                 } else if (face != Face::NegativeY) {

@@ -170,6 +170,14 @@ function Get-ScenarioDefinition {
         $arguments += "--stream-radius=5"
         $arguments += "--disable-post-process"
     }
+    "sea_tempest" {
+        # Je fige une Tempest maritime hors flash pour mesurer durablement le
+        # coût des vagues, des gouttes et des impacts au niveau de qualité haut.
+        $arguments += "--stream-radius=5"
+        $arguments += "--smoke-session=sea-new"
+        $arguments += "--smoke-ship-view=deck"
+        $arguments += "--initial-weather-time=2760"
+    }
     default {
         throw "Unknown perf scenario '$Name'."
     }

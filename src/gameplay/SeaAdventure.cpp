@@ -1,5 +1,6 @@
 #include "gameplay/SeaAdventure.h"
 
+#include "creatures/CreatureSystem.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
 #include "world/World.h"
@@ -27,6 +28,161 @@
 
 namespace valcraft {
 
+auto ShipProtectionProfile::half_width_at(float local_z) const noexcept -> float {
+    const auto finite_profile =
+        std::isfinite(stern_z) &&
+        std::isfinite(bow_z) &&
+        std::isfinite(maximum_half_width) &&
+        std::isfinite(stern_width_loss) &&
+        std::isfinite(bow_width_loss) &&
+        std::isfinite(stern_taper_exponent) &&
+        std::isfinite(bow_taper_exponent);
+    if (!finite_profile ||
+        !std::isfinite(local_z) ||
+        stern_z >= 0.0F ||
+        bow_z <= 0.0F ||
+        maximum_half_width <= 0.0F ||
+        stern_width_loss < 0.0F ||
+        bow_width_loss < 0.0F ||
+        stern_width_loss > maximum_half_width ||
+        bow_width_loss > maximum_half_width ||
+        stern_taper_exponent <= 0.0F ||
+        bow_taper_exponent <= 0.0F) {
+        return 0.0F;
+    }
+
+    const auto bow_side = local_z >= 0.0F;
+    const auto extent =
+        bow_side
+            ? bow_z
+            : -stern_z;
+    const auto width_loss =
+        bow_side
+            ? bow_width_loss
+            : stern_width_loss;
+    const auto exponent =
+        bow_side
+            ? bow_taper_exponent
+            : stern_taper_exponent;
+    const auto progression =
+        std::clamp(
+            std::abs(local_z) / extent,
+            0.0F,
+            1.0F);
+    const auto minimum_half_width =
+        maximum_half_width -
+        width_loss;
+    return std::max(
+        minimum_half_width,
+        maximum_half_width -
+            width_loss *
+                std::pow(
+                    progression,
+                    exponent));
+}
+
+auto ShipProtectionProfile::excludes_ocean_local(
+    const glm::vec3& local_point) const noexcept
+    -> bool {
+
+    const auto finite_point =
+        std::isfinite(local_point.x) &&
+        std::isfinite(local_point.y) &&
+        std::isfinite(local_point.z);
+    const auto finite_bands =
+        std::isfinite(lower_hull_min_y) &&
+        std::isfinite(middle_hull_min_y) &&
+        std::isfinite(upper_hull_min_y) &&
+        std::isfinite(main_deck_top_y) &&
+        std::isfinite(lower_width_inset) &&
+        std::isfinite(middle_width_inset) &&
+        std::isfinite(lower_minimum_half_width) &&
+        std::isfinite(middle_minimum_half_width) &&
+        std::isfinite(boundary_margin);
+    if (!finite_point ||
+        !finite_bands ||
+        !(lower_hull_min_y <
+          middle_hull_min_y &&
+          middle_hull_min_y <
+              upper_hull_min_y &&
+          upper_hull_min_y <
+              main_deck_top_y) ||
+        lower_width_inset < 0.0F ||
+        middle_width_inset < 0.0F ||
+        lower_minimum_half_width < 0.0F ||
+        middle_minimum_half_width < 0.0F ||
+        boundary_margin < 0.0F ||
+        local_point.z <
+            stern_z -
+                boundary_margin ||
+        local_point.z >
+            bow_z +
+                boundary_margin ||
+        local_point.y <
+            lower_hull_min_y ||
+        local_point.y >=
+            main_deck_top_y) {
+        return false;
+    }
+
+    const auto hull_half_width =
+        half_width_at(local_point.z);
+    if (hull_half_width <= 0.0F) {
+        return false;
+    }
+
+    auto protected_half_width =
+        hull_half_width;
+    if (local_point.y <
+        middle_hull_min_y) {
+        protected_half_width =
+            std::max(
+                lower_minimum_half_width,
+                hull_half_width -
+                    lower_width_inset);
+    } else if (local_point.y <
+               upper_hull_min_y) {
+        protected_half_width =
+            std::max(
+                middle_minimum_half_width,
+                hull_half_width -
+                    middle_width_inset);
+    }
+
+    return std::abs(local_point.x) <=
+           protected_half_width +
+               boundary_margin;
+}
+
+auto ShipProtectionProfile::shelters_from_weather_local(
+    const glm::vec3& local_point) const noexcept
+    -> bool {
+
+    if (!std::isfinite(sheltered_floor_y) ||
+        local_point.y <
+            sheltered_floor_y ||
+        !excludes_ocean_local(local_point) ||
+        local_point.z < stern_z ||
+        local_point.z > bow_z) {
+        return false;
+    }
+
+    const auto hull_half_width =
+        half_width_at(local_point.z);
+    const auto sheltered_half_width =
+        std::max(
+            middle_minimum_half_width,
+            hull_half_width -
+                middle_width_inset) -
+        boundary_margin;
+
+    // Je garde la pluie hors du volume habitable, sans rendre la coque
+    // exterieure artificiellement seche.
+    return sheltered_half_width >= 0.0F &&
+           std::abs(local_point.x) <=
+               sheltered_half_width;
+}
+
 namespace {
 
 constexpr float kShipVisualY = static_cast<float>(kSeaLevel + 1);
@@ -45,6 +201,12 @@ constexpr float kFishingStormPenalty = 4.0F;
 constexpr float kFishingNightBonus = 1.2F;
 constexpr float kSurvivalDamageInterval = 1.75F;
 constexpr float kStrandedWarningInterval = 8.0F;
+constexpr float kAboardHungerLossPerSecond = 0.04F;
+constexpr float kAboardThirstLossPerSecond = 0.05F;
+constexpr float kAwayHungerLossPerSecond = 0.16F;
+constexpr float kAwayThirstLossPerSecond = 0.20F;
+constexpr float kAutomaticMealThreshold = 80.0F;
+constexpr float kAutomaticDrinkThreshold = 80.0F;
 constexpr float kRespawnMinimumHunger = 35.0F;
 constexpr float kRespawnMinimumThirst = 35.0F;
 constexpr float kRespawnStamina = 100.0F;
@@ -161,6 +323,32 @@ void integrate_critical_spring(float& value,
         value = target;
     }
     if (!std::isfinite(velocity)) {
+        velocity = 0.0F;
+    }
+}
+
+void clamp_spring_state(
+    float& value,
+    float& velocity,
+    float maximum_absolute_value) noexcept {
+
+    const auto safe_limit =
+        std::max(
+            finite_or(
+                maximum_absolute_value,
+                0.0F),
+            0.0F);
+    const auto clamped_value =
+        std::clamp(
+            finite_or(value, 0.0F),
+            -safe_limit,
+            safe_limit);
+    const auto position_was_clamped =
+        !std::isfinite(value) ||
+        clamped_value != value;
+    value = clamped_value;
+    if (position_was_clamped ||
+        !std::isfinite(velocity)) {
         velocity = 0.0F;
     }
 }
@@ -535,11 +723,32 @@ void add_glyph(
     });
 }
 
-constexpr float kAmelieSternZ = -35.0F;
-constexpr float kAmelieBowZ = 36.0F;
-constexpr float kAmelieMaximumHalfWidth = 8.60F;
+constexpr ShipProtectionProfile kAmelieProtectionProfile {
+    -35.0F,
+    36.0F,
+    8.60F,
+    2.25F,
+    7.50F,
+    1.35F,
+    1.55F,
+    -1.42F,
+    -0.62F,
+    0.82F,
+    4.0F,
+    1.25F,
+    0.62F,
+    0.70F,
+    0.80F,
+    0.04F,
+    1.0F,
+};
+constexpr float kAmelieSternZ =
+    kAmelieProtectionProfile.stern_z;
+constexpr float kAmelieBowZ =
+    kAmelieProtectionProfile.bow_z;
 constexpr float kAmelieMainDeckUnderside = 3.65F;
-constexpr float kAmelieMainDeckTop = 4.0F;
+constexpr float kAmelieMainDeckTop =
+    kAmelieProtectionProfile.main_deck_top_y;
 constexpr int kAmelieBoardingMinRowZ = -9;
 constexpr int kAmelieBoardingMaxRowZ = -7;
 constexpr float kAmelieBoardingOuterX = 9.0F;
@@ -679,19 +888,9 @@ auto amelie_crew_navigation_edges() -> const std::array<ShipCrewNavigationEdge, 
 }
 
 auto amelie_half_width(float z) noexcept -> float {
-    if (z >= 0.0F) {
-        // Je conserve un ventre large au centre puis je pince progressivement
-        // l'etrave : la courbe evite l'ancien avant presque triangulaire.
-        const auto progression = std::clamp(z / kAmelieBowZ, 0.0F, 1.0F);
-        return std::max(1.10F,
-                        kAmelieMaximumHalfWidth - 7.50F * std::pow(progression, 1.55F));
-    }
-
-    // Je resserre la poupe plus doucement que la proue. Son tableau reste assez
-    // large pour la cabine, mais n'a plus la silhouette d'un bloc rectangulaire.
-    const auto progression = std::clamp(-z / -kAmelieSternZ, 0.0F, 1.0F);
-    return std::max(6.35F,
-                    kAmelieMaximumHalfWidth - 2.25F * std::pow(progression, 1.35F));
+    // Je fais du profil partage l'unique source de verite de la coque afin
+    // qu'une retouche de silhouette mette aussi a jour ses volumes proteges.
+    return kAmelieProtectionProfile.half_width_at(z);
 }
 
 auto is_cabin_window_row(int z) noexcept -> bool {
@@ -2624,6 +2823,7 @@ auto amelie_ship_blueprint() noexcept -> const ShipBlueprint& {
             std::span<const glm::vec3>(kAmelieInteriorLanterns),
             bounds,
             anchors,
+            kAmelieProtectionProfile,
             calculate_geometry_revision(parts, bounds),
             calculate_navigation_revision(navigation_nodes, navigation_edges),
         };
@@ -2710,6 +2910,7 @@ auto sanitize_sea_adventure_save_state(const SeaAdventureSaveState& state) noexc
         sanitized.stamped_ship_z = static_cast<std::int32_t>(current_origin_z);
     }
     sanitized.crew = sanitize_ship_crew_save_state(sanitized.crew);
+    sanitized.old_guard = sanitize_old_guard_save_state(sanitized.old_guard);
     return sanitized;
 }
 
@@ -2894,6 +3095,42 @@ auto ShipEntity::motion_delta_at(
 
     return current_world_point -
            previous_world_point;
+}
+
+auto ShipEntity::excludes_ocean_at(
+    const glm::vec3& world_point) const noexcept
+    -> bool {
+
+    // Je refuse les non-finis avant world_to_local_point(), car cette API
+    // remplace volontairement une position corrompue par l'origine du navire.
+    if (!std::isfinite(world_point.x) ||
+        !std::isfinite(world_point.y) ||
+        !std::isfinite(world_point.z)) {
+        return false;
+    }
+
+    return amelie_ship_blueprint()
+        .protection_profile
+        .excludes_ocean_local(
+            world_to_local_point(
+                world_point));
+}
+
+auto ShipEntity::is_weather_sheltered_at(
+    const glm::vec3& world_point) const noexcept
+    -> bool {
+
+    if (!std::isfinite(world_point.x) ||
+        !std::isfinite(world_point.y) ||
+        !std::isfinite(world_point.z)) {
+        return false;
+    }
+
+    return amelie_ship_blueprint()
+        .protection_profile
+        .shelters_from_weather_local(
+            world_to_local_point(
+                world_point));
 }
 
 auto ShipEntity::render_state(bool visible) const noexcept -> ShipRenderState {
@@ -3486,6 +3723,8 @@ void SeaAdventureSystem::reset(int seed) noexcept {
     ship_.synchronize_motion_history();
     crew_.reset(seed, ship_);
     state_.crew = crew_.save_state();
+    old_guard_.reset(seed);
+    state_.old_guard = old_guard_.save_state();
     legacy_ship_migration_.reset();
 }
 
@@ -3508,6 +3747,8 @@ void SeaAdventureSystem::load_state(const SeaAdventureSaveState& state, int worl
     ship_.synchronize_motion_history();
     crew_.load_state(state_.crew, world_seed, ship_);
     state_.crew = crew_.save_state();
+    old_guard_.load_state(state_.old_guard, world_seed);
+    state_.old_guard = old_guard_.save_state();
     legacy_ship_migration_.reset();
 }
 
@@ -3542,6 +3783,34 @@ auto SeaAdventureSystem::crew_render_instances() const noexcept -> std::span<con
 
 auto SeaAdventureSystem::crew_members() const noexcept -> std::span<const ShipCrewMemberSaveState> {
     return state_.active ? crew_.members() : std::span<const ShipCrewMemberSaveState> {};
+}
+
+auto SeaAdventureSystem::old_guard_render_instances() const noexcept
+    -> std::span<const OldGuardRenderInstance> {
+    return state_.active
+               ? old_guard_.render_instances()
+               : std::span<const OldGuardRenderInstance> {};
+}
+
+auto SeaAdventureSystem::old_guard_members() const noexcept
+    -> std::span<const OldGuardMemberSaveState> {
+    return state_.active
+               ? old_guard_.members()
+               : std::span<const OldGuardMemberSaveState> {};
+}
+
+auto SeaAdventureSystem::old_guard_flashes() const noexcept
+    -> std::span<const OldGuardMuzzleFlashInstance> {
+    return state_.active
+               ? old_guard_.flashes()
+               : std::span<const OldGuardMuzzleFlashInstance> {};
+}
+
+auto SeaAdventureSystem::old_guard_smoke() const noexcept
+    -> std::span<const OldGuardSmokeInstance> {
+    return state_.active
+               ? old_guard_.smoke()
+               : std::span<const OldGuardSmokeInstance> {};
 }
 
 auto SeaAdventureSystem::hud_state(const PlayerController& player) const noexcept -> SeaAdventureHudState {
@@ -3586,6 +3855,10 @@ auto SeaAdventureSystem::hud_state(const PlayerController& player) const noexcep
         // raycast de l'equipage tient compte des cloisons du navire.
         hud.crew_focus = crew_.focus_from_ray(
             ship_,
+            player.eye_position(),
+            player.look_direction(),
+            6.5F);
+        hud.old_guard_focus = old_guard_.focus_from_ray(
             player.eye_position(),
             player.look_direction(),
             6.5F);
@@ -3700,10 +3973,6 @@ auto SeaAdventureSystem::update(
     float dt,
     bool request_fishing) -> SeaAdventureFrameResult {
 
-    // Je garde temporairement le parametre pour la compatibilite de l'appel Game;
-    // la simulation de l'entite ne consulte plus et ne modifie plus le monde.
-    (void)world;
-
     SeaAdventureFrameResult result {};
     if (!state_.active) {
         return result;
@@ -3713,7 +3982,9 @@ auto SeaAdventureSystem::update(
         sanitize_sea_environment(environment);
     const auto ocean =
         OceanSimulation::evaluate(
-            safe_environment);
+            safe_environment,
+            OceanSimulation::surface_profile_for_world(
+                world.generation_profile()));
     dt = std::clamp(
         finite_or(dt, 0.0F),
         0.0F,
@@ -3920,20 +4191,22 @@ auto SeaAdventureSystem::update(
         0.01745329251994329577F;
     const auto maximum_heave =
         std::clamp(
-            ocean.total_amplitude *
-                    0.95F +
+            ocean.maximum_displacement *
+                    0.92F +
                 0.05F,
             0.08F,
-            1.55F) *
+            3.60F) *
         motion_scale;
     const auto maximum_pitch =
         (2.5F +
-         ocean.severity * 8.0F) *
+         ocean.severity * 8.0F +
+         ocean.tempest_factor * 3.5F) *
         kRadiansPerDegree *
         motion_scale;
     const auto maximum_roll =
         (4.0F +
-         ocean.severity * 12.0F) *
+         ocean.severity * 12.0F +
+         ocean.tempest_factor * 6.0F) *
         kRadiansPerDegree *
         motion_scale;
 
@@ -3974,6 +4247,21 @@ auto SeaAdventureSystem::update(
         0.31F +
             ocean.severity * 0.06F,
         dt);
+    // Je borne aussi l'état mémorisé du ressort. Un outil ou un mod peut
+    // remplacer instantanément une Tempest par du calme ; le navire doit alors
+    // rester dans l'enveloppe de la surface effectivement rendue.
+    clamp_spring_state(
+        ocean_heave_,
+        ocean_heave_velocity_,
+        maximum_heave);
+    clamp_spring_state(
+        ocean_pitch_,
+        ocean_pitch_velocity_,
+        maximum_pitch);
+    clamp_spring_state(
+        ocean_roll_,
+        ocean_roll_velocity_,
+        maximum_roll);
     ship_.set_ocean_pose(
         ocean_heave_,
         ocean_pitch_,
@@ -4100,14 +4388,18 @@ auto SeaAdventureSystem::update(
         0.0F,
         state_.hunger -
             dt *
-                (player_now_on_ship ? 0.75F : 1.08F) *
+                (player_now_on_ship
+                     ? kAboardHungerLossPerSecond
+                     : kAwayHungerLossPerSecond) *
                 weather_pressure);
 
     state_.thirst = std::max(
         0.0F,
         state_.thirst -
             dt *
-                (player_now_on_ship ? 0.95F : 1.34F) *
+                (player_now_on_ship
+                     ? kAboardThirstLossPerSecond
+                     : kAwayThirstLossPerSecond) *
                 weather_pressure);
 
     if (swimming) {
@@ -4125,7 +4417,28 @@ auto SeaAdventureSystem::update(
                     (player_now_on_ship ? 8.5F : 5.2F));
     }
 
-    consume_automatic_supplies(result);
+    // Je credite les livraisons avant le service et les degats de survie :
+    // une ressource rapportee sur cette frame doit pouvoir sauver le joueur.
+    const auto crew_result =
+        crew_.update(
+            ship_,
+            safe_environment,
+            dt,
+            state_.fish,
+            state_.water_flasks,
+            player.position());
+
+    result.crew_fish_delivered =
+        crew_result.fish_delivered;
+
+    result.crew_water_delivered =
+        crew_result.water_delivered;
+
+    state_.crew = crew_.save_state();
+
+    consume_automatic_supplies(
+        player_now_on_ship,
+        result);
 
     // Ces drapeaux decrivent l'etat de la frame, pas seulement la frame exacte
     // ou un tick de degat est applique.
@@ -4268,25 +4581,262 @@ auto SeaAdventureSystem::update(
         state_.stranded_warning_timer = 0.0F;
     }
 
-    const auto crew_result =
-        crew_.update(
-            ship_,
-            safe_environment,
-            dt,
-            state_.fish,
-            state_.water_flasks,
-            player.position());
-
-    result.crew_fish_delivered =
-        crew_result.fish_delivered;
-
-    result.crew_water_delivered =
-        crew_result.water_delivered;
-
-    state_.crew = crew_.save_state();
-
     return result;
 }
+
+auto SeaAdventureSystem::update_old_guard_combat(
+    World& world,
+    CreatureSystem& creatures,
+    const PlayerController& player,
+    const EnvironmentState& environment,
+    float dt) -> const OldGuardFrameEvents& {
+    static const OldGuardFrameEvents kNoEvents {};
+    if (!state_.active) {
+        old_guard_.clear_transient_effects();
+        return kNoEvents;
+    }
+
+    std::array<OldGuardTargetCandidate, kCreatureMaxActiveCount> targets {};
+    auto target_count = std::size_t {0U};
+    for (const auto& creature : creatures.active_creatures()) {
+        if (target_count >= targets.size() ||
+            !std::isfinite(creature.position.x) ||
+            !std::isfinite(creature.position.y) ||
+            !std::isfinite(creature.position.z) ||
+            !std::isfinite(creature.health) ||
+            creature.health <= 0.0F) {
+            continue;
+        }
+
+        auto aim_height = 0.92F;
+        auto body_radius = 0.48F;
+        switch (creature.anchor.species) {
+        case CreatureSpecies::Cow:
+            aim_height = 1.12F;
+            body_radius = 0.62F;
+            break;
+        case CreatureSpecies::Villager:
+            aim_height = 1.35F;
+            body_radius = 0.42F;
+            break;
+        case CreatureSpecies::Sheep:
+            aim_height = 0.90F;
+            body_radius = 0.52F;
+            break;
+        case CreatureSpecies::Pig:
+        default:
+            break;
+        }
+
+        auto& candidate = targets[target_count++];
+        candidate.position = creature.position;
+        candidate.aim_position =
+            creature.position +
+            glm::vec3 {0.0F, aim_height, 0.0F};
+        candidate.body_radius = body_radius;
+        candidate.morph_factor = creature.morph_factor;
+        candidate.health = creature.health;
+        candidate.stable_id =
+            creature_id_from_anchor(creature.anchor);
+        candidate.species = creature.anchor.species;
+        candidate.phase = creature.phase;
+    }
+
+    std::array<OldGuardOccupant,
+               1U + kShipCrewMemberCount + kOldGuardMemberCount> occupants {};
+    auto occupant_count = std::size_t {0U};
+    if (!player.is_dead()) {
+        occupants[occupant_count++] = {
+            .position =
+                player.position() +
+                glm::vec3 {0.0F, 0.90F, 0.0F},
+            .radius = 0.42F,
+            .priority = OldGuardOccupantPriority::Player,
+            .blocks_shot = true,
+        };
+    }
+    for (const auto& member : crew_.render_instances()) {
+        occupants[occupant_count++] = {
+            .position =
+                member.position +
+                glm::vec3 {0.0F, 0.88F, 0.0F},
+            .radius = 0.40F,
+            .priority = OldGuardOccupantPriority::CrewTask,
+            .blocks_shot = true,
+        };
+    }
+    for (const auto& guard : old_guard_.render_instances()) {
+        occupants[occupant_count++] = {
+            .position =
+                guard.position +
+                glm::vec3 {0.0F, 0.92F, 0.0F},
+            .radius = 0.42F,
+            .priority = OldGuardOccupantPriority::Guard,
+            .blocks_shot = true,
+        };
+    }
+
+    const auto unobstructed_to =
+        [&](const glm::vec3& origin,
+            const glm::vec3& target,
+            bool collidable) {
+            const auto delta = target - origin;
+            const auto distance_squared = glm::dot(delta, delta);
+            if (!std::isfinite(distance_squared) ||
+                distance_squared <= 1.0e-8F) {
+                return false;
+            }
+            const auto distance = std::sqrt(distance_squared);
+            const auto direction = delta / distance;
+            const auto world_hit =
+                collidable
+                    ? world.raycast_collidable(
+                          origin,
+                          direction,
+                          distance)
+                    : world.raycast_visibility(
+                          origin,
+                          direction,
+                          distance);
+            constexpr auto kLineTolerance = 0.025F;
+            if (world_hit.hit &&
+                world_hit.distance <
+                    distance - kLineTolerance) {
+                return false;
+            }
+            const auto ship_hit =
+                ship_.raycast_collidable_distance(
+                    origin,
+                    direction,
+                    distance);
+            return !ship_hit.has_value() ||
+                   *ship_hit >=
+                       distance - kLineTolerance;
+        };
+
+    const auto wind_direction =
+        glm::vec3 {
+            environment.wind_direction_xz.x,
+            0.0F,
+            environment.wind_direction_xz.y,
+        };
+    const auto safe_wind_strength =
+        std::isfinite(environment.wind_strength)
+            ? std::clamp(environment.wind_strength, 0.0F, 1.0F)
+            : 0.0F;
+    const auto wind_velocity =
+        wind_direction * (0.45F + safe_wind_strength * 3.2F);
+    old_guard_.update_effects(dt, wind_velocity);
+
+    OldGuardUpdateContext context {};
+    context.platform = {
+        .world_origin = ship_.world_origin(),
+        .velocity = ship_.velocity(),
+        .orientation = ship_.orientation(),
+    };
+    context.targets = std::span<const OldGuardTargetCandidate> {
+        targets.data(),
+        target_count,
+    };
+    context.occupants = std::span<const OldGuardOccupant> {
+        occupants.data(),
+        occupant_count,
+    };
+    context.visibility_clear =
+        [&](const glm::vec3& origin,
+            const glm::vec3& target) {
+            return unobstructed_to(
+                origin,
+                target,
+                false);
+        };
+    context.melee_clear =
+        [&](const glm::vec3& origin,
+            const glm::vec3& target) {
+            return unobstructed_to(
+                origin,
+                target,
+                true);
+        };
+    context.shot_clear =
+        [&](const glm::vec3& origin,
+            const glm::vec3& direction,
+            float maximum_distance,
+            std::uint64_t intended_target) {
+            if (!std::isfinite(maximum_distance) ||
+                maximum_distance <= 0.0F ||
+                maximum_distance >
+                    kOldGuardMusketRange + 0.05F) {
+                return false;
+            }
+            const auto first_creature =
+                creatures.raycast_first_creature(
+                    origin,
+                    direction,
+                    maximum_distance);
+            if (!first_creature.hit ||
+                first_creature.id != intended_target) {
+                return false;
+            }
+
+            constexpr auto kImpactTolerance = 0.025F;
+            const auto world_hit =
+                world.raycast_collidable(
+                    origin,
+                    direction,
+                    maximum_distance);
+            if (world_hit.hit &&
+                world_hit.distance <
+                    first_creature.distance -
+                        kImpactTolerance) {
+                return false;
+            }
+            const auto ship_hit =
+                ship_.raycast_collidable_distance(
+                    origin,
+                    direction,
+                    maximum_distance);
+            return !ship_hit.has_value() ||
+                   *ship_hit >=
+                       first_creature.distance -
+                           kImpactTolerance;
+        };
+    context.wind_velocity = wind_velocity;
+    context.sky_light =
+        std::clamp(
+            std::isfinite(environment.daylight_factor)
+                ? environment.daylight_factor
+                : 1.0F,
+            0.0F,
+            1.0F);
+    context.local_light =
+        std::clamp(
+            0.18F +
+                (1.0F - context.sky_light) * 0.30F,
+            0.0F,
+            1.0F);
+    context.precipitation_exposure = 1.0F;
+
+    const auto& events =
+        old_guard_.update(context, dt);
+    for (const auto& shot : events.shots) {
+        (void)creatures.apply_damage(
+            shot.target_id,
+            shot.damage,
+            CreatureDamageSource::OldGuard,
+            shot.direction);
+    }
+    for (const auto& bayonet : events.bayonet_hits) {
+        (void)creatures.apply_damage(
+            bayonet.target_id,
+            bayonet.damage,
+            CreatureDamageSource::OldGuard,
+            bayonet.direction);
+    }
+    state_.old_guard = old_guard_.save_state();
+    return events;
+}
+
 auto SeaAdventureSystem::collect_resource(
     BlockId block_id) noexcept -> bool {
 
@@ -4378,6 +4928,18 @@ auto SeaAdventureSystem::try_damage_crew(const glm::vec3& origin,
     return result;
 }
 
+auto SeaAdventureSystem::intercept_old_guard(const glm::vec3& origin,
+                                             const glm::vec3& direction,
+                                             float max_distance) const noexcept -> OldGuardRayHit {
+    if (!state_.active) {
+        return {};
+    }
+    return old_guard_.intercept_ray(
+        origin,
+        direction,
+        max_distance);
+}
+
 void SeaAdventureSystem::cancel_fishing() noexcept {
     state_.fishing_active = false;
     state_.fishing_progress = 0.0F;
@@ -4435,20 +4997,38 @@ auto SeaAdventureSystem::player_ship_distance(const glm::vec3& player_position) 
     return glm::length(delta);
 }
 
-void SeaAdventureSystem::consume_automatic_supplies(SeaAdventureFrameResult& result) noexcept {
-    if (state_.hunger < 34.0F && state_.fish > 0U) {
-        --state_.fish;
-        state_.hunger = std::min(100.0F, state_.hunger + 20.0F);
-        result.consumed_food = true;
-    } else if (state_.hunger < 26.0F && state_.food_rations > 0U) {
-        --state_.food_rations;
-        state_.hunger = std::min(100.0F, state_.hunger + 24.0F);
-        result.consumed_food = true;
+void SeaAdventureSystem::consume_automatic_supplies(
+    bool player_on_ship,
+    SeaAdventureFrameResult& result) noexcept {
+
+    if (!player_on_ship) {
+        return;
     }
 
-    if (state_.thirst < 30.0F && state_.water_flasks > 0U) {
+    // Je laisse la jauge atteindre un seuil de confort avant le service pour
+    // ne jamais gaspiller une unite a chaque frame, puis le repas la remplit.
+    if (state_.hunger <=
+        kAutomaticMealThreshold) {
+
+        if (state_.fish > 0U) {
+            --state_.fish;
+            result.consumed_food = true;
+        } else if (state_.food_rations > 0U) {
+            --state_.food_rations;
+            result.consumed_food = true;
+        }
+
+        if (result.consumed_food) {
+            state_.hunger = 100.0F;
+        }
+    }
+
+    if (state_.thirst <=
+            kAutomaticDrinkThreshold &&
+        state_.water_flasks > 0U) {
+
         --state_.water_flasks;
-        state_.thirst = std::min(100.0F, state_.thirst + 32.0F);
+        state_.thirst = 100.0F;
         result.consumed_water = true;
     }
 }

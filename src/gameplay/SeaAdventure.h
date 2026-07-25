@@ -2,6 +2,7 @@
 
 #include "app/Hotbar.h"
 #include "creatures/CreatureTypes.h"
+#include "gameplay/OldGuard.h"
 #include "gameplay/ShipCrew.h"
 #include "world/Block.h"
 #include "world/Environment.h"
@@ -20,6 +21,7 @@
 namespace valcraft {
 
 class PlayerController;
+class CreatureSystem;
 class World;
 struct ItemDrop;
 struct PlayerState;
@@ -54,6 +56,7 @@ struct SeaAdventureSaveState {
     bool has_stamped_ship = false;
     bool fishing_active = false;
     ShipCrewSaveState crew {};
+    OldGuardSaveState old_guard {};
 
     auto operator==(const SeaAdventureSaveState&) const -> bool = default;
 };
@@ -100,6 +103,7 @@ struct SeaAdventureHudState {
     std::uint32_t water_flasks = 0U;
     std::uint32_t fish = 0U;
     ShipCrewFocusState crew_focus {};
+    OldGuardFocusState old_guard_focus {};
 };
 
 struct ShipVoxel {
@@ -160,6 +164,34 @@ struct ShipBounds {
     auto operator==(const ShipBounds&) const -> bool = default;
 };
 
+struct ShipProtectionProfile {
+    float stern_z = 0.0F;
+    float bow_z = 0.0F;
+    float maximum_half_width = 0.0F;
+    float stern_width_loss = 0.0F;
+    float bow_width_loss = 0.0F;
+    float stern_taper_exponent = 1.0F;
+    float bow_taper_exponent = 1.0F;
+    float lower_hull_min_y = 0.0F;
+    float middle_hull_min_y = 0.0F;
+    float upper_hull_min_y = 0.0F;
+    float main_deck_top_y = 0.0F;
+    float lower_width_inset = 0.0F;
+    float middle_width_inset = 0.0F;
+    float lower_minimum_half_width = 0.0F;
+    float middle_minimum_half_width = 0.0F;
+    float boundary_margin = 0.0F;
+    float sheltered_floor_y = 0.0F;
+
+    // Je centralise la silhouette et les volumes proteges afin que la
+    // geometrie, la physique et le rendu ne puissent pas diverger.
+    [[nodiscard]] auto half_width_at(float local_z) const noexcept -> float;
+    [[nodiscard]] auto excludes_ocean_local(const glm::vec3& local_point) const noexcept -> bool;
+    [[nodiscard]] auto shelters_from_weather_local(const glm::vec3& local_point) const noexcept -> bool;
+
+    auto operator==(const ShipProtectionProfile&) const -> bool = default;
+};
+
 struct ShipClimbContact {
     // L'AABB monde reste pratique pour les diagnostics et les tests historiques.
     // Les donnees locales et la base orientee permettent au controleur de suivre
@@ -194,6 +226,7 @@ struct ShipBlueprint {
     std::span<const glm::vec3> interior_lanterns {};
     ShipBounds bounds {};
     ShipAnchors anchors {};
+    ShipProtectionProfile protection_profile {};
     std::uint64_t geometry_revision = 0U;
     std::uint64_t navigation_revision = 0U;
 };
@@ -249,6 +282,8 @@ public:
     [[nodiscard]] auto local_to_world_direction(const glm::vec3& local_direction) const noexcept -> glm::vec3;
     [[nodiscard]] auto world_to_local_direction(const glm::vec3& world_direction) const noexcept -> glm::vec3;
     [[nodiscard]] auto motion_delta_at(const glm::vec3& previous_world_point) const noexcept -> glm::vec3;
+    [[nodiscard]] auto excludes_ocean_at(const glm::vec3& world_point) const noexcept -> bool;
+    [[nodiscard]] auto is_weather_sheltered_at(const glm::vec3& world_point) const noexcept -> bool;
 
     [[nodiscard]] auto render_state(bool visible) const noexcept -> ShipRenderState;
     [[nodiscard]] auto support_height(const glm::vec3& feet_position) const noexcept -> std::optional<float>;
@@ -320,6 +355,14 @@ public:
     [[nodiscard]] auto ship_render_state() const noexcept -> ShipRenderState;
     [[nodiscard]] auto crew_render_instances() const noexcept -> std::span<const CrewRenderInstance>;
     [[nodiscard]] auto crew_members() const noexcept -> std::span<const ShipCrewMemberSaveState>;
+    [[nodiscard]] auto old_guard_render_instances() const noexcept
+        -> std::span<const OldGuardRenderInstance>;
+    [[nodiscard]] auto old_guard_members() const noexcept
+        -> std::span<const OldGuardMemberSaveState>;
+    [[nodiscard]] auto old_guard_flashes() const noexcept
+        -> std::span<const OldGuardMuzzleFlashInstance>;
+    [[nodiscard]] auto old_guard_smoke() const noexcept
+        -> std::span<const OldGuardSmokeInstance>;
     [[nodiscard]] auto hud_state(const PlayerController& player) const noexcept -> SeaAdventureHudState;
 
     // Je conserve ce point d'entree pour migrer les anciennes sauvegardes qui
@@ -335,6 +378,11 @@ public:
                               const EnvironmentState& environment,
                               float dt,
                               bool request_fishing) -> SeaAdventureFrameResult;
+    [[nodiscard]] auto update_old_guard_combat(World& world,
+                                               CreatureSystem& creatures,
+                                               const PlayerController& player,
+                                               const EnvironmentState& environment,
+                                               float dt) -> const OldGuardFrameEvents&;
 
     [[nodiscard]] auto collect_resource(BlockId block_id) noexcept -> bool;
     [[nodiscard]] auto record_hunt(CreatureSpecies species) noexcept -> bool;
@@ -342,6 +390,9 @@ public:
                                        const glm::vec3& direction,
                                        float max_distance,
                                        float damage) noexcept -> ShipCrewDamageResult;
+    [[nodiscard]] auto intercept_old_guard(const glm::vec3& origin,
+                                           const glm::vec3& direction,
+                                           float max_distance) const noexcept -> OldGuardRayHit;
     void cancel_fishing() noexcept;
 
     // Le respawn conserve la progression du voyage et les stocks, mais retire
@@ -352,7 +403,8 @@ private:
     [[nodiscard]] auto player_should_ride_ship(const PlayerController& player) const noexcept -> bool;
     [[nodiscard]] auto player_on_ship(const glm::vec3& player_position) const noexcept -> bool;
     [[nodiscard]] auto player_ship_distance(const glm::vec3& player_position) const noexcept -> float;
-    void consume_automatic_supplies(SeaAdventureFrameResult& result) noexcept;
+    void consume_automatic_supplies(bool player_on_ship,
+                                    SeaAdventureFrameResult& result) noexcept;
     struct LegacyShipMigrationState {
         int origin_x = 0;
         int origin_z = 0;
@@ -363,6 +415,7 @@ private:
     SeaAdventureSaveState state_ {};
     ShipEntity ship_ {};
     ShipCrewSystem crew_ {};
+    OldGuardSystem old_guard_ {};
     // Je conserve les fractions de deplacement en double : au-dela de 524 km,
     // un float ne peut plus representer chaque petite avance d'une frame.
     double precise_ship_position_z_ = 0.5;

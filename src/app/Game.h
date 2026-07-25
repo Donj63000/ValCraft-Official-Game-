@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/CommandConsole.h"
 #include "app/ConfirmDialog.h"
 #include "app/DeathScreen.h"
 #include "app/Hotbar.h"
@@ -57,6 +58,7 @@ private:
         Inventory = 4,
         Pause = 5,
         Death = 6,
+        CommandConsole = 7,
     };
 
     struct FramePerformanceStats {
@@ -255,6 +257,11 @@ private:
     void update_simulation(float dt, FramePerformanceStats& frame_stats);
     void update_world_pipeline(FramePerformanceStats& frame_stats);
     void set_mouse_capture(bool captured);
+    [[nodiscard]] auto can_open_command_console() const noexcept -> bool;
+    void set_command_console_visible(bool visible);
+    void refresh_command_console_text_input_rect() noexcept;
+    void handle_command_console_keydown(const SDL_KeyboardEvent& event);
+    void submit_command_console();
     void set_death_screen_visible(bool visible, PlayerDeathCause cause = PlayerDeathCause::None);
     void set_paused(bool paused);
     void set_inventory_visible(bool visible);
@@ -426,6 +433,8 @@ private:
     SaveSlotMenuState save_slot_menu_ {};
     OptionsMenuState options_menu_ {};
     ConfirmDialogState confirm_dialog_ {};
+    CommandConsoleToggle command_console_toggle_ {};
+    CommandConsole command_console_ {};
     glm::vec3 spawn_position_ {0.5F, 70.0F, 0.5F};
     StartingVillageLayout starting_village_ {};
     GameOptions options_ {};

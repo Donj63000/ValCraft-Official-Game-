@@ -12,6 +12,8 @@ namespace valcraft {
 
 inline constexpr std::size_t kOceanMaxWaveCount = 6U;
 
+enum class WorldGenerationProfile : std::uint8_t;
+
 // Les trois grandes composantes portent la flottabilite. Les composantes
 // courtes restent visuelles : une coque lourde les moyenne naturellement.
 inline constexpr std::size_t kOceanBuoyancyWaveCount = 3U;
@@ -22,6 +24,11 @@ enum class OceanSeaState : std::uint8_t {
     Rough,
     Storm,
     Tempest,
+};
+
+enum class OceanSurfaceProfile : std::uint8_t {
+    InlandWater = 0,
+    OpenSea,
 };
 
 struct OceanWave {
@@ -38,6 +45,7 @@ struct OceanState {
     OceanSeaState sea_state = OceanSeaState::Calm;
 
     float severity = 0.0F;
+    float tempest_factor = 0.0F;
     float total_amplitude = 0.0F;
     float maximum_displacement = 0.0F;
     float foam_threshold = 1.0F;
@@ -57,10 +65,15 @@ struct OceanSample {
 
 class OceanSimulation {
 public:
+    [[nodiscard]] static auto surface_profile_for_world(
+        WorldGenerationProfile profile) noexcept
+        -> OceanSurfaceProfile;
+
     // Construit un spectre continu depuis les valeurs meteorologiques.
     // Les vagues ne changent pas brutalement pendant une transition.
     [[nodiscard]] static auto evaluate(
-        const EnvironmentState& environment) noexcept -> OceanState;
+        const EnvironmentState& environment,
+        OceanSurfaceProfile profile) noexcept -> OceanState;
 
     // Echantillonne la meme equation analytique que le shader.
     // Aucune allocation et aucune lecture GPU ne sont necessaires.

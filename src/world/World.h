@@ -75,6 +75,12 @@ struct WorldStreamingStats {
     std::size_t unloaded_chunks = 0;
 };
 
+enum class WorldRaycastMode : std::uint8_t {
+    Selection = 0,
+    VisibilityOpaque = 1,
+    ProjectileCollidable = 2,
+};
+
 struct WorldChunkSnapshot {
     ChunkCoord coord {};
     std::array<BlockId, kChunkVolume> blocks {};
@@ -163,6 +169,16 @@ public:
     [[nodiscard]] auto world_to_local(int x, int y, int z) const noexcept -> BlockCoord;
     [[nodiscard]] auto local_to_world(const ChunkCoord& chunk_coord, const BlockCoord& local) const noexcept -> BlockCoord;
     [[nodiscard]] auto raycast(const glm::vec3& origin, const glm::vec3& direction, float max_distance) const -> RaycastHit;
+    [[nodiscard]] auto raycast(const glm::vec3& origin,
+                               const glm::vec3& direction,
+                               float max_distance,
+                               WorldRaycastMode mode) const -> RaycastHit;
+    [[nodiscard]] auto raycast_visibility(const glm::vec3& origin,
+                                          const glm::vec3& direction,
+                                          float max_distance) const -> RaycastHit;
+    [[nodiscard]] auto raycast_collidable(const glm::vec3& origin,
+                                          const glm::vec3& direction,
+                                          float max_distance) const -> RaycastHit;
     [[nodiscard]] auto can_place_torch_at(const BlockCoord& world_coord) const -> bool;
     [[nodiscard]] auto can_place_torch_at(const BlockCoord& world_coord, const BlockCoord& support_coord) const -> bool;
     [[nodiscard]] auto torch_block_to_place(const BlockCoord& world_coord, const BlockCoord& support_coord) const

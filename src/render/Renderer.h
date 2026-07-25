@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/CommandConsole.h"
 #include "app/ConfirmDialog.h"
 #include "app/DeathScreen.h"
 #include "app/Hotbar.h"
@@ -12,6 +13,7 @@
 #include "creatures/CreatureGeometry.h"
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
+#include "gameplay/OldGuard.h"
 #include "gameplay/PlayerController.h"
 #include "gameplay/PlayerProgression.h"
 #include "player/PlayerGeometry.h"
@@ -19,6 +21,7 @@
 #include "render/RendererQuality.h"
 #include "render/ShadowCulling.h"
 #include "world/Environment.h"
+#include "world/PrecipitationField.h"
 #include "world/World.h"
 
 #include <array>
@@ -44,6 +47,7 @@ namespace valcraft {
 
 struct ShipRenderState;
 struct ShipVoxel;
+struct OceanState;
 
 class RendererResourceResetProgress {
 public:
@@ -148,6 +152,8 @@ struct RendererFrameStats {
     std::size_t visible_chunks = 0;
     std::size_t shadow_chunks = 0;
     std::size_t world_chunks = 0;
+    std::size_t precipitation_drops = 0;
+    std::size_t precipitation_impacts = 0;
     std::size_t draw_calls = 0;
     std::uint64_t triangles = 0;
     std::uint64_t uploaded_bytes = 0;
@@ -240,6 +246,7 @@ public:
                       bool super_vision_active,
                       const GameplayHudAnnouncementView& gameplay_announcement,
                       const MaritimeHudView& maritime_hud,
+                      const CommandConsoleView& command_console,
                       const EnvironmentState& environment,
                       int width,
                       int height);
@@ -255,12 +262,16 @@ public:
                       const ConfirmDialogState& confirm_dialog,
                       std::span<const CreatureRenderInstance> creatures,
                       std::span<const CrewRenderInstance> crew,
+                      std::span<const OldGuardRenderInstance> old_guard,
+                      std::span<const OldGuardMuzzleFlashInstance> old_guard_flashes,
+                      std::span<const OldGuardSmokeInstance> old_guard_smoke,
                       std::span<const ItemDropRenderInstance> item_drops,
                       const ShipRenderState& ship,
                       const PlayerProgressionState& progression,
                       bool super_vision_active,
                       const GameplayHudAnnouncementView& gameplay_announcement,
                       const MaritimeHudView& maritime_hud,
+                      const CommandConsoleView& command_console,
                       const EnvironmentState& environment,
                       int width,
                       int height);
@@ -346,6 +357,8 @@ private:
         GLint ocean_detail_strength = -1;
         GLint ocean_detail_phase = -1;
         GLint ocean_severity = -1;
+        GLint ocean_tempest_factor = -1;
+        GLint ocean_open_sea = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint scene_color = -1;
@@ -353,6 +366,15 @@ private:
         GLint inverse_view_projection = -1;
         GLint shadows_enabled = -1;
         GLint super_vision_strength = -1;
+        GLint ship_protection_enabled = -1;
+        GLint ship_inverse_model = -1;
+        GLint ship_bounds_min = -1;
+        GLint ship_bounds_max = -1;
+        GLint ship_profile_longitudinal = -1;
+        GLint ship_profile_taper = -1;
+        GLint ship_profile_heights = -1;
+        GLint ship_profile_widths = -1;
+        GLint ship_sheltered_floor = -1;
     };
 
     struct ShadowUniformLocations {
@@ -382,7 +404,11 @@ private:
         GLint overcast_intensity = -1;
         GLint precipitation_intensity = -1;
         GLint storm_intensity = -1;
+        GLint violent_storm_intensity = -1;
         GLint lightning_intensity = -1;
+        GLint lightning_bolt_intensity = -1;
+        GLint lightning_direction = -1;
+        GLint lightning_shape_seed = -1;
         GLint weather_time = -1;
         GLint cloud_steps = -1;
         GLint cloud_detail = -1;
@@ -401,10 +427,46 @@ private:
         GLint glow_strength = -1;
         GLint sharpen_strength = -1;
         GLint edge_strength = -1;
-        GLint precipitation_intensity = -1;
         GLint storm_intensity = -1;
         GLint lightning_intensity = -1;
-        GLint weather_time = -1;
+        GLint weather_exposure = -1;
+    };
+
+    struct PrecipitationUniformLocations {
+        GLint view_projection = -1;
+        GLint camera_position = -1;
+        GLint camera_right = -1;
+        GLint camera_up = -1;
+        GLint fog_color = -1;
+        GLint lightning_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint ship_protection_enabled = -1;
+        GLint ship_inverse_model = -1;
+        GLint ship_bounds_min = -1;
+        GLint ship_bounds_max = -1;
+        GLint ship_profile_longitudinal = -1;
+        GLint ship_profile_taper = -1;
+        GLint ship_profile_heights = -1;
+        GLint ship_profile_widths = -1;
+        GLint ship_sheltered_floor = -1;
+    };
+
+    struct PrecipitationGpuInstance {
+        glm::vec4 position_length {0.0F};
+        glm::vec4 velocity_width {0.0F};
+        glm::vec4 appearance {0.0F};
+    };
+
+    struct OldGuardEffectUniformLocations {
+        GLint view_projection = -1;
+        GLint camera_right = -1;
+        GLint camera_up = -1;
+    };
+
+    struct OldGuardEffectGpuInstance {
+        glm::vec4 position_size {0.0F};
+        // x = opacite, y = type (fumee/flash), z = rotation, w = intensite.
+        glm::vec4 appearance {0.0F};
     };
 
     struct GlowExtractUniformLocations {
@@ -471,6 +533,11 @@ private:
 
     struct VisibleCrewMember {
         const CrewRenderInstance* crew = nullptr;
+        float distance_squared = 0.0F;
+    };
+
+    struct VisibleOldGuardMember {
+        const OldGuardRenderInstance* guard = nullptr;
         float distance_squared = 0.0F;
     };
 
@@ -605,6 +672,8 @@ private:
     void create_scene_sampler_fallback_textures();
     void create_creature_geometry();
     void create_item_drop_geometry();
+    void create_precipitation_geometry();
+    void create_old_guard_effect_geometry();
     void create_screen_quad_geometry();
     void create_crosshair_geometry();
     void upload_block_break_overlay_mesh(const BlockBreakProgress& break_progress);
@@ -618,7 +687,10 @@ private:
     void draw_sky(const glm::mat4& inverse_view_projection,
                   const EnvironmentState& environment,
                   const RendererQualitySettings& quality_settings);
-    void run_post_process(const EnvironmentState& environment, int width, int height);
+    void run_post_process(const EnvironmentState& environment,
+                          float weather_exposure,
+                          int width,
+                          int height);
     void run_menu_background_pass(int width, int height);
     void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
                          const glm::mat4& view_projection,
@@ -629,21 +701,41 @@ private:
                          bool sun_visible);
     void draw_creatures(std::span<const CreatureRenderInstance> creatures,
                         std::span<const CrewRenderInstance> crew,
+                        std::span<const OldGuardRenderInstance> old_guard,
                         const glm::mat4& view_projection,
                         const glm::mat4& light_view_projection,
                         const glm::vec3& camera_position,
                         const EnvironmentState& environment,
                         bool player_light_active,
                         float super_vision_strength);
+    void draw_precipitation(const glm::mat4& view_projection,
+                            const glm::mat4& inverse_view,
+                            const glm::vec3& camera_position,
+                            const EnvironmentState& environment,
+                            const OceanState& ocean,
+                            const ShipRenderState& ship,
+                            const RendererQualitySettings& quality_settings,
+                            RendererFrameStats& frame_stats);
+    void draw_old_guard_effects(
+        std::span<const OldGuardMuzzleFlashInstance> flashes,
+        std::span<const OldGuardSmokeInstance> smoke,
+        const glm::mat4& view_projection,
+        const glm::mat4& inverse_view,
+        const glm::vec3& camera_position);
+    void upload_world_ship_protection(const ShipRenderState& ship);
+    void upload_precipitation_ship_protection(const ShipRenderState& ship);
     void draw_creature_shadows(std::span<const CreatureRenderInstance> creatures,
                                std::span<const CrewRenderInstance> crew,
+                               std::span<const OldGuardRenderInstance> old_guard,
                                const glm::mat4& light_view_projection,
                                const glm::vec3& shadow_focus);
     [[nodiscard]] auto collect_visible_creature_parts(std::span<const CreatureRenderInstance> creatures,
                                                       std::span<const CrewRenderInstance> crew,
+                                                      std::span<const OldGuardRenderInstance> old_guard,
                                                       const glm::vec3& focus,
                                                       float creature_draw_distance,
-                                                      float crew_draw_distance)
+                                                      float crew_draw_distance,
+                                                      float old_guard_draw_distance)
         -> std::span<const CreaturePartInstance>;
     void draw_player_viewmodel(const PlayerController& player,
                                BlockId held_item,
@@ -660,6 +752,7 @@ private:
                      int height);
     void draw_maritime_hud(const MaritimeHudView& maritime_hud, int width, int height);
     void draw_gameplay_announcement(const GameplayHudAnnouncementView& announcement, int width, int height);
+    void draw_command_console(const CommandConsoleView& command_console, int width, int height);
     void draw_inventory_menu(const InventoryMenuState& inventory_menu, const HotbarState& hotbar, int width, int height);
     void draw_death_screen(const DeathScreenState& death_screen, int width, int height);
     void draw_pause_menu(const PauseMenuState& pause_menu, int width, int height);
@@ -685,6 +778,8 @@ private:
     GLuint creature_program_ = 0;
     GLuint creature_shadow_program_ = 0;
     GLuint item_drop_program_ = 0;
+    GLuint precipitation_program_ = 0;
+    GLuint old_guard_effect_program_ = 0;
     GLuint shadow_program_ = 0;
     GLuint hud_program_ = 0;
     GLuint crosshair_program_ = 0;
@@ -723,6 +818,12 @@ private:
     GLuint item_drop_vbo_ = 0;
     GLuint item_drop_ebo_ = 0;
     GLuint item_drop_instance_vbo_ = 0;
+    GLuint precipitation_vao_ = 0;
+    GLuint precipitation_vbo_ = 0;
+    GLuint precipitation_instance_vbo_ = 0;
+    GLuint old_guard_effect_vao_ = 0;
+    GLuint old_guard_effect_vbo_ = 0;
+    GLuint old_guard_effect_instance_vbo_ = 0;
     GLuint hud_vao_ = 0;
     GLuint hud_vbo_ = 0;
     GLuint crosshair_vao_ = 0;
@@ -739,6 +840,8 @@ private:
     HudUniformLocations hud_uniforms_ {};
     SkyUniformLocations sky_uniforms_ {};
     PostProcessUniformLocations post_process_uniforms_ {};
+    PrecipitationUniformLocations precipitation_uniforms_ {};
+    OldGuardEffectUniformLocations old_guard_effect_uniforms_ {};
     GlowExtractUniformLocations glow_extract_uniforms_ {};
     GlowBlurUniformLocations glow_blur_uniforms_ {};
     MenuBackgroundUniformLocations menu_background_uniforms_ {};
@@ -748,18 +851,25 @@ private:
     std::vector<ShadowChunk> shadow_chunks_cache_ {};
     std::vector<VisibleCreature> visible_creatures_cache_ {};
     std::vector<VisibleCrewMember> visible_crew_cache_ {};
+    std::vector<VisibleOldGuardMember> visible_old_guard_cache_ {};
     GLsizeiptr creature_instance_buffer_bytes_ = 0;
     GLsizeiptr viewmodel_instance_buffer_bytes_ = 0;
     GLsizeiptr item_drop_instance_buffer_bytes_ = 0;
+    GLsizeiptr precipitation_instance_buffer_bytes_ = 0;
+    GLsizeiptr old_guard_effect_instance_buffer_bytes_ = 0;
     GLsizeiptr hud_vertex_buffer_bytes_ = 0;
     RendererFrameStats last_frame_stats_ {};
     std::vector<ItemDropGpuInstance> item_drop_instances_scratch_ {};
+    PrecipitationField precipitation_field_ {};
+    std::vector<PrecipitationGpuInstance> precipitation_instances_scratch_ {};
+    std::vector<OldGuardEffectGpuInstance> old_guard_effect_instances_scratch_ {};
     std::vector<CreaturePartInstance> creature_parts_scratch_ {};
     std::vector<std::uint32_t> translated_water_indices_scratch_ {};
     ChunkMeshData chunk_upload_scratch_ {};
     ChunkMeshData block_break_overlay_scratch_ {};
     std::vector<HudVertex> loading_vertices_scratch_ {};
     std::vector<HudVertex> gameplay_announcement_vertices_scratch_ {};
+    std::vector<HudVertex> command_console_vertices_scratch_ {};
     HudGeometryCache<HotbarHudCacheKey> hotbar_cache_ {};
     HudGeometryCache<InventoryHudCacheKey> inventory_cache_ {};
     HudGeometryCache<DeathHudCacheKey> death_cache_ {};

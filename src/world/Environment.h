@@ -1,10 +1,15 @@
 #pragma once
 
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
 #include <cstdint>
 
 namespace valcraft {
+
+// Je borne le temps meteo externe avant les conversions en indices de cycles.
+// Cette limite couvre plus de trente ans de simulation continue.
+inline constexpr float kMaximumWeatherTimeSeconds = 1.0e9F;
 
 enum class WeatherKind : std::uint8_t {
     Clear = 0,
@@ -38,9 +43,14 @@ struct EnvironmentState {
     float overcast_intensity = 0.0F;
     float precipitation_intensity = 0.0F;
     float storm_intensity = 0.0F;
+    float violent_storm_intensity = 0.0F;
     float lightning_intensity = 0.0F;
+    float lightning_bolt_intensity = 0.0F;
+    glm::vec3 lightning_direction {0.0F, 0.35F, 0.93675F};
+    float lightning_shape_seed = 0.0F;
     float weather_transition_factor = 1.0F;
     float cloud_shadow_strength = 0.18F;
+    glm::vec2 wind_direction_xz {0.0F, 1.0F};
     float wind_strength = 0.26F;
     float atmospheric_scatter_strength = 0.070F;
     float height_fog_density = 0.0025F;
@@ -75,6 +85,7 @@ public:
     void set_time_of_day(float time_of_day) noexcept;
     void set_weather_seed(std::uint32_t weather_seed) noexcept;
     void set_weather_time_seconds(float weather_time_seconds) noexcept;
+    [[nodiscard]] auto start_weather_event(WeatherKind weather) noexcept -> bool;
 
     [[nodiscard]] auto is_frozen() const noexcept -> bool;
     [[nodiscard]] auto time_of_day() const noexcept -> float;

@@ -4,6 +4,7 @@
 #include "app/GameLoop.h"
 #include "gameplay/StartingPort.h"
 #include "render/ShipMesh.h"
+#include "world/OceanSimulation.h"
 
 #include <glm/geometric.hpp>
 #include <glm/trigonometric.hpp>
@@ -49,6 +50,12 @@ constexpr std::string_view kPerformanceBuildType = VALCRAFT_BUILD_TYPE;
 constexpr std::string_view kPerformanceBuildType = "unknown";
 #endif
 
+#if defined(VALCRAFT_COVERAGE_BUILD) && VALCRAFT_COVERAGE_BUILD
+constexpr bool kCoverageInstrumentationEnabled = true;
+#else
+constexpr bool kCoverageInstrumentationEnabled = false;
+#endif
+
 // Je garde le contrat production a 50 ms et j'accorde au build Debug non
 // optimise la marge necessaire a la generation atomique d'un chunk oceanique.
 constexpr double kMaritimeSmokeSliceLimitMs = kPerformanceBuildType == "Debug" ? 100.0 : 50.0;
@@ -57,6 +64,8 @@ constexpr std::size_t kMaxGameplayAnnouncementQueue = 6U;
 constexpr std::size_t kMaxPerformanceSamples = 36'000U;
 constexpr std::size_t kMaxPerformanceEvents = 4'096U;
 constexpr int kWorldMemorySamplePeriodFrames = 30;
+constexpr int kMinimumWindowWidth = 640;
+constexpr int kMinimumWindowHeight = 360;
 
 auto make_nonblocking_world_seed(std::size_t slot_index) noexcept -> int {
     static std::atomic<std::uint32_t> sequence {0U};
@@ -258,8 +267,18 @@ Game::Game(const GameOptions& options)
       renderer_(),
       world_(1337, options.performance.stream_radius),
       options_(options) {
-    window_width_ = std::clamp(options_.window_width, 640, 7680);
-    window_height_ = std::clamp(options_.window_height, 360, 4320);
+    window_width_ =
+        std::clamp(
+            options_.window_width,
+            kMinimumWindowWidth,
+            7680);
+    window_height_ =
+        std::clamp(
+            options_.window_height,
+            kMinimumWindowHeight,
+            4320);
+    environment_.set_weather_time_seconds(
+        options_.initial_weather_time_seconds);
     runtime_shadows_enabled_ = options_.performance.shadows_enabled;
     runtime_post_process_enabled_ = options_.performance.post_process_enabled;
     if (should_capture_performance()) {
@@ -446,12 +465,16 @@ auto Game::run() -> int {
                 confirm_dialog_,
                 creatures_.render_instances(),
                 sea_adventure_.crew_render_instances(),
+                sea_adventure_.old_guard_render_instances(),
+                sea_adventure_.old_guard_flashes(),
+                sea_adventure_.old_guard_smoke(),
                 item_drop_render_instances_,
                 sea_adventure_.ship_render_state(),
                 progression_.state(),
                 super_vision_active_ && progression_.has_super_vision_power(),
                 current_gameplay_announcement_view(),
                 current_maritime_hud_view(),
+                command_console_.view(),
                 environment_state,
                 window_width_,
                 window_height_);
@@ -575,6 +598,13 @@ auto Game::initialize() -> bool {
         return false;
     }
 
+    // Je conserve la taille minimale deja imposee au demarrage pour que
+    // toutes les interfaces restent lisibles apres un redimensionnement.
+    SDL_SetWindowMinimumSize(
+        window_,
+        kMinimumWindowWidth,
+        kMinimumWindowHeight);
+    SDL_StopTextInput();
     apply_window_icon(window_);
 
     gl_context_ = SDL_GL_CreateContext(window_);
@@ -764,6 +794,10 @@ void Game::finalize_audit(const PerformanceRunReport& report, AuditRunStatus sta
 void Game::shutdown() {
     finish_pending_save(true);
     finish_pending_world_release(true);
+    if (SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+        SDL_StopTextInput();
+    }
+    command_console_.close();
     music_.shutdown();
     renderer_.shutdown();
 
@@ -807,14 +841,69 @@ void Game::process_events() {
             continue;
         }
 
+        if (event.type == SDL_KEYDOWN &&
+            is_command_console_key(event.key.keysym)) {
+            const auto action =
+                command_console_toggle_.handle_key_down(
+                    event.key.repeat != 0,
+                    command_console_.visible(),
+                    can_open_command_console());
+            if (action ==
+                CommandConsoleToggleAction::Close) {
+                set_command_console_visible(false);
+            }
+            continue;
+        }
+        if (event.type == SDL_KEYUP &&
+            is_command_console_key(event.key.keysym)) {
+            const auto action =
+                command_console_toggle_.handle_key_up(
+                    can_open_command_console());
+            // J'ouvre au relachement pour que le caractere produit par la
+            // touche physique ne puisse jamais entrer dans la commande.
+            if (action ==
+                CommandConsoleToggleAction::Open) {
+                set_command_console_visible(true);
+            }
+            continue;
+        }
+
+        if (command_console_.visible()) {
+            if (event.type == SDL_TEXTINPUT) {
+                command_console_.insert_text(
+                    event.text.text);
+                continue;
+            }
+            if (event.type == SDL_KEYDOWN) {
+                handle_command_console_keydown(
+                    event.key);
+                continue;
+            }
+            if (event.type == SDL_KEYUP ||
+                event.type == SDL_TEXTEDITING ||
+                event.type == SDL_MOUSEMOTION ||
+                event.type == SDL_MOUSEBUTTONDOWN ||
+                event.type == SDL_MOUSEBUTTONUP ||
+                event.type == SDL_MOUSEWHEEL) {
+                continue;
+            }
+        }
+
         switch (event.type) {
         case SDL_QUIT:
             running_ = false;
             break;
         case SDL_WINDOWEVENT:
+            if (event.window.event ==
+                SDL_WINDOWEVENT_FOCUS_LOST) {
+                command_console_toggle_.cancel();
+            }
             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 window_width_ = std::max(event.window.data1, 1);
                 window_height_ = std::max(event.window.data2, 1);
+                if (command_console_.visible()) {
+                    refresh_command_console_text_input_rect();
+                }
                 record_audit_event(
                     AuditEventCategory::Ui,
                     "window_resized",
@@ -1406,35 +1495,50 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
     environment_.update(dt);
     const auto environment_state = environment_.current_state();
     const auto creature_cycle = environment_.current_creature_cycle();
+    const auto maritime_session_active =
+        active_game_mode_ == GameMode::SeaAdventure &&
+        sea_adventure_.active();
+    std::optional<OceanState> maritime_ocean {};
+    if (maritime_session_active) {
+        maritime_ocean =
+            OceanSimulation::evaluate(
+                environment_state,
+                OceanSimulation::surface_profile_for_world(
+                    world_.generation_profile()));
+    }
 
     if (options_.smoke_test) {
-        if (active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active()) {
+        if (maritime_session_active) {
             PlayerInput smoke_input {};
-            player_.update(smoke_input, dt, world_, &sea_adventure_.ship_entity());
+            player_.update(
+                smoke_input,
+                dt,
+                world_,
+                &sea_adventure_.ship_entity(),
+                &*maritime_ocean);
             (void)sea_adventure_.update(world_, player_, environment_state, dt, false);
             update_smoke_ship_camera();
         } else {
             update_smoke_player(dt);
         }
     } else {
+        const auto gameplay_input_enabled =
+            !inventory_visible_ &&
+            !command_console_.visible();
         PlayerInput input {};
-        if (!inventory_visible_) {
+        if (gameplay_input_enabled) {
             input = read_player_movement_input(SDL_GetKeyboardState(nullptr));
         }
         input.toggle_fly = std::exchange(pending_toggle_fly_, false);
         input.look_delta_x = mouse_captured_ ? std::exchange(pending_look_x_, 0.0F) : 0.0F;
         input.look_delta_y = mouse_captured_ ? std::exchange(pending_look_y_, 0.0F) : 0.0F;
 
-        if (!inventory_visible_ &&
+        if (gameplay_input_enabled &&
             pending_place_block_ &&
             !player_.is_dead()) {
 
             player_.trigger_secondary_action();
         }
-
-        const auto maritime_session_active =
-            active_game_mode_ == GameMode::SeaAdventure &&
-            sea_adventure_.active();
 
         const auto* dynamic_ship =
             maritime_session_active
@@ -1445,7 +1549,10 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             input,
             dt,
             world_,
-            dynamic_ship);
+            dynamic_ship,
+            maritime_ocean.has_value()
+                ? &*maritime_ocean
+                : nullptr);
 
         if (maritime_session_active) {
             const auto sea_result = sea_adventure_.update(
@@ -1490,7 +1597,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             pending_fishing_ = false;
         }
 
-        if (!inventory_visible_ &&
+        if (gameplay_input_enabled &&
             pending_primary_attack_ &&
             !player_.is_dead()) {
 
@@ -1506,14 +1613,41 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                 if (block_hit.hit) {
                     weapon_range = std::clamp(block_hit.distance, 0.0F, weapon_range);
                 }
+                if (maritime_session_active) {
+                    if (const auto ship_hit =
+                            sea_adventure_.ship_entity().raycast_collidable_distance(
+                                player_.eye_position(),
+                                player_.look_direction(),
+                                weapon_range);
+                        ship_hit.has_value()) {
+                        weapon_range =
+                            std::clamp(
+                                *ship_hit,
+                                0.0F,
+                                weapon_range);
+                    }
+                }
 
                 const auto damage = weapon->damage * progression_.attack_damage_multiplier();
+                const auto old_guard_hit =
+                    maritime_session_active
+                        ? sea_adventure_.intercept_old_guard(
+                              player_.eye_position(),
+                              player_.look_direction(),
+                              weapon_range)
+                        : OldGuardRayHit {};
+                const auto entity_weapon_range =
+                    old_guard_hit.hit
+                        ? std::min(
+                              weapon_range,
+                              old_guard_hit.distance)
+                        : weapon_range;
                 const auto crew_hit =
                     maritime_session_active
                         ? sea_adventure_.try_damage_crew(
                               player_.eye_position(),
                               player_.look_direction(),
-                              weapon_range,
+                              entity_weapon_range,
                               damage)
                         : ShipCrewDamageResult {};
                 if (crew_hit.hit) {
@@ -1535,7 +1669,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     const auto hit_result = creatures_.try_damage_from_player(
                         player_.eye_position(),
                         player_.look_direction(),
-                        weapon_range,
+                        entity_weapon_range,
                         damage);
                     if (hit_result.hit) {
                         music_.play_sfx(hit_result.killed ? GameSfxKind::CreatureDeath : GameSfxKind::CreatureHit,
@@ -1568,12 +1702,28 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                                 {"remaining_health", audit_json_number(hit_result.remaining_health)},
                             }),
                             hit_result.killed ? AuditPriority::High : AuditPriority::Normal);
+                    } else if (old_guard_hit.hit) {
+                        // Je laisse le garde invulnerable tout en consommant le
+                        // rayon : aucun coup du joueur ne traverse son corps.
+                        music_.play_sfx(
+                            GameSfxKind::CreatureHit,
+                            0.42F);
+                        record_audit_event(
+                            AuditEventCategory::Creatures,
+                            "old_guard_intercepted_player_attack",
+                            AuditSeverity::Info,
+                            audit_json_object({
+                                {"guard_id", audit_json_number(old_guard_hit.guard_id)},
+                                {"distance", audit_json_number(old_guard_hit.distance)},
+                            }),
+                            AuditPriority::Normal);
                     }
                 }
             }
         }
 
-        if (!inventory_visible_ && pending_break_block_) {
+        if (gameplay_input_enabled &&
+            pending_break_block_) {
             const auto break_target = player_.current_target(world_);
             const auto tool_speed_multiplier =
                 break_target.hit ? selected_tool_break_speed_multiplier(break_target.block_id) : 1.0F;
@@ -1611,7 +1761,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         } else {
             player_.cancel_block_breaking();
         }
-        if (!inventory_visible_ &&
+        if (gameplay_input_enabled &&
             pending_place_block_ &&
             !player_.is_dead()) {
 
@@ -1630,7 +1780,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             }
             pending_place_block_ = false;
         }
-        if (inventory_visible_) {
+        if (!gameplay_input_enabled) {
             pending_break_block_ = false;
             pending_primary_attack_ = false;
             pending_place_block_ = false;
@@ -1671,7 +1821,100 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         sync_selected_hotbar_slot();
     }
 
+    if (maritime_session_active) {
+        // Je maintiens quatre chunks autour de L'Amelie pour que la perception
+        // de 50 m des gardes ne depende jamais de l'alignement du joueur.
+        creatures_.set_secondary_population_interest(
+            sea_adventure_.ship_position(),
+            4);
+    } else {
+        creatures_.clear_secondary_population_interest();
+    }
+
     creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
+    if (maritime_session_active) {
+        const auto& guard_events =
+            sea_adventure_.update_old_guard_combat(
+                world_,
+                creatures_,
+                player_,
+                environment_state,
+                dt);
+
+        auto listener_right =
+            glm::cross(
+                player_.look_direction(),
+                glm::vec3 {0.0F, 1.0F, 0.0F});
+        const auto right_length_squared =
+            glm::dot(listener_right, listener_right);
+        if (!std::isfinite(right_length_squared) ||
+            right_length_squared <= 1.0e-6F) {
+            listener_right = {1.0F, 0.0F, 0.0F};
+        } else {
+            listener_right /=
+                std::sqrt(right_length_squared);
+        }
+
+        for (const auto& shot : guard_events.shots) {
+            const auto listener_delta =
+                shot.muzzle_position -
+                player_.eye_position();
+            const auto distance_squared =
+                glm::dot(listener_delta, listener_delta);
+            const auto distance =
+                std::isfinite(distance_squared) &&
+                        distance_squared > 0.0F
+                    ? std::sqrt(distance_squared)
+                    : 0.0F;
+            const auto direction =
+                distance > 1.0e-4F
+                    ? listener_delta / distance
+                    : glm::vec3 {0.0F, 0.0F, 1.0F};
+            const auto pan =
+                std::clamp(
+                    glm::dot(direction, listener_right),
+                    -1.0F,
+                    1.0F);
+            const auto normalized_distance =
+                distance / 32.0F;
+            const auto attenuation =
+                1.0F /
+                (1.0F +
+                 normalized_distance *
+                     normalized_distance);
+            music_.play_sfx(
+                GameSfxKind::MusketShot,
+                1.0F,
+                pan,
+                attenuation,
+                static_cast<std::uint32_t>(
+                    shot.sequence ^
+                    (static_cast<std::uint64_t>(shot.guard_id) << 24U)));
+
+            record_audit_event(
+                AuditEventCategory::Creatures,
+                "old_guard_musket_shot",
+                AuditSeverity::Info,
+                audit_json_object({
+                    {"guard_id", audit_json_number(shot.guard_id)},
+                    {"target_id", audit_json_number(shot.target_id)},
+                    {"damage", audit_json_number(shot.damage)},
+                }),
+                AuditPriority::Normal);
+        }
+        for (const auto& bayonet : guard_events.bayonet_hits) {
+            record_audit_event(
+                AuditEventCategory::Creatures,
+                "old_guard_bayonet_hit",
+                AuditSeverity::Info,
+                audit_json_object({
+                    {"guard_id", audit_json_number(bayonet.guard_id)},
+                    {"target_id", audit_json_number(bayonet.target_id)},
+                    {"damage", audit_json_number(bayonet.damage)},
+                }),
+                AuditPriority::Normal);
+        }
+    }
     if (const auto creature_stats = creatures_.consume_audit_stats();
         audit_ && audit_->enabled() &&
         (creature_stats.spawned != 0 || creature_stats.despawned != 0 || creature_stats.attacks != 0)) {
@@ -1846,6 +2089,212 @@ void Game::set_mouse_capture(bool captured) {
     }
 }
 
+auto Game::can_open_command_console() const noexcept -> bool {
+    return !options_.smoke_test &&
+           has_active_session_ &&
+           !front_end_visible() &&
+           !confirm_dialog_.visible &&
+           !death_screen_visible_ &&
+           !paused_ &&
+           !inventory_visible_;
+}
+
+void Game::set_command_console_visible(bool visible) {
+    if (visible == command_console_.visible()) {
+        return;
+    }
+    if (visible && !can_open_command_console()) {
+        return;
+    }
+
+    pending_toggle_fly_ = false;
+    pending_break_block_ = false;
+    pending_primary_attack_ = false;
+    pending_place_block_ = false;
+    pending_fishing_ = false;
+    pending_look_x_ = 0.0F;
+    pending_look_y_ = 0.0F;
+    player_.cancel_block_breaking();
+
+    if (visible) {
+        command_console_.open();
+        if (command_console_.view().feedback.empty()) {
+            command_console_.set_feedback(
+                "SAISISSEZ UNE COMMANDE",
+                false);
+        }
+        set_mouse_capture(false);
+        refresh_command_console_text_input_rect();
+        SDL_StartTextInput();
+    } else {
+        command_console_.close();
+        SDL_StopTextInput();
+        if (has_active_session_ &&
+            !death_screen_visible_ &&
+            !paused_ &&
+            !inventory_visible_ &&
+            !confirm_dialog_.visible &&
+            !front_end_visible()) {
+            set_mouse_capture(true);
+        }
+    }
+
+    record_audit_event(
+        AuditEventCategory::Ui,
+        visible
+            ? "command_console_opened"
+            : "command_console_closed",
+        AuditSeverity::Info,
+        audit_json_object({
+            {"visible", audit_json_bool(visible)},
+        }),
+        AuditPriority::High);
+}
+
+void Game::refresh_command_console_text_input_rect() noexcept {
+    const auto layout =
+        build_command_console_layout(
+            window_width_,
+            window_height_);
+    const SDL_Rect input_rect {
+        static_cast<int>(
+            std::lround(layout.input_x)),
+        static_cast<int>(
+            std::lround(layout.input_y)),
+        std::max(
+            static_cast<int>(
+                std::lround(layout.input_width)),
+            1),
+        std::max(
+            static_cast<int>(
+                std::lround(layout.input_height)),
+            1),
+    };
+    SDL_SetTextInputRect(&input_rect);
+}
+
+void Game::handle_command_console_keydown(
+    const SDL_KeyboardEvent& event) {
+    const auto key = event.keysym.sym;
+    const auto repeated =
+        event.repeat != 0;
+
+    switch (key) {
+    case SDLK_ESCAPE:
+        if (!repeated) {
+            set_command_console_visible(false);
+        }
+        return;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        if (!repeated) {
+            submit_command_console();
+        }
+        return;
+    case SDLK_BACKSPACE:
+        command_console_.backspace();
+        return;
+    case SDLK_DELETE:
+        command_console_.delete_forward();
+        return;
+    case SDLK_LEFT:
+        command_console_.move_cursor_left();
+        return;
+    case SDLK_RIGHT:
+        command_console_.move_cursor_right();
+        return;
+    case SDLK_HOME:
+        command_console_.move_cursor_home();
+        return;
+    case SDLK_END:
+        command_console_.move_cursor_end();
+        return;
+    case SDLK_UP:
+        command_console_.show_previous_history();
+        return;
+    case SDLK_DOWN:
+        command_console_.show_next_history();
+        return;
+    default:
+        break;
+    }
+
+    if (!repeated &&
+        (event.keysym.mod & KMOD_CTRL) != 0 &&
+        event.keysym.scancode == SDL_SCANCODE_V) {
+        if (auto* clipboard_text =
+                SDL_GetClipboardText();
+            clipboard_text != nullptr) {
+            command_console_.insert_text(
+                clipboard_text);
+            SDL_free(clipboard_text);
+        }
+    }
+}
+
+void Game::submit_command_console() {
+    const auto parsed =
+        command_console_.submit();
+    switch (parsed.status) {
+    case CommandConsoleParseStatus::Empty:
+        command_console_.set_feedback(
+            "SAISISSEZ UNE COMMANDE",
+            true);
+        return;
+    case CommandConsoleParseStatus::InvalidUsage:
+        command_console_.set_feedback(
+            "UTILISATION : /METEO TEMPETE",
+            true);
+        return;
+    case CommandConsoleParseStatus::UnknownCommand:
+        command_console_.set_feedback(
+            "COMMANDE INCONNUE",
+            true);
+        return;
+    case CommandConsoleParseStatus::Ready:
+        break;
+    }
+
+    if (parsed.command !=
+        CommandConsoleCommand::StartTempest) {
+        command_console_.set_feedback(
+            "COMMANDE INCONNUE",
+            true);
+        return;
+    }
+
+    if (!environment_.start_weather_event(
+            WeatherKind::Tempest)) {
+        command_console_.set_feedback(
+            "IMPOSSIBLE DE LANCER LA TEMPETE",
+            true);
+        return;
+    }
+
+    // Je modifie l'horloge meteo persistante : tout le rendu, la musique et
+    // la simulation oceanique recoivent la Tempest des la prochaine image.
+    command_console_.set_feedback(
+        "TEMPETE LANCEE",
+        false);
+    queue_gameplay_announcement(
+        "TEMPETE",
+        "LA HOULE SE LEVE",
+        3.0F);
+    mark_session_dirty();
+    record_audit_event(
+        AuditEventCategory::InputAction,
+        "command_console_tempest_started",
+        AuditSeverity::Info,
+        audit_json_object({
+            {
+                "weather_time_seconds",
+                audit_json_number(
+                    environment_.weather_time_seconds()),
+            },
+        }),
+        AuditPriority::High);
+}
+
 void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     if (options_.smoke_test) {
         return;
@@ -1859,6 +2308,10 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
 
     death_screen_visible_ = visible;
     death_screen_.visible = visible;
+    if (death_screen_visible_ &&
+        command_console_.visible()) {
+        set_command_console_visible(false);
+    }
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
     pending_primary_attack_ = false;
@@ -1894,7 +2347,9 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     }
 
     death_screen_.cause = PlayerDeathCause::None;
-    if (!paused_ && !inventory_visible_) {
+    if (!paused_ &&
+        !inventory_visible_ &&
+        !command_console_.visible()) {
         set_mouse_capture(true);
     }
     record_audit_event(
@@ -1915,6 +2370,10 @@ void Game::set_paused(bool paused) {
 
     paused_ = paused;
     pause_menu_.visible = paused;
+    if (paused_ &&
+        command_console_.visible()) {
+        set_command_console_visible(false);
+    }
     pause_menu_.selected_action = PauseMenuAction::Resume;
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
@@ -1929,7 +2388,8 @@ void Game::set_paused(bool paused) {
         set_mouse_capture(false);
         center_ui_cursor(window_, window_width_, window_height_, pause_menu_.cursor_x, pause_menu_.cursor_y);
         refresh_pause_menu_hover();
-    } else if (!inventory_visible_) {
+    } else if (!inventory_visible_ &&
+               !command_console_.visible()) {
         set_mouse_capture(true);
     }
     record_audit_event(
@@ -1955,6 +2415,10 @@ void Game::set_inventory_visible(bool visible) {
 
     inventory_visible_ = visible;
     inventory_menu_.visible = visible;
+    if (inventory_visible_ &&
+        command_console_.visible()) {
+        set_command_console_visible(false);
+    }
     pending_toggle_fly_ = false;
     pending_break_block_ = false;
     pending_primary_attack_ = false;
@@ -1980,7 +2444,8 @@ void Game::set_inventory_visible(bool visible) {
     }
     normalize_inventory_state(inventory_menu_, hotbar_);
     inventory_menu_.hovered_slot.reset();
-    if (!paused_) {
+    if (!paused_ &&
+        !command_console_.visible()) {
         set_mouse_capture(true);
     }
     sync_selected_hotbar_slot();
@@ -2003,12 +2468,20 @@ void Game::set_confirm_dialog_visible(bool visible,
     confirm_dialog_.intent = visible ? intent : ConfirmDialogIntent::None;
     confirm_dialog_.selected_choice = ConfirmDialogChoice::Confirm;
     pending_confirm_slot_ = visible ? slot_index : std::nullopt;
+    if (confirm_dialog_.visible &&
+        command_console_.visible()) {
+        set_command_console_visible(false);
+    }
 
     if (confirm_dialog_.visible) {
         set_mouse_capture(false);
         center_ui_cursor(window_, window_width_, window_height_, confirm_dialog_.cursor_x, confirm_dialog_.cursor_y);
         refresh_confirm_dialog_hover();
-    } else if (!death_screen_visible_ && !inventory_visible_ && !paused_ && !front_end_visible()) {
+    } else if (!death_screen_visible_ &&
+               !inventory_visible_ &&
+               !paused_ &&
+               !command_console_.visible() &&
+               !front_end_visible()) {
         set_mouse_capture(true);
     }
     record_audit_event(
@@ -2514,6 +2987,67 @@ auto Game::current_maritime_hud_view() const noexcept -> MaritimeHudView {
     view.fish = state.fish;
 
     const auto& focus = state.crew_focus;
+    const auto guard_has_priority =
+        state.old_guard_focus.visible &&
+        (!focus.visible ||
+         state.old_guard_focus.distance <=
+             focus.distance);
+    if (guard_has_priority) {
+        view.crew_focus_visible = true;
+        view.crew_moving = false;
+        view.crew_blocked = false;
+        view.crew_knocked_out = false;
+        view.crew_has_progress = false;
+        view.crew_role = "VIEILLE GARDE - PROTECTEUR";
+        view.crew_activity = "SURVEILLANCE DU NAVIRE";
+        view.crew_health_ratio = 1.0F;
+        view.crew_distance =
+            state.old_guard_focus.distance;
+
+        const auto guard_members =
+            sea_adventure_.old_guard_members();
+        const auto guard_id =
+            static_cast<std::size_t>(
+                state.old_guard_focus.guard_id);
+        if (guard_id < guard_members.size()) {
+            const auto& guard = guard_members[guard_id];
+            view.crew_moving =
+                guard.action == OldGuardAction::Patrol;
+            switch (guard.action) {
+            case OldGuardAction::Patrol:
+                view.crew_activity = "RONDE SUR LE PONT";
+                break;
+            case OldGuardAction::Watch:
+                view.crew_activity = "SURVEILLANCE DU NAVIRE";
+                break;
+            case OldGuardAction::RaiseMusket:
+                view.crew_activity = "MISE EN JOUE";
+                break;
+            case OldGuardAction::StabilizeAim:
+                view.crew_activity = "VISEE STABILISEE";
+                break;
+            case OldGuardAction::Fire:
+                view.crew_activity = "FEU";
+                break;
+            case OldGuardAction::Reload:
+                view.crew_activity = "RECHARGEMENT DU MOUSQUET";
+                view.crew_has_progress = true;
+                view.crew_progress_ratio =
+                    std::clamp(
+                        1.0F -
+                            guard.reload_remaining /
+                                kOldGuardReloadSeconds,
+                        0.0F,
+                        1.0F);
+                break;
+            case OldGuardAction::Bayonet:
+                view.crew_activity = "DEFENSE A LA BAIONNETTE";
+                break;
+            }
+        }
+        return view;
+    }
+
     view.crew_focus_visible = focus.visible;
     view.crew_moving = focus.moving;
     view.crew_blocked = focus.blocked;
@@ -2708,6 +3242,9 @@ auto Game::active_ui_screen() const noexcept -> UiScreen {
     if (paused_) {
         return UiScreen::Pause;
     }
+    if (command_console_.visible()) {
+        return UiScreen::CommandConsole;
+    }
     return UiScreen::Gameplay;
 }
 
@@ -2718,7 +3255,12 @@ auto Game::front_end_visible() const noexcept -> bool {
 }
 
 auto Game::gameplay_interaction_blocked() const noexcept -> bool {
-    return death_screen_visible_ || paused_ || confirm_dialog_.visible || front_end_visible();
+    return death_screen_visible_ ||
+           paused_ ||
+           inventory_visible_ ||
+           command_console_.visible() ||
+           confirm_dialog_.visible ||
+           front_end_visible();
 }
 
 auto Game::render_player() const noexcept -> const PlayerController& {
@@ -3436,6 +3978,9 @@ void Game::prime_world_around(
 }
 
 void Game::prepare_game_session() {
+    if (command_console_.visible()) {
+        set_command_console_visible(false);
+    }
     main_menu_.visible = false;
     save_slot_menu_.visible = false;
     options_menu_.visible = false;
@@ -3487,7 +4032,8 @@ void Game::initialize_preview_world() {
 
     menu_preview_time_of_day_ = 8.25F;
     environment_.set_weather_seed(1337U);
-    environment_.set_weather_time_seconds(0.0F);
+    environment_.set_weather_time_seconds(
+        options_.initial_weather_time_seconds);
     sync_menu_preview_environment();
 
     // The main menu only needs a scenic background; building the whole starting
@@ -3508,6 +4054,9 @@ void Game::initialize_preview_world() {
 
 void Game::open_main_menu(bool from_session) {
     main_menu_.visible = true;
+    if (command_console_.visible()) {
+        set_command_console_visible(false);
+    }
     main_menu_.selected_action = MainMenuAction::Play;
     save_slot_menu_.visible = false;
     options_menu_.visible = false;
@@ -3744,7 +4293,8 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         EnvironmentClock prepared_environment {};
         prepared_environment.set_time_of_day(8.25F);
         prepared_environment.set_weather_seed(static_cast<std::uint32_t>(seed));
-        prepared_environment.set_weather_time_seconds(0.0F);
+        prepared_environment.set_weather_time_seconds(
+            options_.initial_weather_time_seconds);
         prepared_environment.set_frozen(options_.freeze_time || options_.smoke_test);
         record_loading_step(
             sea_mode ? "new_session_finalize" : "new_session_prepare",
@@ -4187,6 +4737,8 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         EnvironmentClock prepared_environment {};
         prepared_environment.set_time_of_day(snapshot.metadata.time_of_day);
         prepared_environment.set_weather_seed(static_cast<std::uint32_t>(snapshot.metadata.seed));
+        // Je conserve le temps meteo persiste : l'option de demarrage ne doit
+        // jamais remplacer l'etat d'une sauvegarde existante.
         prepared_environment.set_weather_time_seconds(snapshot.metadata.weather_time_seconds);
         prepared_environment.set_frozen(options_.freeze_time || options_.smoke_test);
         const auto prepared_village_enabled =
@@ -4345,6 +4897,10 @@ auto Game::start_smoke_session() -> bool {
         fixture.metadata.exists = true;
         fixture.metadata.seed = kSmokeSeed;
         fixture.metadata.time_of_day = 8.25F;
+        // Je passe l'override par la fixture pour valider le meme chemin de
+        // chargement que celui d'une vraie sauvegarde maritime.
+        fixture.metadata.weather_time_seconds =
+            options_.initial_weather_time_seconds;
         fixture.metadata.game_mode = GameMode::SeaAdventure;
         fixture.sea_adventure = sea_state;
         const auto legacy_world_origin = glm::vec3 {
@@ -4454,12 +5010,14 @@ auto Game::start_smoke_session() -> bool {
     if (!renderer_.ship_mesh_ready(sea_adventure_.ship_render_state())) {
         throw std::runtime_error("Maritime smoke loading entered gameplay before the ship mesh was ready");
     }
-    // Je mesure encore le chargement legacy en Debug, mais je reserve son
-    // verdict fonctionnel a la migration : la generation non optimisee d'un
-    // chunk peut fluctuer selon la charge du poste. Release conserve le
-    // contrat production de 50 ms pour les deux parcours maritimes.
+    // Je mesure encore chaque tranche sous gcov, mais je ne compare pas ce
+    // binaire force en -O0 et instrumente au SLA d'un executable de production.
+    // Le build strict non instrumente conserve le contrat de 50 ms pour les
+    // deux parcours maritimes.
     const auto enforce_loading_slice_budget =
-        kPerformanceBuildType != "Debug" || options_.smoke_session != SmokeSessionMode::SeaLegacy;
+        !kCoverageInstrumentationEnabled &&
+        (kPerformanceBuildType != "Debug" ||
+         options_.smoke_session != SmokeSessionMode::SeaLegacy);
     if (enforce_loading_slice_budget && loading_max_step_ms_ > kMaritimeSmokeSliceLimitMs) {
         throw std::runtime_error(
             std::string("Maritime smoke loading exceeded the ") +
@@ -5357,6 +5915,9 @@ auto Game::make_audit_frame_sample(const FramePerformanceStats& frame_stats) con
         break;
     case UiScreen::Death:
         sample.ui_screen = "death";
+        break;
+    case UiScreen::CommandConsole:
+        sample.ui_screen = "command_console";
         break;
     case UiScreen::Gameplay:
     default:

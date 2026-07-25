@@ -2640,7 +2640,11 @@ TEST_CASE("chunk mesher keeps atlas UVs inside half texel safe bounds") {
 TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animation") {
     World world(186, 1);
     test::make_chunk_empty(world, {0, 0});
-    world.set_block(3, 5, 5, to_block_id(BlockType::Water));
+    world.set_block(
+        3,
+        kSeaLevel,
+        5,
+        to_block_id(BlockType::Water));
 
     ChunkMesher mesher {};
     const auto mesh = mesher.build_mesh(world, {0, 0});
@@ -2655,11 +2659,19 @@ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animat
     }));
 }
 
-TEST_CASE("stacked water only animates the topmost surface block") {
+TEST_CASE("water surfaces above sea level stay outside ocean swell") {
     World world(187, 1);
     test::make_chunk_empty(world, {0, 0});
-    world.set_block(3, 5, 5, to_block_id(BlockType::Water));
-    world.set_block(3, 6, 5, to_block_id(BlockType::Water));
+    world.set_block(
+        3,
+        kSeaLevel,
+        5,
+        to_block_id(BlockType::Water));
+    world.set_block(
+        3,
+        kSeaLevel + 1,
+        5,
+        to_block_id(BlockType::Water));
 
     ChunkMesher mesher {};
     const auto mesh = mesher.build_mesh(world, {0, 0});
@@ -2667,14 +2679,13 @@ TEST_CASE("stacked water only animates the topmost surface block") {
     const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
         return vertex.wave_weight > 0.5F;
     });
-    CHECK(animated_vertex_count == 21);
-
-    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
-        if (vertex.wave_weight <= 0.5F) {
-            return true;
-        }
-        return vertex.y > 5.85F;
-    }));
+    CHECK(animated_vertex_count == 0);
+    CHECK(std::all_of(
+        mesh.water_vertices.begin(),
+        mesh.water_vertices.end(),
+        [](const ChunkVertex& vertex) {
+            return vertex.wave_weight == 0.0F;
+        }));
 }
 
 TEST_CASE("chunk mesher handles isolated high blocks without losing geometry") {
@@ -4257,9 +4268,9 @@ TEST_CASE("weather cycle stays mostly fair while still producing rain and storms
     constexpr int sampled_slots = 2048;
     int fair_weather_slots = 0;
     int rainy_slots = 0;
+    int tempest_slots = 0;
     bool saw_overcast = false;
     bool saw_storm = false;
-    bool saw_tempest = false;
 
     for (int slot = 0; slot < sampled_slots; ++slot) {
         const auto state = EnvironmentClock::compute_state(
@@ -4274,14 +4285,205 @@ TEST_CASE("weather cycle stays mostly fair while still producing rain and storms
         }
         saw_overcast = saw_overcast || state.weather == WeatherKind::Overcast;
         saw_storm = saw_storm || state.storm_intensity > 0.30F;
-        saw_tempest = saw_tempest || state.weather == WeatherKind::Tempest;
+        if (state.weather == WeatherKind::Tempest) {
+            ++tempest_slots;
+            CHECK(state.violent_storm_intensity ==
+                  doctest::Approx(1.0F));
+        }
     }
 
-    CHECK(static_cast<float>(fair_weather_slots) / static_cast<float>(sampled_slots) > 0.64F);
+    const auto fair_weather_ratio =
+        static_cast<float>(fair_weather_slots) /
+        static_cast<float>(sampled_slots);
+    const auto tempest_ratio =
+        static_cast<float>(tempest_slots) /
+        static_cast<float>(sampled_slots);
+
+    // Je verrouille une météo majoritairement praticable tout en conservant
+    // des tempêtes majeures rares, mais réellement présentes dans le cycle.
+    CHECK(fair_weather_ratio > 0.64F);
+    CHECK(fair_weather_ratio < 0.72F);
+    CHECK(tempest_ratio > 0.02F);
+    CHECK(tempest_ratio < 0.05F);
     CHECK(rainy_slots > 0);
     CHECK(saw_overcast);
     CHECK(saw_storm);
-    CHECK(saw_tempest);
+    CHECK(tempest_slots > 0);
+}
+
+TEST_CASE("violent storm weather is grey deterministic and produces intermittent lightning") {
+    constexpr std::uint32_t seed = 1337U;
+    constexpr float lightning_time = 2'685.0979F;
+
+    const auto clear =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            0.0F);
+    const auto tempest =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            lightning_time);
+    const auto replay =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            lightning_time);
+    const auto between_strikes =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            2'760.0F);
+
+    REQUIRE(clear.weather == WeatherKind::Clear);
+    REQUIRE(tempest.weather == WeatherKind::Tempest);
+    REQUIRE(between_strikes.weather == WeatherKind::Tempest);
+    CHECK(tempest.violent_storm_intensity ==
+          doctest::Approx(1.0F));
+    CHECK(tempest.overcast_intensity ==
+          doctest::Approx(1.0F));
+    CHECK(tempest.precipitation_intensity ==
+          doctest::Approx(1.0F));
+    CHECK(tempest.storm_intensity ==
+          doctest::Approx(1.0F));
+
+    const auto tempest_zenith_span =
+        std::max({
+            tempest.sky_zenith_color.r,
+            tempest.sky_zenith_color.g,
+            tempest.sky_zenith_color.b,
+        }) -
+        std::min({
+            tempest.sky_zenith_color.r,
+            tempest.sky_zenith_color.g,
+            tempest.sky_zenith_color.b,
+        });
+    const auto clear_zenith_span =
+        std::max({
+            clear.sky_zenith_color.r,
+            clear.sky_zenith_color.g,
+            clear.sky_zenith_color.b,
+        }) -
+        std::min({
+            clear.sky_zenith_color.r,
+            clear.sky_zenith_color.g,
+            clear.sky_zenith_color.b,
+        });
+    const auto tempest_zenith_energy =
+        tempest.sky_zenith_color.r +
+        tempest.sky_zenith_color.g +
+        tempest.sky_zenith_color.b;
+    const auto clear_zenith_energy =
+        clear.sky_zenith_color.r +
+        clear.sky_zenith_color.g +
+        clear.sky_zenith_color.b;
+
+    // Je contrôle le résultat visuel : la palette devient sombre et grise
+    // même pendant l'éclair, au lieu de garder le bleu saturé du beau temps.
+    CHECK(tempest_zenith_span < 0.15F);
+    CHECK(tempest_zenith_span <
+          clear_zenith_span * 0.25F);
+    CHECK(tempest_zenith_energy <
+          clear_zenith_energy * 0.55F);
+    CHECK(tempest.exposure < clear.exposure);
+
+    CHECK(tempest.lightning_intensity > 0.65F);
+    CHECK(tempest.lightning_bolt_intensity > 0.65F);
+    CHECK(tempest.lightning_bolt_intensity <=
+          tempest.lightning_intensity);
+    CHECK(tempest.lightning_direction.x ==
+          doctest::Approx(-0.510863F).epsilon(0.001));
+    CHECK(tempest.lightning_direction.y ==
+          doctest::Approx(0.471381F).epsilon(0.001));
+    CHECK(tempest.lightning_direction.z ==
+          doctest::Approx(0.718901F).epsilon(0.001));
+    CHECK(glm::length(tempest.lightning_direction) ==
+          doctest::Approx(1.0F).epsilon(0.0001));
+    CHECK(tempest.lightning_shape_seed ==
+          doctest::Approx(0.817389F).epsilon(0.001));
+
+    // Je rejoue exactement le même instant pour garantir que l'éclair ne
+    // dépend ni du framerate ni d'un générateur aléatoire mutable.
+    CHECK(replay.lightning_intensity ==
+          tempest.lightning_intensity);
+    CHECK(replay.lightning_bolt_intensity ==
+          tempest.lightning_bolt_intensity);
+    CHECK(replay.lightning_direction.x ==
+          tempest.lightning_direction.x);
+    CHECK(replay.lightning_direction.y ==
+          tempest.lightning_direction.y);
+    CHECK(replay.lightning_direction.z ==
+          tempest.lightning_direction.z);
+    CHECK(replay.lightning_shape_seed ==
+          tempest.lightning_shape_seed);
+
+    // Je vérifie que le ciel de tempête ne reste pas artificiellement illuminé
+    // entre deux impacts.
+    CHECK(between_strikes.lightning_intensity == 0.0F);
+    CHECK(between_strikes.lightning_bolt_intensity == 0.0F);
+}
+
+TEST_CASE("lightning stays continuous when a tempest transition crosses an event threshold") {
+    constexpr std::uint32_t seed = 3U;
+    constexpr float after_time = 11'077.0333F;
+    constexpr float before_time =
+        after_time - 1.0F / 60.0F;
+
+    const auto before =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            before_time);
+    const auto after =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            after_time);
+
+    // Je verrouille le franchissement réel qui faisait auparavant apparaître
+    // un pulse déjà puissant entre deux images consécutives.
+    REQUIRE(after.storm_intensity >
+            before.storm_intensity);
+    CHECK(std::abs(
+              after.lightning_intensity -
+              before.lightning_intensity) <
+          0.01F);
+    CHECK(std::abs(
+              after.lightning_bolt_intensity -
+              before.lightning_bolt_intensity) <
+          0.01F);
+}
+
+TEST_CASE("lightning fades continuously into the first storm frames") {
+    constexpr std::uint32_t seed = 550U;
+    constexpr float after_time = 18'242.482F;
+    constexpr float before_time =
+        after_time - 1.0F / 60.0F;
+
+    const auto before =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            before_time);
+    const auto after =
+        EnvironmentClock::compute_state(
+            12.0F,
+            seed,
+            after_time);
+
+    REQUIRE(before.storm_intensity < 0.01F);
+    REQUIRE(after.storm_intensity > 0.01F);
+    REQUIRE(after.lightning_intensity > 0.0F);
+    REQUIRE(after.lightning_bolt_intensity > 0.0F);
+    CHECK(std::abs(
+              after.lightning_intensity -
+              before.lightning_intensity) <
+          0.01F);
+    CHECK(std::abs(
+              after.lightning_bolt_intensity -
+              before.lightning_bolt_intensity) <
+          0.01F);
 }
 
 TEST_CASE("weather transitions blend cloud cover instead of jumping abruptly") {
@@ -4366,8 +4568,15 @@ TEST_CASE("weather cycle keeps environment values finite and renderer-safe") {
                 CHECK(state.precipitation_intensity <= 1.0F);
                 CHECK(state.storm_intensity >= 0.0F);
                 CHECK(state.storm_intensity <= 1.0F);
+                CHECK(state.violent_storm_intensity >= 0.0F);
+                CHECK(state.violent_storm_intensity <= 1.0F);
                 CHECK(state.lightning_intensity >= 0.0F);
                 CHECK(state.lightning_intensity <= 1.0F);
+                CHECK(state.lightning_bolt_intensity >= 0.0F);
+                CHECK(state.lightning_bolt_intensity <=
+                      state.lightning_intensity);
+                CHECK(state.lightning_shape_seed >= 0.0F);
+                CHECK(state.lightning_shape_seed <= 1.0F);
                 CHECK(state.weather_transition_factor >= 0.0F);
                 CHECK(state.weather_transition_factor <= 1.0F);
                 CHECK(state.cloud_shadow_strength >= 0.0F);
@@ -4385,6 +4594,11 @@ TEST_CASE("weather cycle keeps environment values finite and renderer-safe") {
                 CHECK(finite_vec3(state.sky_zenith_color));
                 CHECK(finite_vec3(state.sky_horizon_color));
                 CHECK(finite_vec3(state.distant_fog_color));
+                CHECK(finite_vec3(state.lightning_direction));
+                CHECK(glm::length(state.lightning_direction) ==
+                      doctest::Approx(1.0F).epsilon(0.0001));
+                CHECK(state.lightning_direction.y > 0.10F);
+                CHECK(state.lightning_direction.y < 0.50F);
                 CHECK(vec3_components_at_least(state.sun_color, 0.0F));
                 CHECK(vec3_components_at_least(state.ambient_color, 0.0F));
                 CHECK(vec3_components_at_least(state.fog_color, 0.0F));
@@ -4406,6 +4620,22 @@ TEST_CASE("environment clock sanitizes non finite time inputs") {
     CHECK(state.time_of_day == doctest::Approx(8.0F));
     CHECK(finite_vec3(state.sun_direction));
     CHECK(finite_vec3(state.sun_color));
+
+    EnvironmentClock bounded_clock {};
+    bounded_clock.set_weather_time_seconds(1.0e30F);
+    CHECK(bounded_clock.weather_time_seconds() ==
+          doctest::Approx(kMaximumWeatherTimeSeconds));
+
+    const auto bounded_state =
+        EnvironmentClock::compute_state(
+            8.0F,
+            1337U,
+            1.0e30F);
+    CHECK(bounded_state.weather_time_seconds ==
+          doctest::Approx(kMaximumWeatherTimeSeconds));
+    CHECK(std::isfinite(bounded_state.lightning_intensity));
+    CHECK(std::isfinite(bounded_state.lightning_bolt_intensity));
+    CHECK(finite_vec3(bounded_state.lightning_direction));
 }
 
 TEST_CASE("environment clock respects freeze mode") {
@@ -4418,6 +4648,91 @@ TEST_CASE("environment clock respects freeze mode") {
     running_clock.update(30.0F);
     CHECK(running_clock.time_of_day() == doctest::Approx(9.0F).epsilon(0.01));
     CHECK(running_clock.weather_time_seconds() == doctest::Approx(30.0F));
+}
+
+TEST_CASE("environment clock starts a complete deterministic tempest for arbitrary world seeds") {
+    constexpr std::array<std::uint32_t, 6> seeds {
+        0U,
+        1U,
+        1337U,
+        424242U,
+        987654U,
+        0xffffffffU,
+    };
+
+    for (const auto seed : seeds) {
+        EnvironmentClock clock {12.0F, false, seed};
+        clock.set_weather_time_seconds(
+            seed == 0xffffffffU
+                ? kMaximumWeatherTimeSeconds
+                : 17.0F);
+
+        CAPTURE(seed);
+        REQUIRE(clock.start_weather_event(WeatherKind::Tempest));
+        const auto started = clock.current_state();
+        CHECK(started.weather == WeatherKind::Tempest);
+        CHECK(started.weather_transition_factor == doctest::Approx(1.0F));
+        CHECK(started.storm_intensity == doctest::Approx(1.0F));
+        CHECK(started.violent_storm_intensity == doctest::Approx(1.0F));
+        CHECK(started.precipitation_intensity == doctest::Approx(1.0F));
+        const auto ocean =
+            OceanSimulation::evaluate(
+                started,
+                OceanSurfaceProfile::OpenSea);
+        CHECK(ocean.sea_state == OceanSeaState::Tempest);
+        CHECK(ocean.tempest_factor == doctest::Approx(1.0F));
+        CHECK(ocean.total_amplitude == doctest::Approx(3.33F));
+
+        const auto started_weather_time =
+            clock.weather_time_seconds();
+        clock.update(1.0F);
+        const auto continued = clock.current_state();
+        CHECK(clock.weather_time_seconds() ==
+              doctest::Approx(started_weather_time + 1.0F));
+        CHECK(continued.weather == WeatherKind::Tempest);
+        CHECK(continued.violent_storm_intensity == doctest::Approx(1.0F));
+    }
+
+    EnvironmentClock invalid_weather_clock {
+        12.0F,
+        false,
+        1337U,
+    };
+    invalid_weather_clock.set_weather_time_seconds(
+        125.0F);
+    CHECK_FALSE(
+        invalid_weather_clock.start_weather_event(
+            static_cast<WeatherKind>(
+                0xffU)));
+    CHECK(invalid_weather_clock.weather_time_seconds() ==
+          doctest::Approx(125.0F));
+
+    EnvironmentClock long_session_clock {
+        12.0F,
+        false,
+        0U,
+    };
+    long_session_clock.set_weather_time_seconds(
+        268'451'040.0F);
+    REQUIRE(
+        long_session_clock.start_weather_event(
+            WeatherKind::Tempest));
+    const auto long_session_tempest =
+        long_session_clock.current_state();
+    CHECK(long_session_tempest.weather ==
+          WeatherKind::Tempest);
+    CHECK(long_session_tempest.weather_transition_factor ==
+          doctest::Approx(1.0F));
+    CHECK(long_session_tempest.violent_storm_intensity ==
+          doctest::Approx(1.0F));
+    const auto long_session_ocean =
+        OceanSimulation::evaluate(
+            long_session_tempest,
+            OceanSurfaceProfile::OpenSea);
+    CHECK(long_session_ocean.tempest_factor ==
+          doctest::Approx(1.0F));
+    CHECK(long_session_ocean.total_amplitude ==
+          doctest::Approx(3.33F));
 }
 
 TEST_CASE("ocean spectrum maps weather severity to bounded physical states") {
@@ -4447,11 +4762,14 @@ TEST_CASE("ocean spectrum maps weather severity to bounded physical states") {
     auto previous_severity = -1.0F;
     auto previous_amplitude = -1.0F;
     for (std::size_t state_index = 0; state_index < environments.size(); ++state_index) {
-        const auto ocean = OceanSimulation::evaluate(environments[state_index]);
+        const auto ocean = OceanSimulation::evaluate(
+            environments[state_index],
+            OceanSurfaceProfile::OpenSea);
         CAPTURE(state_index);
 
         CHECK(ocean.sea_state == expected_states[state_index]);
         CHECK(std::isfinite(ocean.severity));
+        CHECK(std::isfinite(ocean.tempest_factor));
         CHECK(std::isfinite(ocean.total_amplitude));
         CHECK(std::isfinite(ocean.maximum_displacement));
         CHECK(std::isfinite(ocean.foam_threshold));
@@ -4459,13 +4777,15 @@ TEST_CASE("ocean spectrum maps weather severity to bounded physical states") {
         CHECK(std::isfinite(ocean.detail_phase));
         CHECK(ocean.severity >= 0.0F);
         CHECK(ocean.severity <= 1.0F);
-        CHECK(ocean.total_amplitude >= 0.09F);
-        CHECK(ocean.total_amplitude <= 1.4051F);
+        CHECK(ocean.tempest_factor >= 0.0F);
+        CHECK(ocean.tempest_factor <= 1.0F);
+        CHECK(ocean.total_amplitude >= 0.22F);
+        CHECK(ocean.total_amplitude <= 3.3301F);
         CHECK(ocean.maximum_displacement >= ocean.total_amplitude);
-        CHECK(ocean.foam_threshold >= 0.67F);
-        CHECK(ocean.foam_threshold <= 0.93F);
-        CHECK(ocean.detail_strength >= 0.0028F);
-        CHECK(ocean.detail_strength <= 0.0153F);
+        CHECK(ocean.foam_threshold >= 0.54F);
+        CHECK(ocean.foam_threshold <= 0.84F);
+        CHECK(ocean.detail_strength >= 0.0080F);
+        CHECK(ocean.detail_strength <= 0.0194F);
         CHECK(ocean.detail_phase >= 0.0F);
         CHECK(ocean.detail_phase < 6.283186F);
         CHECK(ocean.severity > previous_severity);
@@ -4494,6 +4814,11 @@ TEST_CASE("ocean spectrum maps weather severity to bounded physical states") {
 
         CHECK(amplitude_sum == doctest::Approx(ocean.total_amplitude).epsilon(0.0001));
         CHECK(displacement_bound == doctest::Approx(ocean.maximum_displacement).epsilon(0.0001));
+        CHECK(ocean.tempest_factor ==
+              doctest::Approx(
+                  state_index + 1U == environments.size()
+                      ? 1.0F
+                      : 0.0F));
         previous_severity = ocean.severity;
         previous_amplitude = ocean.total_amplitude;
     }
@@ -4506,6 +4831,45 @@ TEST_CASE("ocean spectrum maps weather severity to bounded physical states") {
     CHECK(std::string_view {OceanSimulation::state_label(static_cast<OceanSeaState>(255U))} == "calme");
 }
 
+TEST_CASE("ocean world profiles and explicit tempest factor stay coherent") {
+    CHECK(OceanSimulation::surface_profile_for_world(
+              WorldGenerationProfile::Continental) ==
+          OceanSurfaceProfile::InlandWater);
+    CHECK(OceanSimulation::surface_profile_for_world(
+              WorldGenerationProfile::OceanAdventure) ==
+          OceanSurfaceProfile::OpenSea);
+
+    EnvironmentState explicit_tempest {};
+    explicit_tempest.wind_strength = 0.0F;
+    explicit_tempest.storm_intensity = 0.0F;
+    explicit_tempest.precipitation_intensity = 0.0F;
+    explicit_tempest.violent_storm_intensity = 1.0F;
+
+    const auto open_sea =
+        OceanSimulation::evaluate(
+            explicit_tempest,
+            OceanSurfaceProfile::OpenSea);
+    const auto inland =
+        OceanSimulation::evaluate(
+            explicit_tempest,
+            OceanSurfaceProfile::InlandWater);
+
+    // Je traite le facteur Tempest explicite comme l'autorité, même si un mod
+    // ou un outil de test ne renseigne pas les anciens champs météo.
+    CHECK(open_sea.severity == 0.0F);
+    CHECK(open_sea.tempest_factor ==
+          doctest::Approx(1.0F));
+    CHECK(open_sea.sea_state ==
+          OceanSeaState::Tempest);
+    CHECK(open_sea.total_amplitude ==
+          doctest::Approx(3.33F));
+    CHECK(inland.tempest_factor == 0.0F);
+    CHECK(inland.sea_state ==
+          OceanSeaState::Calm);
+    CHECK(inland.total_amplitude ==
+          doctest::Approx(0.09F));
+}
+
 TEST_CASE("ocean sampling bounds wave counts and rejects non finite inputs") {
     EnvironmentState environment {};
     environment.wind_strength = 0.82F;
@@ -4513,7 +4877,9 @@ TEST_CASE("ocean sampling bounds wave counts and rejects non finite inputs") {
     environment.precipitation_intensity = 0.35F;
     environment.weather_time_seconds = 934.5F;
 
-    const auto ocean = OceanSimulation::evaluate(environment);
+    const auto ocean = OceanSimulation::evaluate(
+        environment,
+        OceanSurfaceProfile::OpenSea);
     const glm::vec2 point {13.25F, -7.75F};
     const auto full_sample = OceanSimulation::sample(ocean, point);
     const auto oversized_sample = OceanSimulation::sample(ocean, point, kOceanMaxWaveCount + 17U);
@@ -4561,12 +4927,17 @@ TEST_CASE("ocean evaluation sanitizes non finite weather values") {
     environment.wind_strength = std::numeric_limits<float>::quiet_NaN();
     environment.storm_intensity = std::numeric_limits<float>::infinity();
     environment.precipitation_intensity = -std::numeric_limits<float>::infinity();
+    environment.violent_storm_intensity =
+        std::numeric_limits<float>::quiet_NaN();
     environment.weather_time_seconds = std::numeric_limits<float>::quiet_NaN();
 
-    const auto ocean = OceanSimulation::evaluate(environment);
+    const auto ocean = OceanSimulation::evaluate(
+        environment,
+        OceanSurfaceProfile::OpenSea);
     CHECK(ocean.sea_state == OceanSeaState::Calm);
     CHECK(ocean.severity == 0.0F);
-    CHECK(ocean.total_amplitude == doctest::Approx(0.09F));
+    CHECK(ocean.tempest_factor == 0.0F);
+    CHECK(ocean.total_amplitude == doctest::Approx(0.22F));
     CHECK(ocean.detail_phase == 0.0F);
 
     for (const auto& wave : ocean.waves) {
@@ -4581,40 +4952,282 @@ TEST_CASE("ocean evaluation sanitizes non finite weather values") {
     environment.wind_strength = -12.0F;
     environment.storm_intensity = 7.0F;
     environment.precipitation_intensity = 4.0F;
+    environment.violent_storm_intensity = 7.0F;
     environment.weather_time_seconds = std::numeric_limits<float>::infinity();
-    const auto clamped = OceanSimulation::evaluate(environment);
+    const auto clamped = OceanSimulation::evaluate(
+        environment,
+        OceanSurfaceProfile::OpenSea);
     CHECK(clamped.severity <= 1.0F);
-    CHECK(clamped.total_amplitude <= 1.4051F);
+    CHECK(clamped.tempest_factor == doctest::Approx(1.0F));
+    CHECK(clamped.total_amplitude == doctest::Approx(3.33F));
     CHECK(clamped.detail_phase == 0.0F);
 }
 
-TEST_CASE("ocean keeps a visible swell from the start without strengthening tempests") {
+TEST_CASE("ocean keeps a visible swell and reaches multi metre tempests") {
     EnvironmentState calm {};
     calm.wind_strength = 0.0F;
     calm.storm_intensity = 0.0F;
     calm.precipitation_intensity = 0.0F;
 
     const auto calm_ocean =
-        OceanSimulation::evaluate(calm);
+        OceanSimulation::evaluate(
+            calm,
+            OceanSurfaceProfile::OpenSea);
 
     CHECK(calm_ocean.sea_state == OceanSeaState::Calm);
     CHECK(calm_ocean.total_amplitude ==
-          doctest::Approx(0.09F));
+          doctest::Approx(0.22F));
     CHECK(calm_ocean.maximum_displacement >
           calm_ocean.total_amplitude);
+    CHECK(calm_ocean.foam_threshold ==
+          doctest::Approx(0.84F));
+    CHECK(calm_ocean.detail_strength ==
+          doctest::Approx(0.0080F));
+
+    const auto inland_calm =
+        OceanSimulation::evaluate(
+            calm,
+            OceanSurfaceProfile::InlandWater);
+    CHECK(inland_calm.total_amplitude ==
+          doctest::Approx(0.09F));
+    CHECK(inland_calm.foam_threshold ==
+          doctest::Approx(0.93F));
+    CHECK(inland_calm.detail_strength ==
+          doctest::Approx(0.0028F));
+    CHECK(calm_ocean.total_amplitude >
+          inland_calm.total_amplitude * 2.0F);
+
+    auto visual_wave_amplitude = 0.0F;
+    for (std::size_t index = kOceanBuoyancyWaveCount;
+         index < calm_ocean.waves.size();
+         ++index) {
+        visual_wave_amplitude +=
+            calm_ocean.waves[index].amplitude;
+    }
+    CHECK(visual_wave_amplitude >=
+          calm_ocean.total_amplitude * 0.22F);
+
+    auto minimum_height =
+        std::numeric_limits<float>::max();
+    auto maximum_height =
+        std::numeric_limits<float>::lowest();
+    auto maximum_crest = 0.0F;
+
+    // Je balaie une zone assez large pour verrouiller une houle calme
+    // reellement visible, pas seulement une amplitude theorique non observee.
+    for (int z = -48; z <= 48; ++z) {
+        for (int x = -48; x <= 48; ++x) {
+            const auto sample =
+                OceanSimulation::sample(
+                    calm_ocean,
+                    {
+                        static_cast<float>(x) * 0.5F,
+                        static_cast<float>(z) * 0.5F,
+                    });
+            minimum_height =
+                std::min(minimum_height, sample.height);
+            maximum_height =
+                std::max(maximum_height, sample.height);
+            maximum_crest =
+                std::max(maximum_crest, sample.crest);
+        }
+    }
+
+    CHECK(maximum_height - minimum_height > 0.30F);
+    CHECK(maximum_crest > 0.95F);
+
+    auto moving_calm = calm;
+    moving_calm.weather_time_seconds = 0.5F;
+    const auto moving_ocean =
+        OceanSimulation::evaluate(
+            moving_calm,
+            OceanSurfaceProfile::OpenSea);
+    const glm::vec2 observation_point {7.25F, -11.5F};
+    const auto initial_sample =
+        OceanSimulation::sample(
+            calm_ocean,
+            observation_point);
+    const auto moving_sample =
+        OceanSimulation::sample(
+            moving_ocean,
+            observation_point);
+    CHECK(std::abs(
+              moving_sample.height -
+              initial_sample.height) >
+          0.001F);
 
     EnvironmentState tempest {};
     tempest.wind_strength = 1.0F;
     tempest.storm_intensity = 1.0F;
     tempest.precipitation_intensity = 1.0F;
+    tempest.violent_storm_intensity = 1.0F;
 
     const auto tempest_ocean =
-        OceanSimulation::evaluate(tempest);
+        OceanSimulation::evaluate(
+            tempest,
+            OceanSurfaceProfile::OpenSea);
 
     CHECK(tempest_ocean.sea_state ==
           OceanSeaState::Tempest);
+    CHECK(tempest_ocean.tempest_factor ==
+          doctest::Approx(1.0F));
     CHECK(tempest_ocean.total_amplitude ==
-          doctest::Approx(1.405F));
+          doctest::Approx(3.33F));
+}
+
+TEST_CASE("open sea tempest spectrum keeps long waves and produces observed multi metre swell") {
+    constexpr std::array<float, kOceanMaxWaveCount>
+        expected_open_sea_wavelengths {{
+            96.0F,
+            64.0F,
+            36.0F,
+            14.0F,
+            7.0F,
+            3.5F,
+        }};
+    constexpr std::array<float, kOceanMaxWaveCount>
+        expected_tempest_amplitude_shares {{
+            0.480F,
+            0.270F,
+            0.150F,
+            0.055F,
+            0.030F,
+            0.015F,
+        }};
+    constexpr float two_pi = 6.28318530717958647692F;
+    constexpr float lightning_time = 2'685.0979F;
+
+    const auto calm_environment =
+        EnvironmentClock::compute_state(
+            12.0F,
+            1337U,
+            0.0F);
+    const auto tempest_environment =
+        EnvironmentClock::compute_state(
+            12.0F,
+            1337U,
+            lightning_time);
+    REQUIRE(tempest_environment.weather ==
+            WeatherKind::Tempest);
+
+    const auto calm_open_sea =
+        OceanSimulation::evaluate(
+            calm_environment,
+            OceanSurfaceProfile::OpenSea);
+    const auto tempest_open_sea =
+        OceanSimulation::evaluate(
+            tempest_environment,
+            OceanSurfaceProfile::OpenSea);
+    const auto tempest_inland =
+        OceanSimulation::evaluate(
+            tempest_environment,
+            OceanSurfaceProfile::InlandWater);
+
+    REQUIRE(tempest_open_sea.sea_state ==
+            OceanSeaState::Tempest);
+    CHECK(tempest_open_sea.tempest_factor ==
+          doctest::Approx(1.0F));
+    CHECK(tempest_open_sea.total_amplitude ==
+          doctest::Approx(3.33F));
+    CHECK(tempest_open_sea.total_amplitude <= 3.3301F);
+    CHECK(tempest_inland.tempest_factor == 0.0F);
+    CHECK(tempest_inland.sea_state ==
+          OceanSeaState::Storm);
+    CHECK(tempest_inland.total_amplitude ==
+          doctest::Approx(0.34F));
+    CHECK(tempest_inland.total_amplitude <= 0.3401F);
+
+    auto detail_wave_amplitude = 0.0F;
+    for (std::size_t index = 0;
+         index < kOceanMaxWaveCount;
+         ++index) {
+
+        CAPTURE(index);
+        const auto expected_wave_number =
+            two_pi /
+            expected_open_sea_wavelengths[index];
+
+        // Je garde les longueurs d'onde fixes quand la météo change afin
+        // d'éviter tout glissement brutal des crêtes pendant une transition.
+        CHECK(calm_open_sea.waves[index].wave_number ==
+              doctest::Approx(expected_wave_number).epsilon(0.0001));
+        CHECK(tempest_open_sea.waves[index].wave_number ==
+              doctest::Approx(expected_wave_number).epsilon(0.0001));
+        CHECK(tempest_open_sea.waves[index].wave_number ==
+              doctest::Approx(
+                  calm_open_sea.waves[index].wave_number)
+                  .epsilon(0.0001));
+        CHECK(
+            tempest_open_sea.waves[index].amplitude /
+                tempest_open_sea.total_amplitude ==
+            doctest::Approx(
+                expected_tempest_amplitude_shares[index])
+                .epsilon(0.0001));
+
+        if (index >= kOceanBuoyancyWaveCount) {
+            detail_wave_amplitude +=
+                tempest_open_sea.waves[index].amplitude;
+        }
+    }
+
+    CHECK(detail_wave_amplitude ==
+          doctest::Approx(
+              tempest_open_sea.total_amplitude * 0.10F)
+              .epsilon(0.0001));
+    CHECK(detail_wave_amplitude <= 0.34F);
+
+    auto minimum_height =
+        std::numeric_limits<float>::max();
+    auto maximum_height =
+        std::numeric_limits<float>::lowest();
+    auto minimum_buoyancy_height =
+        std::numeric_limits<float>::max();
+    auto maximum_buoyancy_height =
+        std::numeric_limits<float>::lowest();
+
+    // Je mesure la surface rendue sur une large zone, car une simple somme
+    // d'amplitudes ne prouverait pas que des vagues de plusieurs mètres sont
+    // réellement observables par le joueur et par la flottabilité.
+    for (int z = -128; z <= 128; z += 2) {
+        for (int x = -128; x <= 128; x += 2) {
+            const glm::vec2 point {
+                static_cast<float>(x),
+                static_cast<float>(z),
+            };
+            const auto sample =
+                OceanSimulation::sample(
+                    tempest_open_sea,
+                    point);
+            const auto buoyancy_sample =
+                OceanSimulation::sample(
+                    tempest_open_sea,
+                    point,
+                    kOceanBuoyancyWaveCount);
+
+            minimum_height =
+                std::min(
+                    minimum_height,
+                    sample.height);
+            maximum_height =
+                std::max(
+                    maximum_height,
+                    sample.height);
+            minimum_buoyancy_height =
+                std::min(
+                    minimum_buoyancy_height,
+                    buoyancy_sample.height);
+            maximum_buoyancy_height =
+                std::max(
+                    maximum_buoyancy_height,
+                    buoyancy_sample.height);
+        }
+    }
+
+    CHECK(maximum_height - minimum_height > 5.0F);
+    CHECK(
+        maximum_buoyancy_height -
+            minimum_buoyancy_height >
+        4.5F);
 }
 
 TEST_CASE("ocean analytical gradient matches a centered finite difference") {
@@ -4623,7 +5236,9 @@ TEST_CASE("ocean analytical gradient matches a centered finite difference") {
     environment.storm_intensity = 0.72F;
     environment.precipitation_intensity = 0.41F;
     environment.weather_time_seconds = 1'234.5F;
-    const auto ocean = OceanSimulation::evaluate(environment);
+    const auto ocean = OceanSimulation::evaluate(
+        environment,
+        OceanSurfaceProfile::OpenSea);
 
     constexpr float step = 0.005F;
     constexpr std::array<glm::vec2, 5> points {{
@@ -4659,8 +5274,12 @@ TEST_CASE("ocean samples remain continuous across time and wrapped phases") {
 
     auto next_environment = environment;
     next_environment.weather_time_seconds += 0.001F;
-    const auto ocean = OceanSimulation::evaluate(environment);
-    const auto next_ocean = OceanSimulation::evaluate(next_environment);
+    const auto ocean = OceanSimulation::evaluate(
+        environment,
+        OceanSurfaceProfile::OpenSea);
+    const auto next_ocean = OceanSimulation::evaluate(
+        next_environment,
+        OceanSurfaceProfile::OpenSea);
     const glm::vec2 point {37.25F, -19.75F};
     const auto sample = OceanSimulation::sample(ocean, point);
     const auto next_sample = OceanSimulation::sample(next_ocean, point);
@@ -4674,18 +5293,30 @@ TEST_CASE("ocean samples remain continuous across time and wrapped phases") {
     // bouclage 2*pi pour verifier la continuite de l'equation echantillonnee.
     EnvironmentState phase_environment = environment;
     phase_environment.weather_time_seconds = 0.0F;
-    const auto initial_ocean = OceanSimulation::evaluate(phase_environment);
+    const auto initial_ocean = OceanSimulation::evaluate(
+        phase_environment,
+        OceanSurfaceProfile::OpenSea);
     const auto first_angular_frequency = std::sqrt(9.80665F * initial_ocean.waves[0].wave_number);
     const auto first_phase_wrap_time = initial_ocean.waves[0].phase / first_angular_frequency;
     phase_environment.weather_time_seconds = first_phase_wrap_time - 0.0001F;
-    const auto before_wrap = OceanSimulation::sample(OceanSimulation::evaluate(phase_environment), point);
+    const auto before_wrap = OceanSimulation::sample(
+        OceanSimulation::evaluate(
+            phase_environment,
+            OceanSurfaceProfile::OpenSea),
+        point);
     phase_environment.weather_time_seconds = first_phase_wrap_time + 0.0001F;
-    const auto after_wrap = OceanSimulation::sample(OceanSimulation::evaluate(phase_environment), point);
+    const auto after_wrap = OceanSimulation::sample(
+        OceanSimulation::evaluate(
+            phase_environment,
+            OceanSurfaceProfile::OpenSea),
+        point);
     CHECK(std::abs(after_wrap.height - before_wrap.height) < 0.001F);
     CHECK(glm::length(after_wrap.gradient - before_wrap.gradient) < 0.001F);
 
     auto nearby_weather = environment;
-    auto nearby_ocean = OceanSimulation::evaluate(nearby_weather);
+    auto nearby_ocean = OceanSimulation::evaluate(
+        nearby_weather,
+        OceanSurfaceProfile::OpenSea);
 
     // Je cherche le premier changement representable qui modifie reellement
     // le spectre afin que ce controle local ne puisse pas devenir vacu.
@@ -4697,7 +5328,9 @@ TEST_CASE("ocean samples remain continuous across time and wrapped phases") {
             std::nextafter(
                 nearby_weather.wind_strength,
                 1.0F);
-        nearby_ocean = OceanSimulation::evaluate(nearby_weather);
+        nearby_ocean = OceanSimulation::evaluate(
+            nearby_weather,
+            OceanSurfaceProfile::OpenSea);
     }
 
     REQUIRE(nearby_ocean.total_amplitude > ocean.total_amplitude);
@@ -4706,7 +5339,9 @@ TEST_CASE("ocean samples remain continuous across time and wrapped phases") {
     CHECK(glm::length(nearby_sample.gradient - sample.gradient) < 0.001F);
 
     environment.weather_time_seconds = 1.0e9F;
-    const auto long_session_ocean = OceanSimulation::evaluate(environment);
+    const auto long_session_ocean = OceanSimulation::evaluate(
+        environment,
+        OceanSurfaceProfile::OpenSea);
     const auto long_session_sample = OceanSimulation::sample(long_session_ocean, point);
     CHECK(long_session_ocean.detail_phase >= 0.0F);
     CHECK(long_session_ocean.detail_phase < 6.283186F);

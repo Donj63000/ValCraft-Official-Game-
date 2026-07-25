@@ -1,11 +1,11 @@
 #include "world/OceanSimulation.h"
+#include "world/WorldGenerator.h"
 
 #include <glm/geometric.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <limits>
 
 namespace valcraft {
 
@@ -13,11 +13,11 @@ namespace {
 
 constexpr float kGravity = 9.80665F;
 constexpr float kTwoPi = 6.28318530717958647692F;
-constexpr float kCalmOceanAmplitude = 0.09F;
-constexpr float kMaximumOceanAmplitude = 1.405F;
-constexpr float kWeatherOceanAmplitudeRange =
-    kMaximumOceanAmplitude -
-    kCalmOceanAmplitude;
+constexpr float kInlandCalmAmplitude = 0.09F;
+constexpr float kOpenSeaCalmAmplitude = 0.22F;
+constexpr float kMaximumInlandAmplitude = 0.34F;
+constexpr float kOpenSeaStormAmplitude = 1.405F;
+constexpr float kMaximumOpenSeaTempestAmplitude = 3.33F;
 
 // Une petite seconde harmonique rend les cretes plus aiguës sans provoquer
 // les boucles ou auto-intersections possibles avec des Gerstner trop fortes.
@@ -25,21 +25,24 @@ constexpr float kSecondHarmonicScale = 0.14F;
 
 struct WavePreset {
     glm::vec2 direction;
-    float wavelength;
+    float inland_wavelength;
+    float open_sea_wavelength;
     float amplitude_share;
+    float tempest_amplitude_share;
     float phase_offset;
     float steepness;
 };
 
 // Les trois premières vagues constituent la houle qui déplace le navire.
-// Les trois suivantes apportent le clapot visible de moyenne et petite échelle.
+// En Tempest, je concentre 90 % de l'énergie sur cette houle longue : la
+// flottabilité et les profils graphiques Low restent ainsi cohérents.
 constexpr std::array<WavePreset, kOceanMaxWaveCount> kWavePresets {{
-    {{ 0.180F, 0.984F}, 42.0F, 0.360F, 0.15F, 0.48F},
-    {{-0.320F, 0.947F}, 27.0F, 0.240F, 1.72F, 0.54F},
-    {{ 0.620F, 0.785F}, 16.0F, 0.170F, 3.36F, 0.61F},
-    {{-0.780F, 0.626F},  9.0F, 0.110F, 5.02F, 0.68F},
-    {{ 0.930F, 0.368F},  4.8F, 0.075F, 2.58F, 0.74F},
-    {{-0.480F, 0.877F},  2.4F, 0.045F, 4.41F, 0.80F},
+    {{ 0.180F, 0.984F}, 42.0F, 96.0F, 0.360F, 0.480F, 0.15F, 0.48F},
+    {{-0.320F, 0.947F}, 27.0F, 64.0F, 0.240F, 0.270F, 1.72F, 0.54F},
+    {{ 0.620F, 0.785F}, 16.0F, 36.0F, 0.170F, 0.150F, 3.36F, 0.61F},
+    {{-0.780F, 0.626F},  9.0F, 14.0F, 0.110F, 0.055F, 5.02F, 0.68F},
+    {{ 0.930F, 0.368F},  4.8F,  7.0F, 0.075F, 0.030F, 2.58F, 0.74F},
+    {{-0.480F, 0.877F},  2.4F,  3.5F, 0.045F, 0.015F, 4.41F, 0.80F},
 }};
 
 [[nodiscard]] auto finite_or(
@@ -74,7 +77,12 @@ constexpr std::array<WavePreset, kOceanMaxWaveCount> kWavePresets {{
 }
 
 [[nodiscard]] auto classify_sea(
-    float severity) noexcept -> OceanSeaState {
+    float severity,
+    float tempest_factor) noexcept -> OceanSeaState {
+
+    if (tempest_factor >= 0.50F) {
+        return OceanSeaState::Tempest;
+    }
 
     if (severity < 0.24F) {
         return OceanSeaState::Calm;
@@ -88,22 +96,32 @@ constexpr std::array<WavePreset, kOceanMaxWaveCount> kWavePresets {{
         return OceanSeaState::Rough;
     }
 
-    if (severity < 0.86F) {
-        return OceanSeaState::Storm;
-    }
-
-    return OceanSeaState::Tempest;
+    return OceanSeaState::Storm;
 }
 
 } // namespace
 
+auto OceanSimulation::surface_profile_for_world(
+    WorldGenerationProfile profile) noexcept
+    -> OceanSurfaceProfile {
+
+    return profile ==
+                   WorldGenerationProfile::OceanAdventure
+               ? OceanSurfaceProfile::OpenSea
+               : OceanSurfaceProfile::InlandWater;
+}
+
 auto OceanSimulation::evaluate(
-    const EnvironmentState& environment) noexcept -> OceanState {
+    const EnvironmentState& environment,
+    OceanSurfaceProfile profile) noexcept -> OceanState {
 
     const auto wind = saturate(environment.wind_strength);
     const auto storm = saturate(environment.storm_intensity);
     const auto precipitation =
         saturate(environment.precipitation_intensity);
+    const auto authored_violent_storm =
+        saturate(
+            environment.violent_storm_intensity);
 
     // Le vent forme la houle de fond. La tempête augmente surtout son énergie
     // et sa cambrure. La pluie ne fournit qu'une faible contribution.
@@ -116,15 +134,47 @@ auto OceanSimulation::evaluate(
 
     const auto severity = smootherstep(raw_energy);
 
-    // Je conserve une houle lisible dès le départ, même sans vent. Je réduis
-    // d'autant la plage météorologique afin de ne pas renforcer les tempêtes.
-    const auto total_amplitude =
-        kCalmOceanAmplitude +
-        kWeatherOceanAmplitudeRange *
-            std::pow(raw_energy, 1.65F);
+    // Je conserve une voie de secours pour les tests, mods et futurs appels
+    // publics qui renseignent uniquement vent=1 et tempête=1. Le profil météo
+    // normal fournit cependant violent_storm_intensity et reste la référence.
+    const auto inferred_tempest =
+        smootherstep(
+            (storm - 0.82F) /
+            0.18F) *
+        smootherstep(
+            (wind - 0.62F) /
+            0.30F);
+    const auto tempest_factor =
+        profile == OceanSurfaceProfile::OpenSea
+            ? smootherstep(
+                  std::max(
+                      authored_violent_storm,
+                      inferred_tempest))
+            : 0.0F;
 
-    const auto wavelength_scale =
-        0.82F + severity * 0.38F;
+    // Je conserve une houle lisible dès le départ. Les lacs restent bornés à
+    // quelques dizaines de centimètres, tandis que seule la Tempest de pleine
+    // mer ajoute la houle extrême de plusieurs mètres.
+    const auto calm_amplitude =
+        profile == OceanSurfaceProfile::OpenSea
+            ? kOpenSeaCalmAmplitude
+            : kInlandCalmAmplitude;
+
+    const auto ordinary_amplitude_ceiling =
+        profile == OceanSurfaceProfile::OpenSea
+            ? kOpenSeaStormAmplitude
+            : kMaximumInlandAmplitude;
+    const auto ordinary_amplitude =
+        calm_amplitude +
+        (ordinary_amplitude_ceiling - calm_amplitude) *
+            std::pow(raw_energy, 1.65F);
+    const auto total_amplitude =
+        profile == OceanSurfaceProfile::OpenSea
+            ? ordinary_amplitude +
+                  (kMaximumOpenSeaTempestAmplitude -
+                   ordinary_amplitude) *
+                      tempest_factor
+            : ordinary_amplitude;
 
     const auto safe_time = static_cast<double>(
         std::clamp(
@@ -135,12 +185,33 @@ auto OceanSimulation::evaluate(
             1.0e9F));
 
     OceanState result {};
-    result.sea_state = classify_sea(severity);
+    result.sea_state =
+        classify_sea(
+            severity,
+            tempest_factor);
     result.severity = severity;
+    result.tempest_factor =
+        tempest_factor;
     result.total_amplitude = total_amplitude;
-    result.foam_threshold = 0.93F - severity * 0.26F;
-    result.detail_strength =
-        0.0028F + severity * 0.0125F;
+    if (profile == OceanSurfaceProfile::OpenSea) {
+        // Je garde des cretes lisibles par beau temps sans les transformer en
+        // ecume de tempete. La meteo abaisse ensuite progressivement le seuil.
+        result.foam_threshold = std::max(
+            0.54F,
+            0.84F -
+                severity * 0.17F -
+                tempest_factor * 0.13F);
+        result.detail_strength =
+            0.0080F +
+            severity * 0.0073F +
+            tempest_factor * 0.0040F;
+    } else {
+        result.foam_threshold = std::max(
+            0.67F,
+            0.93F - severity * 0.26F);
+        result.detail_strength =
+            0.0028F + severity * 0.0125F;
+    }
 
     // La phase des petites rides est bornée. On évite ainsi les pertes de
     // précision flottante après plusieurs heures de jeu.
@@ -161,9 +232,14 @@ auto OceanSimulation::evaluate(
                 ? preset.direction / direction_length
                 : glm::vec2 {0.0F, 1.0F};
 
+        // Je garde les nombres d'onde fixes pendant les transitions météo.
+        // Faire varier la longueur avec l'énergie ferait glisser la phase de
+        // omega(E)*temps et déplacerait brutalement les crêtes en longue partie.
         const auto wavelength = std::max(
             1.0F,
-            preset.wavelength * wavelength_scale);
+            profile == OceanSurfaceProfile::OpenSea
+                ? preset.open_sea_wavelength
+                : preset.inland_wavelength);
 
         const auto wave_number =
             kTwoPi / wavelength;
@@ -179,13 +255,20 @@ auto OceanSimulation::evaluate(
 
         const auto steepness = std::clamp(
             preset.steepness *
-                (0.34F + severity * 0.66F),
+                (0.34F +
+                 severity * 0.58F +
+                 tempest_factor * 0.08F),
             0.12F,
             0.86F);
 
+        const auto amplitude_share =
+            preset.amplitude_share +
+            (preset.tempest_amplitude_share -
+             preset.amplitude_share) *
+                tempest_factor;
         const auto amplitude =
             total_amplitude *
-            preset.amplitude_share;
+            amplitude_share;
 
         result.waves[index] = {
             direction,
@@ -218,7 +301,6 @@ auto OceanSimulation::sample(
         wave_count,
         ocean.waves.size());
 
-    auto amplitude_sum = 0.0F;
     OceanSample result {};
 
     for (std::size_t index = 0;
@@ -274,21 +356,25 @@ auto OceanSimulation::sample(
         result.gradient +=
             wave.direction * derivative;
 
-        result.crest +=
-            wave.amplitude *
-            (0.5F + 0.5F * sine);
+        // Je conserve la crete la plus nette au lieu de moyenner toutes les
+        // ondes. Une moyenne effacait presque totalement les lignes de houle
+        // des que plusieurs directions se croisaient par beau temps.
+        const auto normalized_wave_height =
+            std::clamp(
+                0.5F +
+                    0.5F *
+                        (sine +
+                         harmonic * double_sine) /
+                        (1.0F + harmonic),
+                0.0F,
+                1.0F);
 
-        amplitude_sum += wave.amplitude;
+        result.crest = std::max(
+            result.crest,
+            normalized_wave_height *
+                normalized_wave_height *
+                normalized_wave_height);
     }
-
-    result.crest =
-        amplitude_sum >
-                std::numeric_limits<float>::epsilon()
-            ? std::clamp(
-                  result.crest / amplitude_sum,
-                  0.0F,
-                  1.0F)
-            : 0.0F;
 
     return result;
 }

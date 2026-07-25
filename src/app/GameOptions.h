@@ -80,6 +80,7 @@ struct GameOptions {
     int window_height = 900;
     bool freeze_time = false;
     float initial_time_of_day = 8.0F;
+    float initial_weather_time_seconds = 0.0F;
     StartupUiOverlay startup_ui_overlay = StartupUiOverlay::None;
     std::string frame_capture_path {};
     PerformanceOptions performance {};

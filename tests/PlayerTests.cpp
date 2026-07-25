@@ -6,6 +6,8 @@
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
 #include "player/PlayerGeometry.h"
+#include "world/OceanAdventureLayout.h"
+#include "world/OceanSimulation.h"
 
 #include "TestUtils.h"
 
@@ -610,6 +612,104 @@ TEST_CASE("partial overlap with deep water still counts as swimming") {
 
     CHECK(player.state().swimming);
     CHECK(player.state().head_underwater);
+}
+
+TEST_CASE("ocean adventure swimming follows tempest crests and troughs") {
+    World world(
+        1524,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+    EnvironmentState tempest {};
+    tempest.wind_strength = 1.0F;
+    tempest.storm_intensity = 1.0F;
+    tempest.precipitation_intensity = 1.0F;
+    tempest.violent_storm_intensity = 1.0F;
+    tempest.weather_time_seconds = 2'685.0979F;
+    const auto ocean =
+        OceanSimulation::evaluate(
+            tempest,
+            OceanSurfaceProfile::OpenSea);
+
+    auto crest_height =
+        std::numeric_limits<float>::lowest();
+    auto trough_height =
+        std::numeric_limits<float>::max();
+    glm::vec2 crest_point {};
+    glm::vec2 trough_point {};
+
+    // Je reste dans le corridor maritime profond pour isoler la surface
+    // dynamique de toute berge ou colonne de terrain.
+    for (int z = 96; z <= 288; z += 2) {
+        for (int x = -12; x <= 12; ++x) {
+            const glm::vec2 point {
+                static_cast<float>(x) + 0.5F,
+                static_cast<float>(z) + 0.5F,
+            };
+            const auto height =
+                OceanSimulation::sample(
+                    ocean,
+                    point,
+                    kOceanBuoyancyWaveCount)
+                    .height;
+            if (height > crest_height) {
+                crest_height = height;
+                crest_point = point;
+            }
+            if (height < trough_height) {
+                trough_height = height;
+                trough_point = point;
+            }
+        }
+    }
+
+    REQUIRE(crest_height > 2.0F);
+    REQUIRE(trough_height < -2.0F);
+    constexpr float surface_at_rest =
+        static_cast<float>(kSeaLevel + 1);
+
+    const glm::vec3 crest_feet {
+        crest_point.x,
+        surface_at_rest + crest_height - 1.25F,
+        crest_point.y,
+    };
+    PlayerController static_crest_player(crest_feet);
+    static_crest_player.update(
+        PlayerInput {},
+        0.0F,
+        world);
+    CHECK_FALSE(static_crest_player.state().swimming);
+
+    PlayerController dynamic_crest_player(crest_feet);
+    dynamic_crest_player.update(
+        PlayerInput {},
+        0.0F,
+        world,
+        nullptr,
+        &ocean);
+    CHECK(dynamic_crest_player.state().swimming);
+    CHECK_FALSE(dynamic_crest_player.state().head_underwater);
+
+    const glm::vec3 trough_feet {
+        trough_point.x,
+        surface_at_rest + trough_height + 0.45F,
+        trough_point.y,
+    };
+    PlayerController static_trough_player(trough_feet);
+    static_trough_player.update(
+        PlayerInput {},
+        0.0F,
+        world);
+    CHECK(static_trough_player.state().swimming);
+
+    PlayerController dynamic_trough_player(trough_feet);
+    dynamic_trough_player.update(
+        PlayerInput {},
+        0.0F,
+        world,
+        nullptr,
+        &ocean);
+    CHECK_FALSE(dynamic_trough_player.state().swimming);
+    CHECK_FALSE(dynamic_trough_player.state().head_underwater);
 }
 
 TEST_CASE("shallow water slows movement without entering swimming state") {
@@ -1227,6 +1327,352 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
     CHECK_FALSE(ship.intersects_aabb(collidable_center, collidable_center));
 }
 
+TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabited hull") {
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto& profile =
+        blueprint.protection_profile;
+
+    CHECK(
+        profile.half_width_at(0.0F) ==
+        doctest::Approx(8.60F));
+    CHECK(
+        profile.half_width_at(profile.stern_z) ==
+        doctest::Approx(6.35F));
+    CHECK(
+        profile.half_width_at(profile.bow_z) ==
+        doctest::Approx(1.10F));
+    CHECK(
+        profile.half_width_at(-17.5F) >
+        profile.half_width_at(profile.stern_z));
+    CHECK(
+        profile.half_width_at(18.0F) >
+        profile.half_width_at(profile.bow_z));
+    auto previous_half_width =
+        profile.half_width_at(
+            profile.stern_z);
+    constexpr auto continuity_samples =
+        284;
+    for (auto sample = 1;
+         sample <= continuity_samples;
+         ++sample) {
+        const auto progression =
+            static_cast<float>(
+                sample) /
+            static_cast<float>(
+                continuity_samples);
+        const auto local_z =
+            glm::mix(
+                profile.stern_z,
+                profile.bow_z,
+                progression);
+        const auto half_width =
+            profile.half_width_at(
+                local_z);
+        CHECK(
+            std::isfinite(
+                half_width));
+        CHECK(
+            half_width > 0.0F);
+        CHECK(
+            std::abs(
+                half_width -
+                previous_half_width) <
+            0.10F);
+        previous_half_width =
+            half_width;
+    }
+
+    const auto& anchors =
+        blueprint.anchors;
+    const std::array<glm::vec3, 5> interior_anchors {{
+        anchors.lower_deck,
+        anchors.captain_cabin,
+        anchors.crew_quarters,
+        anchors.galley,
+        anchors.cargo_hold,
+    }};
+    for (const auto& anchor : interior_anchors) {
+        CAPTURE(anchor.x);
+        CAPTURE(anchor.y);
+        CAPTURE(anchor.z);
+        CHECK(
+            profile.excludes_ocean_local(
+                anchor));
+        CHECK(
+            profile.shelters_from_weather_local(
+                anchor));
+    }
+
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            anchors.safe_spawn));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            anchors.safe_spawn));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            anchors.helm));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            anchors.helm));
+    const std::array<glm::vec3, 6> exposed_weather_points {{
+        {0.0F, profile.main_deck_top_y, 0.0F},
+        anchors.helm,
+        {0.0F, profile.main_deck_top_y, profile.stern_z + 0.25F},
+        {0.0F, profile.main_deck_top_y, profile.bow_z - 0.25F},
+        {-8.92F, 1.25F, -7.50F},
+        {8.92F, 1.25F, -7.50F},
+    }};
+    for (const auto& point : exposed_weather_points) {
+        CAPTURE(point.x);
+        CAPTURE(point.y);
+        CAPTURE(point.z);
+        CHECK_FALSE(
+            profile.shelters_from_weather_local(
+                point));
+    }
+
+    const glm::vec3 exterior_hull_skin {
+        profile.half_width_at(0.0F) -
+            0.10F,
+        1.50F,
+        0.0F,
+    };
+    CHECK(
+        profile.excludes_ocean_local(
+            exterior_hull_skin));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            exterior_hull_skin));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            {8.92F, 1.25F, -7.50F}));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            {8.92F, 1.25F, -7.50F}));
+    const auto middle_boundary =
+        profile.half_width_at(0.0F) -
+        profile.middle_width_inset;
+    CHECK(
+        profile.excludes_ocean_local(
+            {
+                middle_boundary,
+                profile.middle_hull_min_y,
+                0.0F,
+            }));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            {
+                middle_boundary +
+                    profile.boundary_margin +
+                    0.01F,
+                profile.middle_hull_min_y,
+                0.0F,
+            }));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            {
+                0.0F,
+                1.50F,
+                profile.stern_z -
+                    profile.boundary_margin -
+                    0.01F,
+            }));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            {
+                0.0F,
+                1.50F,
+                profile.bow_z +
+                    profile.boundary_margin +
+                    0.01F,
+            }));
+
+    CHECK(
+        profile.excludes_ocean_local(
+            {0.0F, 0.0F, 0.0F}));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            {0.0F, 0.0F, 0.0F}));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            {0.0F, profile.main_deck_top_y, 0.0F}));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            {0.0F, profile.main_deck_top_y, 0.0F}));
+
+    ShipEntity ship {};
+    ship.set_position(
+        {12.5F, 49.0F, 23.5F});
+    ship.set_ocean_pose(
+        0.42F,
+        0.122173048F,
+        -0.191986218F);
+    for (const auto& anchor : interior_anchors) {
+        const auto world_anchor =
+            ship.local_to_world_point(
+                anchor);
+        CHECK(
+            ship.excludes_ocean_at(
+                world_anchor));
+        CHECK(
+            ship.is_weather_sheltered_at(
+                world_anchor));
+    }
+
+    const auto exterior_hull_world =
+        ship.local_to_world_point(
+            exterior_hull_skin);
+    CHECK(
+        ship.excludes_ocean_at(
+            exterior_hull_world));
+    CHECK_FALSE(
+        ship.is_weather_sheltered_at(
+            exterior_hull_world));
+
+    constexpr auto nan =
+        std::numeric_limits<float>::quiet_NaN();
+    constexpr auto infinity =
+        std::numeric_limits<float>::infinity();
+    CHECK(
+        profile.half_width_at(nan) ==
+        doctest::Approx(0.0F));
+    CHECK_FALSE(
+        profile.excludes_ocean_local(
+            {nan, 1.50F, 0.0F}));
+    CHECK_FALSE(
+        profile.shelters_from_weather_local(
+            {0.0F, infinity, 0.0F}));
+    CHECK_FALSE(
+        ship.excludes_ocean_at(
+            {nan, 49.0F, 0.0F}));
+    CHECK_FALSE(
+        ship.is_weather_sheltered_at(
+            {0.0F, infinity, 0.0F}));
+
+    const ShipProtectionProfile empty_profile {};
+    CHECK(
+        empty_profile.half_width_at(0.0F) ==
+        doctest::Approx(0.0F));
+    CHECK_FALSE(
+        empty_profile.excludes_ocean_local(
+            {0.0F, 1.50F, 0.0F}));
+    CHECK_FALSE(
+        empty_profile.shelters_from_weather_local(
+            {0.0F, 1.50F, 0.0F}));
+
+    auto malformed_profile =
+        profile;
+    malformed_profile.middle_width_inset =
+        infinity;
+    CHECK_FALSE(
+        malformed_profile.excludes_ocean_local(
+            {0.0F, 1.50F, 0.0F}));
+    CHECK_FALSE(
+        malformed_profile.shelters_from_weather_local(
+            {0.0F, 1.50F, 0.0F}));
+}
+
+TEST_CASE("ship watertight volume rejects tempest water contacts while adjacent sea remains swimmable") {
+    World world(
+        1525,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+    ShipEntity ship {};
+    ship.set_position(
+        {0.5F, 49.0F, 128.5F});
+
+    OceanState synthetic_crest {};
+    synthetic_crest.waves[0] = {
+        {1.0F, 0.0F},
+        3.5F,
+        0.01F,
+        1.570796327F,
+        0.0F,
+    };
+
+    const auto& anchors =
+        amelie_ship_blueprint().anchors;
+    const std::array<glm::vec3, 5> interior_anchors {{
+        anchors.lower_deck,
+        anchors.captain_cabin,
+        anchors.crew_quarters,
+        anchors.galley,
+        anchors.cargo_hold,
+    }};
+    const glm::vec3 adjacent_sea_local {
+        10.0F,
+        1.01F,
+        0.0F,
+    };
+    const std::array<glm::vec3, 3> ocean_poses {{
+        {0.40F, 0.0F, 0.0F},
+        {-0.10F, 0.025F, 0.0F},
+        {-0.10F, 0.0F, -0.040F},
+    }};
+
+    // Je rejoue la meme crete avec du pilonnement, du tangage puis du roulis :
+    // le volume etanche doit suivre exactement la pose rigide du navire.
+    for (const auto& pose : ocean_poses) {
+        ship.set_ocean_pose(
+            pose.x,
+            pose.y,
+            pose.z);
+        CAPTURE(pose.x);
+        CAPTURE(pose.y);
+        CAPTURE(pose.z);
+
+        // Je place volontairement la crete au-dessus de la tete : l'interieur
+        // doit rester sec alors que la mer voisine conserve toute sa physique.
+        for (const auto& anchor : interior_anchors) {
+            PlayerController protected_player(
+                ship.local_to_world_point(
+                    anchor));
+            protected_player.update(
+                PlayerInput {},
+                0.0F,
+                world,
+                &ship,
+                &synthetic_crest);
+
+            CAPTURE(anchor.z);
+            CHECK_FALSE(
+                protected_player.state().swimming);
+            CHECK_FALSE(
+                protected_player.state().head_underwater);
+        }
+
+        const auto adjacent_sea_world =
+            ship.local_to_world_point(
+                adjacent_sea_local);
+        REQUIRE(
+            world.peek_water_level_or_generated(
+                static_cast<int>(
+                    std::floor(adjacent_sea_world.x)),
+                kSeaLevel,
+                static_cast<int>(
+                    std::floor(adjacent_sea_world.z))) >
+            0);
+        CHECK_FALSE(
+            ship.excludes_ocean_at(
+                adjacent_sea_world));
+
+        PlayerController exposed_player(
+            adjacent_sea_world);
+        exposed_player.update(
+            PlayerInput {},
+            0.0F,
+            world,
+            &ship,
+            &synthetic_crest);
+        CHECK(
+            exposed_player.state().swimming);
+        CHECK(
+            exposed_player.state().head_underwater);
+    }
+}
+
 TEST_CASE("L'Amelie exposes two mirrored boarding nets without changing ship collisions") {
     const auto& blueprint = amelie_ship_blueprint();
     std::array<const ShipPart*, 2> nets {{nullptr, nullptr}};
@@ -1721,6 +2167,7 @@ TEST_CASE("sea adventure ocean probes and critical springs stay bounded and cont
         environment.wind_strength = ratio;
         environment.precipitation_intensity = ratio;
         environment.storm_intensity = ratio;
+        environment.violent_storm_intensity = ratio;
 
         (void)sea_adventure.update(
             world,
@@ -1750,11 +2197,11 @@ TEST_CASE("sea adventure ocean probes and critical springs stay bounded and cont
         REQUIRE(std::isfinite(heave));
         REQUIRE(std::isfinite(pitch));
         REQUIRE(std::isfinite(roll));
-        CHECK(std::abs(heave) <= 1.385F);
+        CHECK(std::abs(heave) <= 3.60F);
         CHECK(std::abs(pitch) <=
-              10.5F * kRadiansPerDegree + 0.0001F);
+              14.0F * kRadiansPerDegree + 0.0001F);
         CHECK(std::abs(roll) <=
-              16.0F * kRadiansPerDegree + 0.0001F);
+              22.0F * kRadiansPerDegree + 0.0001F);
 
         if (frame > 0) {
             CHECK(std::abs(heave - previous_heave) < 0.04F);
@@ -1764,6 +2211,158 @@ TEST_CASE("sea adventure ocean probes and critical springs stay bounded and cont
         previous_heave = heave;
         previous_pitch = pitch;
         previous_roll = roll;
+    }
+}
+
+TEST_CASE("violent tempest keeps ship motion and deck passengers coherent") {
+    constexpr float kStep = 1.0F / 60.0F;
+    constexpr float kRadiansPerDegree =
+        0.01745329251994329577F;
+
+    World world(5517, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(sea_adventure, world.seed());
+
+    const glm::vec3 initial_deck_local {0.0F, 4.10F, -8.0F};
+    PlayerController player(
+        sea_adventure.ship_entity().local_to_world_point(
+            initial_deck_local));
+    EnvironmentState environment {};
+    environment.wind_strength = 1.0F;
+    environment.precipitation_intensity = 1.0F;
+    environment.storm_intensity = 1.0F;
+    environment.violent_storm_intensity = 1.0F;
+
+    for (int frame = 0; frame < 480; ++frame) {
+        environment.weather_time_seconds =
+            static_cast<float>(frame) * kStep;
+        const auto result = sea_adventure.update(
+            world,
+            player,
+            environment,
+            kStep,
+            false);
+        const auto& ship = sea_adventure.ship_entity();
+        const auto local_player =
+            ship.world_to_local_point(player.position());
+        const auto support =
+            ship.support_height(player.position());
+
+        REQUIRE(result.ship_moved_player);
+        REQUIRE(result.on_ship);
+        REQUIRE(support.has_value());
+        REQUIRE(std::isfinite(player.position().x));
+        REQUIRE(std::isfinite(player.position().y));
+        REQUIRE(std::isfinite(player.position().z));
+        CHECK(std::abs(player.position().y - *support) <= 0.12F);
+        CHECK(local_player.x ==
+              doctest::Approx(initial_deck_local.x).epsilon(0.002F));
+        CHECK(local_player.z ==
+              doctest::Approx(initial_deck_local.z).epsilon(0.002F));
+    }
+
+    EnvironmentState calm {};
+    calm.wind_strength = 0.0F;
+    calm.precipitation_intensity = 0.0F;
+    calm.storm_intensity = 0.0F;
+    calm.violent_storm_intensity = 0.0F;
+    calm.weather_time_seconds =
+        environment.weather_time_seconds + kStep;
+    const auto calm_result =
+        sea_adventure.update(
+            world,
+            player,
+            calm,
+            kStep,
+            false);
+    const auto& calm_ship =
+        sea_adventure.ship_entity();
+    const auto calm_ocean =
+        OceanSimulation::evaluate(
+            calm,
+            OceanSurfaceProfile::OpenSea);
+    const auto calm_forward =
+        calm_ship.local_to_world_direction(
+            {0.0F, 0.0F, 1.0F});
+    const auto calm_right =
+        calm_ship.local_to_world_direction(
+            {1.0F, 0.0F, 0.0F});
+    const auto calm_up =
+        calm_ship.local_to_world_direction(
+            {0.0F, 1.0F, 0.0F});
+    const auto calm_heave =
+        calm_ship.world_origin().y -
+        calm_ship.position().y;
+    const auto calm_pitch =
+        std::atan2(
+            -calm_forward.y,
+            calm_forward.z);
+    const auto calm_roll =
+        std::atan2(
+            -calm_up.x,
+            calm_right.x);
+
+    REQUIRE(calm_result.ship_moved_player);
+    REQUIRE(calm_result.on_ship);
+    CHECK(std::abs(calm_heave) <=
+          calm_ocean.maximum_displacement * 0.92F +
+              0.0501F);
+    CHECK(std::abs(calm_pitch) <=
+          2.5F * kRadiansPerDegree + 0.0001F);
+    CHECK(std::abs(calm_roll) <=
+          4.0F * kRadiansPerDegree + 0.0001F);
+}
+
+TEST_CASE("sea adventure buoyancy uses the rendered world water profile") {
+    constexpr float kStep = 1.0F / 60.0F;
+
+    World world(
+        5518,
+        1,
+        WorldGenerationProfile::Continental);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(
+        sea_adventure,
+        world.seed());
+    PlayerController player(
+        sea_adventure.deck_spawn_position());
+    EnvironmentState environment {};
+    environment.wind_strength = 1.0F;
+    environment.precipitation_intensity = 1.0F;
+    environment.storm_intensity = 1.0F;
+    environment.violent_storm_intensity = 1.0F;
+
+    const auto inland_ocean =
+        OceanSimulation::evaluate(
+            environment,
+            OceanSurfaceProfile::InlandWater);
+    const auto maximum_inland_heave =
+        inland_ocean.maximum_displacement *
+            0.92F +
+        0.05F;
+
+    for (int frame = 0; frame < 480; ++frame) {
+        environment.weather_time_seconds =
+            static_cast<float>(frame) *
+            kStep;
+        (void)sea_adventure.update(
+            world,
+            player,
+            environment,
+            kStep,
+            false);
+        const auto& ship =
+            sea_adventure.ship_entity();
+        const auto heave =
+            ship.world_origin().y -
+            ship.position().y;
+
+        CHECK(std::isfinite(heave));
+        CHECK(std::abs(heave) <=
+              maximum_inland_heave +
+                  0.0001F);
     }
 }
 
@@ -2369,6 +2968,254 @@ TEST_CASE("sea adventure resource counters saturate instead of wrapping") {
     CHECK(sea_adventure.save_state().wood == std::numeric_limits<std::uint32_t>::max());
     CHECK(sea_adventure.save_state().water_flasks == std::numeric_limits<std::uint32_t>::max());
     CHECK(sea_adventure.save_state().food_rations == std::numeric_limits<std::uint32_t>::max());
+}
+
+TEST_CASE("sea adventure automatically serves complete food and water refills on board") {
+    World world(5540, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase = SeaVoyagePhase::Underway;
+    state.hunger = 80.0F;
+    state.thirst = 80.0F;
+    state.food_rations = 2U;
+    state.water_flasks = 1U;
+    state.fish = 1U;
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(state, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+
+    const auto served = sea_adventure.update(
+        world,
+        player,
+        EnvironmentState {},
+        0.0F,
+        false);
+    const auto& served_state = sea_adventure.save_state();
+
+    REQUIRE(served.on_ship);
+    CHECK(served.consumed_food);
+    CHECK(served.consumed_water);
+    CHECK_FALSE(served.starving);
+    CHECK_FALSE(served.dehydrating);
+    CHECK(served_state.hunger == doctest::Approx(100.0F));
+    CHECK(served_state.thirst == doctest::Approx(100.0F));
+    CHECK(served_state.fish == 0U);
+    CHECK(served_state.food_rations == 2U);
+    CHECK(served_state.water_flasks == 0U);
+
+    const auto full_gauges = sea_adventure.update(
+        world,
+        player,
+        EnvironmentState {},
+        0.0F,
+        false);
+
+    CHECK_FALSE(full_gauges.consumed_food);
+    CHECK_FALSE(full_gauges.consumed_water);
+    CHECK(sea_adventure.save_state().food_rations == 2U);
+}
+
+TEST_CASE("same frame crew deliveries prevent fatal sea survival damage") {
+    World world(5545, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+
+    auto state = sea_adventure.save_state();
+    state.voyage_phase = SeaVoyagePhase::Underway;
+    state.hunger = 0.0F;
+    state.thirst = 0.0F;
+    state.survival_damage_timer = 1.74F;
+    state.food_rations = 0U;
+    state.water_flasks = 0U;
+    state.fish = 0U;
+
+    const auto station_position =
+        [](ShipCrewStation station) -> std::optional<glm::vec3> {
+        for (const auto& node :
+             amelie_ship_blueprint().crew_navigation_nodes) {
+            if (node.station == station) {
+                return node.local_position;
+            }
+        }
+        return std::nullopt;
+    };
+
+    const auto fish_hold =
+        station_position(ShipCrewStation::CargoFish);
+    const auto water_hold =
+        station_position(ShipCrewStation::CargoWater);
+    REQUIRE(fish_hold.has_value());
+    REQUIRE(water_hold.has_value());
+
+    auto& fisher = state.crew.members[1];
+    fisher.local_position = *fish_hold;
+    fisher.current_station = ShipCrewStation::CargoFish;
+    fisher.next_station = ShipCrewStation::CargoFish;
+    fisher.destination_station = ShipCrewStation::CargoFish;
+    fisher.activity = ShipCrewActivity::Carry;
+    fisher.cargo = ShipCrewCargo::Fish;
+    fisher.routine_step = 1U;
+
+    auto& water_tender = state.crew.members[3];
+    water_tender.local_position = *water_hold;
+    water_tender.current_station = ShipCrewStation::CargoWater;
+    water_tender.next_station = ShipCrewStation::CargoWater;
+    water_tender.destination_station = ShipCrewStation::CargoWater;
+    water_tender.activity = ShipCrewActivity::Carry;
+    water_tender.cargo = ShipCrewCargo::Water;
+    water_tender.routine_step = 1U;
+
+    sea_adventure.load_state(state, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+    auto vulnerable_player = player.state();
+    vulnerable_player.health = 2.0F;
+    player.load_state(vulnerable_player);
+
+    const auto result = sea_adventure.update(
+        world,
+        player,
+        EnvironmentState {},
+        0.02F,
+        false);
+    const auto& rescued_state = sea_adventure.save_state();
+
+    REQUIRE(result.on_ship);
+    CHECK(result.crew_fish_delivered);
+    CHECK(result.crew_water_delivered);
+    CHECK(result.consumed_food);
+    CHECK(result.consumed_water);
+    CHECK_FALSE(result.starving);
+    CHECK_FALSE(result.dehydrating);
+    CHECK(rescued_state.hunger == doctest::Approx(100.0F));
+    CHECK(rescued_state.thirst == doctest::Approx(100.0F));
+    CHECK(rescued_state.survival_damage_timer == doctest::Approx(0.0F));
+    CHECK(rescued_state.fish == 0U);
+    CHECK(rescued_state.water_flasks == 0U);
+    CHECK_FALSE(player.is_dead());
+    CHECK(player.state().health == doctest::Approx(2.0F));
+}
+
+TEST_CASE("sea adventure complete meal falls back to stored rations") {
+    World world(5541, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase = SeaVoyagePhase::Underway;
+    state.hunger = 79.0F;
+    state.thirst = 100.0F;
+    state.food_rations = 1U;
+    state.water_flasks = 1U;
+    state.fish = 0U;
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(state, world.seed());
+    PlayerController player(sea_adventure.deck_spawn_position());
+
+    const auto result = sea_adventure.update(
+        world,
+        player,
+        EnvironmentState {},
+        0.0F,
+        false);
+    const auto& fed_state = sea_adventure.save_state();
+
+    REQUIRE(result.on_ship);
+    CHECK(result.consumed_food);
+    CHECK_FALSE(result.consumed_water);
+    CHECK(fed_state.hunger == doctest::Approx(100.0F));
+    CHECK(fed_state.food_rations == 0U);
+    CHECK(fed_state.water_flasks == 1U);
+}
+
+TEST_CASE("sea adventure leaves ship provisions untouched away from the deck") {
+    World world(5542, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase = SeaVoyagePhase::Underway;
+    state.hunger = 79.0F;
+    state.thirst = 79.0F;
+    state.food_rations = 1U;
+    state.water_flasks = 1U;
+    state.fish = 1U;
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.load_state(state, world.seed());
+    PlayerController player(
+        sea_adventure.ship_position() +
+        glm::vec3 {40.0F, 4.10F, 0.0F});
+
+    const auto result = sea_adventure.update(
+        world,
+        player,
+        EnvironmentState {},
+        0.0F,
+        false);
+    const auto& away_state = sea_adventure.save_state();
+
+    CHECK_FALSE(result.on_ship);
+    CHECK_FALSE(result.consumed_food);
+    CHECK_FALSE(result.consumed_water);
+    CHECK(away_state.hunger == doctest::Approx(79.0F));
+    CHECK(away_state.thirst == doctest::Approx(79.0F));
+    CHECK(away_state.food_rations == 1U);
+    CHECK(away_state.water_flasks == 1U);
+    CHECK(away_state.fish == 1U);
+}
+
+TEST_CASE("sea adventure survival gauges decline slowly and favor ship passengers") {
+    constexpr float kStepSeconds = 0.25F;
+    constexpr int kStepCount = 240;
+
+    SeaAdventureSaveState state {};
+    state.active = true;
+    state.voyage_phase = SeaVoyagePhase::Underway;
+    state.hunger = 100.0F;
+    state.thirst = 100.0F;
+    state.food_rations = 0U;
+    state.water_flasks = 0U;
+    state.fish = 0U;
+
+    World aboard_world(5543, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem aboard_adventure {};
+    aboard_adventure.load_state(state, aboard_world.seed());
+    PlayerController aboard_player(aboard_adventure.deck_spawn_position());
+
+    World away_world(5544, 1, WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem away_adventure {};
+    away_adventure.load_state(state, away_world.seed());
+    PlayerController away_player(
+        away_adventure.ship_position() +
+        glm::vec3 {40.0F, 4.10F, 0.0F});
+
+    // Je simule une minute par pas reels, car la boucle maritime borne chaque
+    // mise a jour a 250 ms pour rester stable lors d'un ralentissement.
+    for (int step = 0; step < kStepCount; ++step) {
+        const auto aboard_result = aboard_adventure.update(
+            aboard_world,
+            aboard_player,
+            EnvironmentState {},
+            kStepSeconds,
+            false);
+        const auto away_result = away_adventure.update(
+            away_world,
+            away_player,
+            EnvironmentState {},
+            kStepSeconds,
+            false);
+
+        REQUIRE(aboard_result.on_ship);
+        REQUIRE_FALSE(away_result.on_ship);
+    }
+
+    const auto& aboard_state = aboard_adventure.save_state();
+    const auto& away_state = away_adventure.save_state();
+
+    CHECK(aboard_state.hunger == doctest::Approx(97.6F).epsilon(0.001F));
+    CHECK(aboard_state.thirst == doctest::Approx(97.0F).epsilon(0.001F));
+    CHECK(away_state.hunger == doctest::Approx(90.4F).epsilon(0.001F));
+    CHECK(away_state.thirst == doctest::Approx(88.0F).epsilon(0.001F));
+    CHECK(aboard_state.hunger > away_state.hunger);
+    CHECK(aboard_state.thirst > away_state.thirst);
 }
 
 TEST_CASE(

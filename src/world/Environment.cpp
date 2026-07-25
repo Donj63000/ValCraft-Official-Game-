@@ -15,6 +15,8 @@ constexpr float kFullDayDurationSeconds = 12.0F * 60.0F;
 constexpr float kDefaultTimeOfDay = 8.0F;
 constexpr float kWeatherSlotDurationSeconds = 240.0F;
 constexpr float kWeatherTransitionSeconds = 42.0F;
+constexpr float kWeatherEventStartOffsetSeconds =
+    kWeatherSlotDurationSeconds * 0.5F;
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kTwoPi = 2.0F * kPi;
 
@@ -30,6 +32,7 @@ struct WeatherProfile {
     float saturation_adjust = 0.03F;
     float contrast_adjust = 0.02F;
     float fog_density_bonus = 0.0F;
+    float violent_storm_intensity = 0.0F;
 };
 
 struct WeatherSample {
@@ -40,13 +43,25 @@ struct WeatherSample {
     float overcast_intensity = 0.0F;
     float precipitation_intensity = 0.0F;
     float storm_intensity = 0.0F;
+    float violent_storm_intensity = 0.0F;
     float lightning_intensity = 0.0F;
+    float lightning_bolt_intensity = 0.0F;
+    glm::vec3 lightning_direction {0.0F, 0.35F, 0.93675F};
+    float lightning_shape_seed = 0.0F;
     float cloud_shadow_strength = 0.04F;
+    glm::vec2 wind_direction_xz {0.0F, 1.0F};
     float wind_strength = 0.18F;
     float exposure_adjust = 0.03F;
     float saturation_adjust = 0.03F;
     float contrast_adjust = 0.02F;
     float fog_density_bonus = 0.0F;
+};
+
+struct LightningSample {
+    float flash_intensity = 0.0F;
+    float bolt_intensity = 0.0F;
+    glm::vec3 direction {0.0F, 0.35F, 0.93675F};
+    float shape_seed = 0.0F;
 };
 
 auto saturate(float value) noexcept -> float {
@@ -88,28 +103,85 @@ auto weather_random(std::uint32_t seed, std::int64_t slot_index, std::uint32_t s
     return static_cast<float>(mixed >> 8U) * (1.0F / 16777216.0F);
 }
 
+auto safe_wind_direction(const glm::vec2& direction) noexcept -> glm::vec2 {
+    if (!std::isfinite(direction.x) || !std::isfinite(direction.y)) {
+        return {0.0F, 1.0F};
+    }
+    const auto length_squared = glm::dot(direction, direction);
+    if (!std::isfinite(length_squared) || length_squared <= 1.0e-6F) {
+        return {0.0F, 1.0F};
+    }
+    return direction / std::sqrt(length_squared);
+}
+
+auto wind_direction_for_slot(std::uint32_t seed, std::int64_t slot_index) noexcept -> glm::vec2 {
+    const auto angle =
+        weather_random(
+            seed,
+            slot_index,
+            113U) *
+        kTwoPi;
+    return {
+        std::cos(angle),
+        std::sin(angle),
+    };
+}
+
+auto blend_wind_direction(
+    const glm::vec2& previous,
+    const glm::vec2& current,
+    float blend) noexcept -> glm::vec2 {
+    const auto safe_previous =
+        safe_wind_direction(
+            previous);
+    const auto safe_current =
+        safe_wind_direction(
+            current);
+    const auto previous_angle =
+        std::atan2(
+            safe_previous.y,
+            safe_previous.x);
+    const auto current_angle =
+        std::atan2(
+            safe_current.y,
+            safe_current.x);
+    const auto angle_delta =
+        std::atan2(
+            std::sin(current_angle - previous_angle),
+            std::cos(current_angle - previous_angle));
+    const auto angle =
+        previous_angle +
+        angle_delta *
+            saturate(
+                blend);
+    return safe_wind_direction({
+        std::cos(angle),
+        std::sin(angle),
+    });
+}
+
 auto weather_kind_for_slot(std::uint32_t seed, std::int64_t slot_index) noexcept -> WeatherKind {
     if (slot_index <= 0) {
         return WeatherKind::Clear;
     }
 
     const auto roll = weather_random(seed, slot_index, 11U);
-    if (roll < 0.40F) {
+    if (roll < 0.38F) {
         return WeatherKind::Clear;
     }
-    if (roll < 0.72F) {
+    if (roll < 0.68F) {
         return WeatherKind::PartlyCloudy;
     }
-    if (roll < 0.82F) {
+    if (roll < 0.78F) {
         return WeatherKind::Overcast;
     }
-    if (roll < 0.90F) {
+    if (roll < 0.86F) {
         return WeatherKind::LightRain;
     }
-    if (roll < 0.95F) {
+    if (roll < 0.92F) {
         return WeatherKind::LightStorm;
     }
-    if (roll < 0.98F) {
+    if (roll < 0.96F) {
         return WeatherKind::HeavyStorm;
     }
     return WeatherKind::Tempest;
@@ -118,19 +190,19 @@ auto weather_kind_for_slot(std::uint32_t seed, std::int64_t slot_index) noexcept
 auto weather_profile(WeatherKind kind) noexcept -> WeatherProfile {
     switch (kind) {
     case WeatherKind::Clear:
-        return {kind, 0.08F, 0.00F, 0.00F, 0.00F, 0.04F, 0.22F, 0.04F, 0.03F, 0.02F, 0.0000F};
+        return {kind, 0.08F, 0.00F, 0.00F, 0.00F, 0.04F, 0.22F, 0.04F, 0.03F, 0.02F, 0.0000F, 0.00F};
     case WeatherKind::PartlyCloudy:
-        return {kind, 0.38F, 0.08F, 0.00F, 0.00F, 0.15F, 0.26F, 0.01F, 0.01F, 0.01F, 0.0002F};
+        return {kind, 0.38F, 0.08F, 0.00F, 0.00F, 0.15F, 0.26F, 0.01F, 0.01F, 0.01F, 0.0002F, 0.00F};
     case WeatherKind::Overcast:
-        return {kind, 0.74F, 0.66F, 0.00F, 0.00F, 0.30F, 0.34F, -0.08F, -0.06F, -0.02F, 0.0009F};
+        return {kind, 0.74F, 0.66F, 0.00F, 0.00F, 0.30F, 0.34F, -0.08F, -0.06F, -0.02F, 0.0009F, 0.00F};
     case WeatherKind::LightRain:
-        return {kind, 0.84F, 0.76F, 0.44F, 0.00F, 0.36F, 0.42F, -0.12F, -0.10F, -0.03F, 0.0016F};
+        return {kind, 0.84F, 0.76F, 0.44F, 0.00F, 0.36F, 0.42F, -0.12F, -0.10F, -0.03F, 0.0016F, 0.00F};
     case WeatherKind::LightStorm:
-        return {kind, 0.92F, 0.88F, 0.58F, 0.34F, 0.46F, 0.50F, -0.18F, -0.16F, -0.05F, 0.0022F};
+        return {kind, 0.92F, 0.88F, 0.58F, 0.34F, 0.46F, 0.50F, -0.18F, -0.16F, -0.05F, 0.0022F, 0.00F};
     case WeatherKind::HeavyStorm:
-        return {kind, 0.98F, 0.94F, 0.82F, 0.68F, 0.58F, 0.68F, -0.25F, -0.22F, -0.07F, 0.0030F};
+        return {kind, 0.98F, 0.94F, 0.82F, 0.68F, 0.58F, 0.68F, -0.25F, -0.22F, -0.07F, 0.0030F, 0.12F};
     case WeatherKind::Tempest:
-        return {kind, 1.00F, 1.00F, 1.00F, 1.00F, 0.72F, 0.92F, -0.32F, -0.28F, -0.08F, 0.0040F};
+        return {kind, 1.00F, 1.00F, 1.00F, 1.00F, 0.72F, 0.92F, -0.32F, -0.28F, -0.08F, 0.0040F, 1.00F};
     }
     return {};
 }
@@ -151,36 +223,118 @@ auto blend_weather_profile(const WeatherProfile& previous, const WeatherProfile&
     sample.saturation_adjust = glm::mix(previous.saturation_adjust, current.saturation_adjust, t);
     sample.contrast_adjust = glm::mix(previous.contrast_adjust, current.contrast_adjust, t);
     sample.fog_density_bonus = glm::mix(previous.fog_density_bonus, current.fog_density_bonus, t);
+    sample.violent_storm_intensity =
+        glm::mix(
+            previous.violent_storm_intensity,
+            current.violent_storm_intensity,
+            t);
     return sample;
 }
 
 auto lightning_for_weather(std::uint32_t seed,
                            std::int64_t slot_index,
                            float weather_time_seconds,
-                           float storm_intensity) noexcept -> float {
-    if (storm_intensity <= 0.01F) {
-        return 0.0F;
-    }
-
+                           float storm_intensity,
+                           float violent_storm_intensity) noexcept
+    -> LightningSample {
     constexpr float kLightningPeriodSeconds = 4.8F;
     const auto event_index = static_cast<std::int64_t>(std::floor(weather_time_seconds / kLightningPeriodSeconds));
     const auto period_position = weather_time_seconds / kLightningPeriodSeconds;
     const auto phase = period_position - std::floor(period_position);
-    const auto chance = 0.08F + storm_intensity * 0.36F;
-    if (weather_random(seed, event_index, 31U) > chance) {
-        return 0.0F;
+    const auto azimuth =
+        weather_random(seed, event_index, 71U) *
+        kTwoPi;
+    const auto elevation =
+        0.12F +
+        weather_random(seed, event_index, 83U) *
+            0.38F;
+    const auto horizontal_scale = std::cos(elevation);
+
+    LightningSample sample {};
+    sample.direction = glm::normalize(
+        glm::vec3 {
+            std::cos(azimuth) * horizontal_scale,
+            std::sin(elevation),
+            std::sin(azimuth) * horizontal_scale,
+        });
+    sample.shape_seed =
+        weather_random(seed, event_index, 97U);
+
+    // Je fais tendre l'eclair vers zero avec la tempete au lieu de couper son
+    // pulse a un seuil binaire pendant les premieres frames d'une transition.
+    const auto storm_presence =
+        smooth_curve(
+            0.0F,
+            0.10F,
+            storm_intensity);
+    const auto violent = saturate(violent_storm_intensity);
+    const auto chance =
+        0.06F +
+        storm_intensity * 0.28F +
+        violent * 0.34F;
+    const auto event_roll =
+        weather_random(
+            seed,
+            event_index,
+            31U);
+    // Je fais entrer l'événement progressivement lorsque la météo transitoire
+    // franchit son seuil. Un test booléen ferait sinon apparaître un éclair
+    // déjà au maximum d'une frame à l'autre pendant un pulse en cours.
+    const auto activation =
+        smooth_curve(
+            event_roll,
+            event_roll + 0.04F,
+            chance);
+    if (activation <= 0.0F) {
+        return sample;
     }
 
     const auto center = 0.18F + weather_random(seed, event_index, 47U) * 0.62F;
-    const auto width = 0.022F + storm_intensity * 0.030F;
+    const auto width =
+        0.018F +
+        storm_intensity * 0.025F +
+        violent * 0.012F;
     const auto primary = saturate(1.0F - std::abs(phase - center) / width);
     const auto secondary = saturate(1.0F - std::abs(phase - (center + 0.075F)) / (width * 0.72F));
     const auto pulse = std::max(primary * primary, secondary * secondary * 0.45F);
-    return pulse * (0.35F + storm_intensity * 0.65F) * (0.70F + 0.30F * weather_random(seed, slot_index, 59U));
+    const auto strength =
+        (0.35F + storm_intensity * 0.65F) *
+        (0.70F +
+         0.30F *
+             weather_random(
+                 seed,
+                 slot_index,
+                 59U)) *
+        storm_presence;
+
+    sample.flash_intensity =
+        pulse *
+        strength *
+        activation;
+    sample.bolt_intensity =
+        std::max(
+            primary * primary * primary,
+            secondary * secondary * 0.32F) *
+        strength *
+        activation;
+    return sample;
+}
+
+auto sanitize_weather_time_seconds(float weather_time_seconds) noexcept
+    -> float {
+    if (!std::isfinite(weather_time_seconds)) {
+        return 0.0F;
+    }
+    return std::clamp(
+        weather_time_seconds,
+        0.0F,
+        kMaximumWeatherTimeSeconds);
 }
 
 auto weather_sample_at(std::uint32_t seed, float weather_time_seconds) noexcept -> WeatherSample {
-    const auto safe_time = std::isfinite(weather_time_seconds) ? std::max(weather_time_seconds, 0.0F) : 0.0F;
+    const auto safe_time =
+        sanitize_weather_time_seconds(
+            weather_time_seconds);
     const auto slot_index = static_cast<std::int64_t>(std::floor(safe_time / kWeatherSlotDurationSeconds));
     const auto slot_start = static_cast<float>(slot_index) * kWeatherSlotDurationSeconds;
     const auto slot_progress = safe_time - slot_start;
@@ -191,7 +345,30 @@ auto weather_sample_at(std::uint32_t seed, float weather_time_seconds) noexcept 
     const auto current = weather_profile(weather_kind_for_slot(seed, slot_index));
     auto sample = blend_weather_profile(previous, current, blend);
     sample.weather_time_seconds = safe_time;
-    sample.lightning_intensity = lightning_for_weather(seed, slot_index, safe_time, sample.storm_intensity);
+    sample.wind_direction_xz =
+        blend_wind_direction(
+            wind_direction_for_slot(
+                seed,
+                slot_index - 1),
+            wind_direction_for_slot(
+                seed,
+                slot_index),
+            blend);
+    const auto lightning =
+        lightning_for_weather(
+            seed,
+            slot_index,
+            safe_time,
+            sample.storm_intensity,
+            sample.violent_storm_intensity);
+    sample.lightning_intensity =
+        lightning.flash_intensity;
+    sample.lightning_bolt_intensity =
+        lightning.bolt_intensity;
+    sample.lightning_direction =
+        lightning.direction;
+    sample.lightning_shape_seed =
+        lightning.shape_seed;
     return sample;
 }
 
@@ -209,16 +386,47 @@ void apply_weather(EnvironmentState& state,
     state.overcast_intensity = saturate(weather.overcast_intensity);
     state.precipitation_intensity = saturate(weather.precipitation_intensity);
     state.storm_intensity = saturate(weather.storm_intensity);
+    state.violent_storm_intensity =
+        saturate(
+            weather.violent_storm_intensity);
     state.lightning_intensity = saturate(weather.lightning_intensity);
+    state.lightning_bolt_intensity =
+        saturate(
+            weather.lightning_bolt_intensity);
+    state.lightning_direction =
+        weather.lightning_direction;
+    state.lightning_shape_seed =
+        saturate(
+            weather.lightning_shape_seed);
     state.cloud_shadow_strength =
         saturate(glm::mix(0.02F, 0.10F, daylight) + weather.cloud_shadow_strength * glm::mix(0.45F, 1.0F, daylight));
+    state.wind_direction_xz =
+        safe_wind_direction(
+            weather.wind_direction_xz);
     state.wind_strength = saturate(std::max(state.wind_strength * 0.62F, weather.wind_strength + low_sun * 0.03F));
 
-    const auto grey_strength = saturate(state.overcast_intensity * (0.46F + daylight * 0.42F));
-    const auto storm_grade = saturate(state.storm_intensity + state.precipitation_intensity * 0.24F);
-    const auto grey_zenith = glm::mix(glm::vec3 {0.48F, 0.56F, 0.66F}, glm::vec3 {0.19F, 0.23F, 0.31F}, storm_grade);
-    const auto grey_horizon = glm::mix(glm::vec3 {0.64F, 0.69F, 0.74F}, glm::vec3 {0.30F, 0.33F, 0.40F}, storm_grade);
-    const auto grey_fog = glm::mix(glm::vec3 {0.56F, 0.62F, 0.68F}, glm::vec3 {0.24F, 0.28F, 0.34F}, storm_grade);
+    const auto grey_strength =
+        saturate(
+            state.overcast_intensity *
+                (0.54F + daylight * 0.40F) +
+            state.violent_storm_intensity * 0.18F);
+    const auto storm_grade =
+        saturate(
+            state.storm_intensity +
+            state.precipitation_intensity * 0.20F +
+            state.violent_storm_intensity * 0.28F);
+    const auto grey_zenith = glm::mix(
+        glm::vec3 {0.48F, 0.56F, 0.66F},
+        glm::vec3 {0.13F, 0.15F, 0.19F},
+        storm_grade);
+    const auto grey_horizon = glm::mix(
+        glm::vec3 {0.64F, 0.69F, 0.74F},
+        glm::vec3 {0.25F, 0.27F, 0.30F},
+        storm_grade);
+    const auto grey_fog = glm::mix(
+        glm::vec3 {0.56F, 0.62F, 0.68F},
+        glm::vec3 {0.19F, 0.22F, 0.25F},
+        storm_grade);
     state.sky_zenith_color = glm::mix(state.sky_zenith_color, grey_zenith, grey_strength);
     state.sky_horizon_color = glm::mix(state.sky_horizon_color, grey_horizon, saturate(grey_strength * 0.86F + state.precipitation_intensity * 0.12F));
     state.sky_color = glm::mix(state.sky_horizon_color, state.sky_zenith_color, 0.54F);
@@ -228,14 +436,19 @@ void apply_weather(EnvironmentState& state,
         glm::mix(glm::vec3 {0.52F, 0.60F, 0.68F}, glm::vec3 {0.24F, 0.29F, 0.36F}, storm_grade),
         saturate(grey_strength * 0.58F + state.precipitation_intensity * 0.18F));
 
-    const auto sun_loss = saturate(state.overcast_intensity * 0.34F + state.precipitation_intensity * 0.18F + state.storm_intensity * 0.24F);
+    const auto sun_loss =
+        saturate(
+            state.overcast_intensity * 0.34F +
+            state.precipitation_intensity * 0.18F +
+            state.storm_intensity * 0.24F +
+            state.violent_storm_intensity * 0.12F);
     state.sun_color *= 1.0F - sun_loss * saturate(daylight + twilight_presence * 0.25F);
     state.sun_disk_color = glm::mix(state.sun_disk_color, glm::vec3 {0.78F, 0.82F, 0.88F}, saturate(grey_strength * 0.65F));
     state.horizon_glow_color =
         glm::mix(state.horizon_glow_color, grey_horizon, saturate(state.overcast_intensity * 0.55F + state.storm_intensity * 0.22F));
     state.ambient_color = glm::mix(
         state.ambient_color,
-        glm::mix(glm::vec3 {0.36F, 0.41F, 0.48F}, glm::vec3 {0.16F, 0.19F, 0.25F}, storm_grade),
+        glm::mix(glm::vec3 {0.36F, 0.41F, 0.48F}, glm::vec3 {0.13F, 0.15F, 0.19F}, storm_grade),
         saturate(grey_strength * 0.46F));
     state.night_tint_color =
         glm::mix(state.night_tint_color, glm::vec3 {0.06F, 0.09F, 0.16F}, saturate(state.storm_intensity * 0.34F));
@@ -290,7 +503,59 @@ void EnvironmentClock::set_weather_seed(std::uint32_t weather_seed) noexcept {
 }
 
 void EnvironmentClock::set_weather_time_seconds(float weather_time_seconds) noexcept {
-    weather_time_seconds_ = std::isfinite(weather_time_seconds) ? std::max(weather_time_seconds, 0.0F) : 0.0F;
+    weather_time_seconds_ =
+        sanitize_weather_time_seconds(
+            weather_time_seconds);
+}
+
+auto EnvironmentClock::start_weather_event(WeatherKind weather) noexcept
+    -> bool {
+    constexpr std::int64_t kMaximumSearchSlots = 4'096;
+    const auto maximum_slot =
+        static_cast<std::int64_t>(
+            std::floor(
+                (kMaximumWeatherTimeSeconds -
+                 kWeatherEventStartOffsetSeconds) /
+                kWeatherSlotDurationSeconds));
+    if (maximum_slot < 1) {
+        return false;
+    }
+
+    auto first_slot =
+        static_cast<std::int64_t>(
+            std::floor(
+                weather_time_seconds_ /
+                kWeatherSlotDurationSeconds));
+    first_slot = std::clamp<std::int64_t>(
+        first_slot,
+        1,
+        maximum_slot);
+
+    for (std::int64_t offset = 0;
+         offset < kMaximumSearchSlots;
+         ++offset) {
+        const auto candidate_slot =
+            1 +
+            ((first_slot - 1 + offset) %
+             maximum_slot);
+        if (weather_kind_for_slot(
+                weather_seed_,
+                candidate_slot) != weather) {
+            continue;
+        }
+
+        // Je vise le milieu du creneau : meme lorsque la precision du float
+        // diminue en tres longue session, je reste loin des deux transitions.
+        set_weather_time_seconds(
+            static_cast<float>(
+                static_cast<double>(candidate_slot) *
+                        static_cast<double>(
+                            kWeatherSlotDurationSeconds) +
+                    static_cast<double>(
+                        kWeatherEventStartOffsetSeconds)));
+        return true;
+    }
+    return false;
 }
 
 auto EnvironmentClock::is_frozen() const noexcept -> bool {

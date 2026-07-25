@@ -12,6 +12,7 @@
 namespace valcraft {
 
 inline constexpr std::size_t kCreatureResidentPatrolPointCount = 4;
+using CreatureId = std::uint64_t;
 
 enum class CreatureSpecies : std::uint8_t {
     Pig = 0,
@@ -58,6 +59,17 @@ enum class CreatureBehaviorState : std::uint8_t {
     ReturnHome = 13,
 };
 
+enum class CreatureDisposition : std::uint8_t {
+    Neutral = 0,
+    Hostile = 1,
+};
+
+enum class CreatureDamageSource : std::uint8_t {
+    Player = 0,
+    OldGuard = 1,
+    Environment = 2,
+};
+
 struct CreatureSpawnAnchor {
     ChunkCoord chunk {};
     BlockCoord ground_block {};
@@ -67,6 +79,25 @@ struct CreatureSpawnAnchor {
     std::array<glm::vec3, kCreatureResidentPatrolPointCount> patrol_points {};
     std::uint8_t patrol_point_count = 0;
 };
+
+inline constexpr auto creature_id_from_anchor(const CreatureSpawnAnchor& anchor) noexcept -> CreatureId {
+    // Je derive l'identite des seules donnees entieres stables de l'ancre :
+    // une correction de hauteur ou de ronde ne peut donc pas changer la cible.
+    auto hash = UINT64_C(1469598103934665603);
+    const auto mix = [&hash](std::uint32_t value) constexpr noexcept {
+        for (unsigned int shift = 0; shift < 32U; shift += 8U) {
+            hash ^= static_cast<std::uint8_t>(value >> shift);
+            hash *= UINT64_C(1099511628211);
+        }
+    };
+    mix(static_cast<std::uint32_t>(anchor.chunk.x));
+    mix(static_cast<std::uint32_t>(anchor.chunk.z));
+    mix(static_cast<std::uint32_t>(anchor.ground_block.x));
+    mix(static_cast<std::uint32_t>(anchor.ground_block.y));
+    mix(static_cast<std::uint32_t>(anchor.ground_block.z));
+    mix(static_cast<std::uint32_t>(anchor.species));
+    return hash == 0U ? 1U : hash;
+}
 
 inline auto operator==(const CreatureSpawnAnchor& lhs, const CreatureSpawnAnchor& rhs) noexcept -> bool {
     if (lhs.chunk != rhs.chunk ||
@@ -121,6 +152,30 @@ struct CreatureInstance {
     std::uint8_t resident_cached_phase = 0;
     bool resident_target_valid = false;
     bool resident_heading_valid = false;
+};
+
+inline auto creature_disposition(const CreatureInstance& creature) noexcept -> CreatureDisposition {
+    const auto wildlife =
+        creature.anchor.species == CreatureSpecies::Pig ||
+        creature.anchor.species == CreatureSpecies::Cow ||
+        creature.anchor.species == CreatureSpecies::Sheep;
+    const auto fully_transformed =
+        creature.phase == CreaturePhase::Night &&
+        creature.morph_factor >= 0.999F;
+    return wildlife && fully_transformed ? CreatureDisposition::Hostile : CreatureDisposition::Neutral;
+}
+
+inline auto is_hostile_creature(const CreatureInstance& creature) noexcept -> bool {
+    return creature_disposition(creature) == CreatureDisposition::Hostile;
+}
+
+struct CreatureRaycastResult {
+    bool hit = false;
+    CreatureId id = 0;
+    CreatureSpecies species = CreatureSpecies::Pig;
+    CreatureDisposition disposition = CreatureDisposition::Neutral;
+    glm::vec3 position {0.0F};
+    float distance = 0.0F;
 };
 
 struct CreatureRenderInstance {

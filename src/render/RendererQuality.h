@@ -24,6 +24,9 @@ struct RendererQualitySettings {
     bool high_precision_hdr = true;
     int ocean_wave_count = 6;
     float ocean_detail_scale = 1.0F;
+    std::size_t precipitation_drop_budget = 6'000U;
+    std::size_t precipitation_impact_budget = 96U;
+    float precipitation_radius = 38.0F;
 
     auto operator==(const RendererQualitySettings&) const -> bool = default;
 };
@@ -57,6 +60,9 @@ struct RendererQualitySettings {
             false,
             4,      // Quatre vagues géométriques.
             0.70F,  // Petites rides réduites.
+            3'000U,
+            48U,
+            28.0F,
         };
 
     case RendererQuality::Low:
@@ -69,6 +75,9 @@ struct RendererQualitySettings {
             false,
             3,      // Uniquement les trois grandes vagues.
             0.0F,   // Aucun calcul de ride par fragment.
+            1'200U,
+            16U,
+            18.0F,
         };
 
     case RendererQuality::High:
@@ -83,6 +92,9 @@ struct RendererQualitySettings {
             true,
             6,
             1.0F,
+            6'000U,
+            96U,
+            38.0F,
         };
     }
 }

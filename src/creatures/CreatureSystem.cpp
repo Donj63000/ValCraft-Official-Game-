@@ -1238,6 +1238,41 @@ auto chunk_distance_squared_to_player(const ChunkCoord& coord, const glm::vec3& 
     return static_cast<float>(dx * dx + dz * dz);
 }
 
+auto is_chunk_within_population_interest(const ChunkCoord& player_center,
+                                         const ChunkCoord& coord,
+                                         int player_radius,
+                                         const std::optional<CreaturePopulationInterest>& secondary,
+                                         int secondary_radius_offset = 0) noexcept -> bool {
+    if (is_chunk_within_radius(player_center, coord, player_radius)) {
+        return true;
+    }
+    if (!secondary.has_value()) {
+        return false;
+    }
+
+    const ChunkCoord secondary_center {
+        static_cast<int>(std::floor(secondary->center.x / static_cast<float>(kChunkSizeX))),
+        static_cast<int>(std::floor(secondary->center.z / static_cast<float>(kChunkSizeZ))),
+    };
+    return is_chunk_within_radius(
+        secondary_center,
+        coord,
+        std::max(1, secondary->radius_chunks + secondary_radius_offset));
+}
+
+auto chunk_distance_squared_to_population_interests(
+    const ChunkCoord& coord,
+    const glm::vec3& player_position,
+    const std::optional<CreaturePopulationInterest>& secondary) noexcept -> float {
+    auto closest_distance = chunk_distance_squared_to_player(coord, player_position);
+    if (secondary.has_value()) {
+        closest_distance = std::min(
+            closest_distance,
+            chunk_distance_squared_to_player(coord, secondary->center));
+    }
+    return closest_distance;
+}
+
 auto horizontal_distance_squared(const glm::vec3& lhs, const glm::vec3& rhs) noexcept -> float {
     const auto dx = lhs.x - rhs.x;
     const auto dz = lhs.z - rhs.z;
@@ -2032,37 +2067,31 @@ auto CreatureSystem::consume_audit_stats() noexcept -> CreatureAuditStats {
     return stats;
 }
 
-auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
+auto CreatureSystem::raycast_first_creature(const glm::vec3& origin,
                                             const glm::vec3& direction,
-                                            float max_distance,
-                                            float damage) -> CreatureDamageResult {
+                                            float max_distance) const -> CreatureRaycastResult {
     if (!is_finite_vec3(origin) ||
         !is_finite_vec3(direction) ||
-        !std::isfinite(damage) ||
         !std::isfinite(max_distance) ||
-        damage <= 0.0F ||
         max_distance <= 0.0F ||
         glm::dot(direction, direction) <= 1.0e-6F) {
         return {};
     }
 
     const auto ray_direction = glm::normalize(direction);
-    const auto clamped_distance = std::max(max_distance, 0.0F);
-
     auto best_index = creatures_.size();
     auto best_distance = std::numeric_limits<float>::max();
     for (std::size_t index = 0; index < creatures_.size(); ++index) {
-        auto& creature = creatures_[index];
-        ensure_creature_health(creature);
-        if (creature.health <= 0.0F) {
+        const auto& creature = creatures_[index];
+        if (!std::isfinite(creature.health) || creature.health <= 0.0F) {
             continue;
         }
 
         const auto hitbox = hitbox_for(creature);
         const auto min_corner = creature.position + glm::vec3 {-hitbox.radius, 0.05F, -hitbox.radius};
         const auto max_corner = creature.position + glm::vec3 { hitbox.radius, hitbox.height, hitbox.radius};
-
-        const auto hit_distance = ray_intersects_aabb(origin, ray_direction, min_corner, max_corner, clamped_distance);
+        const auto hit_distance =
+            ray_intersects_aabb(origin, ray_direction, min_corner, max_corner, max_distance);
         if (!hit_distance.has_value() || *hit_distance >= best_distance) {
             continue;
         }
@@ -2075,11 +2104,53 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
         return {};
     }
 
-    auto& creature = creatures_[best_index];
-    const auto applied_damage = std::min(std::max(damage, 0.0F), creature.health);
-    const auto impact_direction = horizontal_direction_or_fallback(
-        creature.position - origin,
-        -ray_direction);
+    const auto& creature = creatures_[best_index];
+    return {
+        true,
+        creature_id_from_anchor(creature.anchor),
+        creature.anchor.species,
+        creature_disposition(creature),
+        creature.position,
+        best_distance,
+    };
+}
+
+auto CreatureSystem::apply_damage(CreatureId target_id,
+                                  float damage,
+                                  CreatureDamageSource source,
+                                  const glm::vec3& hit_direction) -> CreatureDamageResult {
+    CreatureDamageResult result {};
+    result.source =
+        source == CreatureDamageSource::Player ||
+        source == CreatureDamageSource::OldGuard ||
+        source == CreatureDamageSource::Environment
+            ? source
+            : CreatureDamageSource::Environment;
+    result.id = target_id;
+
+    if (target_id == 0U || !std::isfinite(damage) || damage <= 0.0F) {
+        return result;
+    }
+
+    const auto iterator = std::find_if(creatures_.begin(), creatures_.end(), [&](const CreatureInstance& creature) {
+        return creature_id_from_anchor(creature.anchor) == target_id;
+    });
+    if (iterator == creatures_.end()) {
+        return result;
+    }
+
+    const auto index = static_cast<std::size_t>(std::distance(creatures_.begin(), iterator));
+    auto& creature = *iterator;
+    ensure_creature_health(creature);
+    if (creature.health <= 0.0F) {
+        return result;
+    }
+
+    const auto safe_hit_direction =
+        is_finite_vec3(hit_direction) ? hit_direction : glm::vec3 {0.0F, 0.0F, 1.0F};
+    const auto impact_direction =
+        horizontal_direction_or_fallback(safe_hit_direction, creature.hit_direction);
+    const auto applied_damage = std::min(damage, creature.health);
     creature.health = std::max(0.0F, creature.health - applied_damage);
     creature.nervous_intensity = 1.0F;
     creature.attack_amount = std::max(creature.attack_amount, 0.82F);
@@ -2088,30 +2159,111 @@ auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
     creature.behavior_state = CreatureBehaviorState::Flee;
     creature.behavior_timer = std::max(creature.behavior_timer, 0.56F);
 
-    CreatureDamageResult result {};
     result.hit = true;
     result.killed = creature.health <= 0.0F;
+    result.grants_player_rewards = result.killed && result.source == CreatureDamageSource::Player;
     result.species = creature.anchor.species;
+    result.disposition = creature_disposition(creature);
     result.position = creature.position;
     result.damage = applied_damage;
     result.remaining_health = creature.health;
-    result.distance = best_distance;
 
     if (result.killed) {
+        // Je conserve la meme mort et la meme suppression de respawn quelle
+        // que soit la source; seule la recompense appartient au joueur.
         spawn_death_visual(creature, impact_direction);
         suppress_spawn_after_death(creature.anchor);
         if (is_resident_species(creature.anchor.species)) {
             remember_session_dead_resident(creature.anchor);
         }
-        creatures_.erase(creatures_.begin() + static_cast<std::ptrdiff_t>(best_index));
-        if (best_index < render_instances_.size()) {
-            render_instances_.erase(render_instances_.begin() + static_cast<std::ptrdiff_t>(best_index));
+        creatures_.erase(creatures_.begin() + static_cast<std::ptrdiff_t>(index));
+        if (index < render_instances_.size()) {
+            render_instances_.erase(render_instances_.begin() + static_cast<std::ptrdiff_t>(index));
         }
         ++audit_stats_.despawned;
         audit_stats_.active_creatures = creatures_.size();
     }
 
     return result;
+}
+
+auto CreatureSystem::try_damage_by_ray(const glm::vec3& origin,
+                                       const glm::vec3& direction,
+                                       float max_distance,
+                                       float damage,
+                                       CreatureDamageSource source) -> CreatureDamageResult {
+    const auto hit = raycast_first_creature(origin, direction, max_distance);
+    if (!hit.hit) {
+        CreatureDamageResult miss {};
+        miss.source = source;
+        return miss;
+    }
+
+    auto result = apply_damage(hit.id, damage, source, hit.position - origin);
+    result.distance = hit.distance;
+    return result;
+}
+
+auto CreatureSystem::try_damage_from_player(const glm::vec3& origin,
+                                            const glm::vec3& direction,
+                                            float max_distance,
+                                            float damage) -> CreatureDamageResult {
+    return try_damage_by_ray(
+        origin,
+        direction,
+        max_distance,
+        damage,
+        CreatureDamageSource::Player);
+}
+
+void CreatureSystem::set_secondary_population_interest(const glm::vec3& center,
+                                                       int radius_chunks) noexcept {
+    if (!is_finite_vec3(center)) {
+        clear_secondary_population_interest();
+        return;
+    }
+
+    // Je borne le centre avant tout floor/cast entier : meme FLT_MAX reste
+    // ainsi representable quand je le convertis en coordonnees de chunk.
+    const auto coordinate_limit = glm::vec3 {kCreaturePopulationInterestCoordinateLimit};
+    const auto sanitized_center = glm::clamp(center, -coordinate_limit, coordinate_limit);
+    CreaturePopulationInterest sanitized {
+        sanitized_center,
+        std::clamp(radius_chunks, 1, 16),
+    };
+    if (secondary_population_interest_.has_value()) {
+        const auto previous_chunk_x = static_cast<int>(std::floor(
+            secondary_population_interest_->center.x / static_cast<float>(kChunkSizeX)));
+        const auto previous_chunk_z = static_cast<int>(std::floor(
+            secondary_population_interest_->center.z / static_cast<float>(kChunkSizeZ)));
+        const auto next_chunk_x =
+            static_cast<int>(std::floor(sanitized.center.x / static_cast<float>(kChunkSizeX)));
+        const auto next_chunk_z =
+            static_cast<int>(std::floor(sanitized.center.z / static_cast<float>(kChunkSizeZ)));
+        const auto structural_change =
+            previous_chunk_x != next_chunk_x ||
+            previous_chunk_z != next_chunk_z ||
+            secondary_population_interest_->radius_chunks != sanitized.radius_chunks;
+        secondary_population_interest_ = sanitized;
+        population_sync_requested_ = population_sync_requested_ || structural_change;
+        return;
+    }
+
+    secondary_population_interest_ = sanitized;
+    population_sync_requested_ = true;
+}
+
+void CreatureSystem::clear_secondary_population_interest() noexcept {
+    if (!secondary_population_interest_.has_value()) {
+        return;
+    }
+    secondary_population_interest_.reset();
+    population_sync_requested_ = true;
+}
+
+auto CreatureSystem::secondary_population_interest() const noexcept
+    -> const std::optional<CreaturePopulationInterest>& {
+    return secondary_population_interest_;
 }
 
 void CreatureSystem::set_settlement_residents(std::vector<CreatureSpawnAnchor> residents) {
@@ -2227,6 +2379,7 @@ void CreatureSystem::clear() noexcept {
     spawn_candidates_scratch_.clear();
     spawn_anchor_cache_.clear();
     last_population_center_.reset();
+    secondary_population_interest_.reset();
     last_loaded_chunk_count_ = 0;
     population_sync_accumulator_ = 0.0F;
     population_sync_requested_ = true;
@@ -2242,7 +2395,12 @@ void CreatureSystem::sync_active_creatures(const World& world,
         static_cast<int>(std::floor(player_position.z)));
 
     for (auto iterator = creatures_.begin(); iterator != creatures_.end();) {
-        if (!is_chunk_within_radius(center, iterator->anchor.chunk, kCreatureKeepAliveRadiusChunks) ||
+        if (!is_chunk_within_population_interest(
+                center,
+                iterator->anchor.chunk,
+                kCreatureKeepAliveRadiusChunks,
+                secondary_population_interest_,
+                1) ||
             world.find_chunk(iterator->anchor.chunk) == nullptr) {
             ++audit_stats_.despawned;
             iterator = creatures_.erase(iterator);
@@ -2299,7 +2457,11 @@ void CreatureSystem::sync_active_creatures(const World& world,
         resident_candidates.reserve(resident_profiles_.size());
     }
     for (const auto& profile : resident_profiles_) {
-        if (!is_chunk_within_radius(center, profile.anchor.chunk, kCreatureActivationRadiusChunks) ||
+        if (!is_chunk_within_population_interest(
+                center,
+                profile.anchor.chunk,
+                kCreatureActivationRadiusChunks,
+                secondary_population_interest_) ||
             world.find_chunk(profile.anchor.chunk) == nullptr ||
             is_session_dead_resident(profile.anchor) ||
             is_spawn_suppressed(profile.anchor) ||
@@ -2337,7 +2499,14 @@ void CreatureSystem::sync_active_creatures(const World& world,
             if (is_resident_species(iterator->anchor.species)) {
                 continue;
             }
-            const auto distance = horizontal_distance_squared(iterator->position, player_position);
+            auto distance = horizontal_distance_squared(iterator->position, player_position);
+            if (secondary_population_interest_.has_value()) {
+                distance = std::min(
+                    distance,
+                    horizontal_distance_squared(
+                        iterator->position,
+                        secondary_population_interest_->center));
+            }
             if (distance > farthest_distance) {
                 farthest_distance = distance;
                 farthest = iterator;
@@ -2366,15 +2535,24 @@ void CreatureSystem::sync_active_creatures(const World& world,
 
     auto& candidates = spawn_candidates_scratch_;
     candidates.clear();
-    constexpr auto kMaximumCandidateCount =
+    auto maximum_candidate_count =
         static_cast<std::size_t>((kCreatureActivationRadiusChunks * 2 + 1) * (kCreatureActivationRadiusChunks * 2 + 1));
-    if (candidates.capacity() < kMaximumCandidateCount) {
-        candidates.reserve(kMaximumCandidateCount);
+    if (secondary_population_interest_.has_value()) {
+        const auto secondary_diameter = secondary_population_interest_->radius_chunks * 2 + 1;
+        maximum_candidate_count += static_cast<std::size_t>(secondary_diameter * secondary_diameter);
+    }
+    if (candidates.capacity() < maximum_candidate_count) {
+        candidates.reserve(maximum_candidate_count);
     }
 
     for (const auto& [coord, record] : world.chunk_records()) {
         (void)record;
-        if (!is_chunk_within_radius(center, coord, kCreatureActivationRadiusChunks) || find_creature(coord) != nullptr) {
+        if (!is_chunk_within_population_interest(
+                center,
+                coord,
+                kCreatureActivationRadiusChunks,
+                secondary_population_interest_) ||
+            find_creature(coord) != nullptr) {
             continue;
         }
         if (std::any_of(settlement_residents_.begin(), settlement_residents_.end(), [&](const CreatureSpawnAnchor& resident) {
@@ -2386,8 +2564,14 @@ void CreatureSystem::sync_active_creatures(const World& world,
     }
 
     std::sort(candidates.begin(), candidates.end(), [&](const ChunkCoord& lhs, const ChunkCoord& rhs) {
-        return chunk_distance_squared_to_player(lhs, player_position) <
-               chunk_distance_squared_to_player(rhs, player_position);
+        return chunk_distance_squared_to_population_interests(
+                   lhs,
+                   player_position,
+                   secondary_population_interest_) <
+               chunk_distance_squared_to_population_interests(
+                   rhs,
+                   player_position,
+                   secondary_population_interest_);
     });
 
     for (const auto& candidate : candidates) {
@@ -2981,6 +3165,20 @@ auto CreatureSystem::find_creature(const ChunkCoord& coord) -> CreatureInstance*
 auto CreatureSystem::find_creature(const ChunkCoord& coord) const -> const CreatureInstance* {
     const auto iterator = std::find_if(creatures_.begin(), creatures_.end(), [&](const CreatureInstance& creature) {
         return creature.anchor.chunk == coord;
+    });
+    return iterator == creatures_.end() ? nullptr : &(*iterator);
+}
+
+auto CreatureSystem::find_creature(CreatureId id) -> CreatureInstance* {
+    const auto iterator = std::find_if(creatures_.begin(), creatures_.end(), [&](const CreatureInstance& creature) {
+        return creature_id_from_anchor(creature.anchor) == id;
+    });
+    return iterator == creatures_.end() ? nullptr : &(*iterator);
+}
+
+auto CreatureSystem::find_creature(CreatureId id) const -> const CreatureInstance* {
+    const auto iterator = std::find_if(creatures_.begin(), creatures_.end(), [&](const CreatureInstance& creature) {
+        return creature_id_from_anchor(creature.anchor) == id;
     });
     return iterator == creatures_.end() ? nullptr : &(*iterator);
 }

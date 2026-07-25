@@ -15,6 +15,7 @@ namespace valcraft {
 inline constexpr int kCreatureActivationRadiusChunks = 3;
 inline constexpr int kCreatureKeepAliveRadiusChunks = 4;
 inline constexpr std::size_t kCreatureMaxActiveCount = 32;
+inline constexpr float kCreaturePopulationInterestCoordinateLimit = 1'000'000.0F;
 
 struct CreatureAuditStats {
     std::size_t spawned = 0;
@@ -30,11 +31,20 @@ struct CreatureAuditStats {
 struct CreatureDamageResult {
     bool hit = false;
     bool killed = false;
+    bool grants_player_rewards = false;
+    CreatureId id = 0;
     CreatureSpecies species = CreatureSpecies::Pig;
+    CreatureDisposition disposition = CreatureDisposition::Neutral;
+    CreatureDamageSource source = CreatureDamageSource::Player;
     glm::vec3 position {0.0F};
     float damage = 0.0F;
     float remaining_health = 0.0F;
     float distance = 0.0F;
+};
+
+struct CreaturePopulationInterest {
+    glm::vec3 center {0.0F};
+    int radius_chunks = 4;
 };
 
 struct ResidentProfile {
@@ -65,8 +75,24 @@ public:
     [[nodiscard]] auto render_instances() const noexcept -> std::span<const CreatureRenderInstance>;
     [[nodiscard]] auto recent_attacks() const noexcept -> std::span<const CreatureAttackEvent>;
     [[nodiscard]] auto consume_audit_stats() noexcept -> CreatureAuditStats;
+    [[nodiscard]] auto raycast_first_creature(const glm::vec3& origin,
+                                               const glm::vec3& direction,
+                                               float max_distance) const -> CreatureRaycastResult;
+    auto apply_damage(CreatureId target_id,
+                      float damage,
+                      CreatureDamageSource source,
+                      const glm::vec3& hit_direction = {0.0F, 0.0F, 1.0F}) -> CreatureDamageResult;
+    auto try_damage_by_ray(const glm::vec3& origin,
+                           const glm::vec3& direction,
+                           float max_distance,
+                           float damage,
+                           CreatureDamageSource source) -> CreatureDamageResult;
     auto try_damage_from_player(const glm::vec3& origin, const glm::vec3& direction, float max_distance, float damage)
         -> CreatureDamageResult;
+    void set_secondary_population_interest(const glm::vec3& center, int radius_chunks = 4) noexcept;
+    void clear_secondary_population_interest() noexcept;
+    [[nodiscard]] auto secondary_population_interest() const noexcept
+        -> const std::optional<CreaturePopulationInterest>&;
     void set_settlement_residents(std::vector<CreatureSpawnAnchor> residents);
     void load_creatures(const std::vector<CreatureInstance>& creatures, const EnvironmentState& environment);
     void clear() noexcept;
@@ -92,6 +118,8 @@ private:
     void prune_spawn_anchor_cache(const World& world);
     [[nodiscard]] auto find_creature(const ChunkCoord& coord) -> CreatureInstance*;
     [[nodiscard]] auto find_creature(const ChunkCoord& coord) const -> const CreatureInstance*;
+    [[nodiscard]] auto find_creature(CreatureId id) -> CreatureInstance*;
+    [[nodiscard]] auto find_creature(CreatureId id) const -> const CreatureInstance*;
     [[nodiscard]] auto find_resident(const CreatureSpawnAnchor& anchor) const -> const CreatureSpawnAnchor*;
     [[nodiscard]] auto find_resident_creature(const CreatureSpawnAnchor& anchor) -> CreatureInstance*;
     [[nodiscard]] auto find_resident_creature(const CreatureSpawnAnchor& anchor) const -> const CreatureInstance*;
@@ -144,6 +172,7 @@ private:
     std::vector<ChunkCoord> spawn_candidates_scratch_ {};
     std::unordered_map<ChunkCoord, SpawnAnchorCacheEntry, ChunkCoordHash> spawn_anchor_cache_ {};
     std::optional<ChunkCoord> last_population_center_ {};
+    std::optional<CreaturePopulationInterest> secondary_population_interest_ {};
     std::size_t last_loaded_chunk_count_ = 0;
     float population_sync_accumulator_ = 0.0F;
     bool population_sync_requested_ = true;

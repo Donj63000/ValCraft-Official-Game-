@@ -1,6 +1,8 @@
 #include "gameplay/PlayerController.h"
 
 #include "gameplay/SeaAdventure.h"
+#include "world/OceanAdventureLayout.h"
+#include "world/OceanSimulation.h"
 #include "world/World.h"
 
 #include <glm/common.hpp>
@@ -175,7 +177,12 @@ PlayerController::PlayerController(glm::vec3 spawn_position) {
     state_.body_yaw_degrees = state_.yaw_degrees;
 }
 
-void PlayerController::update(const PlayerInput& input, float dt, const World& world, const ShipEntity* dynamic_obstacle) {
+void PlayerController::update(
+    const PlayerInput& input,
+    float dt,
+    const World& world,
+    const ShipEntity* dynamic_obstacle,
+    const OceanState* dynamic_ocean) {
     const auto clamped_dt = non_negative_finite(dt);
     const auto move_forward = finite_input_axis(input.move_forward);
     const auto move_right = finite_input_axis(input.move_right);
@@ -202,7 +209,12 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
     }
 
     const auto was_on_ground = state_.on_ground;
-    const auto water_contact_before_move = sample_water_contact(world, state_.position);
+    const auto water_contact_before_move =
+        sample_water_contact(
+            world,
+            state_.position,
+            dynamic_obstacle,
+            dynamic_ocean);
     state_.animation_time += clamped_dt;
     state_.hurt_timer = std::max(0.0F, state_.hurt_timer - clamped_dt);
     state_.damage_cooldown = std::max(0.0F, state_.damage_cooldown - clamped_dt);
@@ -700,7 +712,12 @@ void PlayerController::update(const PlayerInput& input, float dt, const World& w
         state_.position.z - start_position.z,
     };
     const auto horizontal_distance = glm::length(horizontal_displacement);
-    const auto water_contact_after_move = sample_water_contact(world, state_.position);
+    const auto water_contact_after_move =
+        sample_water_contact(
+            world,
+            state_.position,
+            dynamic_obstacle,
+            dynamic_ocean);
     auto landed_in_water = false;
 
     if (!state_.fly_mode) {
@@ -1519,7 +1536,11 @@ void PlayerController::reset_dynamic_climb_state() noexcept {
     dynamic_climb_jump_locked_ = false;
 }
 
-auto PlayerController::is_liquid_at(const World& world, const glm::vec3& point) const noexcept -> bool {
+auto PlayerController::is_liquid_at(
+    const World& world,
+    const glm::vec3& point) const noexcept
+    -> bool {
+
     const auto block_x = static_cast<int>(std::floor(point.x));
     const auto block_y = static_cast<int>(std::floor(point.y));
     const auto block_z = static_cast<int>(std::floor(point.z));
@@ -1527,18 +1548,35 @@ auto PlayerController::is_liquid_at(const World& world, const glm::vec3& point) 
         return false;
     }
 
-    const auto level = world.peek_water_level_or_generated(block_x, block_y, block_z);
+    const auto level =
+        world.peek_water_level_or_generated(
+            block_x,
+            block_y,
+            block_z);
     if (level == 0) {
         return false;
     }
 
-    const auto top_height = world.peek_water_level_or_generated(block_x, block_y + 1, block_z) > 0
-                                ? 1.0F
-                                : static_cast<float>(level) / static_cast<float>(kMaxWaterLevel);
-    return point.y < static_cast<float>(block_y) + top_height;
+    const auto top_height =
+        world.peek_water_level_or_generated(
+            block_x,
+            block_y + 1,
+            block_z) > 0
+            ? 1.0F
+            : static_cast<float>(level) /
+                  static_cast<float>(kMaxWaterLevel);
+    return point.y <
+           static_cast<float>(block_y) +
+               top_height;
 }
 
-auto PlayerController::sample_water_contact(const World& world, const glm::vec3& feet_position) const noexcept -> WaterContactState {
+auto PlayerController::sample_water_contact(
+    const World& world,
+    const glm::vec3& feet_position,
+    const ShipEntity* dynamic_obstacle,
+    const OceanState* dynamic_ocean) const noexcept
+    -> WaterContactState {
+
     WaterContactState water_contact {};
     if (state_.fly_mode) {
         return water_contact;
@@ -1554,11 +1592,80 @@ auto PlayerController::sample_water_contact(const World& world, const glm::vec3&
         {sample_radius, sample_radius},
     }};
 
+    struct DynamicOceanContact {
+        bool valid = false;
+        float surface_height = 0.0F;
+    };
+    std::array<
+        DynamicOceanContact,
+        kWaterContactSampleCount>
+        dynamic_contacts {};
+    constexpr float kOceanSurfaceAtRest =
+        static_cast<float>(kSeaLevel + 1);
+
+    if (dynamic_ocean != nullptr) {
+        // Je calcule chaque hauteur horizontale une seule fois, puis je la
+        // réutilise pour les pieds, le torse et la tête.
+        for (std::size_t index = 0;
+             index < horizontal_offsets.size();
+             ++index) {
+            const auto& offset =
+                horizontal_offsets[index];
+            const glm::vec2 point_xz {
+                feet_position.x + offset.x,
+                feet_position.z + offset.y,
+            };
+            const auto block_x =
+                static_cast<int>(
+                    std::floor(point_xz.x));
+            const auto block_z =
+                static_cast<int>(
+                    std::floor(point_xz.y));
+
+            if (world.peek_water_level_or_generated(
+                    block_x,
+                    kSeaLevel,
+                    block_z) == 0) {
+                continue;
+            }
+
+            // Je suis les trois longues composantes physiques, comme la
+            // flottabilite du navire et le rendu en qualite basse. Les petites
+            // rides restent un detail visuel et ne font pas varier la nage
+            // lorsque la qualite adaptative change.
+            const auto surface_height =
+                kOceanSurfaceAtRest +
+                OceanSimulation::sample(
+                    *dynamic_ocean,
+                    point_xz,
+                    kOceanBuoyancyWaveCount)
+                    .height;
+            if (std::isfinite(surface_height)) {
+                dynamic_contacts[index] = {
+                    true,
+                    surface_height,
+                };
+            }
+        }
+    }
+
     const auto any_sample_at_height_is_liquid = [&](float height) {
         std::array<BlockCoord, kWaterContactSampleCount> sampled_blocks {};
         std::size_t sampled_block_count = 0;
-        for (const auto& offset : horizontal_offsets) {
+        for (std::size_t index = 0;
+             index < horizontal_offsets.size();
+             ++index) {
+            const auto& offset =
+                horizontal_offsets[index];
             const auto point = feet_position + glm::vec3 {offset.x, height, offset.y};
+            if (dynamic_obstacle != nullptr &&
+                dynamic_obstacle->excludes_ocean_at(
+                    point)) {
+                // Je supprime chaque contact liquide dans le volume etanche,
+                // aux pieds comme au torse et a la tete, sans assécher la mer
+                // immédiatement voisine de la coque.
+                continue;
+            }
             const BlockCoord block {
                 static_cast<int>(std::floor(point.x)),
                 static_cast<int>(std::floor(point.y)),
@@ -1568,13 +1675,34 @@ auto PlayerController::sample_water_contact(const World& world, const glm::vec3&
                 sampled_blocks.begin(),
                 sampled_blocks.begin() + static_cast<std::ptrdiff_t>(sampled_block_count),
                 block);
-            if (duplicate != sampled_blocks.begin() + static_cast<std::ptrdiff_t>(sampled_block_count)) {
+            // Je mutualise les cellules de l'eau statique. Pour une vague, je
+            // garde les cinq positions car sa hauteur varie à l'intérieur du
+            // même voxel et un bord du joueur peut être immergé avant le centre.
+            if (dynamic_ocean == nullptr &&
+                duplicate !=
+                    sampled_blocks.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            sampled_block_count)) {
                 continue;
             }
             sampled_blocks[sampled_block_count++] = block;
 
-            // Je ne sonde qu'une fois une meme cellule lorsque les cinq points du
-            // volume joueur tombent dans le meme bloc d'eau.
+            const auto& dynamic_contact =
+                dynamic_contacts[index];
+            if (dynamic_contact.valid) {
+                // Je retire l'eau voxel au-dessus d'un creux et je prolonge
+                // son volume sous une crête. Sous le niveau au repos, la
+                // colonne voxel protège toujours les grottes et le terrain.
+                if (point.y >=
+                    dynamic_contact.surface_height) {
+                    continue;
+                }
+                if (point.y >=
+                    kOceanSurfaceAtRest) {
+                    return true;
+                }
+            }
+
             if (is_liquid_at(world, point)) {
                 return true;
             }

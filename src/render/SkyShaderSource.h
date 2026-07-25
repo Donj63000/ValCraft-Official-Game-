@@ -31,7 +31,11 @@ uniform float u_cloud_intensity;
 uniform float u_overcast_intensity;
 uniform float u_precipitation_intensity;
 uniform float u_storm_intensity;
+uniform float u_violent_storm_intensity;
 uniform float u_lightning_intensity;
+uniform float u_lightning_bolt_intensity;
+uniform vec3 u_lightning_direction;
+uniform float u_lightning_shape_seed;
 uniform float u_weather_time;
 uniform int u_cloud_steps;
 uniform float u_cloud_detail;
@@ -84,6 +88,133 @@ float fbm(vec3 p) {
     return value;
 }
 
+float lightning_path_noise(float segment, float salt) {
+    return hash13(
+        vec3(
+            segment,
+            u_lightning_shape_seed * 173.0 + salt,
+            u_lightning_shape_seed * 317.0 - salt));
+}
+
+float lightning_bolt_mask(vec3 view_direction) {
+    // Je conserve uniquement ce court-circuit uniforme : les dérivées de
+    // fragment restent ainsi définies sur tout le quad OpenGL.
+    if (u_lightning_bolt_intensity <= 0.001) {
+        return 0.0;
+    }
+
+    vec2 bolt_horizontal = u_lightning_direction.xz;
+    vec2 view_horizontal = view_direction.xz;
+    float bolt_length = length(bolt_horizontal);
+    float view_length = length(view_horizontal);
+    bolt_horizontal /= max(bolt_length, 0.0001);
+    view_horizontal /= max(view_length, 0.0001);
+    float forward_alignment = dot(view_horizontal, bolt_horizontal);
+    vec2 lateral_axis =
+        vec2(-bolt_horizontal.y, bolt_horizontal.x);
+    float lateral = dot(view_horizontal, lateral_axis);
+    float antialias_width = max(fwidth(lateral), 0.00035);
+
+    // Je fais varier le sommet dans la couche nuageuse avec l'élévation
+    // déterministe calculée côté CPU, au lieu de jeter sa composante Y.
+    float bolt_top =
+        clamp(
+            u_lightning_direction.y + 0.22,
+            0.34,
+            0.72);
+    float vertical_window =
+        smoothstep(0.015, 0.055, view_direction.y) *
+        (1.0 -
+         smoothstep(
+             bolt_top - 0.055,
+             bolt_top + 0.015,
+             view_direction.y));
+    float azimuth_window =
+        smoothstep(0.94, 0.995, forward_alignment);
+    float horizontal_validity =
+        step(0.0001, bolt_length) *
+        step(0.0001, view_length);
+    float bolt_window =
+        vertical_window *
+        azimuth_window *
+        horizontal_validity;
+
+    // Je coupe les calculs de forme coûteux après fwidth : ce branchement peut
+    // varier par fragment sans rendre la dérivée utilisée plus haut indéfinie.
+    if (bolt_window <= 0.0) {
+        return 0.0;
+    }
+
+    float height =
+        clamp(
+            (view_direction.y - 0.025) /
+                max(bolt_top - 0.025, 0.10),
+            0.0,
+            1.0);
+    float segment_position = height * 18.0;
+    float segment = floor(segment_position);
+    float segment_blend = smoothstep(0.0, 1.0, fract(segment_position));
+    float path_a = lightning_path_noise(segment, 11.0) - 0.5;
+    float path_b = lightning_path_noise(segment + 1.0, 11.0) - 0.5;
+    float jagged_path =
+        mix(path_a, path_b, segment_blend) *
+        mix(0.030, 0.009, height);
+
+    float distance_to_main = abs(lateral - jagged_path);
+    float main_core =
+        1.0 -
+        smoothstep(
+            antialias_width * 0.65 + 0.00045,
+            antialias_width * 1.90 + 0.00180,
+            distance_to_main);
+    float main_glow =
+        1.0 -
+        smoothstep(
+            0.0035,
+            0.0170,
+            distance_to_main);
+
+    float fork_start =
+        0.40 +
+        lightning_path_noise(3.0, 29.0) *
+            0.24;
+    float fork_progress =
+        clamp(
+            (fork_start - height) /
+                max(fork_start, 0.10),
+            0.0,
+            1.0);
+    float fork_side =
+        lightning_path_noise(7.0, 43.0) < 0.5
+            ? -1.0
+            : 1.0;
+    float fork_jitter =
+        (lightning_path_noise(segment, 59.0) - 0.5) *
+        0.007;
+    float fork_path =
+        jagged_path +
+        fork_side *
+            fork_progress *
+            0.040 +
+        fork_jitter;
+    float distance_to_fork =
+        abs(lateral - fork_path);
+    float fork_core =
+        (1.0 -
+         smoothstep(
+             antialias_width * 0.75 + 0.00055,
+             antialias_width * 2.10 + 0.00170,
+             distance_to_fork)) *
+        step(height, fork_start) *
+        smoothstep(0.02, 0.18, fork_progress);
+
+    return
+        (main_core * 1.45 +
+         main_glow * 0.30 +
+         fork_core * 0.82) *
+        bolt_window;
+}
+
 float cloud_density(vec3 sample_position, float cloud_intensity, float overcast_intensity, float storm_intensity) {
     float layer = smoothstep(0.22, 0.34, sample_position.y) * (1.0 - smoothstep(0.64, 0.82, sample_position.y));
     float base = fbm(sample_position * 0.82);
@@ -116,8 +247,15 @@ void main() {
     float overcast_factor = clamp(u_overcast_intensity, 0.0, 1.0);
     float precipitation_factor = clamp(u_precipitation_intensity, 0.0, 1.0);
     float storm_factor = clamp(u_storm_intensity, 0.0, 1.0);
+    float violent_storm_factor = clamp(u_violent_storm_intensity, 0.0, 1.0);
     const float volumetric_cloud_minimum = 0.12;
-    float disk_visibility = 1.0 - clamp(overcast_factor * 0.68 + precipitation_factor * 0.18 + storm_factor * 0.18, 0.0, 0.92);
+    float disk_visibility = 1.0 - clamp(
+        overcast_factor * 0.68 +
+        precipitation_factor * 0.18 +
+        storm_factor * 0.18 +
+        violent_storm_factor * 0.12,
+        0.0,
+        0.97);
     float zenith_mix = pow(smoothstep(-0.18, 0.82, direction.y), 0.78);
     float horizon_band = exp(-abs(direction.y) * 6.5);
     float sun_alignment = max(dot(direction, sun_direction), 0.0);
@@ -163,10 +301,15 @@ void main() {
         vec3 blanket_flow = direction * vec3(3.8, 2.2, 3.8) + vec3(u_weather_time * 0.010, 0.0, -u_weather_time * 0.007);
         float blanket_noise = fbm(blanket_flow) * 0.78 + fbm(blanket_flow * 1.82 + vec3(9.1, 4.7, 2.3)) * 0.22;
         float blanket_alpha = smoothstep(0.28, 0.72, blanket_noise + overcast_factor * 0.34) * overcast_band;
-        blanket_alpha *= overcast_factor * (0.24 + 0.38 * day_factor + 0.20 * storm_factor);
+        blanket_alpha *= overcast_factor * (
+            0.24 +
+            0.38 * day_factor +
+            0.20 * storm_factor +
+            0.12 * violent_storm_factor);
         vec3 blanket_color = mix(vec3(0.62, 0.67, 0.72), vec3(0.24, 0.28, 0.36), storm_factor);
+        blanket_color = mix(blanket_color, vec3(0.12, 0.14, 0.18), violent_storm_factor * 0.68);
         blanket_color = mix(blanket_color, u_moon_disk_color * 0.40, night_factor * 0.22);
-        color = mix(color, blanket_color, clamp(blanket_alpha, 0.0, 0.84));
+        color = mix(color, blanket_color, clamp(blanket_alpha, 0.0, mix(0.84, 0.94, violent_storm_factor)));
     }
 
     float cloud_view_band = smoothstep(0.04, 0.18, direction.y) * (1.0 - smoothstep(0.66, 0.90, direction.y));
@@ -176,6 +319,7 @@ void main() {
                     (0.36 + storm_factor * 0.32);
         vec3 cloud_shadow_color = mix(u_sky_zenith_color, u_sky_horizon_color, 0.24);
         cloud_shadow_color = mix(cloud_shadow_color, vec3(0.18, 0.22, 0.30), overcast_factor * (0.28 + storm_factor * 0.48));
+        cloud_shadow_color = mix(cloud_shadow_color, vec3(0.10, 0.12, 0.16), violent_storm_factor * 0.54);
         vec3 cloud_light_color = mix(vec3(0.82, 0.87, 0.94), vec3(0.98, 0.99, 1.00), day_factor);
         cloud_light_color = mix(cloud_light_color, u_horizon_glow_color, 0.12 + 0.18 * horizon_band);
         cloud_light_color = mix(cloud_light_color, u_moon_disk_color, 0.12 * night_factor);
@@ -223,6 +367,12 @@ void main() {
     color = mix(color, twilight_wash, twilight_wash_strength);
     color += u_horizon_glow_color * horizon_band * twilight_softening * disk_visibility * 0.045;
     color += vec3(0.62, 0.72, 1.00) * clamp(u_lightning_intensity, 0.0, 1.0) * (0.12 + horizon_band * 0.22 + storm_factor * 0.18);
+    float bolt = lightning_bolt_mask(direction);
+    color +=
+        vec3(0.78, 0.86, 1.00) *
+        clamp(u_lightning_bolt_intensity, 0.0, 1.0) *
+        bolt *
+        (0.78 + violent_storm_factor * 0.72);
 
     frag_color = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

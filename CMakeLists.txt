@@ -170,14 +170,18 @@ glad_add_library(valcraft_glad REPRODUCIBLE API gl:core=3.3)
 
 add_library(valcraft_core
     src/app/Audit.cpp
+    src/app/CommandConsole.cpp
     src/app/GameBranding.cpp
     src/app/GameOptions.cpp
     src/app/ProcessMemory.cpp
     src/app/SaveGame.cpp
     src/audio/ProceduralMusic.cpp
+    src/audio/ProceduralSfx.cpp
     src/creatures/CrewAnimation.cpp
     src/creatures/CreatureGeometry.cpp
     src/creatures/CreatureSystem.cpp
+    src/creatures/OldGuardAnimation.cpp
+    src/creatures/OldGuardGeometry.cpp
     src/world/Chunk.cpp
     src/world/BlockVisuals.cpp
     src/world/World.cpp
@@ -185,6 +189,7 @@ add_library(valcraft_core
     src/world/ChunkMesher.cpp
     src/world/Environment.cpp
     src/world/OceanSimulation.cpp
+    src/world/PrecipitationField.cpp
     src/gameplay/PlayerController.cpp
     src/gameplay/PlayerProgression.cpp
     src/gameplay/SeaAdventure.cpp
@@ -193,6 +198,7 @@ add_library(valcraft_core
     src/gameplay/StartingVillage.cpp
     src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp
+    src/gameplay/OldGuard.cpp
     src/render/ItemDropGeometry.cpp
 )
 
@@ -233,7 +239,11 @@ target_link_libraries(ValCraft
         SDL2::SDL2
         valcraft_glad
 )
-target_compile_definitions(ValCraft PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+target_compile_definitions(ValCraft
+    PRIVATE
+        VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+        VALCRAFT_COVERAGE_BUILD=$<BOOL:${VALCRAFT_ENABLE_COVERAGE}>
+)
 
 if(WIN32)
     target_link_libraries(ValCraft PRIVATE opengl32)
@@ -259,14 +269,20 @@ add_executable(valcraft_tests
     tests/main.cpp
     tests/AppTests.cpp
     tests/AudioTests.cpp
+    tests/CommandConsoleTests.cpp
     tests/CrewAnimationTests.cpp
     tests/CreatureTests.cpp
+    tests/OldGuardCombatTests.cpp
+    tests/OldGuardSaveTests.cpp
+    tests/OldGuardTests.cpp
     tests/RenderTests.cpp
     tests/ShipCrewTests.cpp
     tests/StartingPortTests.cpp
     tests/WorldSchedulingTests.cpp
     tests/WorldTests.cpp
     tests/PlayerTests.cpp
+    tests/PrecipitationTests.cpp
+    tests/ProceduralSfxTests.cpp
 )
 
 target_link_libraries(valcraft_tests
@@ -362,18 +378,106 @@ if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
             TIMEOUT 60
             RESOURCE_LOCK valcraft_gpu
     )
+
+    function(valcraft_add_tempest_gpu_smoke test_name ship_view weather_time capture_name)
+        add_test(
+            NAME ${test_name}
+            COMMAND $<TARGET_FILE:ValCraft>
+                --smoke-test
+                --smoke-session=sea-new
+                --smoke-ship-view=${ship_view}
+                --initial-weather-time=${weather_time}
+                --smoke-frames=240
+                --window-width=1280
+                --window-height=720
+                --hidden-window
+                --fixed-render-quality
+                --capture-frame=${CMAKE_BINARY_DIR}/artifacts/tempest/${capture_name}.bmp
+                ${ARGN}
+        )
+        set_tests_properties(
+            ${test_name}
+            PROPERTIES
+                LABELS "gpu;integration;weather;tempest;capture"
+                TIMEOUT 90
+                RESOURCE_LOCK valcraft_gpu
+        )
+    endfunction()
+
+    # Je couvre les espaces critiques au pic d'éclair, puis les deux flancs
+    # entre deux éclairs afin de distinguer la pluie du flash atmosphérique.
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_deck_smoke
+        deck
+        2685.0979
+        deck)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_interior_smoke
+        interior
+        2685.0979
+        interior)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_cabin_smoke
+        cabin
+        2685.0979
+        cabin)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_cargo_smoke
+        cargo
+        2685.0979
+        cargo)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_crew_smoke
+        crew
+        2685.0979
+        crew)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_port_smoke
+        port
+        2760
+        port-between-strikes)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_starboard_smoke
+        starboard
+        2760
+        starboard-between-strikes)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_deck_no_post_process_smoke
+        deck
+        2685.0979
+        deck-no-post-process
+        --disable-post-process)
 endif()
 
 add_custom_target(valcraft_check_perf_smoke
     COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
         -BuildDir ${CMAKE_BINARY_DIR}
+        -Configuration $<CONFIG>
         -NoConfigure
         -NoBuild
         -SmokeFrames 180
         -WarmupFrames 60
         -Repetitions 1
         -Scenarios baseline
+        -EnforceThresholds
+    DEPENDS ValCraft
+    USES_TERMINAL
+)
+
+# Je garde la Tempest dans une cible dédiée afin de mesurer durablement son
+# budget à 60 FPS sans rendre incompatibles les baselines de la suite générale.
+add_custom_target(valcraft_check_tempest_perf_smoke
+    COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
+        -BuildDir ${CMAKE_BINARY_DIR}
+        -Configuration $<CONFIG>
+        -NoConfigure
+        -NoBuild
+        -SmokeFrames 180
+        -WarmupFrames 60
+        -Repetitions 1
+        -Scenarios sea_tempest
         -EnforceThresholds
     DEPENDS ValCraft
     USES_TERMINAL
@@ -396,6 +500,7 @@ add_custom_target(valcraft_perf_suite
     COMMAND ${VALCRAFT_POWERSHELL_EXECUTABLE} -ExecutionPolicy Bypass -File
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
         -BuildDir ${CMAKE_BINARY_DIR}
+        -Configuration $<CONFIG>
         -NoConfigure
         -NoBuild
         -EnforceThresholds

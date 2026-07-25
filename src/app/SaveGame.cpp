@@ -24,7 +24,8 @@ namespace valcraft {
 namespace {
 
 constexpr std::array<char, 8> kSaveMagic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
-constexpr std::uint32_t kSaveVersion = 10;
+constexpr std::uint32_t kSaveVersion = 11;
+constexpr std::uint32_t kSaveVersionOldGuard = 11;
 constexpr std::uint32_t kSaveVersionSeaDeparture = 10;
 constexpr std::uint32_t kSaveVersionShipCrew = 9;
 constexpr std::uint32_t kSaveVersionCompactWorldOverrides = 8;
@@ -43,10 +44,12 @@ constexpr float kMaxSavedWorldCoordinateMagnitude = 1'000'000.0F;
 
 static_assert(kChunkSizeX > 0 && kChunkSizeZ > 0);
 static_assert(kShipCrewMemberCount == 6U, "Changer le roster v9 exige une nouvelle version de sauvegarde");
+static_assert(kOldGuardMemberCount == 6U, "Changer le roster v11 exige une nouvelle version de sauvegarde");
 static_assert(sizeof(std::underlying_type_t<ShipCrewRole>) == sizeof(std::uint8_t));
 static_assert(sizeof(std::underlying_type_t<ShipCrewActivity>) == sizeof(std::uint8_t));
 static_assert(sizeof(std::underlying_type_t<ShipCrewCargo>) == sizeof(std::uint8_t));
 static_assert(sizeof(std::underlying_type_t<ShipCrewStation>) == sizeof(std::uint8_t));
+static_assert(sizeof(std::underlying_type_t<OldGuardAction>) == sizeof(std::uint8_t));
 
 constexpr int kMinSafeSavedChunkX =
     (std::numeric_limits<int>::lowest)() / kChunkSizeX + kSavedChunkNeighborMargin;
@@ -449,6 +452,59 @@ auto read_ship_crew_state(BinaryReader& reader, ShipCrewSaveState& state) -> boo
     return true;
 }
 
+void write_old_guard_member(BinaryWriter& writer,
+                            const OldGuardMemberSaveState& member) {
+    write_vec3(writer, member.local_position);
+    writer.write_value(member.yaw_radians);
+    writer.write_value(member.animation_time);
+    writer.write_value(member.action_time);
+    writer.write_value(member.reload_remaining);
+    writer.write_value(member.bayonet_cooldown);
+    writer.write_value(member.id);
+    writer.write_value(member.route_index);
+    writer.write_value(member.route_step);
+    write_enum(writer, member.action);
+    write_bool(writer, member.musket_loaded);
+}
+
+auto read_old_guard_member(BinaryReader& reader,
+                           OldGuardMemberSaveState& member) -> bool {
+    return read_vec3(reader, member.local_position) &&
+           reader.read_value(member.yaw_radians) &&
+           reader.read_value(member.animation_time) &&
+           reader.read_value(member.action_time) &&
+           reader.read_value(member.reload_remaining) &&
+           reader.read_value(member.bayonet_cooldown) &&
+           reader.read_value(member.id) &&
+           reader.read_value(member.route_index) &&
+           reader.read_value(member.route_step) &&
+           read_enum(reader, member.action) &&
+           read_bool(reader, member.musket_loaded);
+}
+
+void write_old_guard_state(BinaryWriter& writer,
+                           const OldGuardSaveState& state) {
+    write_bool(writer, state.initialized);
+    writer.write_value(state.patrol_revision);
+    for (const auto& member : state.members) {
+        write_old_guard_member(writer, member);
+    }
+}
+
+auto read_old_guard_state(BinaryReader& reader,
+                          OldGuardSaveState& state) -> bool {
+    if (!read_bool(reader, state.initialized) ||
+        !reader.read_value(state.patrol_revision)) {
+        return false;
+    }
+    for (auto& member : state.members) {
+        if (!read_old_guard_member(reader, member)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void write_sea_adventure_state(BinaryWriter& writer, const SeaAdventureSaveState& state) {
     const auto sanitized = sanitize_sea_adventure_save_state(state);
     write_bool(writer, sanitized.active);
@@ -474,6 +530,9 @@ void write_sea_adventure_state(BinaryWriter& writer, const SeaAdventureSaveState
     write_ship_crew_state(writer, sanitized.crew);
     write_enum(writer, sanitized.voyage_phase);
     writer.write_value(sanitized.voyage_phase_elapsed);
+    // Je place l'extension v11 apres le payload maritime v10 afin que les
+    // offsets et lecteurs historiques restent reproductibles.
+    write_old_guard_state(writer, sanitized.old_guard);
 }
 
 auto read_sea_adventure_state(BinaryReader& reader,
@@ -516,6 +575,10 @@ auto read_sea_adventure_state(BinaryReader& reader,
         // ajoute ni port retroactif, ni nouvelle attente au quai.
         raw.voyage_phase = SeaVoyagePhase::Underway;
         raw.voyage_phase_elapsed = 0.0F;
+    }
+    if (version >= kSaveVersionOldGuard &&
+        !read_old_guard_state(reader, raw.old_guard)) {
+        return false;
     }
 
     // Je normalise aussi a la frontiere binaire pour qu'un payload ancien ou

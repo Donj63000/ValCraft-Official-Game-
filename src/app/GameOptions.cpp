@@ -1,4 +1,5 @@
 #include "app/GameOptions.h"
+#include "world/Environment.h"
 
 #include <charconv>
 #include <cmath>
@@ -160,6 +161,17 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 return make_error("Invalid value for --initial-time");
             }
             result.options.initial_time_of_day = parsed_value;
+            continue;
+        }
+        if (argument.starts_with("--initial-weather-time=")) {
+            constexpr auto prefix = std::string_view {"--initial-weather-time="};
+            float parsed_value = 0.0F;
+            if (!parse_number(argument.substr(prefix.size()), parsed_value) ||
+                parsed_value < 0.0F ||
+                parsed_value > kMaximumWeatherTimeSeconds) {
+                return make_error("Invalid value for --initial-weather-time");
+            }
+            result.options.initial_weather_time_seconds = parsed_value;
             continue;
         }
         if (argument.starts_with("--ui-preview=")) {

@@ -1,13 +1,17 @@
 #include "app/GameBranding.h"
 #include "render/Renderer.h"
+#include "gameplay/SeaAdventure.h"
 #include "render/ItemDropGeometry.h"
 #include "render/SceneSamplerBindings.h"
 #include "render/ShipMesh.h"
+#include "render/ShipProtectionShaderSource.h"
 #include "render/ShadowCulling.h"
 #include "render/SkyShaderSource.h"
 #include "creatures/CreatureGeometry.h"
+#include "creatures/OldGuardGeometry.h"
 #include "render/HotbarLayout.h"
 #include "world/BlockVisuals.h"
+#include "world/OceanAdventureLayout.h"
 #include "world/OceanSimulation.h"
 
 #include <glm/common.hpp>
@@ -26,6 +30,7 @@
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -47,9 +52,16 @@ constexpr std::size_t kCreatureMaxRenderedCount = 12U;
 constexpr auto kInitialCreatureInstanceBufferBytes =
     static_cast<GLsizeiptr>(sizeof(CreaturePartInstance) *
                            (kCreatureMaxBoxBudget * kCreatureMaxRenderedCount +
-                            kCrewVisualPartBudget * kCrewVisualRenderCapacity));
+                            kCrewVisualPartBudget * kCrewVisualRenderCapacity +
+                            kOldGuardVisualPartBudget * kOldGuardMemberCount));
 constexpr auto kInitialItemDropInstanceBufferBytes =
     static_cast<GLsizeiptr>(sizeof(ItemDropGpuInstance) * 512U);
+constexpr auto kInitialPrecipitationInstanceBufferBytes =
+    static_cast<GLsizeiptr>(sizeof(float) * 12U * (6000U + 96U));
+constexpr auto kInitialOldGuardEffectInstanceBufferBytes =
+    static_cast<GLsizeiptr>(
+        sizeof(OldGuardMuzzleFlashInstance) * kOldGuardFlashCapacity +
+        sizeof(OldGuardSmokeInstance) * kOldGuardSmokeCapacity);
 constexpr auto kInitialHudBufferBytes = static_cast<GLsizeiptr>(sizeof(float) * 9U * 6U * 32U);
 constexpr std::size_t kMaxGpuMeshEventsPerFrame = 8;
 constexpr double kMaxGpuMeshSyncMsPerFrame = 1.0;
@@ -132,6 +144,270 @@ auto color_target_format(const RendererQualitySettings& quality_settings) noexce
         return {};
     }
     return {GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV};
+}
+
+auto finite_vec3(const glm::vec3& value) noexcept -> bool {
+    return std::isfinite(value.x) &&
+           std::isfinite(value.y) &&
+           std::isfinite(value.z);
+}
+
+auto finite_matrix(const glm::mat4& value) noexcept -> bool {
+    for (glm::length_t column = 0; column < 4; ++column) {
+        for (glm::length_t row = 0; row < 4; ++row) {
+            if (!std::isfinite(value[column][row])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+auto finite_saturate(float value) noexcept -> float {
+    return std::isfinite(value)
+               ? std::clamp(
+                     value,
+                     0.0F,
+                     1.0F)
+               : 0.0F;
+}
+
+auto safe_direction(
+    const glm::vec3& direction,
+    const glm::vec3& fallback) noexcept
+    -> glm::vec3 {
+    if (!finite_vec3(direction)) {
+        return fallback;
+    }
+    const auto length_squared =
+        glm::dot(
+            direction,
+            direction);
+    if (!std::isfinite(length_squared) ||
+        length_squared <= 1.0e-6F) {
+        return fallback;
+    }
+    return direction /
+           std::sqrt(
+               length_squared);
+}
+
+auto sanitize_weather_for_rendering(
+    const EnvironmentState& source) noexcept
+    -> EnvironmentState {
+    auto state = source;
+    state.cloud_intensity =
+        finite_saturate(
+            source.cloud_intensity);
+    state.overcast_intensity =
+        finite_saturate(
+            source.overcast_intensity);
+    state.precipitation_intensity =
+        finite_saturate(
+            source.precipitation_intensity);
+    state.storm_intensity =
+        finite_saturate(
+            source.storm_intensity);
+    state.violent_storm_intensity =
+        finite_saturate(
+            source.violent_storm_intensity);
+    state.lightning_intensity =
+        finite_saturate(
+            source.lightning_intensity);
+    state.lightning_bolt_intensity =
+        finite_saturate(
+            source.lightning_bolt_intensity);
+    state.lightning_shape_seed =
+        finite_saturate(
+            source.lightning_shape_seed);
+    state.weather_transition_factor =
+        finite_saturate(
+            source.weather_transition_factor);
+    state.cloud_shadow_strength =
+        finite_saturate(
+            source.cloud_shadow_strength);
+    state.wind_strength =
+        finite_saturate(
+            source.wind_strength);
+    state.weather_time_seconds =
+        std::isfinite(
+            source.weather_time_seconds)
+            ? std::max(
+                  source.weather_time_seconds,
+                  0.0F)
+            : 0.0F;
+    state.lightning_direction =
+        safe_direction(
+            source.lightning_direction,
+            {0.0F, 0.35F, 0.93675F});
+    state.sun_direction =
+        safe_direction(
+            source.sun_direction,
+            {0.0F, 1.0F, 0.0F});
+
+    const auto wind_length_squared =
+        glm::dot(
+            source.wind_direction_xz,
+            source.wind_direction_xz);
+    state.wind_direction_xz =
+        std::isfinite(
+            source.wind_direction_xz.x) &&
+                std::isfinite(
+                    source.wind_direction_xz.y) &&
+                std::isfinite(
+                    wind_length_squared) &&
+                wind_length_squared > 1.0e-6F
+            ? source.wind_direction_xz /
+                  std::sqrt(
+                      wind_length_squared)
+            : glm::vec2 {0.0F, 1.0F};
+    return state;
+}
+
+struct ScopedPrecipitationGlState {
+    GLboolean depth_test_enabled = GL_FALSE;
+    GLboolean cull_face_enabled = GL_FALSE;
+    GLboolean blend_enabled = GL_FALSE;
+    GLboolean depth_write_enabled = GL_TRUE;
+    GLint blend_source_rgb = GL_ONE;
+    GLint blend_destination_rgb = GL_ZERO;
+    GLint blend_source_alpha = GL_ONE;
+    GLint blend_destination_alpha = GL_ZERO;
+    GLint current_program = 0;
+    GLint vertex_array = 0;
+    GLint array_buffer = 0;
+
+    ScopedPrecipitationGlState() noexcept {
+        depth_test_enabled = glIsEnabled(GL_DEPTH_TEST);
+        cull_face_enabled = glIsEnabled(GL_CULL_FACE);
+        blend_enabled = glIsEnabled(GL_BLEND);
+        glGetBooleanv(
+            GL_DEPTH_WRITEMASK,
+            &depth_write_enabled);
+        glGetIntegerv(
+            GL_BLEND_SRC_RGB,
+            &blend_source_rgb);
+        glGetIntegerv(
+            GL_BLEND_DST_RGB,
+            &blend_destination_rgb);
+        glGetIntegerv(
+            GL_BLEND_SRC_ALPHA,
+            &blend_source_alpha);
+        glGetIntegerv(
+            GL_BLEND_DST_ALPHA,
+            &blend_destination_alpha);
+        glGetIntegerv(
+            GL_CURRENT_PROGRAM,
+            &current_program);
+        glGetIntegerv(
+            GL_VERTEX_ARRAY_BINDING,
+            &vertex_array);
+        glGetIntegerv(
+            GL_ARRAY_BUFFER_BINDING,
+            &array_buffer);
+    }
+
+    ScopedPrecipitationGlState(
+        const ScopedPrecipitationGlState&) = delete;
+    auto operator=(
+        const ScopedPrecipitationGlState&)
+        -> ScopedPrecipitationGlState& = delete;
+
+    ~ScopedPrecipitationGlState() noexcept {
+        // Je restitue chaque etat que la passe modifie afin que les objets
+        // suivants ne dependent jamais d'une hypothese sur l'etat precedent.
+        set_capability(
+            GL_DEPTH_TEST,
+            depth_test_enabled);
+        set_capability(
+            GL_CULL_FACE,
+            cull_face_enabled);
+        set_capability(
+            GL_BLEND,
+            blend_enabled);
+        glDepthMask(
+            depth_write_enabled);
+        glBlendFuncSeparate(
+            static_cast<GLenum>(
+                blend_source_rgb),
+            static_cast<GLenum>(
+                blend_destination_rgb),
+            static_cast<GLenum>(
+                blend_source_alpha),
+            static_cast<GLenum>(
+                blend_destination_alpha));
+        glUseProgram(
+            static_cast<GLuint>(
+                current_program));
+        glBindVertexArray(
+            static_cast<GLuint>(
+                vertex_array));
+        glBindBuffer(
+            GL_ARRAY_BUFFER,
+            static_cast<GLuint>(
+                array_buffer));
+    }
+
+private:
+    static void set_capability(
+        GLenum capability,
+        GLboolean enabled) noexcept {
+        if (enabled == GL_TRUE) {
+            glEnable(
+                capability);
+        } else {
+            glDisable(
+                capability);
+        }
+    }
+};
+
+auto ship_protection_is_renderable(const ShipRenderState& ship) noexcept -> bool {
+    if (!ship.visible ||
+        ship.blueprint == nullptr ||
+        !finite_matrix(ship.model_matrix) ||
+        !finite_vec3(ship.world_bounds.min) ||
+        !finite_vec3(ship.world_bounds.max)) {
+        return false;
+    }
+    const auto& profile = ship.blueprint->protection_profile;
+    return profile.maximum_half_width > 0.0F &&
+           profile.stern_z < profile.bow_z &&
+           profile.lower_hull_min_y < profile.main_deck_top_y;
+}
+
+auto ray_aabb_entry_distance(const glm::vec3& origin,
+                             const glm::vec3& direction,
+                             const glm::vec3& min_corner,
+                             const glm::vec3& max_corner,
+                             float max_distance) noexcept
+    -> std::optional<float> {
+    auto entry = 0.0F;
+    auto exit = max_distance;
+    for (glm::length_t axis = 0; axis < 3; ++axis) {
+        if (std::abs(direction[axis]) <= 1.0e-6F) {
+            if (origin[axis] < min_corner[axis] ||
+                origin[axis] > max_corner[axis]) {
+                return std::nullopt;
+            }
+            continue;
+        }
+
+        const auto inverse_direction = 1.0F / direction[axis];
+        auto first = (min_corner[axis] - origin[axis]) * inverse_direction;
+        auto second = (max_corner[axis] - origin[axis]) * inverse_direction;
+        if (first > second) {
+            std::swap(first, second);
+        }
+        entry = std::max(entry, first);
+        exit = std::min(exit, second);
+        if (entry > exit) {
+            return std::nullopt;
+        }
+    }
+    return entry >= 0.0F && entry <= max_distance
+               ? std::optional<float> {entry}
+               : std::nullopt;
 }
 
 void orphan_bound_buffer(GLenum target, GLsizeiptr capacity, GLenum usage = GL_STREAM_DRAW) {
@@ -615,6 +891,9 @@ auto glyph_rows(char character) -> std::array<std::uint8_t, 7> {
     case '?': return {{0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}};
     case '.': return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06}};
     case '-': return {{0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}};
+    case '/': return {{0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10}};
+    case '>': return {{0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10}};
+    case '_': return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F}};
     default: return {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
     }
 }
@@ -2270,6 +2549,8 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
         create_scene_sampler_fallback_textures();
         create_creature_geometry();
         create_item_drop_geometry();
+        create_precipitation_geometry();
+        create_old_guard_effect_geometry();
         create_hud_geometry();
         create_screen_quad_geometry();
         create_crosshair_geometry();
@@ -2356,11 +2637,35 @@ void Renderer::shutdown() {
         if (item_drop_vao_ != 0) {
             glDeleteVertexArrays(1, &item_drop_vao_);
         }
+        if (precipitation_instance_vbo_ != 0) {
+            glDeleteBuffers(1, &precipitation_instance_vbo_);
+        }
+        if (precipitation_vbo_ != 0) {
+            glDeleteBuffers(1, &precipitation_vbo_);
+        }
+        if (precipitation_vao_ != 0) {
+            glDeleteVertexArrays(1, &precipitation_vao_);
+        }
+        if (old_guard_effect_instance_vbo_ != 0) {
+            glDeleteBuffers(1, &old_guard_effect_instance_vbo_);
+        }
+        if (old_guard_effect_vbo_ != 0) {
+            glDeleteBuffers(1, &old_guard_effect_vbo_);
+        }
+        if (old_guard_effect_vao_ != 0) {
+            glDeleteVertexArrays(1, &old_guard_effect_vao_);
+        }
         if (world_program_ != 0) {
             glDeleteProgram(world_program_);
         }
         if (item_drop_program_ != 0) {
             glDeleteProgram(item_drop_program_);
+        }
+        if (precipitation_program_ != 0) {
+            glDeleteProgram(precipitation_program_);
+        }
+        if (old_guard_effect_program_ != 0) {
+            glDeleteProgram(old_guard_effect_program_);
         }
         if (creature_program_ != 0) {
             glDeleteProgram(creature_program_);
@@ -2402,6 +2707,7 @@ void Renderer::shutdown() {
     shadow_chunks_cache_.clear();
     visible_creatures_cache_.clear();
     visible_crew_cache_.clear();
+    visible_old_guard_cache_.clear();
     screen_quad_vao_ = 0;
     crosshair_vbo_ = 0;
     crosshair_vao_ = 0;
@@ -2428,8 +2734,16 @@ void Renderer::shutdown() {
     item_drop_vbo_ = 0;
     item_drop_ebo_ = 0;
     item_drop_instance_vbo_ = 0;
+    precipitation_vao_ = 0;
+    precipitation_vbo_ = 0;
+    precipitation_instance_vbo_ = 0;
+    old_guard_effect_vao_ = 0;
+    old_guard_effect_vbo_ = 0;
+    old_guard_effect_instance_vbo_ = 0;
     world_program_ = 0;
     item_drop_program_ = 0;
+    precipitation_program_ = 0;
+    old_guard_effect_program_ = 0;
     creature_program_ = 0;
     creature_shadow_program_ = 0;
     shadow_program_ = 0;
@@ -2448,12 +2762,16 @@ void Renderer::shutdown() {
     hud_uniforms_ = {};
     sky_uniforms_ = {};
     post_process_uniforms_ = {};
+    precipitation_uniforms_ = {};
+    old_guard_effect_uniforms_ = {};
     glow_extract_uniforms_ = {};
     glow_blur_uniforms_ = {};
     menu_background_uniforms_ = {};
     creature_instance_buffer_bytes_ = 0;
     viewmodel_instance_buffer_bytes_ = 0;
     item_drop_instance_buffer_bytes_ = 0;
+    precipitation_instance_buffer_bytes_ = 0;
+    old_guard_effect_instance_buffer_bytes_ = 0;
     hud_vertex_buffer_bytes_ = 0;
     last_frame_stats_ = {};
     water_scene_target_width_ = 0;
@@ -2466,10 +2784,14 @@ void Renderer::shutdown() {
     scene_color_internal_format_ = 0;
     glow_color_internal_format_ = 0;
     translated_water_indices_scratch_.clear();
+    precipitation_field_.clear();
+    precipitation_instances_scratch_.clear();
+    old_guard_effect_instances_scratch_.clear();
     chunk_upload_scratch_ = {};
     block_break_overlay_scratch_ = {};
     loading_vertices_scratch_.clear();
     gameplay_announcement_vertices_scratch_.clear();
+    command_console_vertices_scratch_.clear();
     last_gpu_timings_ = {};
     gpu_frame_index_ = 0;
     adaptive_last_gpu_source_frame_ = 0;
@@ -2505,6 +2827,7 @@ void Renderer::render_frame(World& world,
                             bool super_vision_active,
                             const GameplayHudAnnouncementView& gameplay_announcement,
                             const MaritimeHudView& maritime_hud,
+                            const CommandConsoleView& command_console,
                             const EnvironmentState& environment,
                             int width,
                             int height) {
@@ -2521,12 +2844,16 @@ void Renderer::render_frame(World& world,
         confirm_dialog,
         creatures,
         std::span<const CrewRenderInstance> {},
+        std::span<const OldGuardRenderInstance> {},
+        std::span<const OldGuardMuzzleFlashInstance> {},
+        std::span<const OldGuardSmokeInstance> {},
         item_drops,
         ship,
         progression,
         super_vision_active,
         gameplay_announcement,
         maritime_hud,
+        command_console,
         environment,
         width,
         height);
@@ -2544,19 +2871,26 @@ void Renderer::render_frame(World& world,
                             const ConfirmDialogState& confirm_dialog,
                             std::span<const CreatureRenderInstance> creatures,
                             std::span<const CrewRenderInstance> crew,
+                            std::span<const OldGuardRenderInstance> old_guard,
+                            std::span<const OldGuardMuzzleFlashInstance> old_guard_flashes,
+                            std::span<const OldGuardSmokeInstance> old_guard_smoke,
                             std::span<const ItemDropRenderInstance> item_drops,
                             const ShipRenderState& ship,
                             const PlayerProgressionState& progression,
                             bool super_vision_active,
                             const GameplayHudAnnouncementView& gameplay_announcement,
                             const MaritimeHudView& maritime_hud,
-                            const EnvironmentState& environment,
+                            const CommandConsoleView& command_console,
+                            const EnvironmentState& raw_environment,
                             int width,
                             int height) {
     if (!initialized_) {
         return;
     }
 
+    const auto environment =
+        sanitize_weather_for_rendering(
+            raw_environment);
     using clock = std::chrono::steady_clock;
     RendererFrameStats frame_stats {};
     frame_draw_calls_ = 0U;
@@ -2597,8 +2931,14 @@ void Renderer::render_frame(World& world,
     const auto quality_settings =
         active_quality_settings_;
 
+    const auto ocean_profile =
+        OceanSimulation::surface_profile_for_world(
+            world.generation_profile());
+
     const auto ocean =
-        OceanSimulation::evaluate(environment);
+        OceanSimulation::evaluate(
+            environment,
+            ocean_profile);
 
     std::array<glm::vec4, kOceanMaxWaveCount>
         ocean_wave_uniforms {};
@@ -2645,6 +2985,7 @@ void Renderer::render_frame(World& world,
         0.02F,
         8.0F);
     const auto view = player.view_matrix();
+    const auto inverse_view = glm::inverse(view);
     const auto view_projection = projection * view;
     const glm::mat4 identity_model {1.0F};
     auto sky_view = view;
@@ -2818,7 +3159,12 @@ void Renderer::render_frame(World& world,
             record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
             glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
         }
-        draw_creature_shadows(creatures, crew, light_view_projection, shadow_context.focus);
+        draw_creature_shadows(
+            creatures,
+            crew,
+            old_guard,
+            light_view_projection,
+            shadow_context.focus);
 
         glDisable(GL_POLYGON_OFFSET_FILL);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2860,6 +3206,7 @@ void Renderer::render_frame(World& world,
     begin_gpu_pass(GpuTimedPass::Opaque);
 
     glUseProgram(world_program_);
+    upload_world_ship_protection(ship);
     glUniform4fv(
         world_uniforms_.ocean_waves,
         static_cast<GLsizei>(
@@ -2898,6 +3245,16 @@ void Renderer::render_frame(World& world,
     glUniform1f(
         world_uniforms_.ocean_severity,
         ocean.severity);
+
+    glUniform1f(
+        world_uniforms_.ocean_tempest_factor,
+        ocean.tempest_factor);
+
+    glUniform1f(
+        world_uniforms_.ocean_open_sea,
+        ocean_profile == OceanSurfaceProfile::OpenSea
+            ? 1.0F
+            : 0.0F);
 
     glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
@@ -2982,6 +3339,7 @@ void Renderer::render_frame(World& world,
     draw_creatures(
         creatures,
         crew,
+        old_guard,
         view_projection,
         light_view_projection,
         eye,
@@ -2994,8 +3352,8 @@ void Renderer::render_frame(World& world,
     draw_sky(inverse_sky_view_projection, environment, quality_settings);
     end_gpu_pass(GpuTimedPass::Sky);
 
+    begin_gpu_pass(GpuTimedPass::Water);
     if (has_visible_water) {
-        begin_gpu_pass(GpuTimedPass::Water);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, final_target_framebuffer);
         glBlitFramebuffer(
@@ -3047,8 +3405,24 @@ void Renderer::render_frame(World& world,
 
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
-        end_gpu_pass(GpuTimedPass::Water);
     }
+
+    draw_precipitation(
+        view_projection,
+        inverse_view,
+        eye,
+        environment,
+        ocean,
+        ship,
+        quality_settings,
+        frame_stats);
+    draw_old_guard_effects(
+        old_guard_flashes,
+        old_guard_smoke,
+        view_projection,
+        inverse_view,
+        eye);
+    end_gpu_pass(GpuTimedPass::Water);
 
     draw_block_break_overlay(player);
 
@@ -3062,13 +3436,30 @@ void Renderer::render_frame(World& world,
             environment);
     }
 
+    auto camera_weather_exposure = 1.0F;
+    if (ship_protection_is_renderable(ship)) {
+        const auto local_eye =
+            glm::vec3 {
+                glm::inverse(ship.model_matrix) *
+                glm::vec4 {eye, 1.0F},
+            };
+        if (ship.blueprint->protection_profile
+                .shelters_from_weather_local(local_eye)) {
+            camera_weather_exposure = 0.0F;
+        }
+    }
+
     begin_gpu_pass(GpuTimedPass::PostProcess);
     if (menu_preview_visible) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         run_menu_background_pass(render_width, render_height);
     } else if (use_post_process) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        run_post_process(environment, render_width, render_height);
+        run_post_process(
+            environment,
+            camera_weather_exposure,
+            render_width,
+            render_height);
     } else if (has_visible_water) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_framebuffer_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -3111,6 +3502,10 @@ void Renderer::render_frame(World& world,
     if (confirm_dialog.visible) {
         draw_confirm_dialog(confirm_dialog, width, height);
     }
+    draw_command_console(
+        command_console,
+        width,
+        height);
     end_gpu_pass(GpuTimedPass::Ui);
     end_gpu_frame();
     frame_stats.world_ms = std::chrono::duration<double, std::milli>(clock::now() - world_start).count();
@@ -3746,6 +4141,22 @@ auto Renderer::estimate_gpu_buffer_bytes() const noexcept -> std::uint64_t {
     if (item_drop_instance_vbo_ != 0) {
         total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(item_drop_instance_buffer_bytes_, 0));
     }
+    if (precipitation_vbo_ != 0) {
+        total += sizeof(float) * 8U;
+    }
+    if (precipitation_instance_vbo_ != 0) {
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(precipitation_instance_buffer_bytes_, 0));
+    }
+    if (old_guard_effect_vbo_ != 0) {
+        total += sizeof(float) * 8U;
+    }
+    if (old_guard_effect_instance_vbo_ != 0) {
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(
+                old_guard_effect_instance_buffer_bytes_,
+                0));
+    }
     if (hud_vbo_ != 0) {
         total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(hud_vertex_buffer_bytes_, 0));
     }
@@ -4226,6 +4637,113 @@ void Renderer::destroy_gpu_mesh(GpuMesh& mesh) {
     mesh.index_buffer_bytes = 0;
 }
 
+void Renderer::upload_world_ship_protection(const ShipRenderState& ship) {
+    const auto enabled = ship_protection_is_renderable(ship);
+    glUniform1i(
+        world_uniforms_.ship_protection_enabled,
+        enabled ? 1 : 0);
+    if (!enabled) {
+        return;
+    }
+
+    const auto inverse_model = glm::inverse(ship.model_matrix);
+    const auto& profile = ship.blueprint->protection_profile;
+    glUniformMatrix4fv(
+        world_uniforms_.ship_inverse_model,
+        1,
+        GL_FALSE,
+        glm::value_ptr(inverse_model));
+    glUniform3fv(
+        world_uniforms_.ship_bounds_min,
+        1,
+        glm::value_ptr(ship.world_bounds.min));
+    glUniform3fv(
+        world_uniforms_.ship_bounds_max,
+        1,
+        glm::value_ptr(ship.world_bounds.max));
+    glUniform4f(
+        world_uniforms_.ship_profile_longitudinal,
+        profile.stern_z,
+        profile.bow_z,
+        profile.maximum_half_width,
+        profile.boundary_margin);
+    glUniform4f(
+        world_uniforms_.ship_profile_taper,
+        profile.stern_width_loss,
+        profile.bow_width_loss,
+        profile.stern_taper_exponent,
+        profile.bow_taper_exponent);
+    glUniform4f(
+        world_uniforms_.ship_profile_heights,
+        profile.lower_hull_min_y,
+        profile.middle_hull_min_y,
+        profile.upper_hull_min_y,
+        profile.main_deck_top_y);
+    glUniform4f(
+        world_uniforms_.ship_profile_widths,
+        profile.lower_width_inset,
+        profile.middle_width_inset,
+        profile.lower_minimum_half_width,
+        profile.middle_minimum_half_width);
+    glUniform1f(
+        world_uniforms_.ship_sheltered_floor,
+        profile.sheltered_floor_y);
+}
+
+void Renderer::upload_precipitation_ship_protection(
+    const ShipRenderState& ship) {
+    const auto enabled = ship_protection_is_renderable(ship);
+    glUniform1i(
+        precipitation_uniforms_.ship_protection_enabled,
+        enabled ? 1 : 0);
+    if (!enabled) {
+        return;
+    }
+
+    const auto inverse_model = glm::inverse(ship.model_matrix);
+    const auto& profile = ship.blueprint->protection_profile;
+    glUniformMatrix4fv(
+        precipitation_uniforms_.ship_inverse_model,
+        1,
+        GL_FALSE,
+        glm::value_ptr(inverse_model));
+    glUniform3fv(
+        precipitation_uniforms_.ship_bounds_min,
+        1,
+        glm::value_ptr(ship.world_bounds.min));
+    glUniform3fv(
+        precipitation_uniforms_.ship_bounds_max,
+        1,
+        glm::value_ptr(ship.world_bounds.max));
+    glUniform4f(
+        precipitation_uniforms_.ship_profile_longitudinal,
+        profile.stern_z,
+        profile.bow_z,
+        profile.maximum_half_width,
+        profile.boundary_margin);
+    glUniform4f(
+        precipitation_uniforms_.ship_profile_taper,
+        profile.stern_width_loss,
+        profile.bow_width_loss,
+        profile.stern_taper_exponent,
+        profile.bow_taper_exponent);
+    glUniform4f(
+        precipitation_uniforms_.ship_profile_heights,
+        profile.lower_hull_min_y,
+        profile.middle_hull_min_y,
+        profile.upper_hull_min_y,
+        profile.main_deck_top_y);
+    glUniform4f(
+        precipitation_uniforms_.ship_profile_widths,
+        profile.lower_width_inset,
+        profile.middle_width_inset,
+        profile.lower_minimum_half_width,
+        profile.middle_minimum_half_width);
+    glUniform1f(
+        precipitation_uniforms_.ship_sheltered_floor,
+        profile.sheltered_floor_y);
+}
+
 auto Renderer::compile_shader(GLenum type, const char* source) -> GLuint {
     const auto shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -4325,8 +4843,6 @@ void sample_ocean(
     gradient = vec2(0.0);
     crest = 0.0;
 
-    float amplitude_sum = 0.0;
-
     // La boucle possède une limite compile-time compatible OpenGL 3.3.
     // u_ocean_wave_count sélectionne le niveau de qualité.
     for (int index = 0; index < 6; ++index) {
@@ -4369,20 +4885,24 @@ void sample_ocean(
         gradient +=
             direction * derivative;
 
-        crest +=
-            amplitude *
-            (0.5 + 0.5 * sine);
+        // Je garde la crete dominante : la moyenne des six directions
+        // supprimait les lignes de houle visibles lorsque la mer etait calme.
+        float normalized_wave_height =
+            clamp(
+                0.5 +
+                    0.5 *
+                        (sine +
+                         harmonic * double_sine) /
+                        (1.0 + harmonic),
+                0.0,
+                1.0);
 
-        amplitude_sum += amplitude;
+        crest = max(
+            crest,
+            normalized_wave_height *
+                normalized_wave_height *
+                normalized_wave_height);
     }
-
-    crest =
-        amplitude_sum > 0.000001
-            ? clamp(
-                  crest / amplitude_sum,
-                  0.0,
-                  1.0)
-            : 0.0;
 }
 
 vec2 vegetation_wind_offset(vec3 world_position, float material_class, float time_phase) {
@@ -4582,6 +5102,8 @@ uniform float u_ocean_foam_threshold;
 uniform float u_ocean_detail_strength;
 uniform float u_ocean_detail_phase;
 uniform float u_ocean_severity;
+uniform float u_ocean_tempest_factor;
+uniform float u_ocean_open_sea;
 
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadow_map;
@@ -4610,6 +5132,7 @@ uniform float u_super_vision_strength;
 uniform int u_shadows_enabled;
 
 out vec4 frag_color;
+)" VALCRAFT_SHIP_PROTECTION_GLSL_SOURCE R"(
 
 float material_mask(float material, float expected) {
     return 1.0 - step(0.25, abs(material - expected));
@@ -4712,6 +5235,28 @@ vec2 water_detail_gradient(
         d_height_dz);
 }
 
+vec2 rain_dimple_gradient(
+    vec2 world_xz,
+    float time_phase
+) {
+    float rain = clamp(u_precipitation_intensity, 0.0, 1.0);
+    if (rain <= 0.001) {
+        return vec2(0.0);
+    }
+
+    vec2 cell_position = world_xz * 1.85;
+    vec2 cell = floor(cell_position);
+    vec2 local = fract(cell_position) - vec2(0.5);
+    float random_phase = hash12(cell + vec2(43.0, 17.0));
+    float age = fract(time_phase * 0.42 + random_phase);
+    float radius = length(local);
+    float front = age * 0.58;
+    float ring = exp(-pow((radius - front) * 22.0, 2.0));
+    float pulse = cos((radius - front) * 46.0) * (1.0 - age);
+    vec2 direction = local / max(radius, 0.035);
+    return direction * ring * pulse * rain * 0.085;
+}
+
 vec3 reconstruct_world_position(vec2 screen_uv, float depth_sample) {
     vec4 clip_position = vec4(screen_uv * 2.0 - 1.0, depth_sample * 2.0 - 1.0, 1.0);
     vec4 world_position = u_inverse_view_projection * clip_position;
@@ -4744,7 +5289,24 @@ float ordered_alpha_threshold(vec2 pixel_position) {
 
 void main() {
     float water_mask = material_mask(v_material_class, 6.0);
-    float water_surface_mask = water_mask * clamp(v_wave_weight * max(v_normal.y, 0.0), 0.0, 1.0);
+    if (water_mask > 0.5 &&
+        ship_excludes_ocean(v_world_position)) {
+        // Je supprime l'ocean avant toute lecture de refraction afin que la
+        // coque reste etanche sans payer le shader d'eau sous le navire.
+        discard;
+    }
+    float weather_exposure =
+        ship_shelters_weather(v_world_position)
+            ? 0.0
+            : 1.0;
+    // Je separe le masque de surface du poids de houle : les eaux locales
+    // gardent leurs petites normales animees sans subir le deplacement marin.
+    float water_surface_mask =
+        water_mask *
+        clamp(
+            max(v_normal.y, 0.0),
+            0.0,
+            1.0);
 
     // Je ne decale pas les UV partages de l'atlas dans le fragment pour eviter
     // d'echantillonner les sprites transparents voisins et d'ouvrir des trous.
@@ -4775,6 +5337,9 @@ void main() {
                 v_world_position.xz,
                 u_ocean_detail_phase);
         }
+        detail_gradient += rain_dimple_gradient(
+            v_world_position.xz,
+            u_ocean_detail_phase);
 
         vec3 ocean_normal = normalize(
             vec3(
@@ -4791,6 +5356,7 @@ void main() {
     if (!gl_FrontFacing && water_mask > 0.5) {
         normal = -normal;
     }
+)" R"(
 
     vec3 view_direction = normalize(u_camera_position - v_world_position);
     vec3 sun_direction = normalize(u_sun_direction);
@@ -4921,6 +5487,11 @@ void main() {
         vec3 shallow_color = mix(vec3(0.07, 0.20, 0.26), vec3(0.10, 0.42, 0.55), daylight);
         vec3 deep_color = mix(vec3(0.02, 0.08, 0.13), vec3(0.04, 0.19, 0.30), daylight);
         vec3 water_volume_color = mix(shallow_color, deep_color, smoothstep(0.25, 6.0, body_depth));
+        float tempest_factor = clamp(u_ocean_tempest_factor, 0.0, 1.0);
+        water_volume_color = mix(
+            water_volume_color,
+            water_volume_color * vec3(0.54, 0.66, 0.72),
+            tempest_factor * 0.34);
         vec3 water_light = ambient * 0.82 + bounce_light * 0.95 + sunlight * 0.40 + torch_light * 0.55;
         vec3 water_body = scene_color * transmittance + water_volume_color * water_light * (1.0 - transmittance);
 
@@ -4930,9 +5501,12 @@ void main() {
         sky_reflection = mix(sky_reflection, u_sun_color, 0.08 + 0.10 * daylight);
 
         vec3 sun_reflection = reflect(-sun_direction, normal);
-        float sparkle = pow(max(dot(sun_reflection, view_direction), 0.0), 72.0);
+        float open_sea = clamp(u_ocean_open_sea, 0.0, 1.0);
+        float sparkle_power = mix(72.0, 42.0, open_sea);
+        float sparkle = pow(max(dot(sun_reflection, view_direction), 0.0), sparkle_power);
         vec3 reflection = sky_reflection * fresnel * (0.18 + 0.16 * daylight);
-        reflection += u_sun_color * sparkle * shadow * cloud_shadow * (0.12 + 0.18 * daylight);
+        reflection += u_sun_color * sparkle * shadow * cloud_shadow * (0.12 + 0.18 * daylight) *
+                      (1.0 - tempest_factor * 0.78);
 
         float shallow_foam = (1.0 - smoothstep(0.08, 0.70, body_depth)) * (0.40 + 0.60 * water_surface_mask);
 
@@ -4954,9 +5528,23 @@ void main() {
                 1.0);
 
         float crest_signal =
-            v_ocean_crest * 0.76 +
-            slope_energy * 0.30 +
-            crest_noise * 0.10;
+            v_ocean_crest * 0.82 +
+            slope_energy * 0.28 +
+            crest_noise * 0.08;
+
+        // Je separe le reflet fin d'une crete calme de l'ecume epaisse. Cette
+        // ligne bleu clair rend la houle lisible au soleil sans blanchir la mer.
+        float crest_sheen =
+            smoothstep(
+                clamp(
+                    u_ocean_foam_threshold - 0.16,
+                    0.52,
+                    0.78),
+                0.98,
+                crest_signal) *
+            water_surface_mask *
+            (0.18 + 0.82 * fresnel) *
+            open_sea;
 
         float crest_foam =
             smoothstep(
@@ -4968,12 +5556,25 @@ void main() {
                 crest_signal) *
             water_surface_mask *
             (0.24 + 0.76 * fresnel) *
-            (0.20 +
-             0.80 *
+            (mix(0.20, 0.30, open_sea) +
+             mix(0.80, 0.70, open_sea) *
                  clamp(
                      u_ocean_severity,
                      0.0,
                      1.0));
+
+        // Je fais apparaître les déferlantes sur les pentes fortes de la houle
+        // extrême, sans blanchir les mers ordinaires ni les eaux intérieures.
+        float breaking_foam =
+            smoothstep(
+                0.34,
+                0.92,
+                slope_energy * 0.72 +
+                    v_ocean_crest * 0.46 +
+                    crest_noise * 0.10) *
+            water_surface_mask *
+            open_sea *
+            tempest_factor;
 
         vec3 foam_color = mix(
             u_fog_color,
@@ -4986,8 +5587,19 @@ void main() {
                 shallow_foam *
                     (0.10 + 0.06 * daylight) +
                 crest_foam *
-                    (0.12 + 0.11 * daylight)
+                    (0.12 + 0.11 * daylight +
+                     tempest_factor * 0.10) +
+                breaking_foam *
+                    (0.12 + 0.10 * daylight)
             );
+
+        foam +=
+            mix(
+                water_volume_color,
+                foam_color,
+                0.62) *
+            crest_sheen *
+            (0.035 + 0.040 * daylight);
 
         float shimmer = 0.5 + 0.5 * sin(v_world_position.x * 0.26 + v_world_position.z * 0.30 + u_time_of_day * 21.0);
         lit_color = water_body + reflection + foam;
@@ -4995,11 +5607,17 @@ void main() {
         output_alpha = 1.0;
     }
 
-    float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) * sky_light * (1.0 - water_mask);
+    float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) *
+                    sky_light *
+                    weather_exposure *
+                    (1.0 - water_mask);
     wetness *= 0.45 + 0.55 * smoothstep(-0.10, 1.0, normal.y);
     lit_color = mix(lit_color, lit_color * vec3(0.72, 0.78, 0.86), wetness * (0.16 + 0.14 * clamp(u_storm_intensity, 0.0, 1.0)));
 
-    float lightning_surface = clamp(u_lightning_intensity, 0.0, 1.0) * sky_light * (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
+    float lightning_surface = clamp(u_lightning_intensity, 0.0, 1.0) *
+                              sky_light *
+                              mix(0.16, 1.0, weather_exposure) *
+                              (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
     lit_color += albedo * vec3(0.62, 0.72, 1.00) * lightning_surface * (0.24 + 0.22 * clamp(u_storm_intensity, 0.0, 1.0));
 
     lit_color += vec3(1.24, 0.68, 0.24) * emissive_mask * (0.32 + 0.90 * block_light);
@@ -5457,6 +6075,204 @@ void main() {
 }
 )";
 
+    static constexpr auto* precipitation_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec2 a_quad_position;
+layout(location = 1) in vec4 i_position_length;
+layout(location = 2) in vec4 i_velocity_width;
+layout(location = 3) in vec4 i_appearance;
+
+uniform mat4 u_view_projection;
+uniform vec3 u_camera_position;
+uniform vec3 u_camera_right;
+uniform vec3 u_camera_up;
+
+out vec2 v_uv;
+out vec3 v_world_position;
+out float v_opacity;
+out float v_kind;
+out float v_age_ratio;
+
+void main() {
+    vec3 instance_position = i_position_length.xyz;
+    float length_value = max(i_position_length.w, 0.001);
+    vec3 velocity = i_velocity_width.xyz;
+    float width_value = max(i_velocity_width.w, 0.001);
+    float kind = i_appearance.y;
+    vec3 world_position;
+
+    if (kind < 0.5) {
+        vec3 fall_direction = normalize(
+            dot(velocity, velocity) > 0.000001
+                ? velocity
+                : vec3(0.0, -1.0, 0.0));
+        vec3 view_direction = normalize(u_camera_position - instance_position);
+        vec3 side = cross(fall_direction, view_direction);
+        if (dot(side, side) <= 0.00001) {
+            side = u_camera_right;
+        } else {
+            side = normalize(side);
+        }
+        world_position =
+            instance_position +
+            fall_direction * ((a_quad_position.y - 0.5) * length_value) +
+            side * (a_quad_position.x * width_value);
+    } else {
+        float age = clamp(i_appearance.z, 0.0, 1.0);
+        float radius = max(i_appearance.w, 0.01) * mix(0.62, 1.18, age);
+        world_position =
+            instance_position +
+            u_camera_right * (a_quad_position.x * radius * 2.0) +
+            u_camera_up * (a_quad_position.y * radius);
+    }
+
+    gl_Position = u_view_projection * vec4(world_position, 1.0);
+    v_uv = vec2(a_quad_position.x + 0.5, a_quad_position.y);
+    v_world_position = world_position;
+    v_opacity = clamp(i_appearance.x, 0.0, 1.0);
+    v_kind = kind;
+    v_age_ratio = clamp(i_appearance.z, 0.0, 1.0);
+}
+)";
+
+    static constexpr auto* precipitation_fragment_shader = R"(#version 330 core
+in vec2 v_uv;
+in vec3 v_world_position;
+in float v_opacity;
+in float v_kind;
+in float v_age_ratio;
+
+uniform vec3 u_camera_position;
+uniform vec3 u_fog_color;
+uniform float u_lightning_intensity;
+uniform float u_storm_intensity;
+
+out vec4 frag_color;
+)" VALCRAFT_SHIP_PROTECTION_GLSL_SOURCE R"(
+
+void main() {
+    if (ship_shelters_weather(v_world_position) ||
+        (v_kind >= 0.5 &&
+         ship_excludes_ocean(v_world_position))) {
+        discard;
+    }
+
+    float alpha;
+    vec3 color;
+    if (v_kind < 0.5) {
+        float horizontal = 1.0 - smoothstep(0.18, 0.50, abs(v_uv.x - 0.5));
+        float head = smoothstep(0.0, 0.10, v_uv.y);
+        float tail = 1.0 - smoothstep(0.70, 1.0, v_uv.y);
+        alpha = horizontal * head * tail * v_opacity;
+        color = mix(vec3(0.48, 0.62, 0.78), vec3(0.82, 0.91, 1.0), v_uv.y);
+    } else {
+        float centered_x = abs(v_uv.x - 0.5) * 2.0;
+        float crown = 1.0 - smoothstep(0.08, 0.82, centered_x);
+        float stem = 1.0 - smoothstep(0.12, 0.72, v_uv.y);
+        float droplets = smoothstep(0.18, 0.55, v_uv.y) *
+                         (1.0 - smoothstep(0.58, 1.0, v_uv.y)) *
+                         (0.55 + 0.45 * cos((v_uv.x - 0.5) * 18.0));
+        alpha = max(crown * stem * 0.52, droplets) *
+                (1.0 - v_age_ratio) *
+                v_opacity;
+        color = vec3(0.58, 0.78, 0.92);
+    }
+
+    float distance_fade =
+        1.0 - smoothstep(22.0, 62.0, distance(v_world_position, u_camera_position));
+    alpha *= distance_fade;
+    if (alpha <= 0.003) {
+        discard;
+    }
+
+    float lightning = clamp(u_lightning_intensity, 0.0, 1.0);
+    float storm = clamp(u_storm_intensity, 0.0, 1.0);
+    color = mix(color, u_fog_color + vec3(0.10, 0.16, 0.24), storm * 0.22);
+    color += vec3(0.52, 0.62, 0.90) * lightning * 0.65;
+    frag_color = vec4(color, alpha);
+}
+)";
+
+    static constexpr auto* old_guard_effect_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec2 a_quad_position;
+layout(location = 1) in vec4 i_position_size;
+layout(location = 2) in vec4 i_appearance;
+
+uniform mat4 u_view_projection;
+uniform vec3 u_camera_right;
+uniform vec3 u_camera_up;
+
+out vec2 v_uv;
+out float v_opacity;
+out float v_kind;
+out float v_intensity;
+
+void main() {
+    float angle = i_appearance.z;
+    float sine = sin(angle);
+    float cosine = cos(angle);
+    vec2 rotated = vec2(
+        a_quad_position.x * cosine - a_quad_position.y * sine,
+        a_quad_position.x * sine + a_quad_position.y * cosine);
+    float size_value = max(i_position_size.w, 0.001);
+    vec3 world_position =
+        i_position_size.xyz +
+        u_camera_right * rotated.x * size_value +
+        u_camera_up * rotated.y * size_value;
+    gl_Position = u_view_projection * vec4(world_position, 1.0);
+    v_uv = a_quad_position + vec2(0.5);
+    v_opacity = clamp(i_appearance.x, 0.0, 1.0);
+    v_kind = i_appearance.y;
+    v_intensity = max(i_appearance.w, 0.0);
+}
+)";
+
+    static constexpr auto* old_guard_effect_fragment_shader = R"(#version 330 core
+in vec2 v_uv;
+in float v_opacity;
+in float v_kind;
+in float v_intensity;
+
+out vec4 frag_color;
+
+float smoke_noise(vec2 point) {
+    return fract(sin(dot(point, vec2(37.13, 91.73))) * 43758.5453);
+}
+
+void main() {
+    vec2 centered = v_uv - vec2(0.5);
+    float radius = length(centered);
+    float alpha;
+    vec3 color;
+
+    if (v_kind < 0.5) {
+        float body = 1.0 - smoothstep(0.18, 0.52, radius);
+        float turbulence =
+            0.78 +
+            0.22 * smoke_noise(floor(v_uv * 9.0) + vec2(v_intensity * 3.1));
+        alpha = body * turbulence * v_opacity;
+        color = mix(
+            vec3(0.46, 0.48, 0.50),
+            vec3(0.77, 0.75, 0.69),
+            clamp(v_intensity, 0.0, 1.0));
+    } else {
+        float core = 1.0 - smoothstep(0.02, 0.22, radius);
+        float horizontal =
+            1.0 - smoothstep(0.015, 0.11, abs(centered.y));
+        float vertical =
+            1.0 - smoothstep(0.015, 0.10, abs(centered.x));
+        float star = max(core, max(horizontal, vertical) * (1.0 - radius * 1.65));
+        alpha = clamp(star, 0.0, 1.0) * v_opacity;
+        color = mix(vec3(1.0, 0.34, 0.05), vec3(1.0, 0.94, 0.62), core);
+        color *= 1.0 + min(v_intensity, 2.0) * 1.4;
+    }
+
+    if (alpha <= 0.003) {
+        discard;
+    }
+    frag_color = vec4(color, alpha);
+}
+)";
+
     static constexpr auto* glow_blur_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
 
@@ -5489,10 +6305,9 @@ uniform vec3 u_night_tint_color;
 uniform float u_glow_strength;
 uniform float u_sharpen_strength;
 uniform float u_edge_strength;
-uniform float u_precipitation_intensity;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
-uniform float u_weather_time;
+uniform float u_weather_exposure;
 
 out vec4 frag_color;
 
@@ -5514,23 +6329,6 @@ float linearize_depth(float depth_sample) {
 
 bool depth_sample_is_usable(float depth_sample) {
     return depth_sample > 0.00001 && depth_sample < 0.9999;
-}
-
-float hash12(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-}
-
-float rain_streak_layer(vec2 uv, vec2 scale, float speed, float slant) {
-    vec2 p = uv * scale;
-    p.x += p.y * slant;
-    p.y += u_weather_time * speed;
-    vec2 cell = floor(p);
-    vec2 local = fract(p);
-    float center = hash12(cell + vec2(17.0, 3.0));
-    float spawn = step(0.73 - clamp(u_precipitation_intensity, 0.0, 1.0) * 0.28, hash12(cell));
-    float line = 1.0 - smoothstep(0.010, 0.060, abs(local.x - center));
-    float tail = smoothstep(0.04, 0.18, local.y) * (1.0 - smoothstep(0.68, 1.0, local.y));
-    return spawn * line * tail * (0.55 + 0.45 * hash12(cell + vec2(5.0, 29.0)));
 }
 
 vec3 apply_palette_grade(vec3 color, float storm, float lightning) {
@@ -5606,15 +6404,12 @@ void main() {
     color = (color - 0.5) * u_contrast + 0.5;
     color = apply_palette_grade(color, clamp(u_storm_intensity, 0.0, 1.0), clamp(u_lightning_intensity, 0.0, 1.0));
 
-    float rain = clamp(u_precipitation_intensity, 0.0, 1.0);
-    if (rain > 0.001) {
-        float storm = clamp(u_storm_intensity, 0.0, 1.0);
-        float streaks = rain_streak_layer(v_uv, vec2(36.0, 64.0), 0.92 + storm * 0.54, -0.42 - storm * 0.18);
-        streaks += rain_streak_layer(v_uv + vec2(0.017, 0.0), vec2(58.0, 92.0), 1.26 + storm * 0.72, -0.50 - storm * 0.18) * 0.62;
-        color = mix(color, color * vec3(0.88, 0.93, 1.03), rain * (0.07 + storm * 0.08));
-        color += vec3(0.50, 0.62, 0.82) * streaks * rain * (0.10 + storm * 0.22);
-    }
-    color += vec3(0.62, 0.72, 1.00) * clamp(u_lightning_intensity, 0.0, 1.0) * (0.08 + clamp(u_storm_intensity, 0.0, 1.0) * 0.12);
+    float weather_exposure = clamp(u_weather_exposure, 0.0, 1.0);
+    float flash_exposure = mix(0.12, 1.0, weather_exposure);
+    color += vec3(0.62, 0.72, 1.00) *
+             clamp(u_lightning_intensity, 0.0, 1.0) *
+             flash_exposure *
+             (0.08 + clamp(u_storm_intensity, 0.0, 1.0) * 0.12);
 
     float vignette = smoothstep(0.92, 0.22, distance(v_uv, vec2(0.5)));
     color *= mix(1.0 - u_vignette_strength, 1.0, vignette);
@@ -5653,6 +6448,12 @@ void main() {
     item_drop_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, item_drop_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
+    precipitation_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, precipitation_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, precipitation_fragment_shader));
+    old_guard_effect_program_ = link_program(
+        compile_shader(GL_VERTEX_SHADER, old_guard_effect_vertex_shader),
+        compile_shader(GL_FRAGMENT_SHADER, old_guard_effect_fragment_shader));
     creature_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, creature_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, creature_fragment_shader));
@@ -5740,7 +6541,18 @@ void main() {
         glGetUniformLocation(
             world_program_,
             "u_ocean_severity");
-    const std::array<GLint, 7> ocean_uniform_locations {{
+
+    world_uniforms_.ocean_tempest_factor =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_tempest_factor");
+
+    world_uniforms_.ocean_open_sea =
+        glGetUniformLocation(
+            world_program_,
+            "u_ocean_open_sea");
+
+    const std::array<GLint, 9> ocean_uniform_locations {{
         world_uniforms_.ocean_waves,
         world_uniforms_.ocean_wave_phases,
         world_uniforms_.ocean_wave_count,
@@ -5748,6 +6560,8 @@ void main() {
         world_uniforms_.ocean_detail_strength,
         world_uniforms_.ocean_detail_phase,
         world_uniforms_.ocean_severity,
+        world_uniforms_.ocean_tempest_factor,
+        world_uniforms_.ocean_open_sea,
     }};
     // Je refuse une initialisation partielle : un uniform optimise ou mal
     // orthographie rendrait l'ocean visuellement incoherent sans erreur OpenGL.
@@ -5767,6 +6581,45 @@ void main() {
     world_uniforms_.inverse_view_projection = glGetUniformLocation(world_program_, "u_inverse_view_projection");
     world_uniforms_.shadows_enabled = glGetUniformLocation(world_program_, "u_shadows_enabled");
     world_uniforms_.super_vision_strength = glGetUniformLocation(world_program_, "u_super_vision_strength");
+    world_uniforms_.ship_protection_enabled =
+        glGetUniformLocation(world_program_, "u_ship_protection_enabled");
+    world_uniforms_.ship_inverse_model =
+        glGetUniformLocation(world_program_, "u_ship_inverse_model");
+    world_uniforms_.ship_bounds_min =
+        glGetUniformLocation(world_program_, "u_ship_bounds_min");
+    world_uniforms_.ship_bounds_max =
+        glGetUniformLocation(world_program_, "u_ship_bounds_max");
+    world_uniforms_.ship_profile_longitudinal =
+        glGetUniformLocation(world_program_, "u_ship_profile_longitudinal");
+    world_uniforms_.ship_profile_taper =
+        glGetUniformLocation(world_program_, "u_ship_profile_taper");
+    world_uniforms_.ship_profile_heights =
+        glGetUniformLocation(world_program_, "u_ship_profile_heights");
+    world_uniforms_.ship_profile_widths =
+        glGetUniformLocation(world_program_, "u_ship_profile_widths");
+    world_uniforms_.ship_sheltered_floor =
+        glGetUniformLocation(world_program_, "u_ship_sheltered_floor");
+
+    const std::array<GLint, 9> ship_protection_uniform_locations {{
+        world_uniforms_.ship_protection_enabled,
+        world_uniforms_.ship_inverse_model,
+        world_uniforms_.ship_bounds_min,
+        world_uniforms_.ship_bounds_max,
+        world_uniforms_.ship_profile_longitudinal,
+        world_uniforms_.ship_profile_taper,
+        world_uniforms_.ship_profile_heights,
+        world_uniforms_.ship_profile_widths,
+        world_uniforms_.ship_sheltered_floor,
+    }};
+    if (std::any_of(
+            ship_protection_uniform_locations.begin(),
+            ship_protection_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "World shader is missing one or more ship protection uniforms");
+    }
 
     item_drop_uniforms_.view_projection = glGetUniformLocation(item_drop_program_, "u_view_projection");
     item_drop_uniforms_.light_view_projection = glGetUniformLocation(item_drop_program_, "u_light_view_projection");
@@ -5795,6 +6648,74 @@ void main() {
     item_drop_uniforms_.scene_depth = glGetUniformLocation(item_drop_program_, "u_scene_depth");
     item_drop_uniforms_.inverse_view_projection = glGetUniformLocation(item_drop_program_, "u_inverse_view_projection");
     item_drop_uniforms_.shadows_enabled = glGetUniformLocation(item_drop_program_, "u_shadows_enabled");
+
+    precipitation_uniforms_.view_projection =
+        glGetUniformLocation(precipitation_program_, "u_view_projection");
+    precipitation_uniforms_.camera_position =
+        glGetUniformLocation(precipitation_program_, "u_camera_position");
+    precipitation_uniforms_.camera_right =
+        glGetUniformLocation(precipitation_program_, "u_camera_right");
+    precipitation_uniforms_.camera_up =
+        glGetUniformLocation(precipitation_program_, "u_camera_up");
+    precipitation_uniforms_.fog_color =
+        glGetUniformLocation(precipitation_program_, "u_fog_color");
+    precipitation_uniforms_.lightning_intensity =
+        glGetUniformLocation(precipitation_program_, "u_lightning_intensity");
+    precipitation_uniforms_.storm_intensity =
+        glGetUniformLocation(precipitation_program_, "u_storm_intensity");
+    precipitation_uniforms_.ship_protection_enabled =
+        glGetUniformLocation(precipitation_program_, "u_ship_protection_enabled");
+    precipitation_uniforms_.ship_inverse_model =
+        glGetUniformLocation(precipitation_program_, "u_ship_inverse_model");
+    precipitation_uniforms_.ship_bounds_min =
+        glGetUniformLocation(precipitation_program_, "u_ship_bounds_min");
+    precipitation_uniforms_.ship_bounds_max =
+        glGetUniformLocation(precipitation_program_, "u_ship_bounds_max");
+    precipitation_uniforms_.ship_profile_longitudinal =
+        glGetUniformLocation(precipitation_program_, "u_ship_profile_longitudinal");
+    precipitation_uniforms_.ship_profile_taper =
+        glGetUniformLocation(precipitation_program_, "u_ship_profile_taper");
+    precipitation_uniforms_.ship_profile_heights =
+        glGetUniformLocation(precipitation_program_, "u_ship_profile_heights");
+    precipitation_uniforms_.ship_profile_widths =
+        glGetUniformLocation(precipitation_program_, "u_ship_profile_widths");
+    precipitation_uniforms_.ship_sheltered_floor =
+        glGetUniformLocation(precipitation_program_, "u_ship_sheltered_floor");
+
+    old_guard_effect_uniforms_.view_projection =
+        glGetUniformLocation(old_guard_effect_program_, "u_view_projection");
+    old_guard_effect_uniforms_.camera_right =
+        glGetUniformLocation(old_guard_effect_program_, "u_camera_right");
+    old_guard_effect_uniforms_.camera_up =
+        glGetUniformLocation(old_guard_effect_program_, "u_camera_up");
+
+    const std::array<GLint, 16> precipitation_uniform_locations {{
+        precipitation_uniforms_.view_projection,
+        precipitation_uniforms_.camera_position,
+        precipitation_uniforms_.camera_right,
+        precipitation_uniforms_.camera_up,
+        precipitation_uniforms_.fog_color,
+        precipitation_uniforms_.lightning_intensity,
+        precipitation_uniforms_.storm_intensity,
+        precipitation_uniforms_.ship_protection_enabled,
+        precipitation_uniforms_.ship_inverse_model,
+        precipitation_uniforms_.ship_bounds_min,
+        precipitation_uniforms_.ship_bounds_max,
+        precipitation_uniforms_.ship_profile_longitudinal,
+        precipitation_uniforms_.ship_profile_taper,
+        precipitation_uniforms_.ship_profile_heights,
+        precipitation_uniforms_.ship_profile_widths,
+        precipitation_uniforms_.ship_sheltered_floor,
+    }};
+    if (std::any_of(
+            precipitation_uniform_locations.begin(),
+            precipitation_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Precipitation shader is missing one or more required uniforms");
+    }
 
     creature_uniforms_.view_projection = glGetUniformLocation(creature_program_, "u_view_projection");
     creature_uniforms_.light_view_projection = glGetUniformLocation(creature_program_, "u_light_view_projection");
@@ -5844,7 +6765,41 @@ void main() {
     sky_uniforms_.overcast_intensity = glGetUniformLocation(sky_program_, "u_overcast_intensity");
     sky_uniforms_.precipitation_intensity = glGetUniformLocation(sky_program_, "u_precipitation_intensity");
     sky_uniforms_.storm_intensity = glGetUniformLocation(sky_program_, "u_storm_intensity");
+    sky_uniforms_.violent_storm_intensity =
+        glGetUniformLocation(
+            sky_program_,
+            "u_violent_storm_intensity");
     sky_uniforms_.lightning_intensity = glGetUniformLocation(sky_program_, "u_lightning_intensity");
+    sky_uniforms_.lightning_bolt_intensity =
+        glGetUniformLocation(
+            sky_program_,
+            "u_lightning_bolt_intensity");
+    sky_uniforms_.lightning_direction =
+        glGetUniformLocation(
+            sky_program_,
+            "u_lightning_direction");
+    sky_uniforms_.lightning_shape_seed =
+        glGetUniformLocation(
+            sky_program_,
+            "u_lightning_shape_seed");
+    const std::array<GLint, 4>
+        violent_storm_sky_uniform_locations {{
+            sky_uniforms_.violent_storm_intensity,
+            sky_uniforms_.lightning_bolt_intensity,
+            sky_uniforms_.lightning_direction,
+            sky_uniforms_.lightning_shape_seed,
+        }};
+    // Je refuse de masquer une faute d'uniform avec le comportement silencieux
+    // de glUniform(-1, ...), car elle désactiverait une partie de la Tempest.
+    if (std::any_of(
+            violent_storm_sky_uniform_locations.begin(),
+            violent_storm_sky_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Sky shader is missing one or more violent storm uniforms");
+    }
     sky_uniforms_.weather_time = glGetUniformLocation(sky_program_, "u_weather_time");
     sky_uniforms_.cloud_steps = glGetUniformLocation(sky_program_, "u_cloud_steps");
     sky_uniforms_.cloud_detail = glGetUniformLocation(sky_program_, "u_cloud_detail");
@@ -5864,10 +6819,14 @@ void main() {
     post_process_uniforms_.glow_strength = glGetUniformLocation(post_process_program_, "u_glow_strength");
     post_process_uniforms_.sharpen_strength = glGetUniformLocation(post_process_program_, "u_sharpen_strength");
     post_process_uniforms_.edge_strength = glGetUniformLocation(post_process_program_, "u_edge_strength");
-    post_process_uniforms_.precipitation_intensity = glGetUniformLocation(post_process_program_, "u_precipitation_intensity");
     post_process_uniforms_.storm_intensity = glGetUniformLocation(post_process_program_, "u_storm_intensity");
     post_process_uniforms_.lightning_intensity = glGetUniformLocation(post_process_program_, "u_lightning_intensity");
-    post_process_uniforms_.weather_time = glGetUniformLocation(post_process_program_, "u_weather_time");
+    post_process_uniforms_.weather_exposure =
+        glGetUniformLocation(post_process_program_, "u_weather_exposure");
+    if (post_process_uniforms_.weather_exposure < 0) {
+        throw std::runtime_error(
+            "Post-process shader is missing the weather exposure uniform");
+    }
     menu_background_uniforms_.scene_texture = glGetUniformLocation(menu_background_program_, "u_scene_texture");
     menu_background_uniforms_.blur_texture = glGetUniformLocation(menu_background_program_, "u_blur_texture");
     menu_background_uniforms_.blur_mix = glGetUniformLocation(menu_background_program_, "u_blur_mix");
@@ -6081,6 +7040,130 @@ void Renderer::create_item_drop_geometry() {
     configure_item_drop_instance_attributes(item_drop_vao_, item_drop_instance_vbo_);
 
     item_drop_instance_buffer_bytes_ = kInitialItemDropInstanceBufferBytes;
+}
+
+void Renderer::create_precipitation_geometry() {
+    constexpr std::array<float, 8> kQuadVertices {{
+        -0.5F, 0.0F,
+         0.5F, 0.0F,
+        -0.5F, 1.0F,
+         0.5F, 1.0F,
+    }};
+
+    glGenVertexArrays(1, &precipitation_vao_);
+    glGenBuffers(1, &precipitation_vbo_);
+    glGenBuffers(1, &precipitation_instance_vbo_);
+
+    glBindVertexArray(precipitation_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, precipitation_vbo_);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(kQuadVertices.size() * sizeof(float)),
+        kQuadVertices.data(),
+        GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(
+        0,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(float) * 2U),
+        nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, precipitation_instance_vbo_);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        kInitialPrecipitationInstanceBufferBytes,
+        nullptr,
+        GL_STREAM_DRAW);
+
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1,
+        4,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(PrecipitationGpuInstance)),
+        reinterpret_cast<void*>(offsetof(PrecipitationGpuInstance, position_length)));
+    glVertexAttribDivisor(1, 1);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(
+        2,
+        4,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(PrecipitationGpuInstance)),
+        reinterpret_cast<void*>(offsetof(PrecipitationGpuInstance, velocity_width)));
+    glVertexAttribDivisor(2, 1);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(
+        3,
+        4,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(PrecipitationGpuInstance)),
+        reinterpret_cast<void*>(offsetof(PrecipitationGpuInstance, appearance)));
+    glVertexAttribDivisor(3, 1);
+
+    precipitation_instance_buffer_bytes_ =
+        kInitialPrecipitationInstanceBufferBytes;
+}
+
+void Renderer::create_old_guard_effect_geometry() {
+    constexpr std::array<float, 8> kQuadVertices {{
+        -0.5F, -0.5F,
+         0.5F, -0.5F,
+        -0.5F,  0.5F,
+         0.5F,  0.5F,
+    }};
+
+    glGenVertexArrays(1, &old_guard_effect_vao_);
+    glGenBuffers(1, &old_guard_effect_vbo_);
+    glGenBuffers(1, &old_guard_effect_instance_vbo_);
+
+    glBindVertexArray(old_guard_effect_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, old_guard_effect_vbo_);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(kQuadVertices.size() * sizeof(float)),
+        kQuadVertices.data(),
+        GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(
+        0,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(float) * 2U),
+        nullptr);
+
+    glBindBuffer(GL_ARRAY_BUFFER, old_guard_effect_instance_vbo_);
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        kInitialOldGuardEffectInstanceBufferBytes,
+        nullptr,
+        GL_STREAM_DRAW);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1,
+        4,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(OldGuardEffectGpuInstance)),
+        reinterpret_cast<void*>(offsetof(OldGuardEffectGpuInstance, position_size)));
+    glVertexAttribDivisor(1, 1);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(
+        2,
+        4,
+        GL_FLOAT,
+        GL_FALSE,
+        static_cast<GLsizei>(sizeof(OldGuardEffectGpuInstance)),
+        reinterpret_cast<void*>(offsetof(OldGuardEffectGpuInstance, appearance)));
+    glVertexAttribDivisor(2, 1);
+
+    old_guard_effect_instance_buffer_bytes_ =
+        kInitialOldGuardEffectInstanceBufferBytes;
 }
 
 void Renderer::create_screen_quad_geometry() {
@@ -6417,7 +7500,21 @@ void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
     glUniform1f(sky_uniforms_.overcast_intensity, environment.overcast_intensity);
     glUniform1f(sky_uniforms_.precipitation_intensity, environment.precipitation_intensity);
     glUniform1f(sky_uniforms_.storm_intensity, environment.storm_intensity);
+    glUniform1f(
+        sky_uniforms_.violent_storm_intensity,
+        environment.violent_storm_intensity);
     glUniform1f(sky_uniforms_.lightning_intensity, environment.lightning_intensity);
+    glUniform1f(
+        sky_uniforms_.lightning_bolt_intensity,
+        environment.lightning_bolt_intensity);
+    glUniform3fv(
+        sky_uniforms_.lightning_direction,
+        1,
+        glm::value_ptr(
+            environment.lightning_direction));
+    glUniform1f(
+        sky_uniforms_.lightning_shape_seed,
+        environment.lightning_shape_seed);
     glUniform1f(sky_uniforms_.weather_time, environment.weather_time_seconds);
     glUniform1i(sky_uniforms_.cloud_steps, quality_settings.cloud_steps);
     glUniform1f(sky_uniforms_.cloud_detail, quality_settings.cloud_detail);
@@ -6433,7 +7530,10 @@ void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
     glEnable(GL_CULL_FACE);
 }
 
-void Renderer::run_post_process(const EnvironmentState& environment, int width, int height) {
+void Renderer::run_post_process(const EnvironmentState& environment,
+                                float weather_exposure,
+                                int width,
+                                int height) {
     if (post_process_program_ == 0 || glow_extract_program_ == 0 || glow_blur_program_ == 0 || screen_quad_vao_ == 0 ||
         scene_color_texture_ == 0 || scene_depth_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
         return;
@@ -6491,10 +7591,16 @@ void Renderer::run_post_process(const EnvironmentState& environment, int width, 
     glUniform1f(
         post_process_uniforms_.edge_strength,
         environment.post_edge_strength * quality_settings.post_detail_scale);
-    glUniform1f(post_process_uniforms_.precipitation_intensity, environment.precipitation_intensity);
     glUniform1f(post_process_uniforms_.storm_intensity, environment.storm_intensity);
     glUniform1f(post_process_uniforms_.lightning_intensity, environment.lightning_intensity);
-    glUniform1f(post_process_uniforms_.weather_time, environment.weather_time_seconds);
+    glUniform1f(
+        post_process_uniforms_.weather_exposure,
+        glm::clamp(
+            std::isfinite(weather_exposure)
+                ? weather_exposure
+                : 1.0F,
+            0.0F,
+            1.0F));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glActiveTexture(GL_TEXTURE1);
@@ -6552,6 +7658,596 @@ void Renderer::run_menu_background_pass(int width, int height) {
     glDrawArrays(GL_TRIANGLES, 0, 3);
     record_triangle_draw(3);
     glActiveTexture(GL_TEXTURE0);
+}
+
+void Renderer::draw_precipitation(
+    const glm::mat4& view_projection,
+    const glm::mat4& inverse_view,
+    const glm::vec3& camera_position,
+    const EnvironmentState& environment,
+    const OceanState& ocean,
+    const ShipRenderState& ship,
+    const RendererQualitySettings& quality_settings,
+    RendererFrameStats& frame_stats) {
+    if (precipitation_program_ == 0 ||
+        precipitation_vao_ == 0 ||
+        precipitation_instance_vbo_ == 0 ||
+        !std::isfinite(environment.precipitation_intensity) ||
+        environment.precipitation_intensity <= 0.0F) {
+        precipitation_field_.clear();
+        return;
+    }
+
+    const PrecipitationBudget budget {
+        quality_settings.precipitation_drop_budget,
+        quality_settings.precipitation_impact_budget,
+        quality_settings.precipitation_radius,
+    };
+    const auto ocean_displacement =
+        std::isfinite(
+            ocean.maximum_displacement)
+            ? std::clamp(
+                  ocean.maximum_displacement,
+                  0.0F,
+                  16.0F)
+            : 0.0F;
+    // Je prolonge les trajectoires sous le creux theorique le plus bas ; le
+    // depth test les coupe ensuite sur la surface animee exacte de la mer.
+    const auto precipitation_floor =
+        static_cast<float>(
+            kSeaLevel + 1) -
+        ocean_displacement -
+        0.50F;
+    const auto& precipitation = precipitation_field_.sample(
+        environment,
+        camera_position,
+        precipitation_floor,
+        budget);
+
+    auto& instances = precipitation_instances_scratch_;
+    instances.clear();
+    instances.reserve(
+        precipitation.drops.size() +
+        precipitation.impacts.size());
+
+    const auto protection_enabled =
+        ship_protection_is_renderable(ship);
+    const auto inverse_ship_model =
+        protection_enabled
+            ? glm::inverse(ship.model_matrix)
+            : glm::mat4 {1.0F};
+    const auto* protection_profile =
+        protection_enabled
+            ? &ship.blueprint->protection_profile
+            : nullptr;
+    const auto to_ship_local =
+        [&inverse_ship_model](const glm::vec3& world_point) noexcept {
+            return glm::vec3 {
+                inverse_ship_model *
+                glm::vec4 {world_point, 1.0F},
+            };
+        };
+    const auto point_is_sheltered =
+        [&to_ship_local, protection_profile](const glm::vec3& world_point) noexcept {
+            return protection_profile != nullptr &&
+                   protection_profile->shelters_from_weather_local(
+                       to_ship_local(world_point));
+        };
+    const auto point_excludes_ocean =
+        [&to_ship_local, protection_profile](const glm::vec3& world_point) noexcept {
+            return protection_profile != nullptr &&
+                   protection_profile->excludes_ocean_local(
+                       to_ship_local(world_point));
+        };
+
+    auto visible_drop_count = std::size_t {0U};
+    for (const auto& drop : precipitation.drops) {
+        const auto speed_squared =
+            glm::dot(drop.velocity, drop.velocity);
+        const auto direction =
+            std::isfinite(speed_squared) &&
+                    speed_squared > 1.0e-6F
+                ? drop.velocity /
+                      std::sqrt(speed_squared)
+                : glm::vec3 {0.0F, -1.0F, 0.0F};
+        const auto half_segment =
+            direction *
+            (std::max(drop.length, 0.0F) * 0.5F);
+        if (point_is_sheltered(drop.position) ||
+            point_is_sheltered(drop.position - half_segment) ||
+            point_is_sheltered(drop.position + half_segment)) {
+            continue;
+        }
+
+        instances.push_back({
+            {
+                drop.position.x,
+                drop.position.y,
+                drop.position.z,
+                drop.length,
+            },
+            {
+                drop.velocity.x,
+                drop.velocity.y,
+                drop.velocity.z,
+                drop.width,
+            },
+            {
+                drop.opacity,
+                0.0F,
+                0.0F,
+                0.0F,
+            },
+        });
+        ++visible_drop_count;
+    }
+
+    auto wind_direction =
+        glm::vec2 {
+            environment.wind_direction_xz.x,
+            environment.wind_direction_xz.y,
+        };
+    const auto wind_length_squared =
+        glm::dot(wind_direction, wind_direction);
+    if (!std::isfinite(wind_length_squared) ||
+        wind_length_squared <= 1.0e-6F) {
+        wind_direction = {0.0F, 1.0F};
+    } else {
+        wind_direction /= std::sqrt(wind_length_squared);
+    }
+    const auto fall_direction =
+        glm::normalize(
+            glm::vec3 {
+                wind_direction.x *
+                    glm::clamp(environment.wind_strength, 0.0F, 1.0F) *
+                    0.32F,
+                -1.0F,
+                wind_direction.y *
+                    glm::clamp(environment.wind_strength, 0.0F, 1.0F) *
+                    0.32F,
+            });
+    constexpr auto kImpactRayLength = 96.0F;
+    auto visible_impact_count = std::size_t {0U};
+    for (const auto& impact : precipitation.impacts) {
+        auto impact_position = impact.position;
+        auto deck_hit = false;
+
+        if (protection_enabled) {
+            const auto ray_end =
+                glm::vec3 {
+                    impact.position.x,
+                    static_cast<float>(kSeaLevel + 1),
+                    impact.position.z,
+                };
+            const auto ray_origin_world =
+                ray_end -
+                fall_direction *
+                    kImpactRayLength;
+            const auto ray_origin_local =
+                to_ship_local(ray_origin_world);
+            auto ray_direction_local =
+                glm::vec3 {
+                    inverse_ship_model *
+                    glm::vec4 {fall_direction, 0.0F},
+                };
+            const auto local_direction_length_squared =
+                glm::dot(
+                    ray_direction_local,
+                    ray_direction_local);
+            if (std::isfinite(local_direction_length_squared) &&
+                local_direction_length_squared > 1.0e-6F) {
+                ray_direction_local /=
+                    std::sqrt(
+                        local_direction_length_squared);
+                auto nearest_hit =
+                    std::numeric_limits<float>::max();
+                auto nearest_local_position =
+                    glm::vec3 {0.0F};
+
+                for (const auto& part : ship.parts) {
+                    if (!part.supports_player) {
+                        continue;
+                    }
+                    const auto min_corner =
+                        glm::min(
+                            part.local_start,
+                            part.local_end) -
+                        glm::vec3 {0.01F};
+                    const auto max_corner =
+                        glm::max(
+                            part.local_start,
+                            part.local_end) +
+                        glm::vec3 {0.01F};
+                    const auto distance =
+                        ray_aabb_entry_distance(
+                            ray_origin_local,
+                            ray_direction_local,
+                            min_corner,
+                            max_corner,
+                            kImpactRayLength);
+                    if (!distance.has_value() ||
+                        *distance >= nearest_hit) {
+                        continue;
+                    }
+
+                    const auto local_hit =
+                        ray_origin_local +
+                        ray_direction_local *
+                            *distance;
+                    const auto outside_probe =
+                        local_hit -
+                        ray_direction_local *
+                            0.05F;
+                    if (protection_profile->shelters_from_weather_local(
+                            outside_probe)) {
+                        continue;
+                    }
+                    nearest_hit = *distance;
+                    nearest_local_position = local_hit;
+                }
+
+                if (nearest_hit <
+                    std::numeric_limits<float>::max()) {
+                    impact_position =
+                        glm::vec3 {
+                            ship.model_matrix *
+                            glm::vec4 {
+                                nearest_local_position -
+                                    ray_direction_local *
+                                        0.025F,
+                                1.0F,
+                            },
+                        };
+                    deck_hit = true;
+                }
+            }
+        }
+
+        if (!deck_hit) {
+            const auto ocean_sample =
+                OceanSimulation::sample(
+                    ocean,
+                    {impact_position.x, impact_position.z},
+                    static_cast<std::size_t>(
+                        std::clamp(
+                            quality_settings.ocean_wave_count,
+                            1,
+                            static_cast<int>(
+                                kOceanMaxWaveCount))));
+            impact_position.y =
+                static_cast<float>(kSeaLevel + 1) +
+                ocean_sample.height +
+                0.035F;
+            if (point_excludes_ocean(impact_position)) {
+                continue;
+            }
+        }
+        if (point_is_sheltered(impact_position) ||
+            !finite_vec3(impact_position) ||
+            impact.opacity <= 0.003F) {
+            continue;
+        }
+
+        const auto age_ratio =
+            impact.lifetime_seconds > 1.0e-4F
+                ? glm::clamp(
+                      impact.age_seconds /
+                          impact.lifetime_seconds,
+                      0.0F,
+                      1.0F)
+                : 1.0F;
+        instances.push_back({
+            {
+                impact_position.x,
+                impact_position.y,
+                impact_position.z,
+                impact.radius,
+            },
+            {
+                0.0F,
+                1.0F,
+                0.0F,
+                impact.radius,
+            },
+            {
+                impact.opacity,
+                1.0F,
+                age_ratio,
+                impact.radius,
+            },
+        });
+        ++visible_impact_count;
+    }
+
+    if (instances.empty()) {
+        return;
+    }
+
+    const auto instance_bytes =
+        static_cast<GLsizeiptr>(
+            instances.size() *
+            sizeof(PrecipitationGpuInstance));
+    const ScopedPrecipitationGlState previous_gl_state {};
+    glBindVertexArray(precipitation_vao_);
+    glBindBuffer(
+        GL_ARRAY_BUFFER,
+        precipitation_instance_vbo_);
+    if (precipitation_instance_buffer_bytes_ <
+        instance_bytes) {
+        precipitation_instance_buffer_bytes_ =
+            grow_buffer_capacity(
+                precipitation_instance_buffer_bytes_,
+                instance_bytes,
+                kInitialPrecipitationInstanceBufferBytes);
+    }
+    orphan_bound_buffer(
+        GL_ARRAY_BUFFER,
+        precipitation_instance_buffer_bytes_);
+    glBufferSubData(
+        GL_ARRAY_BUFFER,
+        0,
+        instance_bytes,
+        instances.data());
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(
+                instance_bytes,
+                0));
+
+    const auto camera_right =
+        glm::normalize(
+            glm::vec3 {
+                inverse_view[0],
+            });
+    const auto camera_up =
+        glm::normalize(
+            glm::vec3 {
+                inverse_view[1],
+            });
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(
+        GL_SRC_ALPHA,
+        GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(precipitation_program_);
+    glUniformMatrix4fv(
+        precipitation_uniforms_.view_projection,
+        1,
+        GL_FALSE,
+        glm::value_ptr(view_projection));
+    glUniform3fv(
+        precipitation_uniforms_.camera_position,
+        1,
+        glm::value_ptr(camera_position));
+    glUniform3fv(
+        precipitation_uniforms_.camera_right,
+        1,
+        glm::value_ptr(camera_right));
+    glUniform3fv(
+        precipitation_uniforms_.camera_up,
+        1,
+        glm::value_ptr(camera_up));
+    glUniform3fv(
+        precipitation_uniforms_.fog_color,
+        1,
+        glm::value_ptr(environment.fog_color));
+    glUniform1f(
+        precipitation_uniforms_.lightning_intensity,
+        glm::clamp(
+            environment.lightning_intensity,
+            0.0F,
+            1.0F));
+    glUniform1f(
+        precipitation_uniforms_.storm_intensity,
+        glm::clamp(
+            environment.storm_intensity,
+            0.0F,
+            1.0F));
+    upload_precipitation_ship_protection(ship);
+
+    glDrawArraysInstanced(
+        GL_TRIANGLE_STRIP,
+        0,
+        4,
+        static_cast<GLsizei>(
+            instances.size()));
+    record_triangle_draw(
+        6,
+        static_cast<GLsizei>(
+            instances.size()));
+
+    frame_stats.precipitation_drops =
+        visible_drop_count;
+    frame_stats.precipitation_impacts =
+        visible_impact_count;
+}
+
+void Renderer::draw_old_guard_effects(
+    std::span<const OldGuardMuzzleFlashInstance> flashes,
+    std::span<const OldGuardSmokeInstance> smoke,
+    const glm::mat4& view_projection,
+    const glm::mat4& inverse_view,
+    const glm::vec3& camera_position) {
+    if ((flashes.empty() && smoke.empty()) ||
+        old_guard_effect_program_ == 0 ||
+        old_guard_effect_vao_ == 0 ||
+        old_guard_effect_instance_vbo_ == 0) {
+        return;
+    }
+
+    auto& instances = old_guard_effect_instances_scratch_;
+    instances.clear();
+    const auto maximum_count =
+        std::min(smoke.size(), kOldGuardSmokeCapacity) +
+        std::min(flashes.size(), kOldGuardFlashCapacity);
+    if (instances.capacity() < maximum_count) {
+        instances.reserve(maximum_count);
+    }
+
+    constexpr auto kEffectDrawDistanceSquared =
+        kOldGuardRenderDistance * kOldGuardRenderDistance;
+    const auto append_if_visible =
+        [&](const glm::vec3& position,
+            float size,
+            float opacity,
+            float kind,
+            float rotation,
+            float intensity) {
+            if (!std::isfinite(position.x) ||
+                !std::isfinite(position.y) ||
+                !std::isfinite(position.z) ||
+                !std::isfinite(size) ||
+                !std::isfinite(opacity) ||
+                !std::isfinite(rotation) ||
+                !std::isfinite(intensity) ||
+                size <= 0.0F ||
+                opacity <= 0.0F) {
+                return;
+            }
+            const auto delta = position - camera_position;
+            const auto distance_squared = glm::dot(delta, delta);
+            if (!std::isfinite(distance_squared) ||
+                distance_squared > kEffectDrawDistanceSquared) {
+                return;
+            }
+            instances.push_back({
+                .position_size = glm::vec4 {
+                    position,
+                    std::clamp(size, 0.01F, 3.0F),
+                },
+                .appearance = glm::vec4 {
+                    std::clamp(opacity, 0.0F, 1.0F),
+                    kind,
+                    rotation,
+                    std::max(intensity, 0.0F),
+                },
+            });
+        };
+
+    for (const auto& puff : smoke.first(
+             std::min(smoke.size(), kOldGuardSmokeCapacity))) {
+        if (!std::isfinite(puff.age) ||
+            !std::isfinite(puff.lifetime) ||
+            puff.lifetime <= 0.0F ||
+            puff.age < 0.0F ||
+            puff.age >= puff.lifetime) {
+            continue;
+        }
+        const auto age_ratio =
+            std::clamp(puff.age / puff.lifetime, 0.0F, 1.0F);
+        const auto fade =
+            std::pow(1.0F - age_ratio, 1.25F);
+        const auto seed_variation =
+            static_cast<float>(puff.seed % 997U) / 997.0F;
+        append_if_visible(
+            puff.position,
+            puff.size * (1.0F + age_ratio * 2.35F),
+            puff.opacity * fade,
+            0.0F,
+            puff.rotation_radians,
+            seed_variation);
+    }
+    for (const auto& flash : flashes.first(
+             std::min(flashes.size(), kOldGuardFlashCapacity))) {
+        if (!std::isfinite(flash.age) ||
+            !std::isfinite(flash.lifetime) ||
+            flash.lifetime <= 0.0F ||
+            flash.age < 0.0F ||
+            flash.age >= flash.lifetime) {
+            continue;
+        }
+        const auto age_ratio =
+            std::clamp(flash.age / flash.lifetime, 0.0F, 1.0F);
+        append_if_visible(
+            flash.position,
+            flash.size * (1.0F + age_ratio * 0.55F),
+            (1.0F - age_ratio) * (1.0F - age_ratio),
+            1.0F,
+            std::atan2(flash.direction.y, flash.direction.x),
+            flash.intensity);
+    }
+    if (instances.empty()) {
+        return;
+    }
+
+    // Je trie toutes les transparences du fond vers la camera avant l'upload ;
+    // la profondeur reste lue mais aucune bouffee ne masque les suivantes.
+    std::stable_sort(
+        instances.begin(),
+        instances.end(),
+        [&](const OldGuardEffectGpuInstance& left,
+            const OldGuardEffectGpuInstance& right) noexcept {
+            const auto left_delta =
+                glm::vec3 {left.position_size} -
+                camera_position;
+            const auto right_delta =
+                glm::vec3 {right.position_size} -
+                camera_position;
+            return glm::dot(left_delta, left_delta) >
+                   glm::dot(right_delta, right_delta);
+        });
+
+    const auto instance_bytes =
+        static_cast<GLsizeiptr>(
+            instances.size() *
+            sizeof(OldGuardEffectGpuInstance));
+    const ScopedPrecipitationGlState previous_gl_state {};
+    glBindVertexArray(old_guard_effect_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, old_guard_effect_instance_vbo_);
+    if (old_guard_effect_instance_buffer_bytes_ < instance_bytes) {
+        old_guard_effect_instance_buffer_bytes_ =
+            grow_buffer_capacity(
+                old_guard_effect_instance_buffer_bytes_,
+                instance_bytes,
+                kInitialOldGuardEffectInstanceBufferBytes);
+    }
+    orphan_bound_buffer(
+        GL_ARRAY_BUFFER,
+        old_guard_effect_instance_buffer_bytes_);
+    glBufferSubData(
+        GL_ARRAY_BUFFER,
+        0,
+        instance_bytes,
+        instances.data());
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(instance_bytes, 0));
+
+    const auto camera_right =
+        glm::normalize(glm::vec3 {inverse_view[0]});
+    const auto camera_up =
+        glm::normalize(glm::vec3 {inverse_view[1]});
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(old_guard_effect_program_);
+    glUniformMatrix4fv(
+        old_guard_effect_uniforms_.view_projection,
+        1,
+        GL_FALSE,
+        glm::value_ptr(view_projection));
+    glUniform3fv(
+        old_guard_effect_uniforms_.camera_right,
+        1,
+        glm::value_ptr(camera_right));
+    glUniform3fv(
+        old_guard_effect_uniforms_.camera_up,
+        1,
+        glm::value_ptr(camera_up));
+    glDrawArraysInstanced(
+        GL_TRIANGLE_STRIP,
+        0,
+        4,
+        static_cast<GLsizei>(instances.size()));
+    record_triangle_draw(
+        6,
+        static_cast<GLsizei>(instances.size()));
 }
 
 void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
@@ -6650,22 +8346,32 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
 
 auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInstance> creatures,
                                               std::span<const CrewRenderInstance> crew,
+                                              std::span<const OldGuardRenderInstance> old_guard,
                                               const glm::vec3& focus,
                                               float creature_draw_distance,
-                                              float crew_draw_distance)
+                                              float crew_draw_distance,
+                                              float old_guard_draw_distance)
     -> std::span<const CreaturePartInstance> {
     auto& visible_creatures = visible_creatures_cache_;
     auto& visible_crew = visible_crew_cache_;
+    auto& visible_old_guard = visible_old_guard_cache_;
     auto& parts = creature_parts_scratch_;
     visible_creatures.clear();
     visible_crew.clear();
+    visible_old_guard.clear();
     parts.clear();
     const auto safe_creature_distance =
         std::isfinite(creature_draw_distance) ? std::max(creature_draw_distance, 0.0F) : 0.0F;
     const auto safe_crew_distance =
         std::isfinite(crew_draw_distance) ? std::max(crew_draw_distance, 0.0F) : 0.0F;
+    const auto safe_old_guard_distance =
+        std::isfinite(old_guard_draw_distance)
+            ? std::max(old_guard_draw_distance, 0.0F)
+            : 0.0F;
     const auto creature_draw_distance_sq = safe_creature_distance * safe_creature_distance;
     const auto crew_draw_distance_sq = safe_crew_distance * safe_crew_distance;
+    const auto old_guard_draw_distance_sq =
+        safe_old_guard_distance * safe_old_guard_distance;
 
     if (visible_creatures.capacity() < creatures.size()) {
         visible_creatures.reserve(creatures.size());
@@ -6707,12 +8413,40 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
         visible_crew.resize(kCrewVisualRenderCapacity);
     }
 
-    if (visible_creatures.empty() && visible_crew.empty()) {
+    if (visible_old_guard.capacity() < old_guard.size()) {
+        visible_old_guard.reserve(old_guard.size());
+    }
+    for (const auto& guard : old_guard) {
+        const auto dx = guard.position.x - focus.x;
+        const auto dz = guard.position.z - focus.z;
+        const auto distance_squared = dx * dx + dz * dz;
+        if (!std::isfinite(distance_squared) ||
+            distance_squared > old_guard_draw_distance_sq) {
+            continue;
+        }
+        visible_old_guard.push_back({&guard, distance_squared});
+    }
+    std::sort(
+        visible_old_guard.begin(),
+        visible_old_guard.end(),
+        [](const VisibleOldGuardMember& left,
+           const VisibleOldGuardMember& right) noexcept {
+            return left.distance_squared < right.distance_squared;
+        });
+    if (visible_old_guard.size() > kOldGuardMemberCount) {
+        visible_old_guard.resize(kOldGuardMemberCount);
+    }
+
+    if (visible_creatures.empty() &&
+        visible_crew.empty() &&
+        visible_old_guard.empty()) {
         return {};
     }
 
     const auto required_part_capacity =
-        visible_creatures.size() * kCreatureMaxBoxBudget + visible_crew.size() * kCrewVisualPartBudget;
+        visible_creatures.size() * kCreatureMaxBoxBudget +
+        visible_crew.size() * kCrewVisualPartBudget +
+        visible_old_guard.size() * kOldGuardVisualPartBudget;
     if (parts.capacity() < required_part_capacity) {
         parts.reserve(required_part_capacity);
     }
@@ -6728,14 +8462,19 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
     for (const auto& visible_member : visible_crew) {
         append_crew_parts(parts, *visible_member.crew);
     }
+    for (const auto& visible_member : visible_old_guard) {
+        append_old_guard_parts(parts, *visible_member.guard);
+    }
     return parts;
 }
 
 void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> creatures,
                                      std::span<const CrewRenderInstance> crew,
+                                     std::span<const OldGuardRenderInstance> old_guard,
                                      const glm::mat4& light_view_projection,
                                      const glm::vec3& shadow_focus) {
-    if ((creatures.empty() && crew.empty()) || creature_shadow_program_ == 0 || creature_vao_ == 0 ||
+    if ((creatures.empty() && crew.empty() && old_guard.empty()) ||
+        creature_shadow_program_ == 0 || creature_vao_ == 0 ||
         creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
         return;
     }
@@ -6743,9 +8482,11 @@ void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> cre
     const auto parts = collect_visible_creature_parts(
         creatures,
         crew,
+        old_guard,
         shadow_focus,
         kShadowDistance + static_cast<float>(kChunkSizeX),
-        kCrewVisualDrawDistance);
+        kCrewVisualDrawDistance,
+        kOldGuardRenderDistance);
     if (parts.empty()) {
         return;
     }
@@ -6782,22 +8523,27 @@ void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> cre
 
 void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
                               std::span<const CrewRenderInstance> crew,
+                              std::span<const OldGuardRenderInstance> old_guard,
                               const glm::mat4& view_projection,
                               const glm::mat4& light_view_projection,
                               const glm::vec3& camera_position,
                               const EnvironmentState& environment,
                               bool player_light_active,
                               float super_vision_strength) {
-    if ((creatures.empty() && crew.empty()) || creature_program_ == 0 || creature_vao_ == 0 || creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
+    if ((creatures.empty() && crew.empty() && old_guard.empty()) ||
+        creature_program_ == 0 || creature_vao_ == 0 ||
+        creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
         return;
     }
 
     const auto parts = collect_visible_creature_parts(
         creatures,
         crew,
+        old_guard,
         camera_position,
         64.0F,
-        kCrewVisualDrawDistance);
+        kCrewVisualDrawDistance,
+        kOldGuardRenderDistance);
 
     if (parts.empty()) {
         return;
@@ -7685,6 +9431,249 @@ void Renderer::draw_gameplay_announcement(const GameplayHudAnnouncementView& ann
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_command_console(
+    const CommandConsoleView& command_console,
+    int width,
+    int height) {
+    if (!command_console.visible ||
+        width <= 0 ||
+        height <= 0 ||
+        hud_program_ == 0 ||
+        hud_vao_ == 0 ||
+        hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto viewport_width =
+        static_cast<float>(width);
+    const auto viewport_height =
+        static_cast<float>(height);
+    const auto layout =
+        build_command_console_layout(
+            width,
+            height);
+    const auto pixel_size =
+        layout.text_pixel_size;
+    constexpr std::string_view kPrompt = "> ";
+    const auto horizontal_padding =
+        std::max(8.0F, pixel_size * 4.0F);
+    const auto available_text_width =
+        std::max(
+            pixel_size * 6.0F,
+            layout.input_width -
+                horizontal_padding * 2.0F -
+                measure_pixel_text(
+                    kPrompt,
+                    pixel_size));
+    const auto maximum_visible_characters =
+        std::max<std::size_t>(
+            static_cast<std::size_t>(
+                std::floor(
+                    available_text_width /
+                    (pixel_size * 6.0F))),
+            1U);
+    const auto text_window =
+        build_command_console_text_window(
+            command_console.input,
+            command_console.cursor_byte_offset,
+            maximum_visible_characters);
+    const auto visible_input =
+        command_console.input.substr(
+            text_window.start,
+            text_window.length);
+
+    auto& vertices =
+        command_console_vertices_scratch_;
+    vertices.clear();
+    if (vertices.capacity() < 16'384U) {
+        vertices.reserve(16'384U);
+    }
+
+    append_hud_shadow_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.panel_x,
+        layout.panel_y,
+        layout.panel_width,
+        layout.panel_height,
+        14.0F,
+        {0.0F, 0.0F, 0.0F, 0.26F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.panel_x,
+        layout.panel_y,
+        layout.panel_width,
+        layout.panel_height,
+        {0.04F, 0.28F, 0.32F, 0.48F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.panel_x + 1.5F,
+        layout.panel_y + 1.5F,
+        std::max(0.0F, layout.panel_width - 3.0F),
+        std::max(0.0F, layout.panel_height - 3.0F),
+        {0.01F, 0.025F, 0.03F, 0.55F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.panel_x + 2.0F,
+        layout.panel_y + 2.0F,
+        std::max(0.0F, layout.panel_width - 4.0F),
+        2.0F,
+        {0.30F, 0.92F, 0.98F, 0.84F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.input_x,
+        layout.input_y,
+        layout.input_width,
+        layout.input_height,
+        {0.10F, 0.46F, 0.50F, 0.50F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.input_x + 1.5F,
+        layout.input_y + 1.5F,
+        std::max(0.0F, layout.input_width - 3.0F),
+        std::max(0.0F, layout.input_height - 3.0F),
+        {0.005F, 0.015F, 0.02F, 0.58F});
+
+    const auto draw_text =
+        [&](float x,
+            float y,
+            float size,
+            std::string_view text,
+            const HudColor& color) {
+            append_pixel_text(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x + size,
+                y + size,
+                size,
+                text,
+                {0.0F, 0.0F, 0.0F, 0.52F});
+            append_pixel_text(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x,
+                y,
+                size,
+                text,
+                color);
+        };
+
+    const auto title_size =
+        layout.panel_width < 420.0F ? 1.5F : 2.0F;
+    draw_text(
+        layout.input_x,
+        layout.panel_y + 11.0F,
+        title_size,
+        "CONSOLE DE COMMANDE",
+        {0.62F, 0.94F, 0.98F, 0.96F});
+
+    const auto input_text_y =
+        layout.input_y +
+        std::max(
+            0.0F,
+            (layout.input_height -
+             pixel_size * 7.0F) *
+                0.5F);
+    const auto prompt_x =
+        layout.input_x +
+        horizontal_padding;
+    draw_text(
+        prompt_x,
+        input_text_y,
+        pixel_size,
+        kPrompt,
+        {0.38F, 0.94F, 0.72F, 0.98F});
+    const auto input_text_x =
+        prompt_x +
+        measure_pixel_text(
+            kPrompt,
+            pixel_size);
+    draw_text(
+        input_text_x,
+        input_text_y,
+        pixel_size,
+        visible_input,
+        {0.92F, 0.98F, 1.0F, 0.98F});
+
+    const auto cursor_prefix =
+        visible_input.substr(
+            0U,
+            std::min(
+                text_window.cursor_offset,
+                visible_input.size()));
+    const auto cursor_x =
+        input_text_x +
+        measure_pixel_text(
+            cursor_prefix,
+            pixel_size);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        cursor_x,
+        input_text_y,
+        std::max(1.0F, pixel_size * 0.65F),
+        pixel_size * 7.0F,
+        {0.48F, 1.0F, 0.82F, 0.92F});
+
+    const auto feedback =
+        command_console.feedback.empty()
+            ? std::string_view(
+                  "ENTREE POUR VALIDER - ECHAP POUR FERMER")
+            : command_console.feedback;
+    const auto feedback_size =
+        layout.panel_width < 420.0F ? 1.25F : 2.0F;
+    draw_text(
+        layout.input_x,
+        layout.panel_y +
+            layout.panel_height -
+            feedback_size * 7.0F -
+            9.0F,
+        feedback_size,
+        feedback,
+        command_console.feedback_is_error
+            ? HudColor {1.0F, 0.46F, 0.40F, 0.96F}
+            : HudColor {0.48F, 0.94F, 0.72F, 0.94F});
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(
+        GL_SRC_ALPHA,
+        GL_ONE_MINUS_SRC_ALPHA);
+
+    glUseProgram(hud_program_);
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        atlas_texture_);
+
+    upload_hud_vertices(vertices);
+    glDrawArrays(
+        GL_TRIANGLES,
+        0,
+        static_cast<GLsizei>(
+            vertices.size()));
 
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);

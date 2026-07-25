@@ -16,6 +16,7 @@
 #include "app/SessionSaveState.h"
 #include "gameplay/SeaAdventure.h"
 #include "render/HotbarLayout.h"
+#include "world/Environment.h"
 
 #include <doctest/doctest.h>
 
@@ -106,20 +107,57 @@ void downgrade_current_sea_save_to_v9(const std::filesystem::path& path,
     REQUIRE(input.gcount() == static_cast<std::streamsize>(bytes.size()));
     input.close();
 
-    auto departure_payload = std::array<char, sizeof(std::uint8_t) + sizeof(float)> {};
-    departure_payload[0] = static_cast<char>(phase);
-    std::memcpy(departure_payload.data() + sizeof(std::uint8_t), &phase_elapsed, sizeof(float));
+    auto extension_prefix = std::array<
+        char,
+        sizeof(std::uint8_t) +
+            sizeof(float) +
+            sizeof(std::uint8_t) +
+            sizeof(std::uint64_t)> {};
+    extension_prefix[0] = static_cast<char>(phase);
+    std::memcpy(
+        extension_prefix.data() + sizeof(std::uint8_t),
+        &phase_elapsed,
+        sizeof(float));
+    extension_prefix[sizeof(std::uint8_t) + sizeof(float)] = 1;
+    const auto patrol_revision = kOldGuardPatrolRevision;
+    std::memcpy(
+        extension_prefix.data() +
+            sizeof(std::uint8_t) +
+            sizeof(float) +
+            sizeof(std::uint8_t),
+        &patrol_revision,
+        sizeof(patrol_revision));
     const auto match = std::search(
         bytes.begin(),
         bytes.end(),
-        departure_payload.begin(),
-        departure_payload.end());
+        extension_prefix.begin(),
+        extension_prefix.end());
     REQUIRE(match != bytes.end());
-    REQUIRE(std::search(match + 1, bytes.end(), departure_payload.begin(), departure_payload.end()) == bytes.end());
+    REQUIRE(
+        std::search(
+            match + 1,
+            bytes.end(),
+            extension_prefix.begin(),
+            extension_prefix.end()) ==
+        bytes.end());
 
-    // Je retire uniquement l'extension v10 placee apres le roster, puis je
-    // retablis l'entete v9. Le reste du fichier reste donc un vrai payload v9.
-    bytes.erase(match, match + static_cast<std::ptrdiff_t>(departure_payload.size()));
+    constexpr auto old_guard_member_bytes =
+        sizeof(float) * 8U +
+        sizeof(std::uint8_t) * 5U;
+    constexpr auto departure_payload_bytes =
+        sizeof(std::uint8_t) + sizeof(float);
+    constexpr auto old_guard_payload_bytes =
+        sizeof(std::uint8_t) +
+        sizeof(std::uint64_t) +
+        kOldGuardMemberCount * old_guard_member_bytes;
+    // Je retire les extensions v10 puis v11 placees apres le roster historique,
+    // avant de retablir l'entete v9. Le reste demeure un vrai payload v9.
+    bytes.erase(
+        match,
+        match +
+            static_cast<std::ptrdiff_t>(
+                departure_payload_bytes +
+                old_guard_payload_bytes));
     REQUIRE(bytes.size() >= 8U + sizeof(std::uint32_t));
     constexpr std::uint32_t version = 9U;
     std::memcpy(bytes.data() + 8U, &version, sizeof(version));
@@ -353,6 +391,62 @@ TEST_CASE("game option parser accepts startup ui preview overlays") {
     CHECK_FALSE(parse_game_options(invalid_arguments).ok);
 }
 
+TEST_CASE("game option parser accepts deterministic non negative weather time") {
+    const auto default_parse =
+        parse_game_options(std::vector<std::string_view> {});
+    REQUIRE(default_parse.ok);
+    CHECK(default_parse.options.initial_weather_time_seconds ==
+          doctest::Approx(0.0F));
+
+    const auto tempest_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--initial-weather-time=2685.0979",
+            });
+    REQUIRE(tempest_parse.ok);
+    CHECK(tempest_parse.options.initial_weather_time_seconds ==
+          doctest::Approx(2685.0979F));
+
+    const auto zero_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--initial-weather-time=0",
+            });
+    REQUIRE(zero_parse.ok);
+    CHECK(zero_parse.options.initial_weather_time_seconds ==
+          doctest::Approx(0.0F));
+
+    const auto maximum_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--initial-weather-time=1000000000",
+            });
+    REQUIRE(maximum_parse.ok);
+    CHECK(maximum_parse.options.initial_weather_time_seconds ==
+          doctest::Approx(kMaximumWeatherTimeSeconds));
+}
+
+TEST_CASE("game option parser rejects invalid deterministic weather time") {
+    constexpr std::array<std::string_view, 6> invalid_arguments {{
+        "--initial-weather-time=",
+        "--initial-weather-time=-0.001",
+        "--initial-weather-time=nan",
+        "--initial-weather-time=inf",
+        "--initial-weather-time=1e30",
+        "--initial-weather-time=1e100",
+    }};
+
+    for (const auto argument : invalid_arguments) {
+        const auto parsed =
+            parse_game_options(
+                std::vector<std::string_view> {argument});
+        CAPTURE(argument);
+        CHECK_FALSE(parsed.ok);
+        CHECK(parsed.error_message ==
+              "Invalid value for --initial-weather-time");
+    }
+}
+
 TEST_CASE("game option parser accepts explicit visual frame capture target") {
     const std::vector<std::string_view> arguments {
         "--smoke-test",
@@ -419,6 +513,11 @@ TEST_CASE("gameplay action keys use physical scancodes") {
     flight_key.scancode = SDL_SCANCODE_F;
     CHECK(is_flight_action_key(flight_key));
 
+    SDL_Keysym azerty_console_key {};
+    azerty_console_key.sym = static_cast<SDL_Keycode>(0x00B2);
+    azerty_console_key.scancode = SDL_SCANCODE_GRAVE;
+    CHECK(is_command_console_key(azerty_console_key));
+
     SDL_Keysym remapped_v_key {};
     remapped_v_key.sym = SDLK_v;
     remapped_v_key.scancode = SDL_SCANCODE_B;
@@ -428,6 +527,11 @@ TEST_CASE("gameplay action keys use physical scancodes") {
     remapped_f_key.sym = SDLK_f;
     remapped_f_key.scancode = SDL_SCANCODE_G;
     CHECK_FALSE(is_flight_action_key(remapped_f_key));
+
+    SDL_Keysym remapped_console_key {};
+    remapped_console_key.sym = static_cast<SDL_Keycode>(0x00B2);
+    remapped_console_key.scancode = SDL_SCANCODE_1;
+    CHECK_FALSE(is_command_console_key(remapped_console_key));
 }
 
 TEST_CASE("game option parser enables audit only when audit or perf capture flags are present") {
@@ -2245,10 +2349,10 @@ TEST_CASE("sea adventure save payload is normalized at the binary boundary") {
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("version 10 sea and crew save state round trips and sanitizes corrupted members") {
+TEST_CASE("version 11 sea crew and guard payload preserves the version 9 crew contract") {
     const auto unique_suffix = std::to_string(static_cast<unsigned long long>(
         std::chrono::steady_clock::now().time_since_epoch().count()));
-    const auto save_root = std::filesystem::temp_directory_path() / ("valcraft-save-v9-crew-" + unique_suffix);
+    const auto save_root = std::filesystem::temp_directory_path() / ("valcraft-save-v11-crew-" + unique_suffix);
     std::filesystem::remove_all(save_root);
 
     SaveGameSnapshot snapshot {};
