@@ -24,6 +24,7 @@ out float v_ao;
 out float v_sky_light;
 out float v_block_light;
 out float v_material_blend;
+out vec2 v_surface_uv;
 flat out uint v_primary_block;
 flat out uint v_secondary_block;
 flat out uint v_surface_flags;
@@ -38,9 +39,19 @@ void main() {
     v_ao = float(a_material_ao.w) / 255.0;
     v_sky_light = float(a_lighting.x) / 15.0;
     v_block_light = float(a_lighting.y) / 15.0;
-    v_material_blend = float(a_material_ao.z) / 255.0;
+
+    // Pour une surface alpha-testée, le mesher compacte U dans l'ancien
+    // identifiant secondaire et V dans l'ancien poids de mélange. Je restaure
+    // ici le contrat matériau normal afin qu'aucun UV ne devienne un BlockId.
+    bool cutout_surface = (a_surface_flags & 1u) != 0u;
+    v_surface_uv = cutout_surface
+        ? vec2(a_material_ao.yz) / 255.0
+        : vec2(0.0);
+    v_material_blend = cutout_surface
+        ? 0.0
+        : float(a_material_ao.z) / 255.0;
     v_primary_block = a_material_ao.x;
-    v_secondary_block = a_material_ao.y;
+    v_secondary_block = cutout_surface ? 0u : a_material_ao.y;
     v_surface_flags = a_surface_flags;
     gl_Position = u_view_projection * world_position;
 }
@@ -65,6 +76,7 @@ out float v_ao;
 out float v_sky_light;
 out float v_block_light;
 out float v_material_blend;
+out vec2 v_surface_uv;
 flat out uint v_primary_block;
 flat out uint v_secondary_block;
 flat out uint v_surface_flags;
@@ -80,6 +92,7 @@ void main() {
     v_sky_light = float(a_material_lighting_flags.y) / 15.0;
     v_block_light = float(a_material_lighting_flags.z) / 15.0;
     v_material_blend = 0.0;
+    v_surface_uv = vec2(a_uv_fixed) / 256.0;
     v_primary_block = a_material_lighting_flags.x;
     v_secondary_block = 0u;
 
@@ -102,6 +115,7 @@ in float v_ao;
 in float v_sky_light;
 in float v_block_light;
 in float v_material_blend;
+in vec2 v_surface_uv;
 flat in uint v_primary_block;
 flat in uint v_secondary_block;
 flat in uint v_surface_flags;
@@ -243,6 +257,33 @@ MaterialSurfaceSample sample_material_surface(
         u_material_albedo, layer, scale, weights);
     result.orm = sample_triplanar(
         u_material_orm_emission, layer, scale, weights);
+    return result;
+}
+
+vec2 clamped_cutout_uv() {
+    vec2 texture_size = max(
+        vec2(textureSize(u_material_albedo, 0).xy),
+        vec2(1.0));
+    vec2 half_texel = 0.5 / texture_size;
+
+    // Le tableau de matériaux reste en GL_REPEAT pour le terrain triplanaire.
+    // Je garde donc les cartes 0..1 à l'intérieur de leur dernier texel afin
+    // que U/V == 1 ne reboucle pas sur le bord opposé.
+    return clamp(
+        v_surface_uv,
+        half_texel,
+        vec2(1.0) - half_texel);
+}
+
+MaterialSurfaceSample sample_cutout_surface(float layer) {
+    vec2 uv = clamped_cutout_uv();
+    MaterialSurfaceSample result;
+    result.albedo = texture(
+        u_material_albedo,
+        vec3(uv, layer));
+    result.orm = texture(
+        u_material_orm_emission,
+        vec3(uv, layer));
     return result;
 }
 
@@ -411,10 +452,17 @@ vec3 detail_normal(
                           footprint_fade *
                           mix(0.34, 1.0, distance_fade);
 
+    // Chaque projection doit conserver une base tangente de même chiralité
+    // sur les faces positives et négatives. Sans ces signes, le canal vert de
+    // la normale est inversé sur la moitié des pentes et crée une couture.
+    vec3 axis_sign = vec3(
+        geometric_normal.x < 0.0 ? -1.0 : 1.0,
+        geometric_normal.y < 0.0 ? -1.0 : 1.0,
+        geometric_normal.z < 0.0 ? -1.0 : 1.0);
     vec3 perturbation =
-        vec3(0.0, normal_x.y, normal_x.x) * weights.x +
-        vec3(normal_y.x, 0.0, normal_y.y) * weights.y +
-        vec3(normal_z.x, normal_z.y, 0.0) * weights.z;
+        vec3(0.0, -axis_sign.x * normal_x.y, normal_x.x) * weights.x +
+        vec3(normal_y.x, 0.0, -axis_sign.y * normal_y.y) * weights.y +
+        vec3(normal_z.x, axis_sign.z * normal_z.y, 0.0) * weights.z;
     return safe_normalize(
         geometric_normal + perturbation * detail_weight,
         geometric_normal);
@@ -422,6 +470,7 @@ vec3 detail_normal(
 
 void main() {
     vec3 geometric_normal = safe_normalize(v_normal, vec3(0.0, 1.0, 0.0));
+    bool cutout_surface = (v_surface_flags & 1u) != 0u;
     bool architectural_surface = (v_surface_flags & 2u) != 0u;
     bool transparent_surface = (v_surface_flags & 4u) != 0u;
     bool silhouette_bevel = (v_surface_flags & 8u) != 0u;
@@ -485,7 +534,14 @@ void main() {
 
     MaterialSurfaceSample primary_sample;
     MaterialSurfaceSample secondary_sample;
-    if (primary_material_only) {
+    if (cutout_surface) {
+        // Les panneaux et rubans possèdent déjà des UV canoniques. Un
+        // échantillonnage triplanaire en espace monde mélangeait trois masques
+        // alpha différents et faisait nager ou cribler leur silhouette.
+        primary_sample = sample_cutout_surface(primary_layer);
+        secondary_sample = primary_sample;
+        blend = 0.0;
+    } else if (primary_material_only) {
         primary_sample = sample_material_surface(
             primary_layer, primary_scale, weights);
         secondary_sample = primary_sample;
@@ -522,7 +578,6 @@ void main() {
         orm.g = mix(orm.g, max(orm.g, 0.82), loam_band * 0.55);
     }
     float coverage = mix(primary_albedo.a, secondary_albedo.a, blend);
-    bool cutout_surface = (v_surface_flags & 1u) != 0u;
     if (cutout_surface && coverage < 0.46) {
         discard;
     }
@@ -531,7 +586,8 @@ void main() {
     // High, je garde le relief existant mais je n'échantillonne qu'une seule
     // couche lorsque le fast path matériau a déjà établi un poids extrême.
     vec3 normal = geometric_normal;
-    if (u_material_detail_scale >= k_normal_mapping_detail_threshold) {
+    if (!cutout_surface &&
+        u_material_detail_scale >= k_normal_mapping_detail_threshold) {
         if (primary_material_only) {
             normal = detail_normal(
                 primary_layer,
@@ -717,15 +773,72 @@ void main() {
 
 inline constexpr std::string_view kModernTerrainShadowVertexShaderSource = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
+layout(location = 2) in uvec4 a_material_ao;
+layout(location = 4) in uint a_surface_flags;
+
 uniform mat4 u_model;
 uniform mat4 u_light_view_projection;
+
+out vec2 v_surface_uv;
+flat out uint v_primary_block;
+flat out uint v_surface_flags;
+
 void main() {
-    gl_Position = u_light_view_projection * u_model * vec4(a_position, 1.0);
+    v_surface_uv = vec2(a_material_ao.yz) / 255.0;
+    v_primary_block = a_material_ao.x;
+    v_surface_flags = a_surface_flags;
+    gl_Position =
+        u_light_view_projection *
+        u_model *
+        vec4(a_position, 1.0);
 }
 )";
 
 inline constexpr std::string_view kModernTerrainShadowFragmentShaderSource = R"(#version 330 core
+in vec2 v_surface_uv;
+flat in uint v_primary_block;
+flat in uint v_surface_flags;
+
+uniform sampler2DArray u_material_albedo;
+
+float material_layer(uint block_id) {
+    if (block_id >= 1u && block_id <= 20u) {
+        return float(block_id - 1u);
+    }
+    if (block_id == 25u) return 20.0;
+    if (block_id == 26u) return 21.0;
+    if (block_id == 27u) return 22.0;
+    if (block_id == 28u || block_id == 29u) return 23.0;
+    if (block_id == 30u || block_id == 31u) return 24.0;
+    if (block_id >= 32u && block_id <= 36u) return float(block_id - 7u);
+    if (block_id >= 37u && block_id <= 39u) return 30.0;
+    return 2.0;
+}
+
+vec2 clamped_cutout_uv() {
+    vec2 texture_size = max(
+        vec2(textureSize(u_material_albedo, 0).xy),
+        vec2(1.0));
+    vec2 half_texel = 0.5 / texture_size;
+    return clamp(
+        v_surface_uv,
+        half_texel,
+        vec2(1.0) - half_texel);
+}
+
 void main() {
+    if ((v_surface_flags & 1u) == 0u) {
+        return;
+    }
+
+    float coverage = texture(
+        u_material_albedo,
+        vec3(
+            clamped_cutout_uv(),
+            material_layer(v_primary_block))).a;
+    if (coverage < 0.46) {
+        discard;
+    }
 }
 )";
 

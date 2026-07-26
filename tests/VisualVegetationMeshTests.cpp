@@ -151,6 +151,68 @@ TEST_CASE("la végétation convertit ses trois LOD en maillages déterministes v
     }
 }
 
+TEST_CASE("les cartes alpha conservent leurs UV sans agrandir TerrainVertex") {
+    TestBlocks blocks {};
+    blocks[{4, 4, 4}] = to_block_id(BlockType::TallGrass);
+    blocks[{8, 4, 4}] = to_block_id(BlockType::Cactus);
+    blocks[{8, 5, 4}] = to_block_id(BlockType::Cactus);
+
+    const auto build = build_visual_vegetation(
+        {{0, 0, 0}, {15, 15, 15}, 1},
+        test_sampler(blocks),
+        0x6D5A4C31U);
+    const auto mesh = build_visual_vegetation_mesh(
+        build,
+        VisualVegetationLod::Near,
+        StylizedPrimitiveLod::Low,
+        [](int, int, int) {
+            return VisualVegetationLighting {15U, 0U};
+        });
+
+    REQUIRE_FALSE(mesh.empty());
+    CHECK(sizeof(TerrainVertex) == 32U);
+
+    auto cutout_vertex_count = std::size_t {0U};
+    auto opaque_vertex_count = std::size_t {0U};
+    auto saw_u_zero = false;
+    auto saw_u_one = false;
+    auto saw_v_zero = false;
+    auto saw_v_one = false;
+    for (const auto& vertex : mesh.vertices) {
+        const auto cutout =
+            (vertex.surface_flags & 1U) != 0U;
+        if (cutout) {
+            ++cutout_vertex_count;
+            saw_u_zero =
+                saw_u_zero ||
+                vertex.secondary_block_id == 0U;
+            saw_u_one =
+                saw_u_one ||
+                vertex.secondary_block_id == 255U;
+            saw_v_zero =
+                saw_v_zero ||
+                vertex.material_blend == 0U;
+            saw_v_one =
+                saw_v_one ||
+                vertex.material_blend == 255U;
+            continue;
+        }
+
+        ++opaque_vertex_count;
+        CHECK(
+            vertex.secondary_block_id ==
+            to_block_id(BlockType::Air));
+        CHECK(vertex.material_blend == 0U);
+    }
+
+    CHECK(cutout_vertex_count > 0U);
+    CHECK(opaque_vertex_count > 0U);
+    CHECK(saw_u_zero);
+    CHECK(saw_u_one);
+    CHECK(saw_v_zero);
+    CHECK(saw_v_one);
+}
+
 TEST_CASE("les arbres proches arrondissent leur silhouette dans un budget borne") {
     TestBlocks blocks {};
     place_oak_crossing_section(blocks, 6, 4, 7);

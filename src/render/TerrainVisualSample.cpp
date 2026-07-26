@@ -179,6 +179,8 @@ auto sample_terrain_visual_mesh(
 
         const auto dominant = dominant_vertex_index(closest.barycentric);
         const auto& material_vertex = *vertices[dominant];
+        const auto cutout_surface =
+            (material_vertex.surface_flags & 1U) != 0U;
         const auto interpolate_byte =
             [&](auto member) noexcept {
                 return (
@@ -196,12 +198,18 @@ auto sample_terrain_visual_mesh(
             normal,
             visual_material_for_block(
                 material_vertex.primary_block_id),
-            visual_material_for_block(
-                material_vertex.secondary_block_id),
-            std::clamp(
-                interpolate_byte(&TerrainVertex::material_blend) / 255.0F,
-                0.0F,
-                1.0F),
+            cutout_surface
+                ? VisualMaterialId::None
+                : visual_material_for_block(
+                      material_vertex.secondary_block_id),
+            cutout_surface
+                ? 0.0F
+                : std::clamp(
+                      interpolate_byte(
+                          &TerrainVertex::material_blend) /
+                          255.0F,
+                      0.0F,
+                      1.0F),
             std::clamp(
                 interpolate_byte(&TerrainVertex::ambient_occlusion) / 255.0F,
                 0.0F,

@@ -52,6 +52,31 @@ TEST_CASE("terrain visual sampling interpolates a render-only organic surface") 
     CHECK(sample->mesh_revision == 42U);
 }
 
+TEST_CASE("terrain visual sampling ignores packed UVs on cutout vertices") {
+    auto mesh = flat_test_mesh();
+    for (auto& vertex : mesh.vertices) {
+        vertex.primary_block_id =
+            to_block_id(BlockType::TallGrass);
+        // Sur une carte alpha, ces deux octets contiennent U et V en UNORM8.
+        vertex.secondary_block_id = 255U;
+        vertex.material_blend = 255U;
+        vertex.surface_flags = 1U;
+    }
+
+    const auto sample = sample_terrain_visual_mesh(
+        mesh,
+        {{0.25F, 2.25F, 0.25F}, 1.0F, -1.0F});
+
+    REQUIRE(sample.has_value());
+    CHECK(
+        sample->primary_material ==
+        VisualMaterialId::TallGrass);
+    CHECK(
+        sample->secondary_material ==
+        VisualMaterialId::None);
+    CHECK(sample->material_blend == 0.0F);
+}
+
 TEST_CASE("terrain visual sampling rejects invalid distant and back-facing queries") {
     const auto mesh = flat_test_mesh();
 

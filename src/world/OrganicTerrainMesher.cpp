@@ -1041,24 +1041,36 @@ struct BinarySurfaceCache {
     };
     const auto unrelaxed_position = position;
     const auto local_outward = binary_surface.outward;
-    const auto smoothed_field =
+    const auto initial_smoothed_field =
         sample_smoothed_field(grid, cell, unrelaxed_position);
-    const auto normal =
-        smoothed_outward_normal(smoothed_field, local_outward);
+    const auto initial_normal =
+        smoothed_outward_normal(
+            initial_smoothed_field,
+            local_outward);
     position = relaxed_exposed_position(
         grid,
         binary_cache,
         cell,
         unrelaxed_position,
         center,
-        smoothed_field,
+        initial_smoothed_field,
         local_outward,
-        normal,
+        initial_normal,
         solid_count,
         sky_light,
         has_exposed_vertical_clearance(grid, cell),
         maximum_displacement,
         maximum_relaxation);
+
+    // La relaxation change la position géométrique. Je rééchantillonne donc le
+    // champ au point final : conserver la normale de l'ancien point décalait
+    // visuellement les reflets, l'éclairage et le mélange roche/terre.
+    const auto final_smoothed_field =
+        sample_smoothed_field(grid, cell, position);
+    const auto normal =
+        smoothed_outward_normal(
+            final_smoothed_field,
+            local_outward);
     const auto [primary, secondary] = select_materials(samples);
     static_cast<void>(secondary);
     const auto geological_pair =

@@ -139,6 +139,21 @@ inline constexpr float kTau = 6.28318530717958647692F;
     return 1.0F / std::max(std::abs(scale), 1.0e-4F);
 }
 
+[[nodiscard]] auto encode_unorm8(float value) noexcept -> std::uint8_t {
+    if (!std::isfinite(value)) {
+        return 0U;
+    }
+
+    // Les cartes alpha utilisent de vrais UV 0..1. Je les compacte dans les
+    // deux octets libres du format TerrainVertex afin de conserver le budget
+    // GPU de 32 octets et d'éviter tout changement d'ABI du maillage.
+    constexpr float kUnorm8Maximum = 255.0F;
+    return static_cast<std::uint8_t>(
+        std::lround(
+            std::clamp(value, 0.0F, 1.0F) *
+            kUnorm8Maximum));
+}
+
 [[nodiscard]] auto sample_lighting(
     const VisualVegetationLightingSampler& lighting_sampler,
     float world_x,
@@ -209,6 +224,8 @@ void append_instance(
     const auto surface_flags = requires_alpha_cutout(instance)
         ? kVisualSurfaceFlagCutout
         : std::uint16_t {0U};
+    const auto uses_cutout_uv =
+        (surface_flags & kVisualSurfaceFlagCutout) != 0U;
 
     destination.vertices.reserve(
         destination.vertices.size() + primitive.vertices.size());
@@ -306,8 +323,12 @@ void append_instance(
             normal_y,
             normal_z,
             instance.material_block,
-            to_block_id(BlockType::Air),
-            0U,
+            uses_cutout_uv
+                ? static_cast<BlockId>(encode_unorm8(source.u))
+                : to_block_id(BlockType::Air),
+            uses_cutout_uv
+                ? encode_unorm8(source.v)
+                : std::uint8_t {0U},
             255U,
             static_cast<std::uint8_t>(
                 std::min<std::uint8_t>(lighting.sky_light, 15U)),

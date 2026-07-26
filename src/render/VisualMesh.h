@@ -17,6 +17,12 @@ struct TerrainVertex {
     float ny = 1.0F;
     float nz = 0.0F;
     BlockId primary_block_id = to_block_id(BlockType::Air);
+
+    // Contrat compact du pipeline moderne :
+    // - terrain opaque : couche secondaire + poids de mélange ;
+    // - végétation alpha-testée (surface_flags bit 0) : UV U/V en UNORM8.
+    // Le vertex shader et les lecteurs CPU doivent donc tester ce bit avant
+    // d'interpréter ces octets comme un matériau secondaire.
     BlockId secondary_block_id = to_block_id(BlockType::Air);
     std::uint8_t material_blend = 0;
     std::uint8_t ambient_occlusion = 255;

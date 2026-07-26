@@ -414,6 +414,7 @@ private:
     struct ModernTerrainShadowUniformLocations {
         GLint model = -1;
         GLint light_view_projection = -1;
+        GLint material_albedo = -1;
     };
 
     struct WorldUniformLocations {
@@ -526,6 +527,7 @@ private:
         GLint edge_strength = -1;
         GLint fxaa_enabled = -1;
         GLint modern_pipeline = -1;
+        GLint resolve_only = -1;
         GLint storm_intensity = -1;
         GLint lightning_intensity = -1;
         GLint weather_exposure = -1;
@@ -584,6 +586,8 @@ private:
         GLint blur_mix = -1;
         GLint tint_color = -1;
         GLint vignette_strength = -1;
+        GLint exposure = -1;
+        GLint modern_pipeline = -1;
     };
 
     struct CreatureUniformLocations {
@@ -820,8 +824,12 @@ private:
     void run_post_process(const EnvironmentState& environment,
                           float weather_exposure,
                           int width,
-                          int height);
-    void run_menu_background_pass(int width, int height);
+                          int height,
+                          bool optional_effects_enabled);
+    void run_menu_background_pass(
+        int width,
+        int height,
+        float exposure);
     void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
                          const glm::mat4& view_projection,
                          const glm::mat4& light_view_projection,

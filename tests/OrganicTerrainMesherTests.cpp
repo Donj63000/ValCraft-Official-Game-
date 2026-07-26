@@ -479,6 +479,7 @@ TEST_CASE("organic terrain relaxation widens an exposed height transition withou
 
     auto moved_vertex_count = std::size_t {0U};
     auto moved_neighbor_count = std::size_t {0U};
+    auto updated_normal_count = std::size_t {0U};
     auto lower_transition = unrelaxed.vertices.size();
     auto upper_transition = unrelaxed.vertices.size();
     for (std::size_t index = 0U; index < unrelaxed.vertices.size(); ++index) {
@@ -499,6 +500,14 @@ TEST_CASE("organic terrain relaxation widens an exposed height transition withou
             ++moved_vertex_count;
             if (std::abs(before.x) > 0.5F) {
                 ++moved_neighbor_count;
+            }
+
+            // Une position relaxée doit posséder la normale du champ au point
+            // final, pas celle calculée avant son déplacement.
+            if (dot(
+                    normal_of(before),
+                    normal_of(after)) < 0.999999F) {
+                ++updated_normal_count;
             }
         }
 
@@ -537,6 +546,7 @@ TEST_CASE("organic terrain relaxation widens an exposed height transition withou
 
     CHECK(moved_vertex_count >= 8U);
     CHECK(moved_neighbor_count >= 4U);
+    CHECK(updated_normal_count > 0U);
     CHECK(relaxed_horizontal_span > baseline_horizontal_span * 1.24F);
     CHECK(relaxed_height_step < baseline_height_step * 0.80F);
     CHECK(relaxed_angle < baseline_angle - 0.27F);

@@ -4327,6 +4327,14 @@ void Renderer::render_frame(World& world,
                 1,
                 GL_FALSE,
                 glm::value_ptr(cascade_light_view_projection));
+            glUniform1i(
+                modern_terrain_shadow_uniforms_.material_albedo,
+                4);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_albedo_texture_);
+
             for (const auto& shadow_chunk : shadow_chunks) {
                 if (shadow_chunk.mesh->terrain_index_count == 0 ||
                     !renders_in_cascade(*shadow_chunk.mesh)) {
@@ -4343,6 +4351,11 @@ void Renderer::render_frame(World& world,
                     ++frame_stats.shadow_chunks;
                 }
             }
+            // Le VAO architectural n'expose pas l'attribut de flags en
+            // location 4. Sa valeur générique doit donc rester à zéro, sinon
+            // une valeur résiduelle pourrait transformer un mur opaque en
+            // carte alpha dans le shader d'ombre partagé.
+            glVertexAttribI1ui(4, 0U);
             for (const auto& shadow_chunk : shadow_chunks) {
                 if (shadow_chunk.mesh->architecture_opaque_index_count == 0 ||
                     !renders_in_cascade(*shadow_chunk.mesh)) {
@@ -4420,24 +4433,52 @@ void Renderer::render_frame(World& world,
     }
 
     const auto world_start = clock::now();
-    const auto use_post_process = options_.post_process_enabled && width > 0 && height > 0;
+    const auto optional_post_process_enabled =
+        options_.post_process_enabled &&
+        width > 0 &&
+        height > 0;
     const auto menu_preview_visible =
         main_menu.visible ||
-        (save_slot_menu.visible && save_slot_menu.parent == SaveSlotMenuParent::MainMenu) ||
-        (options_menu.visible && options_menu.parent == OptionsMenuParent::MainMenu);
-    const auto has_visible_water = std::any_of(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& visible_chunk) {
-        return visible_chunk.mesh->water_index_count > 0;
-    });
+        (save_slot_menu.visible &&
+         save_slot_menu.parent == SaveSlotMenuParent::MainMenu) ||
+        (options_menu.visible &&
+         options_menu.parent == OptionsMenuParent::MainMenu);
+    const auto has_visible_water =
+        std::any_of(
+            visible_chunks.begin(),
+            visible_chunks.end(),
+            [](const VisibleChunk& visible_chunk) {
+                return visible_chunk.mesh->water_index_count > 0;
+            });
+    const auto modern_output_resolve_required =
+        is_modern_visual_pipeline(options_.visual_pipeline) &&
+        width > 0 &&
+        height > 0;
+    const auto requires_scene_target =
+        optional_post_process_enabled ||
+        modern_output_resolve_required ||
+        has_visible_water ||
+        menu_preview_visible;
 
     if (has_visible_water) {
         ensure_water_scene_targets(render_width, render_height);
     }
-    if (use_post_process || has_visible_water || menu_preview_visible) {
-        ensure_post_process_targets(render_width, render_height, use_post_process || menu_preview_visible);
+    if (requires_scene_target) {
+        ensure_post_process_targets(
+            render_width,
+            render_height,
+            optional_post_process_enabled ||
+                menu_preview_visible);
     }
 
-    const auto final_target_framebuffer = (use_post_process || has_visible_water || menu_preview_visible) ? scene_framebuffer_ : 0U;
-    const auto opaque_target_framebuffer = has_visible_water ? water_scene_framebuffer_ : final_target_framebuffer;
+    const auto final_target_framebuffer =
+        requires_scene_target
+            ? scene_framebuffer_
+            : 0U;
+    const auto opaque_target_framebuffer =
+        has_visible_water
+            ? water_scene_framebuffer_
+            : final_target_framebuffer;
     const auto inverse_view_projection = glm::inverse(view_projection);
 
     glBindFramebuffer(GL_FRAMEBUFFER, opaque_target_framebuffer);
@@ -4891,53 +4932,6 @@ void Renderer::render_frame(World& world,
     draw_sky(inverse_sky_view_projection, environment, quality_settings);
     end_gpu_pass(GpuTimedPass::Sky);
 
-    if (options_.visual_pipeline == VisualPipeline::ModernStylized &&
-        modern_architecture_program_ != 0) {
-        const auto has_transparent_architecture =
-            std::any_of(
-                visible_chunks.begin(),
-                visible_chunks.end(),
-                [](const VisibleChunk& visible_chunk) {
-                    return visible_chunk.mesh
-                               ->architecture_transparent_index_count > 0;
-                });
-        if (has_transparent_architecture) {
-            bind_modern_surface_program(
-                modern_architecture_program_,
-                modern_architecture_uniforms_,
-                8.0F);
-            glEnable(GL_DEPTH_TEST);
-            glDepthMask(GL_FALSE);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glEnable(GL_CULL_FACE);
-            glCullFace(GL_BACK);
-
-            // Je parcours les chunks du plus lointain au plus proche pour
-            // stabiliser le verre sans introduire de tri de gameplay.
-            for (auto iterator = visible_chunks.rbegin();
-                 iterator != visible_chunks.rend();
-                 ++iterator) {
-                const auto* mesh = iterator->mesh;
-                if (mesh->architecture_transparent_index_count == 0) {
-                    continue;
-                }
-                glBindVertexArray(mesh->architecture_vao);
-                glDrawElements(
-                    GL_TRIANGLES,
-                    mesh->architecture_transparent_index_count,
-                    GL_UNSIGNED_INT,
-                    reinterpret_cast<const void*>(
-                        static_cast<std::uintptr_t>(
-                            mesh->architecture_transparent_index_offset_bytes)));
-                record_triangle_draw(
-                    mesh->architecture_transparent_index_count);
-            }
-            glDepthMask(GL_TRUE);
-            glDisable(GL_BLEND);
-        }
-    }
-
     begin_gpu_pass(GpuTimedPass::Water);
     if (has_visible_water) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
@@ -4993,6 +4987,59 @@ void Renderer::render_frame(World& world,
         glCullFace(GL_BACK);
     }
 
+    // Le verre est composé après l'eau. Il n'écrit volontairement pas dans le
+    // depth buffer ; lorsqu'il était dessiné avant l'eau, l'écriture de
+    // profondeur de cette dernière pouvait l'effacer alors qu'il se trouvait
+    // pourtant devant la surface.
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized &&
+        modern_architecture_program_ != 0) {
+        const auto has_transparent_architecture =
+            std::any_of(
+                visible_chunks.begin(),
+                visible_chunks.end(),
+                [](const VisibleChunk& visible_chunk) {
+                    return visible_chunk.mesh
+                               ->architecture_transparent_index_count > 0;
+                });
+        if (has_transparent_architecture) {
+            bind_modern_surface_program(
+                modern_architecture_program_,
+                modern_architecture_uniforms_,
+                8.0F);
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+
+            // Le tri reste effectué du chunk le plus lointain au plus proche.
+            // Cela stabilise la majorité des bâtiments sans coût de tri par
+            // triangle à chaque frame.
+            for (auto iterator = visible_chunks.rbegin();
+                 iterator != visible_chunks.rend();
+                 ++iterator) {
+                const auto* mesh = iterator->mesh;
+                if (mesh->architecture_transparent_index_count == 0) {
+                    continue;
+                }
+                glBindVertexArray(mesh->architecture_vao);
+                glDrawElements(
+                    GL_TRIANGLES,
+                    mesh->architecture_transparent_index_count,
+                    GL_UNSIGNED_INT,
+                    reinterpret_cast<const void*>(
+                        static_cast<std::uintptr_t>(
+                            mesh->architecture_transparent_index_offset_bytes)));
+                record_triangle_draw(
+                    mesh->architecture_transparent_index_count);
+            }
+
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+    }
+
     draw_precipitation(
         view_projection,
         inverse_view,
@@ -5038,15 +5085,24 @@ void Renderer::render_frame(World& world,
     begin_gpu_pass(GpuTimedPass::PostProcess);
     if (menu_preview_visible) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        run_menu_background_pass(render_width, render_height);
-    } else if (use_post_process) {
+        run_menu_background_pass(
+            render_width,
+            render_height,
+            environment.exposure);
+    } else if (optional_post_process_enabled ||
+               modern_output_resolve_required) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         run_post_process(
             environment,
             camera_weather_exposure,
             render_width,
-            render_height);
+            render_height,
+            optional_post_process_enabled);
     } else if (has_visible_water) {
+        // Le pipeline Legacy conserve son comportement historique. Le pipeline
+        // moderne passe toujours par run_post_process afin de convertir sa
+        // cible HDR linéaire vers l'écran SDR, même lorsque les effets sont
+        // désactivés dans les options.
         glBindFramebuffer(GL_READ_FRAMEBUFFER, scene_framebuffer_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         glBlitFramebuffer(
@@ -8699,6 +8755,7 @@ uniform float u_sharpen_strength;
 uniform float u_edge_strength;
 uniform int u_fxaa_enabled;
 uniform int u_modern_pipeline;
+uniform int u_resolve_only;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform float u_weather_exposure;
@@ -8817,7 +8874,32 @@ vec3 apply_palette_grade(vec3 color, float storm, float lightning) {
 
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(u_scene_texture, 0));
-    vec3 scene = sample_scene_fxaa(v_uv, texel);
+    vec3 scene =
+        u_resolve_only != 0
+            ? sample_scene(v_uv)
+            : sample_scene_fxaa(v_uv, texel);
+
+    if (u_resolve_only != 0) {
+        // Même lorsque les effets optionnels sont désactivés, la cible de la
+        // version moderne reste HDR et linéaire. Ce chemin minimal effectue
+        // uniquement la conversion HDR -> SDR et l'encodage gamma.
+        vec3 non_negative_scene = max(scene, vec3(0.0));
+        vec3 color =
+            u_modern_pipeline != 0
+                ? aces_fitted(
+                      non_negative_scene *
+                      max(u_exposure, 0.001))
+                : vec3(1.0) -
+                      exp(
+                          -non_negative_scene *
+                          max(u_exposure, 0.001));
+        color = pow(
+            clamp(color, 0.0, 1.0),
+            vec3(1.0 / 2.2));
+        frag_color = vec4(color, 1.0);
+        return;
+    }
+
     float depth_edge = 0.0;
     float geometry_mask = 0.0;
 
@@ -8912,8 +8994,23 @@ uniform sampler2D u_blur_texture;
 uniform float u_blur_mix;
 uniform vec3 u_tint_color;
 uniform float u_vignette_strength;
+uniform float u_exposure;
+uniform int u_modern_pipeline;
 
 out vec4 frag_color;
+
+vec3 aces_fitted(vec3 color) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp(
+        (color * (a * color + b)) /
+            (color * (c * color + d) + e),
+        0.0,
+        1.0);
+}
 
 void main() {
     vec3 scene = texture(u_scene_texture, v_uv).rgb;
@@ -8922,8 +9019,17 @@ void main() {
     color = mix(color, color * u_tint_color, 0.22);
     float vignette = smoothstep(0.94, 0.18, distance(v_uv, vec2(0.5)));
     color *= mix(1.0 - u_vignette_strength, 1.0, vignette);
-    color = pow(clamp(color, 0.0, 16.0), vec3(1.0 / 2.2));
-    frag_color = vec4(clamp(color, 0.0, 1.0), 1.0);
+
+    // La prévisualisation moderne est elle aussi rendue dans une cible HDR
+    // linéaire. Sans tone mapping, les hautes lumières du menu étaient
+    // écrêtées avant même l'encodage gamma.
+    if (u_modern_pipeline != 0) {
+        color = aces_fitted(
+            max(color, vec3(0.0)) *
+            max(u_exposure, 0.001));
+    }
+    color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2));
+    frag_color = vec4(color, 1.0);
 }
 )";
 
@@ -9131,8 +9237,12 @@ void main() {
         glGetUniformLocation(
             modern_terrain_shadow_program_,
             "u_light_view_projection");
+    modern_terrain_shadow_uniforms_.material_albedo =
+        glGetUniformLocation(
+            modern_terrain_shadow_program_,
+            "u_material_albedo");
 
-    const std::array<GLint, 29> modern_terrain_uniform_locations {{
+    const std::array<GLint, 31> modern_terrain_uniform_locations {{
         modern_terrain_uniforms_.model,
         modern_terrain_uniforms_.view_projection,
         modern_terrain_uniforms_.light_view_projection,
@@ -9162,14 +9272,15 @@ void main() {
         modern_terrain_uniforms_.shadow_split_distance,
         modern_terrain_uniforms_.shadow_transition_width,
         modern_terrain_shadow_uniforms_.model,
+        modern_terrain_shadow_uniforms_.light_view_projection,
+        modern_terrain_shadow_uniforms_.material_albedo,
     }};
     if (std::any_of(
             modern_terrain_uniform_locations.begin(),
             modern_terrain_uniform_locations.end(),
             [](GLint location) noexcept {
                 return location < 0;
-            }) ||
-        modern_terrain_shadow_uniforms_.light_view_projection < 0) {
+            })) {
         throw std::runtime_error(
             "Modern terrain shader is missing one or more required uniforms");
     }
@@ -9620,21 +9731,48 @@ void main() {
     post_process_uniforms_.fxaa_enabled = glGetUniformLocation(post_process_program_, "u_fxaa_enabled");
     post_process_uniforms_.modern_pipeline =
         glGetUniformLocation(post_process_program_, "u_modern_pipeline");
+    post_process_uniforms_.resolve_only =
+        glGetUniformLocation(post_process_program_, "u_resolve_only");
     post_process_uniforms_.storm_intensity = glGetUniformLocation(post_process_program_, "u_storm_intensity");
     post_process_uniforms_.lightning_intensity = glGetUniformLocation(post_process_program_, "u_lightning_intensity");
     post_process_uniforms_.weather_exposure =
         glGetUniformLocation(post_process_program_, "u_weather_exposure");
     if (post_process_uniforms_.weather_exposure < 0 ||
         post_process_uniforms_.fxaa_enabled < 0 ||
-        post_process_uniforms_.modern_pipeline < 0) {
+        post_process_uniforms_.modern_pipeline < 0 ||
+        post_process_uniforms_.resolve_only < 0) {
         throw std::runtime_error(
             "Post-process shader is missing a required modern uniform");
     }
     menu_background_uniforms_.scene_texture = glGetUniformLocation(menu_background_program_, "u_scene_texture");
     menu_background_uniforms_.blur_texture = glGetUniformLocation(menu_background_program_, "u_blur_texture");
     menu_background_uniforms_.blur_mix = glGetUniformLocation(menu_background_program_, "u_blur_mix");
-    menu_background_uniforms_.tint_color = glGetUniformLocation(menu_background_program_, "u_tint_color");
-    menu_background_uniforms_.vignette_strength = glGetUniformLocation(menu_background_program_, "u_vignette_strength");
+    menu_background_uniforms_.tint_color =
+        glGetUniformLocation(
+            menu_background_program_,
+            "u_tint_color");
+    menu_background_uniforms_.vignette_strength =
+        glGetUniformLocation(
+            menu_background_program_,
+            "u_vignette_strength");
+    menu_background_uniforms_.exposure =
+        glGetUniformLocation(
+            menu_background_program_,
+            "u_exposure");
+    menu_background_uniforms_.modern_pipeline =
+        glGetUniformLocation(
+            menu_background_program_,
+            "u_modern_pipeline");
+    if (menu_background_uniforms_.scene_texture < 0 ||
+        menu_background_uniforms_.blur_texture < 0 ||
+        menu_background_uniforms_.blur_mix < 0 ||
+        menu_background_uniforms_.tint_color < 0 ||
+        menu_background_uniforms_.vignette_strength < 0 ||
+        menu_background_uniforms_.exposure < 0 ||
+        menu_background_uniforms_.modern_pipeline < 0) {
+        throw std::runtime_error(
+            "Menu background shader is missing a required uniform");
+    }
 }
 
 void Renderer::create_atlas_texture() {
@@ -11037,11 +11175,27 @@ void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
 void Renderer::run_post_process(const EnvironmentState& environment,
                                 float weather_exposure,
                                 int width,
-                                int height) {
-    if (post_process_program_ == 0 || glow_extract_program_ == 0 || glow_blur_program_ == 0 || screen_quad_vao_ == 0 ||
-        scene_color_texture_ == 0 || scene_depth_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
+                                int height,
+                                bool optional_effects_enabled) {
+    if (post_process_program_ == 0 ||
+        screen_quad_vao_ == 0 ||
+        scene_color_texture_ == 0 ||
+        scene_depth_texture_ == 0) {
         return;
     }
+
+    const auto glow_resources_ready =
+        glow_extract_program_ != 0 &&
+        glow_blur_program_ != 0 &&
+        glow_extract_framebuffer_ != 0 &&
+        glow_extract_texture_ != 0 &&
+        glow_ping_framebuffer_ != 0 &&
+        glow_ping_texture_ != 0 &&
+        glow_target_width_ > 0 &&
+        glow_target_height_ > 0;
+    const auto run_optional_effects =
+        optional_effects_enabled &&
+        glow_resources_ready;
     const auto quality_settings = active_quality_settings_;
 
     glDisable(GL_DEPTH_TEST);
@@ -11049,79 +11203,162 @@ void Renderer::run_post_process(const EnvironmentState& environment,
     glDisable(GL_BLEND);
     glBindVertexArray(screen_quad_vao_);
 
-    glViewport(0, 0, glow_target_width_, glow_target_height_);
-    glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
-    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(glow_extract_program_);
-    glUniform1i(glow_extract_uniforms_.scene_texture, 0);
-    glUniform1f(
-        glow_extract_uniforms_.threshold,
-        visual_pipeline_glow_threshold(
-            options_.visual_pipeline,
-            environment.glow_threshold));
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    record_triangle_draw(3);
+    if (run_optional_effects) {
+        glViewport(
+            0,
+            0,
+            glow_target_width_,
+            glow_target_height_);
+        glBindFramebuffer(
+            GL_FRAMEBUFFER,
+            glow_extract_framebuffer_);
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(glow_extract_program_);
+        glUniform1i(
+            glow_extract_uniforms_.scene_texture,
+            0);
+        glUniform1f(
+            glow_extract_uniforms_.threshold,
+            visual_pipeline_glow_threshold(
+                options_.visual_pipeline,
+                environment.glow_threshold));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(
+            GL_TEXTURE_2D,
+            scene_color_texture_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        record_triangle_draw(3);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, glow_ping_framebuffer_);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(glow_blur_program_);
-    glUniform1i(glow_blur_uniforms_.source_texture, 0);
-    glUniform2f(glow_blur_uniforms_.texel_direction, 1.0F / static_cast<float>(glow_target_width_), 0.0F);
-    glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    record_triangle_draw(3);
+        glBindFramebuffer(
+            GL_FRAMEBUFFER,
+            glow_ping_framebuffer_);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(glow_blur_program_);
+        glUniform1i(
+            glow_blur_uniforms_.source_texture,
+            0);
+        glUniform2f(
+            glow_blur_uniforms_.texel_direction,
+            1.0F /
+                static_cast<float>(glow_target_width_),
+            0.0F);
+        glBindTexture(
+            GL_TEXTURE_2D,
+            glow_extract_texture_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        record_triangle_draw(3);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, glow_extract_framebuffer_);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUniform2f(glow_blur_uniforms_.texel_direction, 0.0F, 1.0F / static_cast<float>(glow_target_height_));
-    glBindTexture(GL_TEXTURE_2D, glow_ping_texture_);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    record_triangle_draw(3);
+        glBindFramebuffer(
+            GL_FRAMEBUFFER,
+            glow_extract_framebuffer_);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUniform2f(
+            glow_blur_uniforms_.texel_direction,
+            0.0F,
+            1.0F /
+                static_cast<float>(glow_target_height_));
+        glBindTexture(
+            GL_TEXTURE_2D,
+            glow_ping_texture_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        record_triangle_draw(3);
+    }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, width, std::max(height, 1));
     glUseProgram(post_process_program_);
-    glUniform1i(post_process_uniforms_.scene_texture, 0);
-    glUniform1i(post_process_uniforms_.glow_texture, 1);
-    glUniform1i(post_process_uniforms_.scene_depth, 2);
-    glUniform1f(post_process_uniforms_.exposure, environment.exposure);
-    glUniform1f(post_process_uniforms_.saturation_boost, environment.saturation_boost);
+    glUniform1i(
+        post_process_uniforms_.scene_texture,
+        0);
+    glUniform1i(
+        post_process_uniforms_.glow_texture,
+        1);
+    glUniform1i(
+        post_process_uniforms_.scene_depth,
+        2);
+    glUniform1f(
+        post_process_uniforms_.exposure,
+        std::isfinite(environment.exposure)
+            ? std::max(environment.exposure, 0.001F)
+            : 1.0F);
+    glUniform1f(
+        post_process_uniforms_.saturation_boost,
+        run_optional_effects
+            ? environment.saturation_boost
+            : 1.0F);
     glUniform1f(
         post_process_uniforms_.contrast,
-        visual_pipeline_post_contrast(
-            options_.visual_pipeline,
-            environment.contrast));
-    glUniform1f(post_process_uniforms_.vignette_strength, environment.vignette_strength);
-    glUniform3fv(post_process_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
+        run_optional_effects
+            ? visual_pipeline_post_contrast(
+                  options_.visual_pipeline,
+                  environment.contrast)
+            : 1.0F);
+    glUniform1f(
+        post_process_uniforms_.vignette_strength,
+        run_optional_effects
+            ? environment.vignette_strength
+            : 0.0F);
+    const auto night_tint =
+        run_optional_effects
+            ? environment.night_tint_color
+            : glm::vec3 {0.0F};
+    glUniform3fv(
+        post_process_uniforms_.night_tint_color,
+        1,
+        glm::value_ptr(night_tint));
     glUniform1f(
         post_process_uniforms_.glow_strength,
-        visual_pipeline_glow_strength(
-            options_.visual_pipeline,
-            environment.glow_strength));
+        run_optional_effects
+            ? visual_pipeline_glow_strength(
+                  options_.visual_pipeline,
+                  environment.glow_strength)
+            : 0.0F);
     glUniform1f(
         post_process_uniforms_.sharpen_strength,
-        environment.post_sharpen_strength * quality_settings.post_detail_scale);
+        run_optional_effects
+            ? environment.post_sharpen_strength *
+                  quality_settings.post_detail_scale
+            : 0.0F);
     glUniform1f(
         post_process_uniforms_.edge_strength,
-        environment.post_edge_strength *
-            quality_settings.post_detail_scale *
-            (options_.visual_pipeline == VisualPipeline::ModernStylized
-                 ? 0.32F
-                 : 1.0F));
+        run_optional_effects
+            ? environment.post_edge_strength *
+                  quality_settings.post_detail_scale *
+                  (options_.visual_pipeline ==
+                           VisualPipeline::ModernStylized
+                       ? 0.32F
+                       : 1.0F)
+            : 0.0F);
     glUniform1i(
         post_process_uniforms_.fxaa_enabled,
-        is_modern_visual_pipeline(options_.visual_pipeline) &&
+        run_optional_effects &&
+                is_modern_visual_pipeline(
+                    options_.visual_pipeline) &&
                 quality_settings.fxaa_enabled
             ? 1
             : 0);
     glUniform1i(
         post_process_uniforms_.modern_pipeline,
-        is_modern_visual_pipeline(options_.visual_pipeline) ? 1 : 0);
-    glUniform1f(post_process_uniforms_.storm_intensity, environment.storm_intensity);
-    glUniform1f(post_process_uniforms_.lightning_intensity, environment.lightning_intensity);
+        is_modern_visual_pipeline(
+            options_.visual_pipeline)
+            ? 1
+            : 0);
+    glUniform1i(
+        post_process_uniforms_.resolve_only,
+        run_optional_effects
+            ? 0
+            : 1);
+    glUniform1f(
+        post_process_uniforms_.storm_intensity,
+        run_optional_effects
+            ? environment.storm_intensity
+            : 0.0F);
+    glUniform1f(
+        post_process_uniforms_.lightning_intensity,
+        run_optional_effects
+            ? environment.lightning_intensity
+            : 0.0F);
     glUniform1f(
         post_process_uniforms_.weather_exposure,
         glm::clamp(
@@ -11130,18 +11367,30 @@ void Renderer::run_post_process(const EnvironmentState& environment,
                 : 1.0F,
             0.0F,
             1.0F));
+
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        scene_color_texture_);
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, glow_extract_texture_);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        run_optional_effects
+            ? glow_extract_texture_
+            : scene_color_texture_);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, scene_depth_texture_);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        scene_depth_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     record_triangle_draw(3);
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::run_menu_background_pass(int width, int height) {
+void Renderer::run_menu_background_pass(
+    int width,
+    int height,
+    float exposure) {
     if (menu_background_program_ == 0 || glow_blur_program_ == 0 || screen_quad_vao_ == 0 ||
         scene_color_texture_ == 0 || glow_extract_texture_ == 0 || glow_ping_texture_ == 0) {
         return;
@@ -11178,8 +11427,23 @@ void Renderer::run_menu_background_pass(int width, int height) {
     glUniform1i(menu_background_uniforms_.blur_texture, 1);
     glUniform1f(menu_background_uniforms_.blur_mix, 0.80F);
     const glm::vec3 tint_color {0.66F, 0.72F, 0.78F};
-    glUniform3fv(menu_background_uniforms_.tint_color, 1, glm::value_ptr(tint_color));
-    glUniform1f(menu_background_uniforms_.vignette_strength, 0.30F);
+    glUniform3fv(
+        menu_background_uniforms_.tint_color,
+        1,
+        glm::value_ptr(tint_color));
+    glUniform1f(
+        menu_background_uniforms_.vignette_strength,
+        0.30F);
+    glUniform1f(
+        menu_background_uniforms_.exposure,
+        std::isfinite(exposure)
+            ? std::max(exposure, 0.001F)
+            : 1.0F);
+    glUniform1i(
+        menu_background_uniforms_.modern_pipeline,
+        is_modern_visual_pipeline(options_.visual_pipeline)
+            ? 1
+            : 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glActiveTexture(GL_TEXTURE1);
