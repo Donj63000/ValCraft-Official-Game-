@@ -1,0 +1,31 @@
+ValCraft audit summary [baseline]
+  session_id=20260726-191223-960-27928-0 mode=measure status=completed
+  duration_seconds=1.596 recorded_frames=300 written_frames=0 dropped_frames=0 second_samples=2 dropped_second_samples=0
+  events_written=24 events_dropped=0 spike_windows=0
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\performancesaudit\perf-suite\codex-default-legacy-20260726-2114\runs\20260726-191223-20260726-191223-960-27928-0-measure-baseline
+ValCraft performance summary [baseline]
+  capture_mode=measure
+  visual_pipeline=legacy material_pack_version=0 material_pack_checksum=0x0000000000000000
+  render_flags shadows=on post_process=on shadow_map_size=1024
+  frame_total_ms_avg=4.146 p95=6.240 p99=7.146 max=9.887
+  cpu_stages_ms_avg events=0.016 simulation=0.135 audio=0.019 render_prep=0.001 render=0.861 render_overhead=0.073 present=0.504 telemetry=0.036 residual=0.112
+  streaming_ms_avg=0.002 p95=0.003 max=0.042
+  generation_ms_avg=0.154 p95=1.004 max=1.683 chunks_max=2
+  fluid_ms_avg=0.488 p95=0.898 max=1.942 cells_max=256 pending_max=692
+  lighting_ms_avg=0.133 p95=0.962 max=1.719 nodes_max=0 jobs_total=42
+  meshing_ms_avg=1.687 p95=2.481 max=3.014 chunks_max=2
+  upload_ms_avg=0.027 p95=0.003 max=1.294 uploads_max=2
+  shadow_ms_avg=0.282 p95=0.562 max=1.075 chunks_max=25
+  world_ms_avg=0.479 p95=1.138 max=1.829 chunks_max=15
+  gpu_ms_avg frame=3.498 shadow=0.552 world=1.042 sky=0.008 water=0.755 entities=0.013 post=1.088 hud=0.041
+  render_categories_cpu_ms_avg terrain=0.479 vegetation=0.000 entities=0.000 ship=0.000 water=0.000 atmosphere=0.000 post_process=0.000 ui=0.000 shadows=0.282
+  render_categories_gpu_ms_avg terrain=1.042 vegetation=0.000 entities=0.013 ship=0.000 water=0.755 atmosphere=0.008 post_process=1.088 ui=0.041 shadows=0.552
+  memory_peak_mib working_set=268.082 private=300.953 world=59.860 mesh=44.184 overrides=0.010 gpu_buffers=18.611 gpu_textures=46.655
+  pending_generation_avg=2.983 max=41
+  pending_mesh_avg=94.946 max=98
+  pending_lighting_avg=0.021 max=1
+  visible_chunks_avg=14.917 max=15
+  lag_frames_16_7=0 lag_frames_33_3=0 lag_frames_50_0=0
+  hotspot_worst_frame=meshing spike_windows=0
+  events_total=0 block_breaks=0 block_places=0
+  scheduler_stream_changes=0 generation_enqueued=0 generation_pruned=0 unloaded_chunks=0

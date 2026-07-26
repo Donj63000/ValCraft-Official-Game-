@@ -1,5 +1,9 @@
 #include "world/World.h"
 
+#include "render/ArchitecturalFixtureMesh.h"
+#include "render/VisualVegetation.h"
+#include "render/VisualVegetationMesh.h"
+
 #include <glm/geometric.hpp>
 
 #include <algorithm>
@@ -58,6 +62,10 @@ constexpr std::size_t kPressureSearchVisitLimit = 16384U;
 
 constexpr auto kUnlimitedBudget = std::numeric_limits<std::size_t>::max() / 4U;
 constexpr auto kSkyColumnCount = static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
+// Je couvre largement le rayon maximal des arbres proceduraux actuels. Le
+// composant et son feuillage sont ainsi classes de la meme facon des deux
+// cotes d'une frontiere de chunk, y compris aux coordonnees negatives.
+constexpr int kCanonicalVisualVegetationHalo = 8;
 constexpr auto kMeshInvalidationPriorityRadius = 2;
 constexpr std::size_t kLightingTimeCheckInterval = 128;
 constexpr std::uint8_t kLightingBoundaryNegX = 1U << 0U;
@@ -205,6 +213,178 @@ auto section_max_y(std::size_t section_index) noexcept -> int {
     return std::min(kWorldMaxY, section_min_y(section_index) + kChunkSectionHeight - 1);
 }
 
+[[nodiscard]] auto chunk_section_has_organic_surface(
+    const World& world,
+    const Chunk& chunk,
+    std::size_t section_index) -> bool {
+
+    const auto min_y = section_min_y(section_index);
+    const auto max_y = section_max_y(section_index);
+    if (max_y < chunk.min_mesh_y() || min_y > chunk.max_mesh_y()) {
+        return false;
+    }
+    constexpr std::array<BlockCoord, 6> kSurfaceNeighbors {{
+        {1, 0, 0},
+        {-1, 0, 0},
+        {0, 1, 0},
+        {0, -1, 0},
+        {0, 0, 1},
+        {0, 0, -1},
+    }};
+    const auto coord = chunk.coord();
+    const auto world_x = coord.x * kChunkSizeX;
+    const auto world_z = coord.z * kChunkSizeZ;
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                if (!is_organic_terrain_block(chunk.get_local(x, y, z))) {
+                    continue;
+                }
+                for (const auto offset : kSurfaceNeighbors) {
+                    const auto neighbor_x = x + offset.x;
+                    const auto neighbor_y = y + offset.y;
+                    const auto neighbor_z = z + offset.z;
+                    const auto neighbor_inside_chunk =
+                        neighbor_x >= 0 && neighbor_x < kChunkSizeX &&
+                        neighbor_z >= 0 && neighbor_z < kChunkSizeZ &&
+                        is_world_y_valid(neighbor_y);
+                    const auto neighbor_block = neighbor_inside_chunk
+                        ? chunk.get_local(neighbor_x, neighbor_y, neighbor_z)
+                        : world.peek_block_or_generated(
+                              world_x + neighbor_x,
+                              neighbor_y,
+                              world_z + neighbor_z);
+                    if (!is_organic_terrain_block(neighbor_block)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] auto chunk_section_has_architecture(
+    const Chunk& chunk,
+    std::size_t section_index) -> bool {
+
+    const auto min_y = section_min_y(section_index);
+    const auto max_y = section_max_y(section_index);
+    if (max_y < chunk.min_mesh_y() || min_y > chunk.max_mesh_y()) {
+        return false;
+    }
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                const auto block = chunk.get_local(x, y, z);
+                if (is_architectural_solid_block(block) ||
+                    is_architectural_fixture_block(block)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] auto coordinate_is_tree_wood(
+    const VisualVegetationBuild& vegetation,
+    BlockCoord coordinate,
+    BlockId block) noexcept -> bool {
+
+    for (const auto& source : vegetation.sources) {
+        const auto tree =
+            source.kind == VisualVegetationSourceKind::BroadleafTree ||
+            source.kind == VisualVegetationSourceKind::PineTree;
+        if (!tree || source.source_block != block) {
+            continue;
+        }
+
+        // Les arbres du generateur ont une colonne de tronc. Je limite le
+        // masquage a cette colonne exacte pour ne jamais avaler une poutre
+        // voisine qui se trouverait sous le feuillage.
+        if (coordinate.x == source.anchor.x &&
+            coordinate.z == source.anchor.z &&
+            static_cast<float>(coordinate.y) >= source.logical_bounds.min_y &&
+            static_cast<float>(coordinate.y + 1) <= source.logical_bounds.max_y) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] auto is_visual_vegetation_source_block(BlockId block) noexcept
+    -> bool {
+    switch (static_cast<BlockType>(block)) {
+    case BlockType::Wood:
+    case BlockType::Leaves:
+    case BlockType::PineWood:
+    case BlockType::PineLeaves:
+    case BlockType::TallGrass:
+    case BlockType::RedFlower:
+    case BlockType::YellowFlower:
+    case BlockType::Cactus:
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] auto chunk_section_has_visual_vegetation(
+    const Chunk& chunk,
+    std::size_t section_index) -> bool {
+    const auto min_y = section_min_y(section_index);
+    const auto max_y = section_max_y(section_index);
+    if (max_y < chunk.min_mesh_y() || min_y > chunk.max_mesh_y()) {
+        return false;
+    }
+    for (int y = min_y; y <= max_y; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                if (is_visual_vegetation_source_block(
+                        chunk.get_local(x, y, z))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] auto chunk_has_visual_vegetation(
+    const Chunk& chunk) -> bool {
+    for (std::size_t section_index = 0U;
+         section_index < kChunkSectionCount;
+         ++section_index) {
+        if (chunk_section_has_visual_vegetation(
+                chunk,
+                section_index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void append_organic_mesh(
+    OrganicTerrainMesh& destination,
+    const OrganicTerrainMesh& source) {
+    if (source.empty()) {
+        return;
+    }
+    const auto vertex_offset =
+        static_cast<std::uint32_t>(destination.vertices.size());
+    destination.vertices.insert(
+        destination.vertices.end(),
+        source.vertices.begin(),
+        source.vertices.end());
+    destination.indices.reserve(
+        destination.indices.size() + source.indices.size());
+    for (const auto index : source.indices) {
+        destination.indices.push_back(vertex_offset + index);
+    }
+    destination.quad_count += source.quad_count;
+}
+
 auto water_state_after_receiving(WaterState previous_state, std::uint8_t level) noexcept -> WaterState {
     if (level == 0U) {
         return 0;
@@ -254,14 +434,75 @@ void append_chunk_mesh_section(ChunkMeshData& destination, const ChunkMeshData& 
     destination.water_face_count += section_mesh.water_face_count;
 }
 
+void append_architectural_mesh(
+    ArchitecturalMesh& destination,
+    const ArchitecturalMesh& source) {
+    if (source.empty()) {
+        return;
+    }
+
+    const auto vertex_offset =
+        static_cast<std::uint32_t>(destination.vertices.size());
+    const auto index_offset =
+        static_cast<std::uint32_t>(destination.indices.size());
+    destination.vertices.insert(
+        destination.vertices.end(),
+        source.vertices.begin(),
+        source.vertices.end());
+    destination.indices.reserve(
+        destination.indices.size() + source.indices.size());
+    for (const auto index : source.indices) {
+        destination.indices.push_back(vertex_offset + index);
+    }
+    destination.quads.reserve(destination.quads.size() + source.quads.size());
+    for (auto quad : source.quads) {
+        quad.first_vertex += vertex_offset;
+        quad.first_index += index_offset;
+        destination.quads.push_back(quad);
+    }
+    destination.fixtures.insert(
+        destination.fixtures.end(),
+        source.fixtures.begin(),
+        source.fixtures.end());
+
+    if (!source.bounds.valid) {
+        return;
+    }
+    if (!destination.bounds.valid) {
+        destination.bounds = source.bounds;
+        return;
+    }
+    destination.bounds.min_x =
+        std::min(destination.bounds.min_x, source.bounds.min_x);
+    destination.bounds.min_y =
+        std::min(destination.bounds.min_y, source.bounds.min_y);
+    destination.bounds.min_z =
+        std::min(destination.bounds.min_z, source.bounds.min_z);
+    destination.bounds.max_x =
+        std::max(destination.bounds.max_x, source.bounds.max_x);
+    destination.bounds.max_y =
+        std::max(destination.bounds.max_y, source.bounds.max_y);
+    destination.bounds.max_z =
+        std::max(destination.bounds.max_z, source.bounds.max_z);
+}
+
+void mix_revision(std::uint64_t& hash, std::uint64_t value) noexcept {
+    for (std::size_t byte_index = 0U; byte_index < 8U; ++byte_index) {
+        hash ^= (value >> static_cast<unsigned int>(byte_index * 8U)) & 0xFFULL;
+        hash *= 1099511628211ULL;
+    }
+}
+
 } // namespace
 
 World::World(int seed,
              int stream_radius,
              WorldGenerationProfile generation_profile,
-             WorldGenerationVersion generation_version)
+             WorldGenerationVersion generation_version,
+             VisualPipeline visual_pipeline)
     : stream_radius_(std::clamp(stream_radius, 0, kMaxStreamRadius)),
       generator_(seed, generation_profile, generation_version),
+      visual_pipeline_(visual_pipeline),
       active_stream_radius_(stream_radius_) {
     const auto loaded_side = static_cast<std::size_t>(std::max(stream_radius_, 0) * 2 + 3);
     const auto max_loaded_chunks = loaded_side * loaded_side;
@@ -1006,9 +1247,140 @@ auto World::section_meshes_for(const ChunkCoord& coord) const
     return iterator == chunks_.end() ? nullptr : &iterator->second.section_meshes;
 }
 
+auto World::organic_section_meshes_for(const ChunkCoord& coord) const
+    -> const std::array<OrganicTerrainMesh, kChunkSectionCount>* {
+    const auto iterator = chunks_.find(coord);
+    return iterator == chunks_.end() ? nullptr : &iterator->second.organic_section_meshes;
+}
+
+auto World::architectural_section_meshes_for(const ChunkCoord& coord) const
+    -> const std::array<ArchitecturalMesh, kChunkSectionCount>* {
+    const auto iterator = chunks_.find(coord);
+    return iterator == chunks_.end()
+               ? nullptr
+               : &iterator->second.architectural_section_meshes;
+}
+
 auto World::mesh_revision(const ChunkCoord& coord) const -> std::uint64_t {
     const auto iterator = chunks_.find(coord);
     return iterator == chunks_.end() ? 0 : iterator->second.mesh_revision;
+}
+
+auto World::visual_remesh_status(const ChunkCoord& coord) const noexcept
+    -> VisualRemeshStatus {
+    const auto iterator = chunks_.find(coord);
+    if (iterator == chunks_.end()) {
+        return {};
+    }
+
+    VisualRemeshStatus status {};
+    status.published_revision = iterator->second.mesh_revision;
+    if (iterator->second.modern_remesh == nullptr) {
+        return status;
+    }
+
+    const auto& state = *iterator->second.modern_remesh;
+    status.active = true;
+    status.source_revision = state.source_revision;
+    status.target_sections = state.target_sections;
+    status.next_slice = state.next_slice;
+    status.completed_slices = state.completed_slices;
+    status.total_slices = state.total_slices;
+    return status;
+}
+
+auto World::sample_visual_terrain(const TerrainVisualQuery& query) const
+    -> std::optional<TerrainVisualSample> {
+
+    if (visual_pipeline_ != VisualPipeline::ModernStylized ||
+        !std::isfinite(query.world_position.x) ||
+        !std::isfinite(query.world_position.y) ||
+        !std::isfinite(query.world_position.z) ||
+        !std::isfinite(query.maximum_distance) ||
+        !std::isfinite(query.minimum_normal_y) ||
+        query.maximum_distance < 0.0F) {
+        return std::nullopt;
+    }
+
+    const auto query_x = static_cast<double>(query.world_position.x);
+    const auto query_z = static_cast<double>(query.world_position.z);
+    const auto maximum_distance =
+        static_cast<double>(query.maximum_distance);
+    const auto maximum_distance_squared =
+        maximum_distance * maximum_distance;
+
+    std::optional<TerrainVisualSample> closest {};
+    ChunkCoord closest_chunk {};
+    auto closest_section = std::size_t {0U};
+
+    for (const auto& [coord, record] : chunks_) {
+        // Je rejette d'abord les chunks hors du disque horizontal de la
+        // requête afin de ne parcourir les triangles que localement.
+        const auto minimum_x =
+            static_cast<double>(coord.x) * static_cast<double>(kChunkSizeX);
+        const auto maximum_x =
+            minimum_x + static_cast<double>(kChunkSizeX);
+        const auto minimum_z =
+            static_cast<double>(coord.z) * static_cast<double>(kChunkSizeZ);
+        const auto maximum_z =
+            minimum_z + static_cast<double>(kChunkSizeZ);
+        const auto delta_x =
+            query_x < minimum_x
+                ? minimum_x - query_x
+                : (query_x > maximum_x ? query_x - maximum_x : 0.0);
+        const auto delta_z =
+            query_z < minimum_z
+                ? minimum_z - query_z
+                : (query_z > maximum_z ? query_z - maximum_z : 0.0);
+        if (delta_x * delta_x + delta_z * delta_z >
+            maximum_distance_squared) {
+            continue;
+        }
+
+        for (std::size_t section_index = 0U;
+             section_index < record.organic_section_meshes.size();
+             ++section_index) {
+            const auto section_minimum_y =
+                static_cast<float>(section_min_y(section_index));
+            const auto section_maximum_y =
+                static_cast<float>(section_max_y(section_index) + 1);
+            if (query.world_position.y + query.maximum_distance <
+                    section_minimum_y ||
+                query.world_position.y - query.maximum_distance >
+                    section_maximum_y) {
+                continue;
+            }
+
+            const auto sample = sample_terrain_visual_mesh(
+                record.organic_section_meshes[section_index],
+                query,
+                record.mesh_revision);
+            if (!sample.has_value()) {
+                continue;
+            }
+
+            const auto strictly_closer =
+                !closest.has_value() ||
+                sample->distance_squared < closest->distance_squared;
+            const auto same_distance =
+                closest.has_value() &&
+                sample->distance_squared == closest->distance_squared;
+            const auto deterministic_tie_break =
+                same_distance &&
+                (coord.x < closest_chunk.x ||
+                 (coord.x == closest_chunk.x &&
+                  (coord.z < closest_chunk.z ||
+                   (coord.z == closest_chunk.z &&
+                    section_index < closest_section))));
+            if (strictly_closer || deterministic_tie_break) {
+                closest = sample;
+                closest_chunk = coord;
+                closest_section = section_index;
+            }
+        }
+    }
+
+    return closest;
 }
 
 auto World::chunk_records() const noexcept -> const std::unordered_map<ChunkCoord, ChunkRecord, ChunkCoordHash>& {
@@ -1072,6 +1444,31 @@ auto World::generation_version() const noexcept -> WorldGenerationVersion {
     return generator_.generation_version();
 }
 
+auto World::visual_pipeline() const noexcept -> VisualPipeline {
+    return visual_pipeline_;
+}
+
+void World::set_visual_pipeline(VisualPipeline visual_pipeline) {
+    if (visual_pipeline_ == visual_pipeline) {
+        return;
+    }
+
+    visual_pipeline_ = visual_pipeline;
+    for (auto& [coord, record] : chunks_) {
+        record.modern_remesh.reset();
+        record.chunk.mark_dirty();
+        if (visual_pipeline_ == VisualPipeline::LegacyVoxel) {
+            record.organic_section_meshes = {};
+            record.organic_vertex_capacity_hints = {};
+            record.organic_index_capacity_hints = {};
+            record.architectural_section_meshes = {};
+            record.architectural_vertex_capacity_hints = {};
+            record.architectural_index_capacity_hints = {};
+        }
+        enqueue_mesh_rebuild(coord, true);
+    }
+}
+
 auto World::stream_radius() const noexcept -> int {
     return stream_radius_;
 }
@@ -1124,8 +1521,26 @@ auto World::memory_stats() const noexcept -> WorldMemoryStats {
         stats.mesh_vertex_capacity += mesh.vertices.capacity() + mesh.water_vertices.capacity();
         stats.mesh_index_capacity += mesh.indices.capacity() + mesh.water_indices.capacity();
         stats.mesh_cpu_bytes +=
-            (mesh.vertices.capacity() + mesh.water_vertices.capacity()) * sizeof(ChunkVertex) +
+            mesh.vertices.capacity() * sizeof(ChunkVertex) +
+            mesh.water_vertices.capacity() * sizeof(WaterVertex) +
             (mesh.indices.capacity() + mesh.water_indices.capacity()) * sizeof(std::uint32_t);
+    };
+    const auto account_organic_mesh = [&](const OrganicTerrainMesh& mesh) {
+        stats.mesh_vertex_capacity += mesh.vertices.capacity();
+        stats.mesh_index_capacity += mesh.indices.capacity();
+        stats.mesh_cpu_bytes +=
+            mesh.vertices.capacity() * sizeof(TerrainVertex) +
+            mesh.indices.capacity() * sizeof(std::uint32_t);
+    };
+    const auto account_architectural_mesh = [&](const ArchitecturalMesh& mesh) {
+        stats.mesh_vertex_capacity += mesh.vertices.capacity();
+        stats.mesh_index_capacity += mesh.indices.capacity();
+        stats.mesh_cpu_bytes +=
+            mesh.vertices.capacity() * sizeof(HardSurfaceVertex) +
+            mesh.indices.capacity() * sizeof(std::uint32_t) +
+            mesh.quads.capacity() * sizeof(ArchitecturalQuad) +
+            mesh.fixtures.capacity() *
+                sizeof(ArchitecturalFixtureInstance);
     };
 
     for (const auto& [coord, record] : chunks_) {
@@ -1137,6 +1552,27 @@ auto World::memory_stats() const noexcept -> WorldMemoryStats {
         account_mesh(record.mesh);
         for (const auto& section_mesh : record.section_meshes) {
             account_mesh(section_mesh);
+        }
+        for (const auto& organic_mesh : record.organic_section_meshes) {
+            account_organic_mesh(organic_mesh);
+        }
+        for (const auto& architectural_mesh : record.architectural_section_meshes) {
+            account_architectural_mesh(architectural_mesh);
+        }
+        if (record.modern_remesh != nullptr) {
+            stats.chunk_cpu_bytes += sizeof(ModernVisualRemeshState);
+            for (const auto& staged_mesh :
+                 record.modern_remesh->staged_section_meshes) {
+                account_mesh(staged_mesh);
+            }
+            for (const auto& staged_mesh :
+                 record.modern_remesh->staged_organic_meshes) {
+                account_organic_mesh(staged_mesh);
+            }
+            for (const auto& staged_mesh :
+                 record.modern_remesh->staged_architectural_meshes) {
+                account_architectural_mesh(staged_mesh);
+            }
         }
     }
 
@@ -2909,22 +3345,157 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
 }
 
 auto World::rebuild_chunk_mesh(ChunkRecord& record) -> bool {
+    if (visual_pipeline_ == VisualPipeline::ModernStylized) {
+        return rebuild_modern_chunk_mesh(record);
+    }
+
+    // Je conserve le chemin historique tel quel et j'abandonne seulement un
+    // éventuel staging moderne devenu sans objet après un changement d'option.
+    record.modern_remesh.reset();
     for (std::size_t section_index = 0; section_index < kChunkSectionCount; ++section_index) {
         if (!record.chunk.is_section_dirty(section_index)) {
             continue;
         }
 
+        const auto modern_pipeline =
+            visual_pipeline_ == VisualPipeline::ModernStylized;
         record.section_meshes[section_index] = mesher_.build_mesh_range(
             *this,
             record.chunk.coord(),
             section_min_y(section_index),
             section_max_y(section_index),
             record.section_mesh_vertex_capacity_hints[section_index],
-            record.section_mesh_index_capacity_hints[section_index]);
+            record.section_mesh_index_capacity_hints[section_index],
+            modern_pipeline
+                ? ChunkMeshContent::ModernNonOrganic
+                : ChunkMeshContent::LegacyAll);
         record.section_mesh_vertex_capacity_hints[section_index] =
             std::max(record.section_meshes[section_index].total_vertex_count(), static_cast<std::size_t>(128));
         record.section_mesh_index_capacity_hints[section_index] =
             std::max(record.section_meshes[section_index].total_index_count(), static_cast<std::size_t>(192));
+
+        if (modern_pipeline) {
+            const auto coord = record.chunk.coord();
+            const auto chunk_world_x = coord.x * kChunkSizeX;
+            const auto chunk_world_z = coord.z * kChunkSizeZ;
+            const OrganicTerrainSection section {
+                {chunk_world_x, section_min_y(section_index), chunk_world_z},
+                {
+                    chunk_world_x + kChunkSizeX - 1,
+                    section_max_y(section_index),
+                    chunk_world_z + kChunkSizeZ - 1,
+                },
+            };
+            auto& visual_mesh =
+                record.organic_section_meshes[section_index];
+            visual_mesh = {};
+            if (chunk_section_has_organic_surface(
+                    *this,
+                    record.chunk,
+                    section_index)) {
+                visual_mesh = organic_mesher_.build_mesh(
+                    section,
+                    [this](int x, int y, int z) {
+                        return OrganicTerrainCellSample {
+                            peek_block_or_generated(x, y, z),
+                            get_sky_light(x, y, z),
+                            get_block_light(x, y, z),
+                        };
+                    },
+                    record.organic_vertex_capacity_hints[section_index],
+                    record.organic_index_capacity_hints[section_index]);
+            }
+
+            std::optional<VisualVegetationBuild> vegetation {};
+            if (chunk_section_has_visual_vegetation(
+                    record.chunk,
+                    section_index)) {
+                vegetation = build_visual_vegetation(
+                    {
+                        section.min,
+                        section.max,
+                        1,
+                    },
+                    [this](int x, int y, int z) {
+                        return peek_block_or_generated(x, y, z);
+                    },
+                    static_cast<std::uint32_t>(seed()));
+                const auto vegetation_mesh =
+                    build_visual_vegetation_mesh(
+                        *vegetation,
+                        VisualVegetationLod::Medium,
+                        StylizedPrimitiveLod::Low,
+                        [this](int x, int y, int z) {
+                            return VisualVegetationLighting {
+                                get_sky_light(x, y, z),
+                                get_block_light(x, y, z),
+                            };
+                        });
+                append_organic_mesh(visual_mesh, vegetation_mesh);
+            }
+
+            auto& architectural_mesh =
+                record.architectural_section_meshes[section_index];
+            architectural_mesh = {};
+            if (chunk_section_has_architecture(
+                    record.chunk,
+                    section_index)) {
+                const ArchitecturalSection architectural_section {
+                    section.min,
+                    section.max,
+                    1,
+                };
+                architectural_mesh = architectural_mesher_.build_mesh(
+                    architectural_section,
+                    [this, &vegetation](int x, int y, int z) {
+                        auto block = peek_block_or_generated(x, y, z);
+                        if (vegetation.has_value() &&
+                            coordinate_is_tree_wood(
+                                *vegetation,
+                                {x, y, z},
+                                block)) {
+                            block = to_block_id(BlockType::Air);
+                        }
+                        return ArchitecturalCellSample {
+                            block,
+                            get_sky_light(x, y, z),
+                            get_block_light(x, y, z),
+                        };
+                    },
+                    record.architectural_vertex_capacity_hints[section_index],
+                    record.architectural_index_capacity_hints[section_index]);
+                // Je transforme les descriptions de torches en primitives
+                // arrondies après le maillage des surfaces, sans toucher à
+                // leur cellule propriétaire ni à leur lumière logique.
+                [[maybe_unused]] const auto fixture_index_offset =
+                    append_architectural_fixture_geometry(
+                    architectural_mesh,
+                    StylizedPrimitiveLod::Medium);
+            }
+            record.architectural_vertex_capacity_hints[section_index] =
+                std::max(
+                    architectural_mesh.vertices.size(),
+                    static_cast<std::size_t>(64));
+            record.architectural_index_capacity_hints[section_index] =
+                std::max(
+                    architectural_mesh.indices.size(),
+                    static_cast<std::size_t>(96));
+            record.organic_vertex_capacity_hints[section_index] =
+                std::max(
+                    visual_mesh.vertices.size(),
+                    static_cast<std::size_t>(128));
+            record.organic_index_capacity_hints[section_index] =
+                std::max(
+                    visual_mesh.indices.size(),
+                    static_cast<std::size_t>(192));
+        } else {
+            record.organic_section_meshes[section_index] = {};
+            record.organic_vertex_capacity_hints[section_index] = 0U;
+            record.organic_index_capacity_hints[section_index] = 0U;
+            record.architectural_section_meshes[section_index] = {};
+            record.architectural_vertex_capacity_hints[section_index] = 0U;
+            record.architectural_index_capacity_hints[section_index] = 0U;
+        }
         record.chunk.clear_section_dirty(section_index);
         break;
     }
@@ -2939,6 +3510,373 @@ auto World::rebuild_chunk_mesh(ChunkRecord& record) -> bool {
     record.mesh_cache_dirty = true;
     ++record.mesh_revision;
     enqueue_gpu_upload(record.chunk.coord());
+    return true;
+}
+
+auto World::visual_mesh_source_revision(const ChunkCoord& coord) const noexcept
+    -> std::uint64_t {
+    auto revision = std::uint64_t {14695981039346656037ULL};
+    mix_revision(
+        revision,
+        static_cast<std::uint64_t>(
+            static_cast<std::uint8_t>(visual_pipeline_)));
+    mix_revision(
+        revision,
+        static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(coord.x)));
+    mix_revision(
+        revision,
+        static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(coord.z)));
+
+    // Je signe le chunk propriétaire et son halo 3x3. Un voisin chargé,
+    // déchargé ou modifié rend donc immédiatement le staging obsolète.
+    for (int offset_z = -1; offset_z <= 1; ++offset_z) {
+        for (int offset_x = -1; offset_x <= 1; ++offset_x) {
+            const ChunkCoord sampled_coord {
+                coord.x + offset_x,
+                coord.z + offset_z,
+            };
+            const auto iterator = chunks_.find(sampled_coord);
+            if (iterator == chunks_.end()) {
+                mix_revision(revision, 0U);
+                continue;
+            }
+            mix_revision(revision, 1U);
+            mix_revision(revision, iterator->second.chunk.mesh_input_revision());
+        }
+    }
+    return revision;
+}
+
+void World::begin_modern_visual_remesh(ChunkRecord& record) {
+    auto state = std::make_unique<ModernVisualRemeshState>();
+    state->source_revision =
+        visual_mesh_source_revision(record.chunk.coord());
+
+    for (std::size_t section_index = 0U;
+         section_index < kChunkSectionCount;
+         ++section_index) {
+        if (record.chunk.is_section_dirty(section_index)) {
+            state->target_sections.set(section_index);
+        }
+    }
+
+    const auto coord = record.chunk.coord();
+    const auto chunk_world_x = coord.x * kChunkSizeX;
+    const auto chunk_world_z = coord.z * kChunkSizeZ;
+    const auto has_current_vegetation =
+        chunk_has_visual_vegetation(record.chunk);
+    if (has_current_vegetation ||
+        record.published_vegetation_sections.any()) {
+        // Je classe le chunk sur toute sa hauteur une seule fois. Les
+        // frontieres de sections ne peuvent donc plus couper un composant,
+        // tronquer un cactus ou faire perdre le feuillage qui le qualifie.
+        state->canonical_vegetation =
+            build_visual_vegetation(
+                {
+                    {
+                        chunk_world_x,
+                        kWorldMinY,
+                        chunk_world_z,
+                    },
+                    {
+                        chunk_world_x + kChunkSizeX - 1,
+                        kWorldMaxY,
+                        chunk_world_z + kChunkSizeZ - 1,
+                    },
+                    kCanonicalVisualVegetationHalo,
+                },
+                [this](int x, int y, int z) {
+                    return peek_block_or_generated(x, y, z);
+                },
+                static_cast<std::uint32_t>(seed()));
+
+        const auto canonical_mesh =
+            build_visual_vegetation_mesh(
+                *state->canonical_vegetation,
+                VisualVegetationLod::Medium,
+                StylizedPrimitiveLod::Low,
+                [this](int x, int y, int z) {
+                    return VisualVegetationLighting {
+                        get_sky_light(x, y, z),
+                        get_block_light(x, y, z),
+                    };
+                });
+        const auto partitions =
+            partition_visual_vegetation_mesh(
+                canonical_mesh,
+                kWorldMinY,
+                kChunkSectionHeight,
+                kChunkSectionCount);
+        for (std::size_t section_index = 0U;
+             section_index < kChunkSectionCount;
+             ++section_index) {
+            state->vegetation_section_meshes[section_index] =
+                partitions[section_index];
+            if (!partitions[section_index].empty()) {
+                state->vegetation_sections.set(section_index);
+            }
+        }
+
+        // Une modification de composant peut changer la hauteur du tronc ou
+        // de la canopee loin de la cellule editee. Je republie donc toutes les
+        // anciennes et nouvelles partitions de ce chunk atomiquement.
+        state->target_sections |=
+            record.published_vegetation_sections;
+        state->target_sections |=
+            state->vegetation_sections;
+    }
+
+    for (std::size_t section_index = 0U;
+         section_index < kChunkSectionCount;
+         ++section_index) {
+        if (!state->target_sections.test(section_index)) {
+            continue;
+        }
+        if (chunk_section_has_organic_surface(
+                *this,
+                record.chunk,
+                section_index)) {
+            state->organic_sections.set(section_index);
+        }
+        if (chunk_section_has_architecture(
+                record.chunk,
+                section_index)) {
+            state->architectural_sections.set(section_index);
+        }
+    }
+
+    state->total_slices =
+        state->target_sections.count() *
+        kModernVisualRemeshSlicesPerSection;
+    while (state->next_slice < kModernVisualRemeshSliceCount &&
+           !state->target_sections.test(
+               state->next_slice /
+               kModernVisualRemeshSlicesPerSection)) {
+        ++state->next_slice;
+    }
+    record.modern_remesh = std::move(state);
+}
+
+void World::build_modern_visual_remesh_slice(
+    ChunkRecord& record,
+    ModernVisualRemeshState& state,
+    std::size_t slice_index) {
+    const auto section_index =
+        slice_index / kModernVisualRemeshSlicesPerSection;
+    const auto slice_in_section =
+        slice_index % kModernVisualRemeshSlicesPerSection;
+    const auto min_y =
+        static_cast<int>(slice_index *
+                         static_cast<std::size_t>(
+                             kModernVisualRemeshSliceHeight));
+    const auto max_y =
+        std::min(
+            kWorldMaxY,
+            min_y + kModernVisualRemeshSliceHeight - 1);
+    const auto coord = record.chunk.coord();
+    const auto chunk_world_x = coord.x * kChunkSizeX;
+    const auto chunk_world_z = coord.z * kChunkSizeZ;
+
+    if (slice_in_section == 0U) {
+        state.staged_section_meshes[section_index] = {};
+        state.staged_organic_meshes[section_index] = {};
+        state.staged_architectural_meshes[section_index] = {};
+
+        if (state.vegetation_sections.test(section_index)) {
+            append_organic_mesh(
+                state.staged_organic_meshes[section_index],
+                state.vegetation_section_meshes[section_index]);
+        }
+    }
+
+    const auto slice_mesh = mesher_.build_mesh_range(
+        *this,
+        coord,
+        min_y,
+        max_y,
+        std::max<std::size_t>(
+            32U,
+            record.section_mesh_vertex_capacity_hints[section_index] /
+                kModernVisualRemeshSlicesPerSection),
+        std::max<std::size_t>(
+            48U,
+            record.section_mesh_index_capacity_hints[section_index] /
+                kModernVisualRemeshSlicesPerSection),
+        ChunkMeshContent::ModernNonOrganic);
+    append_chunk_mesh_section(
+        state.staged_section_meshes[section_index],
+        slice_mesh);
+
+    const OrganicTerrainSection slice_section {
+        {chunk_world_x, min_y, chunk_world_z},
+        {
+            chunk_world_x + kChunkSizeX - 1,
+            max_y,
+            chunk_world_z + kChunkSizeZ - 1,
+        },
+    };
+    if (state.organic_sections.test(section_index)) {
+        const auto organic_slice = organic_mesher_.build_mesh(
+            slice_section,
+            [this](int x, int y, int z) {
+                return OrganicTerrainCellSample {
+                    peek_block_or_generated(x, y, z),
+                    get_sky_light(x, y, z),
+                    get_block_light(x, y, z),
+                };
+            },
+            std::max<std::size_t>(
+                32U,
+                record.organic_vertex_capacity_hints[section_index] /
+                    kModernVisualRemeshSlicesPerSection),
+            std::max<std::size_t>(
+                48U,
+                record.organic_index_capacity_hints[section_index] /
+                    kModernVisualRemeshSlicesPerSection));
+        append_organic_mesh(
+            state.staged_organic_meshes[section_index],
+            organic_slice);
+    }
+
+    if (state.architectural_sections.test(section_index)) {
+        auto architectural_slice = architectural_mesher_.build_mesh(
+            {
+                slice_section.min,
+                slice_section.max,
+                1,
+            },
+            [this, &state](int x, int y, int z) {
+                auto block = peek_block_or_generated(x, y, z);
+                if (state.canonical_vegetation.has_value() &&
+                    coordinate_is_tree_wood(
+                        *state.canonical_vegetation,
+                        {x, y, z},
+                        block)) {
+                    block = to_block_id(BlockType::Air);
+                }
+                return ArchitecturalCellSample {
+                    block,
+                    get_sky_light(x, y, z),
+                    get_block_light(x, y, z),
+                };
+            },
+            std::max<std::size_t>(
+                16U,
+                record.architectural_vertex_capacity_hints[section_index] /
+                    kModernVisualRemeshSlicesPerSection),
+            std::max<std::size_t>(
+                24U,
+                record.architectural_index_capacity_hints[section_index] /
+                    kModernVisualRemeshSlicesPerSection));
+        [[maybe_unused]] const auto fixture_index_offset =
+            append_architectural_fixture_geometry(
+                architectural_slice,
+                StylizedPrimitiveLod::Medium);
+        append_architectural_mesh(
+            state.staged_architectural_meshes[section_index],
+            architectural_slice);
+    }
+
+}
+
+void World::publish_modern_visual_remesh(ChunkRecord& record) {
+    auto& state = *record.modern_remesh;
+    for (std::size_t section_index = 0U;
+         section_index < kChunkSectionCount;
+         ++section_index) {
+        if (!state.target_sections.test(section_index)) {
+            continue;
+        }
+
+        record.section_meshes[section_index] =
+            std::move(state.staged_section_meshes[section_index]);
+        record.organic_section_meshes[section_index] =
+            std::move(state.staged_organic_meshes[section_index]);
+        record.architectural_section_meshes[section_index] =
+            std::move(state.staged_architectural_meshes[section_index]);
+        record.section_mesh_vertex_capacity_hints[section_index] =
+            std::max<std::size_t>(
+                128U,
+                record.section_meshes[section_index].total_vertex_count());
+        record.section_mesh_index_capacity_hints[section_index] =
+            std::max<std::size_t>(
+                192U,
+                record.section_meshes[section_index].total_index_count());
+        record.organic_vertex_capacity_hints[section_index] =
+            std::max<std::size_t>(
+                128U,
+                record.organic_section_meshes[section_index].vertices.size());
+        record.organic_index_capacity_hints[section_index] =
+            std::max<std::size_t>(
+                192U,
+                record.organic_section_meshes[section_index].indices.size());
+        record.architectural_vertex_capacity_hints[section_index] =
+            std::max<std::size_t>(
+                64U,
+                record.architectural_section_meshes[section_index].vertices.size());
+        record.architectural_index_capacity_hints[section_index] =
+            std::max<std::size_t>(
+                96U,
+                record.architectural_section_meshes[section_index].indices.size());
+        record.chunk.clear_section_dirty(section_index);
+    }
+
+    // Je bascule toutes les sections préparées avant de publier une seule
+    // révision. Le renderer ne peut ainsi jamais observer un chunk hybride.
+    record.published_vegetation_sections =
+        state.vegetation_sections;
+    record.mesh = ChunkMeshData {};
+    record.mesh_cache_dirty = true;
+    ++record.mesh_revision;
+    record.modern_remesh.reset();
+    enqueue_gpu_upload(record.chunk.coord());
+}
+
+auto World::rebuild_modern_chunk_mesh(ChunkRecord& record) -> bool {
+    const auto current_revision =
+        visual_mesh_source_revision(record.chunk.coord());
+    if (record.modern_remesh != nullptr &&
+        record.modern_remesh->source_revision != current_revision) {
+        // Je jette sans publier le staging dont le halo ou la source a changé.
+        record.modern_remesh.reset();
+        return false;
+    }
+
+    if (record.modern_remesh == nullptr) {
+        begin_modern_visual_remesh(record);
+    }
+    if (record.modern_remesh == nullptr ||
+        record.modern_remesh->total_slices == 0U ||
+        record.modern_remesh->next_slice >=
+            kModernVisualRemeshSliceCount) {
+        record.modern_remesh.reset();
+        return false;
+    }
+
+    auto& state = *record.modern_remesh;
+    const auto slice_index = state.next_slice;
+    build_modern_visual_remesh_slice(record, state, slice_index);
+    ++state.completed_slices;
+    ++state.next_slice;
+    while (state.next_slice < kModernVisualRemeshSliceCount &&
+           !state.target_sections.test(
+               state.next_slice /
+               kModernVisualRemeshSlicesPerSection)) {
+        ++state.next_slice;
+    }
+
+    if (visual_mesh_source_revision(record.chunk.coord()) !=
+        state.source_revision) {
+        record.modern_remesh.reset();
+        return false;
+    }
+    if (state.completed_slices < state.total_slices) {
+        return false;
+    }
+
+    publish_modern_visual_remesh(record);
     return true;
 }
 

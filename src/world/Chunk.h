@@ -49,6 +49,7 @@ public:
     [[nodiscard]] auto is_lighting_dirty() const noexcept -> bool;
     [[nodiscard]] auto is_section_dirty(std::size_t section_index) const noexcept -> bool;
     [[nodiscard]] auto dirty_section_count() const noexcept -> std::size_t;
+    [[nodiscard]] auto mesh_input_revision() const noexcept -> std::uint64_t;
     void mark_dirty() noexcept;
     void mark_section_dirty(std::size_t section_index) noexcept;
     void mark_section_dirty_for_y(int y) noexcept;
@@ -61,6 +62,7 @@ private:
     [[nodiscard]] static auto index_of(int x, int y, int z) noexcept -> std::size_t;
     [[nodiscard]] static auto surface_index_of(int x, int z) noexcept -> std::size_t;
     [[nodiscard]] static auto section_index_of_y(int y) noexcept -> std::size_t;
+    void bump_mesh_input_revision() noexcept;
     void rebuild_meshable_bounds() noexcept;
     void rebuild_surface_height_column(int x, int z) noexcept;
 
@@ -74,6 +76,7 @@ private:
     std::bitset<kChunkSectionCount> dirty_sections_ {};
     int min_mesh_y_ = kChunkHeight;
     int max_mesh_y_ = kWorldMinY - 1;
+    std::uint64_t mesh_input_revision_ = 0U;
     bool lighting_dirty_ = true;
 };
 

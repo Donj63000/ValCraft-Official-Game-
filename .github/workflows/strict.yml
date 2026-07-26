@@ -19,6 +19,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install deterministic visual asset tooling
+        run: python -m pip install --requirement tools/requirements-visual.txt
+
       - name: Setup MSYS2 toolchain
         id: msys2
         uses: msys2/setup-msys2@v2
@@ -51,3 +54,13 @@ jobs:
 
       - name: Run strict gate
         run: ./scripts/check.ps1
+
+      - name: Publish deterministic GPU captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valcraft-strict-visual-captures
+          if-no-files-found: ignore
+          path: |
+            cmake-build-strict-*/artifacts/**/*.bmp
+            cmake-build-strict-*/artifacts/**/*.json

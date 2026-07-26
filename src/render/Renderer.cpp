@@ -2,11 +2,19 @@
 #include "render/Renderer.h"
 #include "gameplay/SeaAdventure.h"
 #include "render/ItemDropGeometry.h"
+#include "render/ModelIconAtlas.h"
+#include "render/ModernHudStyle.h"
+#include "render/ModernTerrainShaderSource.h"
+#include "render/MsdfFontAtlas.h"
 #include "render/SceneSamplerBindings.h"
 #include "render/ShipMesh.h"
 #include "render/ShipProtectionShaderSource.h"
+#include "render/ShadowCascades.h"
 #include "render/ShadowCulling.h"
 #include "render/SkyShaderSource.h"
+#include "render/StylizedPrimitives.h"
+#include "render/StylizedShipMesh.h"
+#include "render/VisualEntityPrimitives.h"
 #include "creatures/CreatureGeometry.h"
 #include "creatures/OldGuardGeometry.h"
 #include "render/HotbarLayout.h"
@@ -28,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -42,7 +51,11 @@ namespace {
 
 constexpr auto kShadowDistance = 96.0F;
 constexpr auto kInitialVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(ChunkVertex) * 256U);
+constexpr auto kInitialWaterVertexBufferBytes =
+    static_cast<GLsizeiptr>(sizeof(WaterVertex) * 256U);
 constexpr auto kInitialIndexBufferBytes = static_cast<GLsizeiptr>(sizeof(std::uint32_t) * 384U);
+constexpr auto kInitialTerrainVertexBufferBytes = static_cast<GLsizeiptr>(sizeof(TerrainVertex) * 256U);
+constexpr auto kInitialTerrainIndexBufferBytes = static_cast<GLsizeiptr>(sizeof(std::uint32_t) * 384U);
 constexpr std::size_t kCreatureVerticesPerBox = 24U;
 constexpr std::size_t kCreatureIndicesPerBox = 36U;
 constexpr std::size_t kCreatureDayBoxBudget = 30U;
@@ -65,6 +78,107 @@ constexpr auto kInitialOldGuardEffectInstanceBufferBytes =
 constexpr auto kInitialHudBufferBytes = static_cast<GLsizeiptr>(sizeof(float) * 9U * 6U * 32U);
 constexpr std::size_t kMaxGpuMeshEventsPerFrame = 8;
 constexpr double kMaxGpuMeshSyncMsPerFrame = 1.0;
+constexpr GLenum kTextureMaxAnisotropyExt = 0x84FE;
+constexpr GLenum kMaxTextureMaxAnisotropyExt = 0x84FF;
+
+// Je garde les métriques CPU près des générateurs de géométrie HUD : le
+// renderer OpenGL reste l'unique propriétaire de la texture correspondante.
+std::optional<MsdfFontAtlas> g_modern_hud_font_atlas {};
+bool g_modern_hud_font_enabled = false;
+
+[[nodiscard]] auto active_modern_hud_font() noexcept
+    -> const MsdfFontAtlas* {
+    return g_modern_hud_font_enabled &&
+                   g_modern_hud_font_atlas.has_value()
+               ? &*g_modern_hud_font_atlas
+               : nullptr;
+}
+
+[[nodiscard]] constexpr auto visual_entity_primitive_slot(
+    StylizedPrimitiveType primitive) noexcept -> std::size_t {
+    switch (primitive) {
+    case StylizedPrimitiveType::RoundedBox:
+        return 0U;
+    case StylizedPrimitiveType::Capsule:
+        return 1U;
+    case StylizedPrimitiveType::Ellipsoid:
+        return 2U;
+    case StylizedPrimitiveType::TaperedCylinder:
+        return 3U;
+    case StylizedPrimitiveType::Panel:
+        return 4U;
+    case StylizedPrimitiveType::Ribbon:
+        return 5U;
+    }
+    return 0U;
+}
+
+[[nodiscard]] constexpr auto visual_entity_lod_slot(
+    StylizedPrimitiveLod lod) noexcept -> std::size_t {
+    switch (lod) {
+    case StylizedPrimitiveLod::Low:
+        return 0U;
+    case StylizedPrimitiveLod::Medium:
+        return 1U;
+    case StylizedPrimitiveLod::High:
+        return 2U;
+    }
+    return 1U;
+}
+
+[[nodiscard]] constexpr auto visual_entity_batch_slot(
+    StylizedPrimitiveType primitive,
+    StylizedPrimitiveLod lod) noexcept -> std::size_t {
+    return visual_entity_lod_slot(lod) *
+               kVisualEntityPrimitiveTypeCount +
+           visual_entity_primitive_slot(primitive);
+}
+
+[[nodiscard]] constexpr auto visual_entity_primitive_for_slot(
+    std::size_t slot) noexcept -> StylizedPrimitiveType {
+    switch (slot % kVisualEntityPrimitiveTypeCount) {
+    case 1U:
+        return StylizedPrimitiveType::Capsule;
+    case 2U:
+        return StylizedPrimitiveType::Ellipsoid;
+    case 3U:
+        return StylizedPrimitiveType::TaperedCylinder;
+    case 4U:
+        return StylizedPrimitiveType::Panel;
+    case 5U:
+        return StylizedPrimitiveType::Ribbon;
+    case 0U:
+    default:
+        return StylizedPrimitiveType::RoundedBox;
+    }
+}
+
+[[nodiscard]] constexpr auto visual_entity_lod_for_slot(
+    std::size_t slot) noexcept -> StylizedPrimitiveLod {
+    switch (slot / kVisualEntityPrimitiveTypeCount) {
+    case 0U:
+        return StylizedPrimitiveLod::Low;
+    case 2U:
+        return StylizedPrimitiveLod::High;
+    case 1U:
+    default:
+        return StylizedPrimitiveLod::Medium;
+    }
+}
+
+[[nodiscard]] auto supports_gl_extension(std::string_view requested) noexcept
+    -> bool {
+    GLint extension_count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &extension_count);
+    for (GLint index = 0; index < extension_count; ++index) {
+        const auto* extension = reinterpret_cast<const char*>(
+            glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(index)));
+        if (extension != nullptr && requested == extension) {
+            return true;
+        }
+    }
+    return false;
+}
 
 struct BoxTemplateVertex {
     float x = 0.0F;
@@ -462,6 +576,93 @@ void merge_chunk_mesh_sections_into(
     }
 }
 
+void merge_organic_terrain_sections_into(
+    const std::array<OrganicTerrainMesh, kChunkSectionCount>& sections,
+    OrganicTerrainMesh& merged) {
+    merged.vertices.clear();
+    merged.indices.clear();
+    merged.quad_count = 0U;
+
+    std::size_t vertex_count = 0U;
+    std::size_t index_count = 0U;
+    for (const auto& section : sections) {
+        vertex_count += section.vertices.size();
+        index_count += section.indices.size();
+    }
+    merged.vertices.reserve(vertex_count);
+    merged.indices.reserve(index_count);
+
+    for (const auto& section : sections) {
+        const auto vertex_offset = static_cast<std::uint32_t>(merged.vertices.size());
+        merged.vertices.insert(
+            merged.vertices.end(),
+            section.vertices.begin(),
+            section.vertices.end());
+        for (const auto index : section.indices) {
+            merged.indices.push_back(index + vertex_offset);
+        }
+        merged.quad_count += section.quad_count;
+    }
+}
+
+void merge_architectural_sections_into(
+    const std::array<ArchitecturalMesh, kChunkSectionCount>& sections,
+    ArchitecturalMesh& merged) {
+
+    merged = {};
+    std::size_t vertex_count = 0U;
+    std::size_t index_count = 0U;
+    std::size_t quad_count = 0U;
+    std::size_t fixture_count = 0U;
+    for (const auto& section : sections) {
+        vertex_count += section.vertices.size();
+        index_count += section.indices.size();
+        quad_count += section.quads.size();
+        fixture_count += section.fixtures.size();
+    }
+    merged.vertices.reserve(vertex_count);
+    merged.indices.reserve(index_count);
+    merged.quads.reserve(quad_count);
+    merged.fixtures.reserve(fixture_count);
+
+    for (const auto& section : sections) {
+        const auto vertex_offset =
+            static_cast<std::uint32_t>(merged.vertices.size());
+        const auto index_offset =
+            static_cast<std::uint32_t>(merged.indices.size());
+        merged.vertices.insert(
+            merged.vertices.end(),
+            section.vertices.begin(),
+            section.vertices.end());
+        for (const auto index : section.indices) {
+            merged.indices.push_back(index + vertex_offset);
+        }
+        for (auto quad : section.quads) {
+            quad.first_vertex += vertex_offset;
+            quad.first_index += index_offset;
+            merged.quads.push_back(quad);
+        }
+        merged.fixtures.insert(
+            merged.fixtures.end(),
+            section.fixtures.begin(),
+            section.fixtures.end());
+
+        if (!section.bounds.valid) {
+            continue;
+        }
+        if (!merged.bounds.valid) {
+            merged.bounds = section.bounds;
+            continue;
+        }
+        merged.bounds.min_x = std::min(merged.bounds.min_x, section.bounds.min_x);
+        merged.bounds.min_y = std::min(merged.bounds.min_y, section.bounds.min_y);
+        merged.bounds.min_z = std::min(merged.bounds.min_z, section.bounds.min_z);
+        merged.bounds.max_x = std::max(merged.bounds.max_x, section.bounds.max_x);
+        merged.bounds.max_y = std::max(merged.bounds.max_y, section.bounds.max_y);
+        merged.bounds.max_z = std::max(merged.bounds.max_z, section.bounds.max_z);
+    }
+}
+
 [[nodiscard]] constexpr auto color_target_bytes_per_pixel(GLint internal_format) noexcept -> std::uint64_t {
     return internal_format == GL_RGBA16F ? 8U : 4U;
 }
@@ -702,6 +903,180 @@ void append_hud_rect_top_left(std::vector<HudVertex>& vertices,
     append_hud_quad_top_left(vertices, viewport_width, viewport_height, x, y, width, height, color, {0.0F, 0.0F, 0.0F, 0.0F}, 0.0F);
 }
 
+void append_hud_solid_triangle_top_left(
+    std::vector<HudVertex>& vertices,
+    float viewport_width,
+    float viewport_height,
+    const glm::vec2& first,
+    const glm::vec2& second,
+    const glm::vec2& third,
+    const std::array<float, 4>& color) {
+    const auto make_vertex = [&](const glm::vec2& point) {
+        return HudVertex {
+            pixel_to_ndc_x(point.x, viewport_width),
+            pixel_to_ndc_y(
+                viewport_height - point.y,
+                viewport_height),
+            0.0F,
+            0.0F,
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            0.0F,
+        };
+    };
+    vertices.push_back(make_vertex(first));
+    vertices.push_back(make_vertex(second));
+    vertices.push_back(make_vertex(third));
+}
+
+void append_hud_rounded_rect_top_left(
+    std::vector<HudVertex>& vertices,
+    float viewport_width,
+    float viewport_height,
+    float x,
+    float y,
+    float width,
+    float height,
+    float preferred_radius,
+    const std::array<float, 4>& color) {
+    if (viewport_width <= 0.0F ||
+        viewport_height <= 0.0F ||
+        width <= 0.0F ||
+        height <= 0.0F ||
+        color[3] <= 0.0F) {
+        return;
+    }
+
+    const auto metrics = modern_hud_rounded_rect_metrics(
+        width,
+        height,
+        preferred_radius);
+    if (metrics.corner_segments <= 0 ||
+        metrics.radius <= 0.0F) {
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x,
+            y,
+            width,
+            height,
+            color);
+        return;
+    }
+
+    const auto radius = metrics.radius;
+    const auto center_width =
+        std::max(0.0F, width - radius * 2.0F);
+    const auto middle_height =
+        std::max(0.0F, height - radius * 2.0F);
+    if (center_width > 0.0F) {
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x + radius,
+            y,
+            center_width,
+            height,
+            color);
+    }
+    if (middle_height > 0.0F) {
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x,
+            y + radius,
+            radius,
+            middle_height,
+            color);
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x + width - radius,
+            y + radius,
+            radius,
+            middle_height,
+            color);
+    }
+
+    constexpr float kPi = 3.14159265358979323846F;
+    const std::array<glm::vec2, 4> centers {{
+        {x + radius, y + radius},
+        {x + width - radius, y + radius},
+        {x + width - radius, y + height - radius},
+        {x + radius, y + height - radius},
+    }};
+    constexpr std::array<float, 4> start_angles {{
+        kPi,
+        kPi * 1.5F,
+        0.0F,
+        kPi * 0.5F,
+    }};
+    const auto angle_step =
+        (kPi * 0.5F) /
+        static_cast<float>(metrics.corner_segments);
+    for (std::size_t corner = 0U;
+         corner < centers.size();
+         ++corner) {
+        const auto center = centers[corner];
+        for (int segment = 0;
+             segment < metrics.corner_segments;
+             ++segment) {
+            const auto first_angle =
+                start_angles[corner] +
+                angle_step * static_cast<float>(segment);
+            const auto second_angle =
+                first_angle + angle_step;
+            const auto first = center + glm::vec2 {
+                std::cos(first_angle) * radius,
+                std::sin(first_angle) * radius,
+            };
+            const auto second = center + glm::vec2 {
+                std::cos(second_angle) * radius,
+                std::sin(second_angle) * radius,
+            };
+            append_hud_solid_triangle_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                center,
+                first,
+                second,
+                color);
+        }
+    }
+}
+
+[[maybe_unused]] void append_hud_rounded_rect_bottom_left(
+    std::vector<HudVertex>& vertices,
+    float viewport_width,
+    float viewport_height,
+    float x,
+    float bottom,
+    float width,
+    float height,
+    float radius,
+    const std::array<float, 4>& color) {
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(
+            viewport_height,
+            bottom,
+            height),
+        width,
+        height,
+        radius,
+        color);
+}
+
 void append_hud_frame_top_left(std::vector<HudVertex>& vertices,
                                float viewport_width,
                                float viewport_height,
@@ -899,6 +1274,16 @@ auto glyph_rows(char character) -> std::array<std::uint8_t, 7> {
 }
 
 auto measure_pixel_text(std::string_view text, float pixel_size) -> float {
+    if (const auto* font = active_modern_hud_font();
+        font != nullptr && pixel_size > 0.0F) {
+        const auto layout = font->build_quads(
+            text,
+            0.0F,
+            0.0F,
+            pixel_size * 7.0F);
+        return layout.width;
+    }
+
     float width = 0.0F;
     bool first = true;
     for (const auto character : text) {
@@ -920,6 +1305,50 @@ void append_pixel_text(std::vector<HudVertex>& vertices,
                        std::string_view text,
                        const std::array<float, 4>& color,
                        bool centered = false) {
+    if (const auto* font = active_modern_hud_font();
+        font != nullptr && pixel_size > 0.0F) {
+        const auto requested_height = pixel_size * 7.0F;
+        const auto scale =
+            requested_height / font->metadata().font_em_pixels;
+        auto origin_x = x;
+        const auto measured = font->build_quads(
+            text,
+            0.0F,
+            0.0F,
+            requested_height);
+        if (centered) {
+            origin_x -= measured.width * 0.5F;
+        }
+        const auto baseline_y =
+            y + font->metadata().ascent * scale;
+        const auto layout = font->build_quads(
+            text,
+            origin_x,
+            baseline_y,
+            requested_height);
+        for (const auto& quad : layout.quads) {
+            const auto quad_width = quad.x1 - quad.x0;
+            const auto quad_height = quad.y1 - quad.y0;
+            if (quad_width <= 0.0F || quad_height <= 0.0F) {
+                continue;
+            }
+            // L'asset est rangé ligne par ligne depuis le haut. J'inverse V
+            // ici une seule fois afin de respecter l'origine OpenGL.
+            append_hud_quad_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                quad.x0,
+                quad.y0,
+                quad_width,
+                quad_height,
+                color,
+                {quad.u0, quad.v1, quad.u1, quad.v0},
+                2.0F);
+        }
+        return;
+    }
+
     auto cursor_x = x;
     if (centered) {
         cursor_x -= measure_pixel_text(text, pixel_size) * 0.5F;
@@ -1056,6 +1485,34 @@ auto make_warm_panel_palette(const HudColor& accent) -> HudPanelPalette {
         {0.02F, 0.02F, 0.02F, 0.66F},
         hud_with_alpha(hud_scale_rgb(accent, 1.10F), 0.14F),
     };
+}
+
+auto make_modern_glass_panel_palette(
+    const HudColor& accent,
+    float accent_strength = 0.12F) -> HudPanelPalette {
+    const auto clamped_strength =
+        std::clamp(accent_strength, 0.0F, 0.35F);
+    return {
+        hud_mix(
+            HudColor {0.16F, 0.20F, 0.25F, 0.82F},
+            hud_with_alpha(accent, 0.82F),
+            clamped_strength * 0.55F),
+        hud_mix(
+            HudColor {0.075F, 0.10F, 0.14F, 0.78F},
+            hud_with_alpha(accent, 0.78F),
+            clamped_strength),
+        {0.82F, 0.90F, 0.98F, 0.12F},
+        {0.01F, 0.02F, 0.035F, 0.32F},
+        hud_with_alpha(
+            hud_scale_rgb(accent, 1.08F),
+            0.28F),
+    };
+}
+
+auto make_modern_neutral_panel_palette() -> HudPanelPalette {
+    return make_modern_glass_panel_palette(
+        {0.48F, 0.68F, 0.86F, 1.0F},
+        0.08F);
 }
 
 auto ui_material_accent(BlockId block_id) -> HudColor {
@@ -1407,6 +1864,133 @@ void append_stylized_panel_bottom_left(std::vector<HudVertex>& vertices,
         cast_shadow);
 }
 
+void append_modern_panel_top_left(std::vector<HudVertex>& vertices,
+                                  float viewport_width,
+                                  float viewport_height,
+                                  float x,
+                                  float y,
+                                  float width,
+                                  float height,
+                                  float border_thickness,
+                                  const HudPanelPalette& palette,
+                                  bool cast_shadow = true) {
+    if (width <= 0.0F || height <= 0.0F) {
+        return;
+    }
+
+    const auto border = std::clamp(
+        border_thickness,
+        1.0F,
+        std::min(width, height) * 0.25F);
+    const auto radius =
+        modern_hud_panel_radius(width, height, border);
+
+    // Je compose le panneau avec des courbes simples et bornées : le HUD
+    // moderne reste doux sans dépendre d'un shader ou d'une texture dédiée.
+    if (cast_shadow) {
+        append_hud_rounded_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x + std::max(1.0F, border * 0.45F),
+            y + std::max(2.0F, border * 0.85F),
+            width,
+            height,
+            radius,
+            {0.0F, 0.0F, 0.0F, 0.24F});
+    }
+
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        y,
+        width,
+        height,
+        radius,
+        palette.frame);
+
+    const auto inner_x = x + border;
+    const auto inner_y = y + border;
+    const auto inner_width =
+        std::max(0.0F, width - border * 2.0F);
+    const auto inner_height =
+        std::max(0.0F, height - border * 2.0F);
+    if (inner_width <= 0.0F || inner_height <= 0.0F) {
+        return;
+    }
+
+    const auto inner_radius =
+        std::max(0.0F, radius - border);
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        inner_x,
+        inner_y,
+        inner_width,
+        inner_height,
+        inner_radius,
+        palette.fill);
+
+    const auto highlight_height = std::clamp(
+        border * 0.70F,
+        1.0F,
+        inner_height * 0.22F);
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        inner_x + inner_radius * 0.25F,
+        inner_y + std::max(1.0F, border * 0.24F),
+        std::max(
+            0.0F,
+            inner_width - inner_radius * 0.50F),
+        highlight_height,
+        highlight_height * 0.50F,
+        palette.highlight);
+
+    const auto trim_width =
+        std::clamp(width * 0.28F, 12.0F, 72.0F);
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + (width - trim_width) * 0.5F,
+        y + border * 0.42F,
+        trim_width,
+        std::max(1.0F, border * 0.55F),
+        std::max(0.5F, border * 0.28F),
+        palette.trim);
+}
+
+void append_modern_panel_bottom_left(std::vector<HudVertex>& vertices,
+                                     float viewport_width,
+                                     float viewport_height,
+                                     float x,
+                                     float bottom,
+                                     float width,
+                                     float height,
+                                     float border_thickness,
+                                     const HudPanelPalette& palette,
+                                     bool cast_shadow = true) {
+    append_modern_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(
+            viewport_height,
+            bottom,
+            height),
+        width,
+        height,
+        border_thickness,
+        palette,
+        cast_shadow);
+}
+
 void append_hud_scanlines_top_left(std::vector<HudVertex>& vertices,
                                    float viewport_width,
                                    float viewport_height,
@@ -1571,6 +2155,133 @@ void append_stylized_slot_bottom_left(std::vector<HudVertex>& vertices,
         viewport_height,
         x,
         bottom_to_top_left_y(viewport_height, bottom, size),
+        size,
+        palette,
+        has_item);
+}
+
+void append_modern_slot_top_left(std::vector<HudVertex>& vertices,
+                                 float viewport_width,
+                                 float viewport_height,
+                                 float x,
+                                 float y,
+                                 float size,
+                                 const HudSlotPalette& palette,
+                                 bool has_item) {
+    const auto border = std::max(2.0F, size * 0.065F);
+    const auto glow_pad = std::max(2.0F, size * 0.055F);
+
+    if (palette.glow[3] > 0.0F) {
+        append_hud_rounded_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x - glow_pad,
+            y - glow_pad,
+            size + glow_pad * 2.0F,
+            size + glow_pad * 2.0F,
+            modern_hud_panel_radius(
+                size + glow_pad * 2.0F,
+                size + glow_pad * 2.0F,
+                border),
+            palette.glow);
+    }
+
+    append_modern_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        y,
+        size,
+        size,
+        border,
+        palette.shell,
+        false);
+
+    const auto inset =
+        border + std::max(1.0F, size * 0.055F);
+    const auto inner_size =
+        std::max(0.0F, size - inset * 2.0F);
+    if (inner_size <= 0.0F) {
+        return;
+    }
+
+    const auto well_frame = hud_with_alpha(
+        hud_scale_rgb(
+            palette.accent,
+            has_item ? 0.74F : 0.45F),
+        has_item ? 0.38F : 0.16F);
+    const auto well_fill = has_item
+                               ? hud_with_alpha(
+                                     hud_scale_rgb(
+                                         palette.accent,
+                                         0.28F),
+                                     0.22F)
+                               : HudColor {
+                                     0.05F,
+                                     0.06F,
+                                     0.08F,
+                                     0.62F,
+                                 };
+    const auto inner_radius =
+        modern_hud_panel_radius(
+            inner_size,
+            inner_size,
+            std::max(1.0F, border * 0.45F));
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + inset,
+        y + inset,
+        inner_size,
+        inner_size,
+        inner_radius,
+        well_frame);
+
+    const auto well_border =
+        std::max(1.0F, border * 0.42F);
+    append_hud_rounded_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x + inset + well_border,
+        y + inset + well_border,
+        std::max(0.0F, inner_size - well_border * 2.0F),
+        std::max(0.0F, inner_size - well_border * 2.0F),
+        std::max(0.0F, inner_radius - well_border),
+        well_fill);
+
+    if (!has_item) {
+        append_empty_slot_motif_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            x + inset,
+            y + inset,
+            inner_size,
+            palette.motif);
+    }
+}
+
+void append_modern_slot_bottom_left(std::vector<HudVertex>& vertices,
+                                    float viewport_width,
+                                    float viewport_height,
+                                    float x,
+                                    float bottom,
+                                    float size,
+                                    const HudSlotPalette& palette,
+                                    bool has_item) {
+    append_modern_slot_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        x,
+        bottom_to_top_left_y(
+            viewport_height,
+            bottom,
+            size),
         size,
         palette,
         has_item);
@@ -2493,6 +3204,94 @@ void build_block_break_overlay_mesh_data_into(const BlockBreakProgress& break_pr
     mesh.face_count = mesh.indices.size() / 6U;
 }
 
+void build_organic_block_break_overlay_mesh_data_into(
+    const World& world,
+    const BlockBreakProgress& break_progress,
+    ChunkMeshData& mesh) {
+    mesh.vertices.clear();
+    mesh.indices.clear();
+    mesh.water_vertices.clear();
+    mesh.water_indices.clear();
+    mesh.face_count = 0U;
+    mesh.water_face_count = 0U;
+    if (!break_progress.active ||
+        !is_organic_terrain_block(break_progress.block_id) ||
+        !is_block_breakable_at(
+            break_progress.block,
+            break_progress.block_id)) {
+        return;
+    }
+
+    const OrganicTerrainSection target_section {
+        break_progress.block,
+        break_progress.block,
+    };
+    const OrganicTerrainMesher mesher {};
+    const auto surface = mesher.build_mesh(
+        target_section,
+        [&world](int x, int y, int z) {
+            return OrganicTerrainCellSample {
+                world.peek_block_or_generated(x, y, z),
+                world.get_sky_light(x, y, z),
+                world.get_block_light(x, y, z),
+            };
+        },
+        32U,
+        48U);
+    if (surface.empty()) {
+        return;
+    }
+
+    const auto tile = block_break_crack_tile(break_progress.crack_stage);
+    const auto tile_size = 1.0F / kBlockAtlasTilesPerAxis;
+    const auto tile_u = static_cast<float>(tile.x) * tile_size;
+    const auto tile_v = static_cast<float>(tile.y) * tile_size;
+    const auto inflate =
+        kBlockBreakOverlayBaseInflate +
+        break_progress.progress * kBlockBreakOverlayProgressInflate;
+    mesh.vertices.reserve(surface.vertices.size());
+    mesh.indices = surface.indices;
+
+    for (const auto& source : surface.vertices) {
+        const auto normal = glm::normalize(
+            glm::vec3 {source.nx, source.ny, source.nz});
+        const auto absolute_normal = glm::abs(normal);
+        float local_u = 0.0F;
+        float local_v = 0.0F;
+        if (absolute_normal.x >= absolute_normal.y &&
+            absolute_normal.x >= absolute_normal.z) {
+            local_u = source.z - static_cast<float>(break_progress.block.z);
+            local_v = source.y - static_cast<float>(break_progress.block.y);
+        } else if (absolute_normal.y >= absolute_normal.z) {
+            local_u = source.x - static_cast<float>(break_progress.block.x);
+            local_v = source.z - static_cast<float>(break_progress.block.z);
+        } else {
+            local_u = source.x - static_cast<float>(break_progress.block.x);
+            local_v = source.y - static_cast<float>(break_progress.block.y);
+        }
+        local_u = glm::clamp(local_u, 0.0F, 1.0F);
+        local_v = glm::clamp(local_v, 0.0F, 1.0F);
+
+        mesh.vertices.push_back({
+            source.x + normal.x * inflate,
+            source.y + normal.y * inflate,
+            source.z + normal.z * inflate,
+            tile_u + local_u * tile_size,
+            tile_v + local_v * tile_size,
+            normal.x,
+            normal.y,
+            normal.z,
+            1.0F,
+            kBlockBreakOverlayAo,
+            kBlockBreakOverlaySkyLight,
+            kBlockBreakOverlayBlockLight,
+            kBlockBreakOverlayMaterialClass,
+            0.0F,
+        });
+    }
+    mesh.face_count = mesh.indices.size() / 6U;
+}
+
 } // namespace
 
 Renderer::~Renderer() {
@@ -2500,11 +3299,14 @@ Renderer::~Renderer() {
 }
 
 auto Renderer::initialize(const RendererOptions& options) -> bool {
+    last_initialization_error_.clear();
     auto normalized_options = options;
     normalized_options.shadow_map_size = std::max(normalized_options.shadow_map_size, 1);
     normalized_options.viewmodel_fov_degrees = glm::clamp(normalized_options.viewmodel_fov_degrees, 35.0F, 100.0F);
 
     if (initialized_) {
+        const auto visual_pipeline_changed =
+            options_.visual_pipeline != normalized_options.visual_pipeline;
         const auto shadow_resource_changed =
             options_.shadows_enabled != normalized_options.shadows_enabled ||
             options_.shadow_map_size != normalized_options.shadow_map_size;
@@ -2515,6 +3317,8 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
             adaptive_quality_controller_.reset(options_.quality, 1, 1);
             active_quality_settings_ = adaptive_quality_controller_.settings(options_.quality, 1, 1);
             adaptive_gpu_sample_consumed_ = false;
+            pending_cpu_frame_time_ms_ = 0.0;
+            pending_cpu_frame_time_valid_ = false;
         }
 
         try {
@@ -2529,8 +3333,96 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
             } else if (post_process_disabled) {
                 destroy_glow_targets();
             }
+            if (visual_pipeline_changed) {
+                if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+                    if (!create_modern_material_textures()) {
+                        throw std::runtime_error(
+                            last_initialization_error_.empty()
+                                ? "Unable to load the modern visual material pack"
+                                : last_initialization_error_);
+                    }
+                    if (!create_model_icon_texture()) {
+                        throw std::runtime_error(
+                            last_initialization_error_.empty()
+                                ? "Unable to load the modern model icon atlas"
+                                : last_initialization_error_);
+                    }
+                    if (!create_msdf_font_texture()) {
+                        throw std::runtime_error(
+                            last_initialization_error_.empty()
+                                ? "Unable to load the modern UI font atlas"
+                                : last_initialization_error_);
+                    }
+                } else {
+                    destroy_modern_material_textures();
+                    destroy_model_icon_texture();
+                    destroy_msdf_font_texture();
+                }
+
+                // Je reconstruis les atlas colores lors d'un changement de
+                // pipeline : le rendu moderne les decode en sRGB, tandis que
+                // LegacyVoxel conserve exactement son ancien format lineaire.
+                if (creature_atlas_texture_ != 0) {
+                    glDeleteTextures(1, &creature_atlas_texture_);
+                    creature_atlas_texture_ = 0;
+                }
+                if (player_atlas_texture_ != 0) {
+                    glDeleteTextures(1, &player_atlas_texture_);
+                    player_atlas_texture_ = 0;
+                }
+                create_creature_atlas_texture();
+                create_player_atlas_texture();
+
+                // Les caches incorporent les UV et le mode de texture du
+                // pipeline actif : je les invalide sans modifier leurs états.
+                hotbar_cache_.valid = false;
+                inventory_cache_.valid = false;
+                death_cache_.valid = false;
+                pause_cache_.valid = false;
+                main_menu_cache_.valid = false;
+                save_slot_cache_.valid = false;
+                options_cache_.valid = false;
+                confirm_cache_.valid = false;
+                maritime_cache_.valid = false;
+
+                // Je reconstruis les gabarits partagés sans toucher aux rigs,
+                // sockets ni instances qui portent le gameplay.
+                glDeleteBuffers(1, &viewmodel_instance_vbo_);
+                glDeleteVertexArrays(1, &viewmodel_vao_);
+                glDeleteBuffers(1, &creature_instance_vbo_);
+                glDeleteBuffers(1, &creature_ebo_);
+                glDeleteBuffers(1, &creature_vbo_);
+                glDeleteVertexArrays(1, &creature_vao_);
+                glDeleteBuffers(1, &item_drop_instance_vbo_);
+                glDeleteBuffers(1, &item_drop_ebo_);
+                glDeleteBuffers(1, &item_drop_vbo_);
+                glDeleteVertexArrays(1, &item_drop_vao_);
+                viewmodel_instance_vbo_ = 0;
+                viewmodel_vao_ = 0;
+                creature_instance_vbo_ = 0;
+                creature_ebo_ = 0;
+                creature_vbo_ = 0;
+                creature_vao_ = 0;
+                item_drop_instance_vbo_ = 0;
+                item_drop_ebo_ = 0;
+                item_drop_vbo_ = 0;
+                item_drop_vao_ = 0;
+                create_creature_geometry();
+                create_item_drop_geometry();
+
+                // Je force aussi le navire a changer de representation : sa
+                // revision logique ne varie pas lors d'un basculement visuel.
+                destroy_gpu_mesh(ship_gpu_mesh_);
+                ship_mesh_cache_.reset();
+                active_ship_lod_ = StylizedShipLod::Near;
+            }
             return true;
+        } catch (const std::exception& exception) {
+            last_initialization_error_ = exception.what();
+            return false;
         } catch (...) {
+            last_initialization_error_ =
+                "Unknown exception while reconfiguring renderer resources";
             return false;
         }
     }
@@ -2542,6 +3434,26 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
         gl_api_ready_ = true;
         create_programs();
         create_atlas_texture();
+        if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+            if (!create_modern_material_textures()) {
+                throw std::runtime_error(
+                    last_initialization_error_.empty()
+                        ? "Unable to load the modern visual material pack"
+                        : last_initialization_error_);
+            }
+            if (!create_model_icon_texture()) {
+                throw std::runtime_error(
+                    last_initialization_error_.empty()
+                        ? "Unable to load the modern model icon atlas"
+                        : last_initialization_error_);
+            }
+            if (!create_msdf_font_texture()) {
+                throw std::runtime_error(
+                    last_initialization_error_.empty()
+                        ? "Unable to load the modern UI font atlas"
+                        : last_initialization_error_);
+            }
+        }
         create_accent_texture();
         create_creature_atlas_texture();
         create_player_atlas_texture();
@@ -2557,7 +3469,13 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
         create_gpu_timers();
         initialized_ = true;
         return true;
+    } catch (const std::exception& exception) {
+        last_initialization_error_ = exception.what();
+        shutdown();
+        return false;
     } catch (...) {
+        last_initialization_error_ =
+            "Unknown exception while initializing renderer resources";
         shutdown();
         return false;
     }
@@ -2571,6 +3489,9 @@ void Renderer::shutdown() {
 
         destroy_water_scene_targets();
         destroy_post_process_targets();
+        destroy_modern_material_textures();
+        destroy_model_icon_texture();
+        destroy_msdf_font_texture();
 
         if (screen_quad_vao_ != 0) {
             glDeleteVertexArrays(1, &screen_quad_vao_);
@@ -2658,6 +3579,15 @@ void Renderer::shutdown() {
         if (world_program_ != 0) {
             glDeleteProgram(world_program_);
         }
+        if (modern_terrain_program_ != 0) {
+            glDeleteProgram(modern_terrain_program_);
+        }
+        if (modern_architecture_program_ != 0) {
+            glDeleteProgram(modern_architecture_program_);
+        }
+        if (modern_terrain_shadow_program_ != 0) {
+            glDeleteProgram(modern_terrain_shadow_program_);
+        }
         if (item_drop_program_ != 0) {
             glDeleteProgram(item_drop_program_);
         }
@@ -2714,11 +3644,18 @@ void Renderer::shutdown() {
     hud_vbo_ = 0;
     hud_vao_ = 0;
     atlas_texture_ = 0;
+    msdf_font_texture_ = 0;
+    model_icon_texture_ = 0;
+    modern_material_albedo_texture_ = 0;
+    modern_material_normal_height_texture_ = 0;
+    modern_material_orm_emission_texture_ = 0;
     accent_texture_ = 0;
     creature_atlas_texture_ = 0;
     player_atlas_texture_ = 0;
     shadow_map_ = 0;
     shadow_framebuffer_ = 0;
+    shadow_map_far_ = 0;
+    shadow_framebuffer_far_ = 0;
     scene_fallback_color_texture_ = 0;
     scene_fallback_depth_texture_ = 0;
     water_scene_framebuffer_ = 0;
@@ -2741,6 +3678,9 @@ void Renderer::shutdown() {
     old_guard_effect_vbo_ = 0;
     old_guard_effect_instance_vbo_ = 0;
     world_program_ = 0;
+    modern_terrain_program_ = 0;
+    modern_architecture_program_ = 0;
+    modern_terrain_shadow_program_ = 0;
     item_drop_program_ = 0;
     precipitation_program_ = 0;
     old_guard_effect_program_ = 0;
@@ -2755,6 +3695,9 @@ void Renderer::shutdown() {
     glow_blur_program_ = 0;
     menu_background_program_ = 0;
     world_uniforms_ = {};
+    modern_terrain_uniforms_ = {};
+    modern_architecture_uniforms_ = {};
+    modern_terrain_shadow_uniforms_ = {};
     creature_uniforms_ = {};
     creature_shadow_light_view_projection_ = -1;
     item_drop_uniforms_ = {};
@@ -2770,6 +3713,12 @@ void Renderer::shutdown() {
     creature_instance_buffer_bytes_ = 0;
     viewmodel_instance_buffer_bytes_ = 0;
     item_drop_instance_buffer_bytes_ = 0;
+    creature_template_vertex_buffer_bytes_ = 0;
+    creature_template_index_buffer_bytes_ = 0;
+    item_drop_template_vertex_buffer_bytes_ = 0;
+    item_drop_template_index_buffer_bytes_ = 0;
+    creature_template_index_count_ = 0;
+    item_drop_template_index_count_ = 0;
     precipitation_instance_buffer_bytes_ = 0;
     old_guard_effect_instance_buffer_bytes_ = 0;
     hud_vertex_buffer_bytes_ = 0;
@@ -2783,11 +3732,13 @@ void Renderer::shutdown() {
     water_scene_color_internal_format_ = 0;
     scene_color_internal_format_ = 0;
     glow_color_internal_format_ = 0;
-    translated_water_indices_scratch_.clear();
     precipitation_field_.clear();
     precipitation_instances_scratch_.clear();
     old_guard_effect_instances_scratch_.clear();
     chunk_upload_scratch_ = {};
+    terrain_upload_scratch_ = {};
+    architecture_upload_scratch_ = {};
+    architecture_indices_scratch_.clear();
     block_break_overlay_scratch_ = {};
     loading_vertices_scratch_.clear();
     gameplay_announcement_vertices_scratch_.clear();
@@ -2795,15 +3746,27 @@ void Renderer::shutdown() {
     last_gpu_timings_ = {};
     gpu_frame_index_ = 0;
     adaptive_last_gpu_source_frame_ = 0;
+    pending_cpu_frame_time_ms_ = 0.0;
+    material_pack_checksum_ = 0U;
+    material_pack_version_ = 0U;
+    material_pack_width_ = 0U;
+    material_pack_height_ = 0U;
+    material_pack_layers_ = 0U;
+    material_pack_mips_ = 0U;
+    msdf_font_width_ = 0U;
+    msdf_font_height_ = 0U;
+    msdf_font_mips_ = 0U;
     frame_draw_calls_ = 0U;
     frame_triangles_ = 0U;
     frame_uploaded_bytes_ = 0U;
     world_resource_reset_progress_.finish();
     ship_mesh_cache_.reset();
+    active_ship_lod_ = StylizedShipLod::Near;
     active_gpu_query_frame_ = -1;
     active_gpu_pass_ = -1;
     gpu_timers_supported_ = false;
     adaptive_gpu_sample_consumed_ = false;
+    pending_cpu_frame_time_valid_ = false;
     adaptive_quality_controller_.reset(options_.quality, 1, 1);
     active_quality_settings_ = resolve_renderer_quality_settings(options_.quality, 1, 1);
     gl_api_ready_ = false;
@@ -2893,6 +3856,7 @@ void Renderer::render_frame(World& world,
             raw_environment);
     using clock = std::chrono::steady_clock;
     RendererFrameStats frame_stats {};
+    frame_stats.visual_pipeline = options_.visual_pipeline;
     frame_draw_calls_ = 0U;
     frame_triangles_ = 0U;
     frame_uploaded_bytes_ = 0U;
@@ -2911,14 +3875,22 @@ void Renderer::render_frame(World& world,
         adaptive_sample_ms = last_frame_stats_.upload_ms + last_frame_stats_.world_ms;
         adaptive_sample_valid = adaptive_sample_ms > 0.0;
     }
+    const auto resolved_adaptive_sample =
+        resolve_adaptive_frame_time_sample(
+            adaptive_sample_ms,
+            adaptive_sample_valid,
+            pending_cpu_frame_time_ms_,
+            pending_cpu_frame_time_valid_);
+    pending_cpu_frame_time_ms_ = 0.0;
+    pending_cpu_frame_time_valid_ = false;
 
     const auto previous_quality_settings = active_quality_settings_;
-    active_quality_settings_ = adaptive_sample_valid
+    active_quality_settings_ = resolved_adaptive_sample.valid
                                    ? adaptive_quality_controller_.update(
                                          options_.quality,
                                          render_width,
                                          render_height,
-                                         adaptive_sample_ms)
+                                         resolved_adaptive_sample.frame_time_ms)
                                    : adaptive_quality_controller_.settings(options_.quality, render_width, render_height);
     if (active_quality_settings_ != previous_quality_settings) {
         if (active_quality_settings_.high_precision_hdr != previous_quality_settings.high_precision_hdr) {
@@ -2972,7 +3944,26 @@ void Renderer::render_frame(World& world,
 
     const auto upload_start = clock::now();
     if (ship.visible) {
-        ensure_ship_mesh(ship);
+        if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+            const auto ship_center =
+                (ship.world_bounds.min + ship.world_bounds.max) * 0.5F;
+            const auto distance_squared =
+                glm::dot(ship_center - player.eye_position(), ship_center - player.eye_position());
+            constexpr float kShipFarLodEnterDistance = 176.0F;
+            constexpr float kShipFarLodExitDistance = 144.0F;
+            if (active_ship_lod_ == StylizedShipLod::Near &&
+                distance_squared >
+                    kShipFarLodEnterDistance * kShipFarLodEnterDistance) {
+                active_ship_lod_ = StylizedShipLod::Far;
+            } else if (active_ship_lod_ == StylizedShipLod::Far &&
+                       distance_squared <
+                           kShipFarLodExitDistance * kShipFarLodExitDistance) {
+                active_ship_lod_ = StylizedShipLod::Near;
+            }
+        } else {
+            active_ship_lod_ = StylizedShipLod::Near;
+        }
+        ensure_ship_mesh(ship, active_ship_lod_);
     }
     sync_gpu_meshes(world, frame_stats, kMaxGpuMeshEventsPerFrame, kMaxGpuMeshSyncMsPerFrame);
     frame_stats.upload_ms = std::chrono::duration<double, std::milli>(clock::now() - upload_start).count();
@@ -2993,7 +3984,13 @@ void Renderer::render_frame(World& world,
     const auto inverse_sky_view_projection = glm::inverse(projection * sky_view);
     const auto frustum_planes = extract_frustum_planes(view_projection);
     const auto eye = player.eye_position();
-    auto forward = player.look_direction();
+    auto camera_forward = player.look_direction();
+    if (glm::dot(camera_forward, camera_forward) > 1.0e-6F) {
+        camera_forward = glm::normalize(camera_forward);
+    } else {
+        camera_forward = {0.0F, 0.0F, -1.0F};
+    }
+    auto forward = camera_forward;
     forward.y = 0.0F;
     if (glm::dot(forward, forward) > 1.0e-6F) {
         forward = glm::normalize(forward);
@@ -3001,41 +3998,159 @@ void Renderer::render_frame(World& world,
         forward = {0.0F, 0.0F, -1.0F};
     }
 
-    const auto draw_distance = static_cast<float>((world.stream_radius() + 2) * kChunkSizeX);
+    const auto active_stream_radius =
+        resolve_adaptive_stream_radius(
+            world.stream_radius(),
+            quality_settings.resolved_quality);
+    const auto streamed_draw_distance =
+        static_cast<float>(
+            (active_stream_radius + 2) *
+            kChunkSizeX);
+    const auto draw_distance =
+        std::min(
+            streamed_draw_distance,
+            quality_settings.terrain_lod_distance);
     const auto draw_distance_sq = draw_distance * draw_distance;
     constexpr float kBackCullStartDistance = 20.0F;
     constexpr float kBackCullStartDistanceSq = kBackCullStartDistance * kBackCullStartDistance;
     const auto sun_visible = environment.sun_direction.y > 0.0F;
     const auto super_vision_strength = super_vision_active ? 1.0F : 0.0F;
     glm::mat4 light_view_projection(1.0F);
+    glm::mat4 light_view_projection_far(1.0F);
+    ShadowCascadeSet shadow_cascades {};
+    auto shadow_cascade_count = 1;
+    auto shadow_split_distance = 320.0F;
+    auto shadow_transition_width = 0.0F;
     ShadowPassContext shadow_context {};
+    std::array<
+        ShadowPassContext,
+        kMaximumShadowCascadeCount>
+        shadow_cascade_contexts {};
     auto shadow_map_size = 0;
 
     if (options_.shadows_enabled && sun_visible) {
         shadow_map_size = std::max(options_.shadow_map_size, 1);
-        const auto snap = (kShadowDistance * 2.0F) / static_cast<float>(shadow_map_size);
-        const auto focus = player.position() + glm::vec3 {0.0F, 18.0F, 0.0F};
-        const auto snapped_focus = glm::vec3 {
-            std::floor(focus.x / snap) * snap,
-            std::floor(focus.y / snap) * snap,
-            std::floor(focus.z / snap) * snap,
-        };
-        const auto light_position = snapped_focus + glm::normalize(environment.sun_direction) * (kShadowDistance * 0.85F);
-        const auto up = std::abs(environment.sun_direction.y) > 0.95F ? glm::vec3 {0.0F, 0.0F, 1.0F} : glm::vec3 {0.0F, 1.0F, 0.0F};
-        const auto light_view = glm::lookAt(light_position, snapped_focus, up);
-        const auto light_projection = glm::ortho(
-            -kShadowDistance,
-            kShadowDistance,
-            -kShadowDistance,
-            kShadowDistance,
-            1.0F,
-            kShadowDistance * 3.0F);
-        light_view_projection = light_projection * light_view;
-        shadow_context.frustum = extract_frustum_planes(light_view_projection);
-        shadow_context.focus = focus;
-        const auto max_shadow_distance = kShadowDistance + static_cast<float>(kChunkSizeX);
-        shadow_context.max_distance_sq = max_shadow_distance * max_shadow_distance;
-        shadow_context.enabled = true;
+        if (!is_modern_visual_pipeline(options_.visual_pipeline)) {
+            // Je garde la cascade historique à l'identique : le pipeline de
+            // repli doit pouvoir servir de témoin visuel au même commit.
+            const auto snap =
+                (kShadowDistance * 2.0F) /
+                static_cast<float>(shadow_map_size);
+            const auto focus =
+                player.position() + glm::vec3 {0.0F, 18.0F, 0.0F};
+            const auto snapped_focus = glm::vec3 {
+                std::floor(focus.x / snap) * snap,
+                std::floor(focus.y / snap) * snap,
+                std::floor(focus.z / snap) * snap,
+            };
+            const auto light_position =
+                snapped_focus +
+                glm::normalize(environment.sun_direction) *
+                    (kShadowDistance * 0.85F);
+            const auto up =
+                std::abs(environment.sun_direction.y) > 0.95F
+                    ? glm::vec3 {0.0F, 0.0F, 1.0F}
+                    : glm::vec3 {0.0F, 1.0F, 0.0F};
+            const auto light_view =
+                glm::lookAt(light_position, snapped_focus, up);
+            const auto light_projection = glm::ortho(
+                -kShadowDistance,
+                kShadowDistance,
+                -kShadowDistance,
+                kShadowDistance,
+                1.0F,
+                kShadowDistance * 3.0F);
+            light_view_projection =
+                light_projection * light_view;
+            light_view_projection_far =
+                light_view_projection;
+            shadow_cascade_count = 1;
+            shadow_split_distance = 320.0F;
+            shadow_transition_width = 0.0F;
+            shadow_context.frustum =
+                extract_frustum_planes(light_view_projection);
+            shadow_context.focus = focus;
+            const auto max_shadow_distance =
+                kShadowDistance +
+                static_cast<float>(kChunkSizeX);
+            shadow_context.max_distance_sq =
+                max_shadow_distance * max_shadow_distance;
+            shadow_context.enabled = true;
+            shadow_cascade_contexts[0] =
+                shadow_context;
+        } else {
+            ShadowCascadeBuildParameters cascade_parameters {};
+            cascade_parameters.quality =
+                quality_settings.resolved_quality;
+            cascade_parameters.cascade_count = std::clamp(
+                quality_settings.shadow_cascade_count,
+                1,
+                static_cast<int>(kMaximumShadowCascadeCount));
+            cascade_parameters.camera_position = eye;
+            cascade_parameters.camera_forward = camera_forward;
+            cascade_parameters.camera_up = glm::vec3 {inverse_view[1]};
+            cascade_parameters.vertical_fov_radians =
+                glm::radians(75.0F);
+            cascade_parameters.aspect_ratio = aspect;
+            cascade_parameters.near_distance = 0.1F;
+            cascade_parameters.far_distance = std::clamp(
+                draw_distance + static_cast<float>(kChunkSizeX),
+                kShadowDistance,
+                320.0F);
+            cascade_parameters.sun_direction =
+                environment.sun_direction;
+            cascade_parameters.shadow_map_resolution =
+                shadow_map_size;
+            cascade_parameters.split_lambda = 0.65F;
+            cascade_parameters.caster_depth_padding =
+                static_cast<float>(kChunkSizeX) * 1.5F;
+            shadow_cascades =
+                build_shadow_cascade_set(cascade_parameters);
+            shadow_cascade_count = static_cast<int>(
+                shadow_cascades.cascade_count);
+            light_view_projection =
+                shadow_cascades.cascades[0]
+                    .light_view_projection;
+            light_view_projection_far =
+                shadow_cascades.cascades[
+                    shadow_cascades.cascade_count > 1U
+                        ? 1U
+                        : 0U]
+                    .light_view_projection;
+            shadow_split_distance =
+                shadow_cascades.split_distances[1];
+            shadow_transition_width =
+                shadow_cascades.transition_width;
+
+            const auto& widest_cascade =
+                shadow_cascades.cascades[
+                    shadow_cascades.cascade_count - 1U];
+            shadow_context.frustum =
+                widest_cascade.frustum;
+            shadow_context.focus =
+                widest_cascade.bounds.world_center;
+            const auto max_shadow_distance =
+                widest_cascade.bounds.bounding_radius +
+                static_cast<float>(kChunkSizeX);
+            shadow_context.max_distance_sq =
+                max_shadow_distance * max_shadow_distance;
+            shadow_context.enabled = true;
+            for (std::size_t cascade_index = 0U;
+                 cascade_index < shadow_cascades.cascade_count;
+                 ++cascade_index) {
+                const auto& cascade =
+                    shadow_cascades.cascades[cascade_index];
+                const auto cascade_distance =
+                    cascade.bounds.bounding_radius +
+                    static_cast<float>(kChunkSizeX);
+                shadow_cascade_contexts[cascade_index] = {
+                    cascade.frustum,
+                    cascade.bounds.world_center,
+                    cascade_distance * cascade_distance,
+                    true,
+                };
+            }
+        }
     }
 
     auto& visible_chunks = visible_chunks_cache_;
@@ -3050,7 +4165,11 @@ void Renderer::render_frame(World& world,
     }
 
     for (const auto& [coord, gpu_mesh] : gpu_meshes_) {
-        if (gpu_mesh.opaque_index_count == 0 && gpu_mesh.water_index_count == 0) {
+        if (gpu_mesh.opaque_index_count == 0 &&
+            gpu_mesh.terrain_index_count == 0 &&
+            gpu_mesh.architecture_opaque_index_count == 0 &&
+            gpu_mesh.architecture_transparent_index_count == 0 &&
+            gpu_mesh.water_index_count == 0) {
             continue;
         }
 
@@ -3082,7 +4201,9 @@ void Renderer::render_frame(World& world,
             draw_distance_sq,
             kBackCullStartDistanceSq,
             shadow_context,
-            gpu_mesh.opaque_index_count > 0);
+            gpu_mesh.opaque_index_count > 0 ||
+                gpu_mesh.terrain_index_count > 0 ||
+                gpu_mesh.architecture_opaque_index_count > 0);
         if (visibility.camera) {
             visible_chunks.push_back({
                 coord,
@@ -3097,16 +4218,19 @@ void Renderer::render_frame(World& world,
     }
 
     ChunkPassVisibility ship_visibility {};
-    if (ship.visible && ship_mesh_ready(ship)) {
+    ChunkBounds ship_world_bounds {};
+    auto ship_world_bounds_valid = false;
+    if (ship.visible && ship_mesh_ready(ship, active_ship_lod_)) {
         // Je transforme les limites exactes du plan en espace monde pour ne
         // conserver le navire que dans les passes camera et ombre utiles.
-        const ChunkBounds ship_world_bounds {
+        ship_world_bounds = {
             ship.world_bounds.min,
             ship.world_bounds.max,
             (ship.world_bounds.min +
              ship.world_bounds.max) *
                 0.5F,
         };
+        ship_world_bounds_valid = true;
         ship_visibility = classify_large_bounds_visibility(
             ship_world_bounds,
             frustum_planes,
@@ -3123,8 +4247,43 @@ void Renderer::render_frame(World& world,
     if (shadow_context.enabled) {
         const auto shadow_start = clock::now();
         begin_gpu_pass(GpuTimedPass::Shadow);
+        const std::array<glm::mat4, kMaximumShadowCascadeCount>
+            cascade_matrices {{
+                light_view_projection,
+                light_view_projection_far,
+            }};
+        const std::array<GLuint, kMaximumShadowCascadeCount>
+            cascade_framebuffers {{
+                shadow_framebuffer_,
+                shadow_framebuffer_far_,
+            }};
+
+        // Je rends une cascade en qualité basse/moyenne et deux en haute.
+        // Les candidats restent conservateurs pour préserver les ombres des
+        // objets placés juste avant la coupure entre les deux volumes.
+        for (auto cascade_index = 0;
+             cascade_index < shadow_cascade_count;
+             ++cascade_index) {
+        const auto& cascade_light_view_projection =
+            cascade_matrices[
+                static_cast<std::size_t>(cascade_index)];
+        const auto& cascade_shadow_context =
+            shadow_cascade_contexts[
+                static_cast<std::size_t>(cascade_index)];
+        const auto renders_in_cascade =
+            [&cascade_shadow_context](
+                const GpuMesh& mesh) {
+                return should_render_chunk_in_shadow_pass(
+                    mesh.bounds,
+                    cascade_shadow_context.frustum,
+                    cascade_shadow_context.focus,
+                    cascade_shadow_context.max_distance_sq);
+            };
         glViewport(0, 0, shadow_map_size, shadow_map_size);
-        glBindFramebuffer(GL_FRAMEBUFFER, shadow_framebuffer_);
+        glBindFramebuffer(
+            GL_FRAMEBUFFER,
+            cascade_framebuffers[
+                static_cast<std::size_t>(cascade_index)]);
         glClear(GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
@@ -3134,7 +4293,11 @@ void Renderer::render_frame(World& world,
 
         glUseProgram(shadow_program_);
         glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
-        glUniformMatrix4fv(shadow_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+        glUniformMatrix4fv(
+            shadow_uniforms_.light_view_projection,
+            1,
+            GL_FALSE,
+            glm::value_ptr(cascade_light_view_projection));
         glUniform1f(shadow_uniforms_.time_of_day, environment.time_of_day);
         glUniform1f(shadow_uniforms_.wind_strength, environment.wind_strength);
         glUniform1i(shadow_uniforms_.atlas, 0);
@@ -3142,12 +4305,91 @@ void Renderer::render_frame(World& world,
         glBindTexture(GL_TEXTURE_2D, atlas_texture_);
 
         for (const auto& shadow_chunk : shadow_chunks) {
+            if (shadow_chunk.mesh->opaque_index_count == 0 ||
+                !renders_in_cascade(*shadow_chunk.mesh)) {
+                continue;
+            }
             glBindVertexArray(shadow_chunk.mesh->vao);
             glDrawElements(GL_TRIANGLES, shadow_chunk.mesh->opaque_index_count, GL_UNSIGNED_INT, nullptr);
             record_triangle_draw(shadow_chunk.mesh->opaque_index_count);
             ++frame_stats.shadow_chunks;
         }
-        if (ship_visibility.shadow) {
+        if (options_.visual_pipeline == VisualPipeline::ModernStylized &&
+            modern_terrain_shadow_program_ != 0) {
+            glUseProgram(modern_terrain_shadow_program_);
+            glUniformMatrix4fv(
+                modern_terrain_shadow_uniforms_.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(identity_model));
+            glUniformMatrix4fv(
+                modern_terrain_shadow_uniforms_.light_view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(cascade_light_view_projection));
+            for (const auto& shadow_chunk : shadow_chunks) {
+                if (shadow_chunk.mesh->terrain_index_count == 0 ||
+                    !renders_in_cascade(*shadow_chunk.mesh)) {
+                    continue;
+                }
+                glBindVertexArray(shadow_chunk.mesh->terrain_vao);
+                glDrawElements(
+                    GL_TRIANGLES,
+                    shadow_chunk.mesh->terrain_index_count,
+                    GL_UNSIGNED_INT,
+                    nullptr);
+                record_triangle_draw(shadow_chunk.mesh->terrain_index_count);
+                if (shadow_chunk.mesh->opaque_index_count == 0) {
+                    ++frame_stats.shadow_chunks;
+                }
+            }
+            for (const auto& shadow_chunk : shadow_chunks) {
+                if (shadow_chunk.mesh->architecture_opaque_index_count == 0 ||
+                    !renders_in_cascade(*shadow_chunk.mesh)) {
+                    continue;
+                }
+                glBindVertexArray(shadow_chunk.mesh->architecture_vao);
+                glDrawElements(
+                    GL_TRIANGLES,
+                    shadow_chunk.mesh->architecture_opaque_index_count,
+                    GL_UNSIGNED_INT,
+                    nullptr);
+                record_triangle_draw(
+                    shadow_chunk.mesh->architecture_opaque_index_count);
+                if (shadow_chunk.mesh->opaque_index_count == 0 &&
+                    shadow_chunk.mesh->terrain_index_count == 0) {
+                    ++frame_stats.shadow_chunks;
+                }
+            }
+
+            // Je restaure le programme historique avant les ombres du navire
+            // et des entités, qui conservent encore leur format de sommet.
+            glUseProgram(shadow_program_);
+            glUniformMatrix4fv(
+                shadow_uniforms_.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(identity_model));
+            glUniformMatrix4fv(
+                shadow_uniforms_.light_view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(cascade_light_view_projection));
+            glUniform1f(shadow_uniforms_.time_of_day, environment.time_of_day);
+            glUniform1f(shadow_uniforms_.wind_strength, environment.wind_strength);
+            glUniform1i(shadow_uniforms_.atlas, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+        }
+        const auto ship_visible_in_cascade =
+            ship_visibility.shadow &&
+            ship_world_bounds_valid &&
+            should_render_chunk_in_shadow_pass(
+                ship_world_bounds,
+                cascade_shadow_context.frustum,
+                cascade_shadow_context.focus,
+                cascade_shadow_context.max_distance_sq);
+        if (ship_visible_in_cascade) {
             glUniformMatrix4fv(
                 shadow_uniforms_.model,
                 1,
@@ -3163,15 +4405,18 @@ void Renderer::render_frame(World& world,
             creatures,
             crew,
             old_guard,
-            light_view_projection,
-            shadow_context.focus);
+            cascade_light_view_projection,
+            cascade_shadow_context.focus);
+        }
 
         glDisable(GL_POLYGON_OFFSET_FILL);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glActiveTexture(GL_TEXTURE0);
         end_gpu_pass(GpuTimedPass::Shadow);
         frame_stats.shadow_ms =
-            std::chrono::duration<double, std::milli>(clock::now() - shadow_start).count();
+            std::chrono::duration<double, std::milli>(
+                clock::now() - shadow_start)
+                .count();
     }
 
     const auto world_start = clock::now();
@@ -3259,8 +4504,17 @@ void Renderer::render_frame(World& world,
     glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniformMatrix4fv(
+        world_uniforms_.light_view_projection_far,
+        1,
+        GL_FALSE,
+        glm::value_ptr(light_view_projection_far));
     glUniformMatrix4fv(world_uniforms_.inverse_view_projection, 1, GL_FALSE, glm::value_ptr(inverse_view_projection));
     glUniform3fv(world_uniforms_.camera_position, 1, glm::value_ptr(eye));
+    glUniform3fv(
+        world_uniforms_.camera_forward,
+        1,
+        glm::value_ptr(camera_forward));
     glUniform3fv(world_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
     glUniform3fv(world_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
     glUniform3fv(world_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
@@ -3282,6 +4536,16 @@ void Renderer::render_frame(World& world,
     glUniform1f(world_uniforms_.super_vision_strength, super_vision_strength);
     glUniform1i(world_uniforms_.atlas, 0);
     glUniform1i(world_uniforms_.shadow_map, 1);
+    glUniform1i(world_uniforms_.shadow_map_far, 7);
+    glUniform1i(
+        world_uniforms_.shadow_cascade_count,
+        shadow_cascade_count);
+    glUniform1f(
+        world_uniforms_.shadow_split_distance,
+        shadow_split_distance);
+    glUniform1f(
+        world_uniforms_.shadow_transition_width,
+        shadow_transition_width);
     glUniform1i(world_uniforms_.scene_color, 2);
     glUniform1i(world_uniforms_.scene_depth, 3);
     glUniform1i(world_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
@@ -3303,6 +4567,8 @@ void Renderer::render_frame(World& world,
     glBindTexture(GL_TEXTURE_2D, opaque_scene_bindings.color_texture);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, opaque_scene_bindings.depth_texture);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_far_);
 
     for (const auto& visible_chunk : visible_chunks) {
         if (visible_chunk.mesh->opaque_index_count == 0) {
@@ -3312,6 +4578,269 @@ void Renderer::render_frame(World& world,
         glDrawElements(GL_TRIANGLES, visible_chunk.mesh->opaque_index_count, GL_UNSIGNED_INT, nullptr);
         record_triangle_draw(visible_chunk.mesh->opaque_index_count);
         ++frame_stats.world_chunks;
+    }
+
+    const auto bind_modern_surface_program =
+        [&](GLuint program,
+            const ModernTerrainUniformLocations& uniforms,
+            float triplanar_sharpness) {
+            glUseProgram(program);
+            glUniformMatrix4fv(
+                uniforms.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(identity_model));
+            glUniformMatrix4fv(
+                uniforms.view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(view_projection));
+            glUniformMatrix4fv(
+                uniforms.light_view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(light_view_projection));
+            glUniformMatrix4fv(
+                uniforms.light_view_projection_far,
+                1,
+                GL_FALSE,
+                glm::value_ptr(light_view_projection_far));
+            glUniform3fv(
+                uniforms.camera_position,
+                1,
+                glm::value_ptr(eye));
+            glUniform3fv(
+                uniforms.camera_forward,
+                1,
+                glm::value_ptr(camera_forward));
+            glUniform3fv(
+                uniforms.sun_direction,
+                1,
+                glm::value_ptr(environment.sun_direction));
+            glUniform3fv(
+                uniforms.sun_color,
+                1,
+                glm::value_ptr(environment.sun_color));
+            glUniform3fv(
+                uniforms.ambient_color,
+                1,
+                glm::value_ptr(environment.ambient_color));
+            glUniform3fv(
+                uniforms.fog_color,
+                1,
+                glm::value_ptr(environment.fog_color));
+            glUniform3fv(
+                uniforms.distant_fog_color,
+                1,
+                glm::value_ptr(environment.distant_fog_color));
+            glUniform3fv(
+                uniforms.night_tint_color,
+                1,
+                glm::value_ptr(environment.night_tint_color));
+            glUniform1f(uniforms.daylight_factor, environment.daylight_factor);
+            glUniform1f(
+                uniforms.sun_visibility,
+                sun_visible ? 1.0F : 0.0F);
+            glUniform1f(
+                uniforms.precipitation_intensity,
+                environment.precipitation_intensity);
+            glUniform1f(uniforms.storm_intensity, environment.storm_intensity);
+            glUniform1f(
+                uniforms.lightning_intensity,
+                environment.lightning_intensity);
+            glUniform1f(uniforms.triplanar_sharpness, triplanar_sharpness);
+            glUniform1f(
+                uniforms.material_detail_scale,
+                quality_settings.material_detail_scale);
+            glUniform1i(
+                uniforms.shadows_enabled,
+                options_.shadows_enabled ? 1 : 0);
+            glUniform1i(uniforms.material_albedo, 4);
+            glUniform1i(uniforms.material_normal_height, 5);
+            glUniform1i(uniforms.material_orm_emission, 6);
+            glUniform1i(uniforms.shadow_map, 1);
+            glUniform1i(uniforms.shadow_map_far, 7);
+            glUniform1i(
+                uniforms.shadow_cascade_count,
+                shadow_cascade_count);
+            glUniform1f(
+                uniforms.shadow_split_distance,
+                shadow_split_distance);
+            glUniform1f(
+                uniforms.shadow_transition_width,
+                shadow_transition_width);
+
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, shadow_map_);
+            glActiveTexture(GL_TEXTURE7);
+            glBindTexture(GL_TEXTURE_2D, shadow_map_far_);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_albedo_texture_);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_normal_height_texture_);
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_orm_emission_texture_);
+        };
+
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized &&
+        modern_terrain_program_ != 0 &&
+        modern_architecture_program_ != 0 &&
+        modern_material_albedo_texture_ != 0 &&
+        modern_material_normal_height_texture_ != 0 &&
+        modern_material_orm_emission_texture_ != 0) {
+        glUseProgram(modern_terrain_program_);
+        glUniformMatrix4fv(
+            modern_terrain_uniforms_.model,
+            1,
+            GL_FALSE,
+            glm::value_ptr(identity_model));
+        glUniformMatrix4fv(
+            modern_terrain_uniforms_.view_projection,
+            1,
+            GL_FALSE,
+            glm::value_ptr(view_projection));
+        glUniformMatrix4fv(
+            modern_terrain_uniforms_.light_view_projection,
+            1,
+            GL_FALSE,
+            glm::value_ptr(light_view_projection));
+        glUniformMatrix4fv(
+            modern_terrain_uniforms_.light_view_projection_far,
+            1,
+            GL_FALSE,
+            glm::value_ptr(light_view_projection_far));
+        glUniform3fv(
+            modern_terrain_uniforms_.camera_position,
+            1,
+            glm::value_ptr(eye));
+        glUniform3fv(
+            modern_terrain_uniforms_.camera_forward,
+            1,
+            glm::value_ptr(camera_forward));
+        glUniform3fv(
+            modern_terrain_uniforms_.sun_direction,
+            1,
+            glm::value_ptr(environment.sun_direction));
+        glUniform3fv(
+            modern_terrain_uniforms_.sun_color,
+            1,
+            glm::value_ptr(environment.sun_color));
+        glUniform3fv(
+            modern_terrain_uniforms_.ambient_color,
+            1,
+            glm::value_ptr(environment.ambient_color));
+        glUniform3fv(
+            modern_terrain_uniforms_.fog_color,
+            1,
+            glm::value_ptr(environment.fog_color));
+        glUniform3fv(
+            modern_terrain_uniforms_.distant_fog_color,
+            1,
+            glm::value_ptr(environment.distant_fog_color));
+        glUniform3fv(
+            modern_terrain_uniforms_.night_tint_color,
+            1,
+            glm::value_ptr(environment.night_tint_color));
+        glUniform1f(
+            modern_terrain_uniforms_.daylight_factor,
+            environment.daylight_factor);
+        glUniform1f(
+            modern_terrain_uniforms_.sun_visibility,
+            sun_visible ? 1.0F : 0.0F);
+        glUniform1f(
+            modern_terrain_uniforms_.precipitation_intensity,
+            environment.precipitation_intensity);
+        glUniform1f(
+            modern_terrain_uniforms_.storm_intensity,
+            environment.storm_intensity);
+        glUniform1f(
+            modern_terrain_uniforms_.lightning_intensity,
+            environment.lightning_intensity);
+        glUniform1f(
+            modern_terrain_uniforms_.triplanar_sharpness,
+            5.5F);
+        glUniform1f(
+            modern_terrain_uniforms_.material_detail_scale,
+            quality_settings.material_detail_scale);
+        glUniform1i(
+            modern_terrain_uniforms_.shadows_enabled,
+            options_.shadows_enabled ? 1 : 0);
+        glUniform1i(modern_terrain_uniforms_.material_albedo, 4);
+        glUniform1i(modern_terrain_uniforms_.material_normal_height, 5);
+        glUniform1i(modern_terrain_uniforms_.material_orm_emission, 6);
+        glUniform1i(modern_terrain_uniforms_.shadow_map, 1);
+        glUniform1i(modern_terrain_uniforms_.shadow_map_far, 7);
+        glUniform1i(
+            modern_terrain_uniforms_.shadow_cascade_count,
+            shadow_cascade_count);
+        glUniform1f(
+            modern_terrain_uniforms_.shadow_split_distance,
+            shadow_split_distance);
+        glUniform1f(
+            modern_terrain_uniforms_.shadow_transition_width,
+            shadow_transition_width);
+
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, shadow_map_);
+        glActiveTexture(GL_TEXTURE7);
+        glBindTexture(GL_TEXTURE_2D, shadow_map_far_);
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, modern_material_albedo_texture_);
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(
+            GL_TEXTURE_2D_ARRAY,
+            modern_material_normal_height_texture_);
+        glActiveTexture(GL_TEXTURE6);
+        glBindTexture(
+            GL_TEXTURE_2D_ARRAY,
+            modern_material_orm_emission_texture_);
+
+        for (const auto& visible_chunk : visible_chunks) {
+            if (visible_chunk.mesh->terrain_index_count == 0) {
+                continue;
+            }
+            glBindVertexArray(visible_chunk.mesh->terrain_vao);
+            glDrawElements(
+                GL_TRIANGLES,
+                visible_chunk.mesh->terrain_index_count,
+                GL_UNSIGNED_INT,
+                nullptr);
+            record_triangle_draw(visible_chunk.mesh->terrain_index_count);
+            if (visible_chunk.mesh->opaque_index_count == 0) {
+                ++frame_stats.world_chunks;
+            }
+        }
+
+        bind_modern_surface_program(
+            modern_architecture_program_,
+            modern_architecture_uniforms_,
+            8.0F);
+        for (const auto& visible_chunk : visible_chunks) {
+            if (visible_chunk.mesh->architecture_opaque_index_count == 0) {
+                continue;
+            }
+            glBindVertexArray(visible_chunk.mesh->architecture_vao);
+            glDrawElements(
+                GL_TRIANGLES,
+                visible_chunk.mesh->architecture_opaque_index_count,
+                GL_UNSIGNED_INT,
+                nullptr);
+            record_triangle_draw(
+                visible_chunk.mesh->architecture_opaque_index_count);
+            if (visible_chunk.mesh->opaque_index_count == 0 &&
+                visible_chunk.mesh->terrain_index_count == 0) {
+                ++frame_stats.world_chunks;
+            }
+        }
+
+        // Je restaure le programme du monde pour le navire et l'eau.
+        glUseProgram(world_program_);
     }
     if (ship_visibility.camera) {
         glUniformMatrix4fv(
@@ -3332,8 +4861,13 @@ void Renderer::render_frame(World& world,
         item_drops,
         view_projection,
         light_view_projection,
+        light_view_projection_far,
+        shadow_cascade_count,
+        shadow_split_distance,
+        shadow_transition_width,
         inverse_view_projection,
         eye,
+        camera_forward,
         environment,
         sun_visible);
     draw_creatures(
@@ -3342,7 +4876,12 @@ void Renderer::render_frame(World& world,
         old_guard,
         view_projection,
         light_view_projection,
+        light_view_projection_far,
+        shadow_cascade_count,
+        shadow_split_distance,
+        shadow_transition_width,
         eye,
+        camera_forward,
         environment,
         selected_hotbar_emits_local_light(hotbar),
         super_vision_strength);
@@ -3351,6 +4890,53 @@ void Renderer::render_frame(World& world,
     begin_gpu_pass(GpuTimedPass::Sky);
     draw_sky(inverse_sky_view_projection, environment, quality_settings);
     end_gpu_pass(GpuTimedPass::Sky);
+
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized &&
+        modern_architecture_program_ != 0) {
+        const auto has_transparent_architecture =
+            std::any_of(
+                visible_chunks.begin(),
+                visible_chunks.end(),
+                [](const VisibleChunk& visible_chunk) {
+                    return visible_chunk.mesh
+                               ->architecture_transparent_index_count > 0;
+                });
+        if (has_transparent_architecture) {
+            bind_modern_surface_program(
+                modern_architecture_program_,
+                modern_architecture_uniforms_,
+                8.0F);
+            glEnable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+
+            // Je parcours les chunks du plus lointain au plus proche pour
+            // stabiliser le verre sans introduire de tri de gameplay.
+            for (auto iterator = visible_chunks.rbegin();
+                 iterator != visible_chunks.rend();
+                 ++iterator) {
+                const auto* mesh = iterator->mesh;
+                if (mesh->architecture_transparent_index_count == 0) {
+                    continue;
+                }
+                glBindVertexArray(mesh->architecture_vao);
+                glDrawElements(
+                    GL_TRIANGLES,
+                    mesh->architecture_transparent_index_count,
+                    GL_UNSIGNED_INT,
+                    reinterpret_cast<const void*>(
+                        static_cast<std::uintptr_t>(
+                            mesh->architecture_transparent_index_offset_bytes)));
+                record_triangle_draw(
+                    mesh->architecture_transparent_index_count);
+            }
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+    }
 
     begin_gpu_pass(GpuTimedPass::Water);
     if (has_visible_water) {
@@ -3394,12 +4980,12 @@ void Renderer::render_frame(World& world,
             if (visible_chunk.mesh->water_index_count == 0) {
                 continue;
             }
-            glBindVertexArray(visible_chunk.mesh->vao);
+            glBindVertexArray(visible_chunk.mesh->water_vao);
             glDrawElements(
                 GL_TRIANGLES,
                 visible_chunk.mesh->water_index_count,
                 GL_UNSIGNED_INT,
-                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(visible_chunk.mesh->water_index_offset_bytes)));
+                nullptr);
             record_triangle_draw(visible_chunk.mesh->water_index_count);
         }
 
@@ -3424,7 +5010,7 @@ void Renderer::render_frame(World& world,
         eye);
     end_gpu_pass(GpuTimedPass::Water);
 
-    draw_block_break_overlay(player);
+    draw_block_break_overlay(world, player);
 
     if (!menu_preview_visible) {
         draw_player_viewmodel(
@@ -3922,9 +5508,7 @@ void Renderer::render_loading_screen(const LoadingScreenView& view, int width, i
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);
@@ -3934,6 +5518,28 @@ void Renderer::render_loading_screen(const LoadingScreenView& view, int width, i
 
 auto Renderer::last_frame_stats() const noexcept -> const RendererFrameStats& {
     return last_frame_stats_;
+}
+
+void Renderer::submit_cpu_frame_time_sample(
+    double active_frame_time_ms) noexcept {
+    pending_cpu_frame_time_ms_ =
+        active_frame_time_ms;
+    pending_cpu_frame_time_valid_ =
+        std::isfinite(active_frame_time_ms) &&
+        active_frame_time_ms > 0.0;
+}
+
+auto Renderer::material_pack_version() const noexcept -> std::uint16_t {
+    return material_pack_version_;
+}
+
+auto Renderer::material_pack_checksum() const noexcept -> std::uint64_t {
+    return material_pack_checksum_;
+}
+
+auto Renderer::last_initialization_error() const noexcept
+    -> std::string_view {
+    return last_initialization_error_;
 }
 
 void Renderer::create_gpu_timers() {
@@ -4112,6 +5718,18 @@ auto Renderer::estimate_gpu_buffer_bytes() const noexcept -> std::uint64_t {
     const auto add_mesh = [&total](const GpuMesh& mesh) {
         total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(mesh.vertex_buffer_bytes, 0));
         total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(mesh.index_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(mesh.water_vertex_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(mesh.water_index_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(mesh.terrain_vertex_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(mesh.terrain_index_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(mesh.architecture_vertex_buffer_bytes, 0));
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(mesh.architecture_index_buffer_bytes, 0));
     };
     for (const auto& [coord, mesh] : gpu_meshes_) {
         static_cast<void>(coord);
@@ -4121,16 +5739,20 @@ auto Renderer::estimate_gpu_buffer_bytes() const noexcept -> std::uint64_t {
     add_mesh(ship_gpu_mesh_);
 
     if (creature_vbo_ != 0) {
-        total += sizeof(BoxTemplateVertex) * kCreatureVerticesPerBox;
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(creature_template_vertex_buffer_bytes_, 0));
     }
     if (creature_ebo_ != 0) {
-        total += sizeof(std::uint32_t) * kCreatureIndicesPerBox;
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(creature_template_index_buffer_bytes_, 0));
     }
     if (item_drop_vbo_ != 0) {
-        total += sizeof(BoxTemplateVertex) * kCreatureVerticesPerBox;
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(item_drop_template_vertex_buffer_bytes_, 0));
     }
     if (item_drop_ebo_ != 0) {
-        total += sizeof(std::uint32_t) * kCreatureIndicesPerBox;
+        total += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(item_drop_template_index_buffer_bytes_, 0));
     }
     if (creature_instance_vbo_ != 0) {
         total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(creature_instance_buffer_bytes_, 0));
@@ -4175,6 +5797,60 @@ auto Renderer::estimate_gpu_texture_bytes() const noexcept -> std::uint64_t {
     if (atlas_texture_ != 0) {
         total += image_bytes(kBlockAtlasSize, kBlockAtlasSize, 4U);
     }
+    if (msdf_font_texture_ != 0) {
+        auto mip_texel_count = std::uint64_t {0U};
+        auto mip_width = std::max(msdf_font_width_, 1U);
+        auto mip_height = std::max(msdf_font_height_, 1U);
+        for (std::uint32_t mip = 0U;
+             mip < msdf_font_mips_;
+             ++mip) {
+            mip_texel_count +=
+                static_cast<std::uint64_t>(mip_width) *
+                static_cast<std::uint64_t>(mip_height);
+            mip_width = std::max(mip_width / 2U, 1U);
+            mip_height = std::max(mip_height / 2U, 1U);
+        }
+        total += mip_texel_count * 3U;
+    }
+    if (model_icon_texture_ != 0) {
+        auto mip_texel_count = std::uint64_t {0U};
+        auto mip_width =
+            std::max<std::uint16_t>(model_icon_width_, 1U);
+        auto mip_height =
+            std::max<std::uint16_t>(model_icon_height_, 1U);
+        for (std::uint16_t mip = 0U;
+             mip < model_icon_mips_;
+             ++mip) {
+            mip_texel_count +=
+                static_cast<std::uint64_t>(mip_width) *
+                static_cast<std::uint64_t>(mip_height);
+            mip_width =
+                std::max<std::uint16_t>(mip_width / 2U, 1U);
+            mip_height =
+                std::max<std::uint16_t>(mip_height / 2U, 1U);
+        }
+        total += mip_texel_count *
+                 static_cast<std::uint64_t>(model_icon_layers_) *
+                 4U;
+    }
+    if (modern_material_albedo_texture_ != 0 ||
+        modern_material_normal_height_texture_ != 0 ||
+        modern_material_orm_emission_texture_ != 0) {
+        auto mip_texel_count = std::uint64_t {0U};
+        auto mip_width = std::max<std::uint16_t>(material_pack_width_, 1U);
+        auto mip_height = std::max<std::uint16_t>(material_pack_height_, 1U);
+        for (std::uint16_t mip = 0U; mip < material_pack_mips_; ++mip) {
+            mip_texel_count +=
+                static_cast<std::uint64_t>(mip_width) *
+                static_cast<std::uint64_t>(mip_height);
+            mip_width = std::max<std::uint16_t>(mip_width / 2U, 1U);
+            mip_height = std::max<std::uint16_t>(mip_height / 2U, 1U);
+        }
+        total += mip_texel_count *
+                 static_cast<std::uint64_t>(material_pack_layers_) *
+                 4U *
+                 3U;
+    }
     if (accent_texture_ != 0) {
         total += image_bytes(kAccentAtlasSize, kAccentAtlasSize, 4U);
     }
@@ -4186,6 +5862,12 @@ auto Renderer::estimate_gpu_texture_bytes() const noexcept -> std::uint64_t {
     }
     if (shadow_map_ != 0) {
         const auto size = options_.shadows_enabled ? std::max(options_.shadow_map_size, 1) : 1;
+        total += image_bytes(size, size, 4U);
+    }
+    if (shadow_map_far_ != 0) {
+        const auto size = options_.shadows_enabled
+                              ? std::max(options_.shadow_map_size, 1)
+                              : 1;
         total += image_bytes(size, size, 4U);
     }
     if (scene_fallback_color_texture_ != 0) {
@@ -4269,7 +5951,6 @@ void Renderer::begin_world_resource_reset() {
     block_break_overlay_scratch_.water_indices.clear();
     block_break_overlay_scratch_.face_count = 0U;
     block_break_overlay_scratch_.water_face_count = 0U;
-    translated_water_indices_scratch_.clear();
     last_frame_stats_.uploaded_meshes = 0U;
     last_frame_stats_.visible_chunks = 0U;
     last_frame_stats_.shadow_chunks = 0U;
@@ -4369,6 +6050,14 @@ void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, st
         const auto coord = uploads.front();
         const auto revision = world.mesh_revision(coord);
         const auto* section_meshes = world.section_meshes_for(coord);
+        const auto* organic_section_meshes =
+            options_.visual_pipeline == VisualPipeline::ModernStylized
+                ? world.organic_section_meshes_for(coord)
+                : nullptr;
+        const auto* architectural_section_meshes =
+            options_.visual_pipeline == VisualPipeline::ModernStylized
+                ? world.architectural_section_meshes_for(coord)
+                : nullptr;
         if (revision == 0 || section_meshes == nullptr) {
             ++processed_events;
             continue;
@@ -4383,15 +6072,78 @@ void Renderer::sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, st
         }
 
         merge_chunk_mesh_sections_into(*section_meshes, chunk_upload_scratch_);
-        upload_mesh(coord, chunk_upload_scratch_, revision);
+        const OrganicTerrainMesh* organic_mesh = nullptr;
+        if (organic_section_meshes != nullptr) {
+            merge_organic_terrain_sections_into(
+                *organic_section_meshes,
+                terrain_upload_scratch_);
+            organic_mesh = &terrain_upload_scratch_;
+        }
+        const ArchitecturalMesh* architectural_mesh = nullptr;
+        if (architectural_section_meshes != nullptr) {
+            merge_architectural_sections_into(
+                *architectural_section_meshes,
+                architecture_upload_scratch_);
+            architectural_mesh = &architecture_upload_scratch_;
+        }
+        upload_mesh(
+            coord,
+            chunk_upload_scratch_,
+            organic_mesh,
+            architectural_mesh,
+            revision);
         ++frame_stats.uploaded_meshes;
         ++processed_events;
     }
 }
 
-void Renderer::upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision) {
+void Renderer::upload_mesh(
+    const ChunkCoord& coord,
+    const ChunkMeshData& mesh,
+    const OrganicTerrainMesh* terrain_mesh,
+    const ArchitecturalMesh* architectural_mesh,
+    std::uint64_t revision) {
     auto& gpu_mesh = gpu_meshes_[coord];
-    upload_mesh_data(gpu_mesh, mesh, revision, make_chunk_bounds(coord));
+    ExactAabbAccumulator exact_bounds {};
+    const auto include_vertices =
+        [&exact_bounds](const auto& vertices) {
+            for (const auto& vertex : vertices) {
+                exact_bounds.add(
+                    vertex.x,
+                    vertex.y,
+                    vertex.z);
+            }
+        };
+    include_vertices(mesh.vertices);
+    include_vertices(mesh.water_vertices);
+    if (terrain_mesh != nullptr) {
+        include_vertices(terrain_mesh->vertices);
+    }
+    if (architectural_mesh != nullptr) {
+        include_vertices(architectural_mesh->vertices);
+    }
+
+    // Je remplace la boite haute de 128 blocs par les limites reelles du
+    // maillage. Le frustum et chaque cascade rejettent ainsi les chunks vides
+    // en altitude sans toucher a la geometrie envoyee au GPU.
+    upload_mesh_data(
+        gpu_mesh,
+        mesh,
+        revision,
+        exact_bounds.bounds_or(
+            make_chunk_bounds(coord)));
+    if (terrain_mesh != nullptr) {
+        upload_terrain_mesh_data(gpu_mesh, *terrain_mesh);
+    } else {
+        gpu_mesh.terrain_index_count = 0;
+    }
+    if (architectural_mesh != nullptr) {
+        upload_architectural_mesh_data(gpu_mesh, *architectural_mesh);
+    } else {
+        gpu_mesh.architecture_opaque_index_count = 0;
+        gpu_mesh.architecture_transparent_index_count = 0;
+        gpu_mesh.architecture_transparent_index_offset_bytes = 0;
+    }
 }
 
 void Renderer::upload_mesh_data(
@@ -4403,105 +6155,439 @@ void Renderer::upload_mesh_data(
     gpu_mesh.bounds = bounds;
     gpu_mesh.opaque_index_count = 0;
     gpu_mesh.water_index_count = 0;
-    gpu_mesh.water_index_offset_bytes = 0;
 
     if (mesh.total_index_count() == 0 || mesh.total_vertex_count() == 0) {
         return;
     }
 
-    if (gpu_mesh.vao == 0) {
-        glGenVertexArrays(1, &gpu_mesh.vao);
-        glGenBuffers(1, &gpu_mesh.vbo);
-        glGenBuffers(1, &gpu_mesh.ebo);
-
-        glBindVertexArray(gpu_mesh.vao);
-        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
-
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, x)));
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, u)));
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, nx)));
-        glEnableVertexAttribArray(3);
-        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, face_shade)));
-        glEnableVertexAttribArray(4);
-        glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, ao)));
-        glEnableVertexAttribArray(5);
-        glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, sky_light)));
-        glEnableVertexAttribArray(6);
-        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
-        glEnableVertexAttribArray(7);
-        glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, material_class)));
-        glEnableVertexAttribArray(8);
-        glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, wave_weight)));
-    } else {
-        glBindVertexArray(gpu_mesh.vao);
-        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
-    }
-
     const auto opaque_vertex_bytes = static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(ChunkVertex));
-    const auto water_vertex_bytes = static_cast<GLsizeiptr>(mesh.water_vertices.size() * sizeof(ChunkVertex));
-    const auto vertex_bytes = opaque_vertex_bytes + water_vertex_bytes;
     const auto opaque_index_bytes = static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t));
-    const auto water_index_bytes = static_cast<GLsizeiptr>(mesh.water_indices.size() * sizeof(std::uint32_t));
-    const auto index_bytes = opaque_index_bytes + water_index_bytes;
+    if (opaque_vertex_bytes > 0 && opaque_index_bytes > 0) {
+        if (gpu_mesh.vao == 0) {
+            glGenVertexArrays(1, &gpu_mesh.vao);
+            glGenBuffers(1, &gpu_mesh.vbo);
+            glGenBuffers(1, &gpu_mesh.ebo);
 
-    if (gpu_mesh.vertex_buffer_bytes < vertex_bytes) {
-        gpu_mesh.vertex_buffer_bytes = grow_buffer_capacity(
-            gpu_mesh.vertex_buffer_bytes,
-            vertex_bytes,
-            kInitialVertexBufferBytes);
-    }
-    if (gpu_mesh.index_buffer_bytes < index_bytes) {
-        gpu_mesh.index_buffer_bytes = grow_buffer_capacity(
-            gpu_mesh.index_buffer_bytes,
-            index_bytes,
-            kInitialIndexBufferBytes);
-    }
+            glBindVertexArray(gpu_mesh.vao);
+            glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
 
-    orphan_bound_buffer(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, GL_DYNAMIC_DRAW);
-    orphan_bound_buffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, GL_DYNAMIC_DRAW);
-
-    if (opaque_vertex_bytes > 0) {
-        glBufferSubData(GL_ARRAY_BUFFER, 0, opaque_vertex_bytes, mesh.vertices.data());
-    }
-    if (water_vertex_bytes > 0) {
-        glBufferSubData(GL_ARRAY_BUFFER, opaque_vertex_bytes, water_vertex_bytes, mesh.water_vertices.data());
-    }
-
-    if (opaque_index_bytes > 0) {
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, opaque_index_bytes, mesh.indices.data());
-    }
-    if (water_index_bytes > 0) {
-        auto& translated_water_indices = translated_water_indices_scratch_;
-        translated_water_indices.resize(mesh.water_indices.size());
-        const auto water_vertex_offset = static_cast<std::uint32_t>(mesh.vertices.size());
-        for (std::size_t index = 0; index < mesh.water_indices.size(); ++index) {
-            translated_water_indices[index] = mesh.water_indices[index] + water_vertex_offset;
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, u)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, nx)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, face_shade)));
+            glEnableVertexAttribArray(4);
+            glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, ao)));
+            glEnableVertexAttribArray(5);
+            glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, sky_light)));
+            glEnableVertexAttribArray(6);
+            glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, block_light)));
+            glEnableVertexAttribArray(7);
+            glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, material_class)));
+            glEnableVertexAttribArray(8);
+            glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex), reinterpret_cast<void*>(offsetof(ChunkVertex, wave_weight)));
+        } else {
+            glBindVertexArray(gpu_mesh.vao);
+            glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.ebo);
         }
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, opaque_index_bytes, water_index_bytes, translated_water_indices.data());
+
+        if (gpu_mesh.vertex_buffer_bytes < opaque_vertex_bytes) {
+            gpu_mesh.vertex_buffer_bytes = grow_buffer_capacity(
+                gpu_mesh.vertex_buffer_bytes,
+                opaque_vertex_bytes,
+                kInitialVertexBufferBytes);
+        }
+        if (gpu_mesh.index_buffer_bytes < opaque_index_bytes) {
+            gpu_mesh.index_buffer_bytes = grow_buffer_capacity(
+                gpu_mesh.index_buffer_bytes,
+                opaque_index_bytes,
+                kInitialIndexBufferBytes);
+        }
+
+        orphan_bound_buffer(GL_ARRAY_BUFFER, gpu_mesh.vertex_buffer_bytes, GL_DYNAMIC_DRAW);
+        orphan_bound_buffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.index_buffer_bytes, GL_DYNAMIC_DRAW);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, opaque_vertex_bytes, mesh.vertices.data());
+        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, opaque_index_bytes, mesh.indices.data());
+        gpu_mesh.opaque_index_count = static_cast<GLsizei>(mesh.indices.size());
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(opaque_vertex_bytes);
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(opaque_index_bytes);
     }
 
-    gpu_mesh.opaque_index_count = static_cast<GLsizei>(mesh.indices.size());
-    gpu_mesh.water_index_count = static_cast<GLsizei>(mesh.water_indices.size());
-    gpu_mesh.water_index_offset_bytes = opaque_index_bytes;
-    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(vertex_bytes, 0));
-    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(index_bytes, 0));
+    const auto water_vertex_bytes =
+        static_cast<GLsizeiptr>(mesh.water_vertices.size() * sizeof(WaterVertex));
+    const auto water_index_bytes = static_cast<GLsizeiptr>(mesh.water_indices.size() * sizeof(std::uint32_t));
+    if (water_vertex_bytes > 0 && water_index_bytes > 0) {
+        if (gpu_mesh.water_vao == 0) {
+            glGenVertexArrays(1, &gpu_mesh.water_vao);
+            glGenBuffers(1, &gpu_mesh.water_vbo);
+            glGenBuffers(1, &gpu_mesh.water_ebo);
+
+            glBindVertexArray(gpu_mesh.water_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.water_vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.water_ebo);
+
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, x)));
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, u)));
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(2, 3, GL_BYTE, GL_TRUE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, nx)));
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 1, GL_HALF_FLOAT, GL_FALSE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, face_shade_half)));
+            glEnableVertexAttribArray(4);
+            glVertexAttribPointer(4, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, ao)));
+            glEnableVertexAttribArray(5);
+            glVertexAttribPointer(5, 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, sky_light)));
+            glEnableVertexAttribArray(6);
+            glVertexAttribPointer(6, 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, block_light)));
+            glEnableVertexAttribArray(7);
+            glVertexAttribPointer(7, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, material_class)));
+            glEnableVertexAttribArray(8);
+            glVertexAttribPointer(8, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(WaterVertex), reinterpret_cast<void*>(offsetof(WaterVertex, wave_weight)));
+        } else {
+            glBindVertexArray(gpu_mesh.water_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.water_vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.water_ebo);
+        }
+
+        if (gpu_mesh.water_vertex_buffer_bytes < water_vertex_bytes) {
+            gpu_mesh.water_vertex_buffer_bytes = grow_buffer_capacity(
+                gpu_mesh.water_vertex_buffer_bytes,
+                water_vertex_bytes,
+                kInitialWaterVertexBufferBytes);
+        }
+        if (gpu_mesh.water_index_buffer_bytes < water_index_bytes) {
+            gpu_mesh.water_index_buffer_bytes = grow_buffer_capacity(
+                gpu_mesh.water_index_buffer_bytes,
+                water_index_bytes,
+                kInitialIndexBufferBytes);
+        }
+
+        orphan_bound_buffer(
+            GL_ARRAY_BUFFER,
+            gpu_mesh.water_vertex_buffer_bytes,
+            GL_DYNAMIC_DRAW);
+        orphan_bound_buffer(
+            GL_ELEMENT_ARRAY_BUFFER,
+            gpu_mesh.water_index_buffer_bytes,
+            GL_DYNAMIC_DRAW);
+        glBufferSubData(
+            GL_ARRAY_BUFFER,
+            0,
+            water_vertex_bytes,
+            mesh.water_vertices.data());
+        glBufferSubData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            0,
+            water_index_bytes,
+            mesh.water_indices.data());
+        gpu_mesh.water_index_count = static_cast<GLsizei>(mesh.water_indices.size());
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(water_vertex_bytes);
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(water_index_bytes);
+    }
 }
 
-void Renderer::ensure_ship_mesh(const ShipRenderState& ship) {
+void Renderer::upload_terrain_mesh_data(
+    GpuMesh& gpu_mesh,
+    const OrganicTerrainMesh& mesh) {
+    gpu_mesh.terrain_index_count = 0;
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        return;
+    }
+
+    if (gpu_mesh.terrain_vao == 0) {
+        glGenVertexArrays(1, &gpu_mesh.terrain_vao);
+        glGenBuffers(1, &gpu_mesh.terrain_vbo);
+        glGenBuffers(1, &gpu_mesh.terrain_ebo);
+
+        glBindVertexArray(gpu_mesh.terrain_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.terrain_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.terrain_ebo);
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(
+            0,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(TerrainVertex),
+            reinterpret_cast<void*>(offsetof(TerrainVertex, x)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(
+            1,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(TerrainVertex),
+            reinterpret_cast<void*>(offsetof(TerrainVertex, nx)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribIPointer(
+            2,
+            4,
+            GL_UNSIGNED_BYTE,
+            sizeof(TerrainVertex),
+            reinterpret_cast<void*>(offsetof(TerrainVertex, primary_block_id)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribIPointer(
+            3,
+            2,
+            GL_UNSIGNED_BYTE,
+            sizeof(TerrainVertex),
+            reinterpret_cast<void*>(offsetof(TerrainVertex, sky_light)));
+        glEnableVertexAttribArray(4);
+        glVertexAttribIPointer(
+            4,
+            1,
+            GL_UNSIGNED_SHORT,
+            sizeof(TerrainVertex),
+            reinterpret_cast<void*>(offsetof(TerrainVertex, surface_flags)));
+    } else {
+        glBindVertexArray(gpu_mesh.terrain_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.terrain_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.terrain_ebo);
+    }
+
+    const auto vertex_bytes =
+        static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(TerrainVertex));
+    const auto index_bytes =
+        static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(std::uint32_t));
+    if (gpu_mesh.terrain_vertex_buffer_bytes < vertex_bytes) {
+        gpu_mesh.terrain_vertex_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.terrain_vertex_buffer_bytes,
+            vertex_bytes,
+            kInitialTerrainVertexBufferBytes);
+    }
+    if (gpu_mesh.terrain_index_buffer_bytes < index_bytes) {
+        gpu_mesh.terrain_index_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.terrain_index_buffer_bytes,
+            index_bytes,
+            kInitialTerrainIndexBufferBytes);
+    }
+
+    orphan_bound_buffer(
+        GL_ARRAY_BUFFER,
+        gpu_mesh.terrain_vertex_buffer_bytes,
+        GL_DYNAMIC_DRAW);
+    orphan_bound_buffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        gpu_mesh.terrain_index_buffer_bytes,
+        GL_DYNAMIC_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, mesh.vertices.data());
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, index_bytes, mesh.indices.data());
+
+    gpu_mesh.terrain_index_count = static_cast<GLsizei>(mesh.indices.size());
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(std::max<GLsizeiptr>(vertex_bytes, 0));
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(std::max<GLsizeiptr>(index_bytes, 0));
+}
+
+void Renderer::upload_architectural_mesh_data(
+    GpuMesh& gpu_mesh,
+    const ArchitecturalMesh& mesh) {
+
+    gpu_mesh.architecture_opaque_index_count = 0;
+    gpu_mesh.architecture_transparent_index_count = 0;
+    gpu_mesh.architecture_transparent_index_offset_bytes = 0;
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        return;
+    }
+
+    if (gpu_mesh.architecture_vao == 0U) {
+        glGenVertexArrays(1, &gpu_mesh.architecture_vao);
+        glGenBuffers(1, &gpu_mesh.architecture_vbo);
+        glGenBuffers(1, &gpu_mesh.architecture_ebo);
+
+        glBindVertexArray(gpu_mesh.architecture_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.architecture_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.architecture_ebo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(
+            0,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(HardSurfaceVertex),
+            reinterpret_cast<void*>(offsetof(HardSurfaceVertex, x)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(
+            1,
+            3,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(HardSurfaceVertex),
+            reinterpret_cast<void*>(offsetof(HardSurfaceVertex, nx)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribIPointer(
+            2,
+            2,
+            GL_UNSIGNED_SHORT,
+            sizeof(HardSurfaceVertex),
+            reinterpret_cast<void*>(offsetof(HardSurfaceVertex, u_fixed)));
+        glEnableVertexAttribArray(3);
+        glVertexAttribIPointer(
+            3,
+            4,
+            GL_UNSIGNED_BYTE,
+            sizeof(HardSurfaceVertex),
+            reinterpret_cast<void*>(offsetof(HardSurfaceVertex, material_block)));
+    } else {
+        glBindVertexArray(gpu_mesh.architecture_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, gpu_mesh.architecture_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu_mesh.architecture_ebo);
+    }
+
+    auto& ordered_indices = architecture_indices_scratch_;
+    ordered_indices.clear();
+    ordered_indices.reserve(mesh.indices.size());
+    auto covered_index_count = std::size_t {0U};
+    for (const auto& quad : mesh.quads) {
+        const auto first = static_cast<std::size_t>(quad.first_index);
+        constexpr std::size_t kQuadIndexCount = 6U;
+        if (first > mesh.indices.size() ||
+            mesh.indices.size() - first < kQuadIndexCount) {
+            continue;
+        }
+        covered_index_count = std::max(
+            covered_index_count,
+            first + kQuadIndexCount);
+        if ((quad.surface_flags & ArchitecturalTransparent) != 0U) {
+            continue;
+        }
+        ordered_indices.insert(
+            ordered_indices.end(),
+            mesh.indices.begin() + static_cast<std::ptrdiff_t>(first),
+            mesh.indices.begin() +
+                static_cast<std::ptrdiff_t>(first + kQuadIndexCount));
+    }
+
+    // Les primitives de fixtures sont ajoutees apres les quads greedy et sont
+    // toujours opaques/cutout. Je les conserve dans la premiere plage.
+    ordered_indices.insert(
+        ordered_indices.end(),
+        mesh.indices.begin() + static_cast<std::ptrdiff_t>(
+                                   std::min(covered_index_count, mesh.indices.size())),
+        mesh.indices.end());
+    const auto opaque_index_count = ordered_indices.size();
+
+    for (const auto& quad : mesh.quads) {
+        if ((quad.surface_flags & ArchitecturalTransparent) == 0U) {
+            continue;
+        }
+        const auto first = static_cast<std::size_t>(quad.first_index);
+        constexpr std::size_t kQuadIndexCount = 6U;
+        if (first > mesh.indices.size() ||
+            mesh.indices.size() - first < kQuadIndexCount) {
+            continue;
+        }
+        ordered_indices.insert(
+            ordered_indices.end(),
+            mesh.indices.begin() + static_cast<std::ptrdiff_t>(first),
+            mesh.indices.begin() +
+                static_cast<std::ptrdiff_t>(first + kQuadIndexCount));
+    }
+
+    const auto vertex_bytes = static_cast<GLsizeiptr>(
+        mesh.vertices.size() * sizeof(HardSurfaceVertex));
+    const auto index_bytes = static_cast<GLsizeiptr>(
+        ordered_indices.size() * sizeof(std::uint32_t));
+    if (gpu_mesh.architecture_vertex_buffer_bytes < vertex_bytes) {
+        gpu_mesh.architecture_vertex_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.architecture_vertex_buffer_bytes,
+            vertex_bytes,
+            kInitialTerrainVertexBufferBytes);
+    }
+    if (gpu_mesh.architecture_index_buffer_bytes < index_bytes) {
+        gpu_mesh.architecture_index_buffer_bytes = grow_buffer_capacity(
+            gpu_mesh.architecture_index_buffer_bytes,
+            index_bytes,
+            kInitialTerrainIndexBufferBytes);
+    }
+
+    orphan_bound_buffer(
+        GL_ARRAY_BUFFER,
+        gpu_mesh.architecture_vertex_buffer_bytes,
+        GL_DYNAMIC_DRAW);
+    orphan_bound_buffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        gpu_mesh.architecture_index_buffer_bytes,
+        GL_DYNAMIC_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_bytes, mesh.vertices.data());
+    glBufferSubData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        0,
+        index_bytes,
+        ordered_indices.data());
+
+    gpu_mesh.architecture_opaque_index_count =
+        static_cast<GLsizei>(opaque_index_count);
+    gpu_mesh.architecture_transparent_index_count =
+        static_cast<GLsizei>(ordered_indices.size() - opaque_index_count);
+    gpu_mesh.architecture_transparent_index_offset_bytes =
+        static_cast<GLsizeiptr>(
+            opaque_index_count * sizeof(std::uint32_t));
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(std::max<GLsizeiptr>(vertex_bytes, 0));
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(std::max<GLsizeiptr>(index_bytes, 0));
+}
+
+namespace {
+
+[[nodiscard]] constexpr auto ship_visual_variant(
+    VisualPipeline pipeline,
+    StylizedShipLod lod) noexcept -> std::uint8_t {
+
+    if (pipeline == VisualPipeline::LegacyVoxel) {
+        return 0U;
+    }
+    return lod == StylizedShipLod::Near ? 1U : 2U;
+}
+
+} // namespace
+
+void Renderer::ensure_ship_mesh(
+    const ShipRenderState& ship,
+    StylizedShipLod lod) {
+
     if (!ship.visible || ship.parts.empty() || ship.geometry_revision == 0U) {
         return;
     }
-    if (ship_mesh_ready(ship)) {
+    if (ship_mesh_ready(ship, lod)) {
         return;
     }
 
-    const auto mesh = build_ship_mesh_data(ship.parts);
-    (void)upload_prepared_ship_mesh(ship, mesh);
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        const auto stylized_mesh = build_stylized_ship_mesh(ship, lod);
+        if (stylized_mesh.empty()) {
+            return;
+        }
+        const ChunkBounds local_bounds {
+            stylized_mesh.metrics.bounds.min,
+            stylized_mesh.metrics.bounds.max,
+            (stylized_mesh.metrics.bounds.min +
+             stylized_mesh.metrics.bounds.max) *
+                0.5F,
+        };
+        upload_mesh_data(
+            ship_gpu_mesh_,
+            stylized_mesh.mesh,
+            ship.geometry_revision,
+            local_bounds);
+        ship_mesh_cache_.remember(
+            ship.geometry_revision,
+            ship.parts.size(),
+            ship_visual_variant(options_.visual_pipeline, lod));
+        return;
+    }
+
+    const auto legacy_mesh = build_ship_mesh_data(ship.parts);
+    (void)upload_prepared_ship_mesh(ship, legacy_mesh);
 }
 
 auto Renderer::upload_prepared_ship_mesh(const ShipRenderState& ship, const ChunkMeshData& mesh) -> bool {
@@ -4509,7 +6595,7 @@ auto Renderer::upload_prepared_ship_mesh(const ShipRenderState& ship, const Chun
         mesh.vertices.empty() || mesh.indices.empty()) {
         return false;
     }
-    if (ship_mesh_ready(ship)) {
+    if (ship_mesh_ready(ship, StylizedShipLod::Near)) {
         return true;
     }
 
@@ -4521,19 +6607,30 @@ auto Renderer::upload_prepared_ship_mesh(const ShipRenderState& ship, const Chun
         (ship.local_bounds.min + ship.local_bounds.max) * 0.5F,
     };
     upload_mesh_data(ship_gpu_mesh_, mesh, ship.geometry_revision, local_bounds);
-    ship_mesh_cache_.remember(ship.geometry_revision, ship.parts.size());
-    return ship_mesh_ready(ship);
+    active_ship_lod_ = StylizedShipLod::Near;
+    ship_mesh_cache_.remember(
+        ship.geometry_revision,
+        ship.parts.size(),
+        ship_visual_variant(options_.visual_pipeline, active_ship_lod_));
+    return ship_mesh_ready(ship, active_ship_lod_);
 }
 
 auto Renderer::prepare_ship_mesh(const ShipRenderState& ship) -> bool {
     if (!initialized_ || !ship.visible || ship.parts.empty() || ship.geometry_revision == 0U) {
         return false;
     }
-    ensure_ship_mesh(ship);
+    ensure_ship_mesh(ship, StylizedShipLod::Near);
     return ship_mesh_ready(ship);
 }
 
 auto Renderer::ship_mesh_ready(const ShipRenderState& ship) const noexcept -> bool {
+    return ship_mesh_ready(ship, StylizedShipLod::Near);
+}
+
+auto Renderer::ship_mesh_ready(
+    const ShipRenderState& ship,
+    StylizedShipLod lod) const noexcept -> bool {
+
     const auto gpu_ready = ship_gpu_mesh_.vao != 0U &&
                            ship_gpu_mesh_.vbo != 0U &&
                            ship_gpu_mesh_.ebo != 0U &&
@@ -4543,16 +6640,26 @@ auto Renderer::ship_mesh_ready(const ShipRenderState& ship) const noexcept -> bo
         ship.geometry_revision,
         ship.parts.size(),
         initialized_,
-        gpu_ready);
+        gpu_ready,
+        ship_visual_variant(options_.visual_pipeline, lod));
 }
 
-void Renderer::upload_block_break_overlay_mesh(const BlockBreakProgress& break_progress) {
+void Renderer::upload_block_break_overlay_mesh(
+    const World& world,
+    const BlockBreakProgress& break_progress) {
     auto& mesh = block_break_overlay_scratch_;
-    build_block_break_overlay_mesh_data_into(break_progress, mesh);
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized &&
+        is_organic_terrain_block(break_progress.block_id)) {
+        build_organic_block_break_overlay_mesh_data_into(
+            world,
+            break_progress,
+            mesh);
+    } else {
+        build_block_break_overlay_mesh_data_into(break_progress, mesh);
+    }
     auto& gpu_mesh = block_break_overlay_mesh_;
     gpu_mesh.opaque_index_count = 0;
     gpu_mesh.water_index_count = 0;
-    gpu_mesh.water_index_offset_bytes = 0;
 
     if (mesh.indices.empty() || mesh.vertices.empty()) {
         return;
@@ -4617,6 +6724,42 @@ void Renderer::upload_block_break_overlay_mesh(const BlockBreakProgress& break_p
 }
 
 void Renderer::destroy_gpu_mesh(GpuMesh& mesh) {
+    if (mesh.water_ebo != 0U) {
+        glDeleteBuffers(1, &mesh.water_ebo);
+        mesh.water_ebo = 0U;
+    }
+    if (mesh.water_vbo != 0U) {
+        glDeleteBuffers(1, &mesh.water_vbo);
+        mesh.water_vbo = 0U;
+    }
+    if (mesh.water_vao != 0U) {
+        glDeleteVertexArrays(1, &mesh.water_vao);
+        mesh.water_vao = 0U;
+    }
+    if (mesh.architecture_ebo != 0U) {
+        glDeleteBuffers(1, &mesh.architecture_ebo);
+        mesh.architecture_ebo = 0U;
+    }
+    if (mesh.architecture_vbo != 0U) {
+        glDeleteBuffers(1, &mesh.architecture_vbo);
+        mesh.architecture_vbo = 0U;
+    }
+    if (mesh.architecture_vao != 0U) {
+        glDeleteVertexArrays(1, &mesh.architecture_vao);
+        mesh.architecture_vao = 0U;
+    }
+    if (mesh.terrain_ebo != 0) {
+        glDeleteBuffers(1, &mesh.terrain_ebo);
+        mesh.terrain_ebo = 0;
+    }
+    if (mesh.terrain_vbo != 0) {
+        glDeleteBuffers(1, &mesh.terrain_vbo);
+        mesh.terrain_vbo = 0;
+    }
+    if (mesh.terrain_vao != 0) {
+        glDeleteVertexArrays(1, &mesh.terrain_vao);
+        mesh.terrain_vao = 0;
+    }
     if (mesh.ebo != 0) {
         glDeleteBuffers(1, &mesh.ebo);
         mesh.ebo = 0;
@@ -4631,10 +6774,19 @@ void Renderer::destroy_gpu_mesh(GpuMesh& mesh) {
     }
     mesh.opaque_index_count = 0;
     mesh.water_index_count = 0;
-    mesh.water_index_offset_bytes = 0;
     mesh.revision = 0;
     mesh.vertex_buffer_bytes = 0;
     mesh.index_buffer_bytes = 0;
+    mesh.water_vertex_buffer_bytes = 0;
+    mesh.water_index_buffer_bytes = 0;
+    mesh.terrain_index_count = 0;
+    mesh.terrain_vertex_buffer_bytes = 0;
+    mesh.terrain_index_buffer_bytes = 0;
+    mesh.architecture_opaque_index_count = 0;
+    mesh.architecture_transparent_index_count = 0;
+    mesh.architecture_transparent_index_offset_bytes = 0;
+    mesh.architecture_vertex_buffer_bytes = 0;
+    mesh.architecture_index_buffer_bytes = 0;
 }
 
 void Renderer::upload_world_ship_protection(const ShipRenderState& ship) {
@@ -4922,9 +7074,48 @@ vec2 vegetation_wind_offset(vec3 world_position, float material_class, float tim
     return vec2(gust_a * 0.70 + flutter * 0.30, gust_b * 0.60 - gust_a * 0.22) * amplitude * local_height;
 }
 
+vec3 fabric_wind_offset(
+    vec3 world_position,
+    float material_class,
+    float vertex_weight,
+    float time_phase
+) {
+    float fabric_mask = material_mask(material_class, 9.0);
+    float flexibility = clamp(vertex_weight, 0.0, 1.0) * fabric_mask;
+    if (flexibility <= 0.0) {
+        return vec3(0.0);
+    }
+
+    // Je deplace les deux faces d'une voile dans la meme direction monde :
+    // elles restent jointives, tandis que les sommets ancres (poids nul)
+    // demeurent exactement alignes sur les vergues et les mats.
+    float wind = clamp(u_wind_strength, 0.0, 1.0);
+    vec2 wind_direction = normalize(vec2(0.82, 0.57));
+    vec2 transverse = vec2(-wind_direction.y, wind_direction.x);
+    float phase =
+        dot(world_position.xz, vec2(0.17, 0.11)) +
+        world_position.y * 0.19 +
+        time_phase * 1.24;
+    float billow = sin(phase) + sin(phase * 2.13 + 0.7) * 0.28;
+    float flutter = sin(phase * 3.71 - world_position.y * 0.31);
+    float amplitude = flexibility * (0.014 + wind * 0.082);
+    vec2 horizontal =
+        wind_direction * billow * amplitude +
+        transverse * flutter * amplitude * 0.24;
+    return vec3(
+        horizontal.x,
+        flutter * amplitude * 0.055,
+        horizontal.y);
+}
+
 void main() {
     vec4 world_position = u_model * vec4(a_position, 1.0);
     world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
+    world_position.xyz += fabric_wind_offset(
+        world_position.xyz,
+        a_material_class,
+        a_wave_weight,
+        u_time_of_day * 8.0);
 
     float water_mask =
         material_mask(a_material_class, 6.0);
@@ -5107,9 +7298,12 @@ uniform float u_ocean_open_sea;
 
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadow_map;
+uniform sampler2D u_shadow_map_far;
 uniform sampler2D u_scene_color;
 uniform sampler2D u_scene_depth;
+uniform mat4 u_light_view_projection_far;
 uniform vec3 u_camera_position;
+uniform vec3 u_camera_forward;
 uniform vec3 u_sun_direction;
 uniform vec3 u_sun_color;
 uniform vec3 u_ambient_color;
@@ -5130,6 +7324,9 @@ uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform float u_super_vision_strength;
 uniform int u_shadows_enabled;
+uniform int u_shadow_cascade_count;
+uniform float u_shadow_split_distance;
+uniform float u_shadow_transition_width;
 
 out vec4 frag_color;
 )" VALCRAFT_SHIP_PROTECTION_GLSL_SOURCE R"(
@@ -5138,32 +7335,78 @@ float material_mask(float material, float expected) {
     return 1.0 - step(0.25, abs(material - expected));
 }
 
-float shadow_visibility_at(vec2 uv, float receiver_depth, float bias) {
-    float sampled_depth = texture(u_shadow_map, uv).r;
+float shadow_visibility_at(
+    vec2 uv,
+    float receiver_depth,
+    float bias,
+    bool far_cascade
+) {
+    float sampled_depth = far_cascade
+        ? texture(u_shadow_map_far, uv).r
+        : texture(u_shadow_map, uv).r;
     return (receiver_depth - bias) <= sampled_depth ? 1.0 : 0.0;
+}
+
+float sample_shadow_cascade(vec3 normal, bool far_cascade) {
+    vec4 light_position = far_cascade
+        ? u_light_view_projection_far * vec4(v_world_position, 1.0)
+        : v_light_position;
+    vec3 projected = light_position.xyz / max(light_position.w, 0.0001);
+    projected = projected * 0.5 + 0.5;
+    if (projected.z < 0.0 || projected.z > 1.0 || projected.x < 0.0 || projected.x > 1.0 || projected.y < 0.0 || projected.y > 1.0) {
+        return 1.0;
+    }
+
+    vec2 texel_size = far_cascade
+        ? 1.0 / vec2(textureSize(u_shadow_map_far, 0))
+        : 1.0 / vec2(textureSize(u_shadow_map, 0));
+    float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
+    float bias =
+        max(0.00065 * (1.0 - ndotl), 0.00012) *
+        (far_cascade ? 1.35 : 1.0);
+    // Je garde un PCF en croix pour lisser les ombres sans payer neuf lectures texture par fragment.
+    float visibility = shadow_visibility_at(projected.xy, projected.z, bias, far_cascade) * 0.36;
+    visibility += shadow_visibility_at(projected.xy + vec2(texel_size.x, 0.0), projected.z, bias, far_cascade) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(texel_size.x, 0.0), projected.z, bias, far_cascade) * 0.16;
+    visibility += shadow_visibility_at(projected.xy + vec2(0.0, texel_size.y), projected.z, bias, far_cascade) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(0.0, texel_size.y), projected.z, bias, far_cascade) * 0.16;
+    return visibility;
 }
 
 float sample_shadow(vec3 normal) {
     if (u_sun_visibility < 0.5 || u_shadows_enabled == 0) {
         return 1.0;
     }
-
-    vec3 projected = v_light_position.xyz / max(v_light_position.w, 0.0001);
-    projected = projected * 0.5 + 0.5;
-    if (projected.z > 1.0 || projected.x < 0.0 || projected.x > 1.0 || projected.y < 0.0 || projected.y > 1.0) {
-        return 1.0;
+    if (u_shadow_cascade_count <= 1) {
+        return sample_shadow_cascade(normal, false);
     }
 
-    vec2 texel_size = 1.0 / vec2(textureSize(u_shadow_map, 0));
-    float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
-    float bias = max(0.00065 * (1.0 - ndotl), 0.00012);
-    // Je garde un PCF en croix pour lisser les ombres sans payer neuf lectures texture par fragment.
-    float visibility = shadow_visibility_at(projected.xy, projected.z, bias) * 0.36;
-    visibility += shadow_visibility_at(projected.xy + vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
-    visibility += shadow_visibility_at(projected.xy - vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
-    visibility += shadow_visibility_at(projected.xy + vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
-    visibility += shadow_visibility_at(projected.xy - vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
-    return visibility;
+    float view_depth = max(
+        dot(v_world_position - u_camera_position, u_camera_forward),
+        0.0);
+    float transition_width = max(u_shadow_transition_width, 0.0);
+    if (transition_width <= 0.0001) {
+        return sample_shadow_cascade(
+            normal,
+            view_depth > u_shadow_split_distance);
+    }
+
+    float half_width = transition_width * 0.5;
+    if (view_depth <= u_shadow_split_distance - half_width) {
+        return sample_shadow_cascade(normal, false);
+    }
+    if (view_depth >= u_shadow_split_distance + half_width) {
+        return sample_shadow_cascade(normal, true);
+    }
+
+    float blend = smoothstep(
+        u_shadow_split_distance - half_width,
+        u_shadow_split_distance + half_width,
+        view_depth);
+    return mix(
+        sample_shadow_cascade(normal, false),
+        sample_shadow_cascade(normal, true),
+        blend);
 }
 
 float hash12(vec2 p) {
@@ -5660,9 +7903,11 @@ layout(location = 15) in vec4 i_lighting;
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
+uniform int u_modern_pipeline;
 
 out vec2 v_uv;
 out vec3 v_normal;
+out vec3 v_local_position;
 out vec3 v_world_position;
 out float v_distance;
 out float v_nightmare_factor;
@@ -5699,10 +7944,20 @@ void main() {
     mat3 normal_matrix = transpose(inverse(mat3(i_transform)));
     vec3 world_normal = normalize(normal_matrix * a_normal);
     vec4 uv_rect = face_uv_rect(a_face_index);
+    if (u_modern_pipeline != 0) {
+        // Les atlas joueur et créatures font 128 px. Je reste au centre des
+        // texels de bord pour profiter du filtrage linéaire sans lire la tuile
+        // voisine.
+        vec2 half_texel = vec2(0.5 / 128.0);
+        uv_rect = vec4(
+            uv_rect.xy + half_texel,
+            uv_rect.zw - half_texel);
+    }
 
     gl_Position = u_view_projection * world_position;
     v_uv = mix(uv_rect.xy, uv_rect.zw, a_face_uv);
     v_normal = world_normal;
+    v_local_position = a_position;
     v_world_position = world_position.xyz;
     v_distance = distance(world_position.xyz, u_camera_position);
     v_nightmare_factor = i_surface.x;
@@ -5720,6 +7975,7 @@ void main() {
     static constexpr auto* creature_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
 in vec3 v_normal;
+in vec3 v_local_position;
 in vec3 v_world_position;
 in float v_distance;
 in float v_nightmare_factor;
@@ -5734,7 +7990,10 @@ in vec4 v_light_position;
 
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadow_map;
+uniform sampler2D u_shadow_map_far;
+uniform mat4 u_light_view_projection_far;
 uniform vec3 u_camera_position;
+uniform vec3 u_camera_forward;
 uniform vec3 u_sun_direction;
 uniform vec3 u_sun_color;
 uniform vec3 u_ambient_color;
@@ -5753,37 +8012,87 @@ uniform float u_precipitation_intensity;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform int u_shadows_enabled;
+uniform int u_shadow_cascade_count;
+uniform float u_shadow_split_distance;
+uniform float u_shadow_transition_width;
 uniform float u_player_light_strength;
 uniform float u_super_vision_strength;
+uniform int u_modern_pipeline;
 
 out vec4 frag_color;
 
-float shadow_visibility_at(vec2 uv, float receiver_depth, float bias) {
-    float sampled_depth = texture(u_shadow_map, uv).r;
+float shadow_visibility_at(
+    vec2 uv,
+    float receiver_depth,
+    float bias,
+    bool far_cascade
+) {
+    float sampled_depth = far_cascade
+        ? texture(u_shadow_map_far, uv).r
+        : texture(u_shadow_map, uv).r;
     return (receiver_depth - bias) <= sampled_depth ? 1.0 : 0.0;
+}
+
+float sample_shadow_cascade(vec3 normal, bool far_cascade) {
+    vec4 light_position = far_cascade
+        ? u_light_view_projection_far * vec4(v_world_position, 1.0)
+        : v_light_position;
+    vec3 projected = light_position.xyz / max(light_position.w, 0.0001);
+    projected = projected * 0.5 + 0.5;
+    if (projected.z < 0.0 || projected.z > 1.0 || projected.x < 0.0 || projected.x > 1.0 || projected.y < 0.0 || projected.y > 1.0) {
+        return 1.0;
+    }
+
+    vec2 texel_size = far_cascade
+        ? 1.0 / vec2(textureSize(u_shadow_map_far, 0))
+        : 1.0 / vec2(textureSize(u_shadow_map, 0));
+    float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
+    float bias =
+        max(0.00065 * (1.0 - ndotl), 0.00012) *
+        (far_cascade ? 1.35 : 1.0);
+    // Je garde un PCF en croix pour lisser les ombres sans payer neuf lectures texture par fragment.
+    float visibility = shadow_visibility_at(projected.xy, projected.z, bias, far_cascade) * 0.36;
+    visibility += shadow_visibility_at(projected.xy + vec2(texel_size.x, 0.0), projected.z, bias, far_cascade) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(texel_size.x, 0.0), projected.z, bias, far_cascade) * 0.16;
+    visibility += shadow_visibility_at(projected.xy + vec2(0.0, texel_size.y), projected.z, bias, far_cascade) * 0.16;
+    visibility += shadow_visibility_at(projected.xy - vec2(0.0, texel_size.y), projected.z, bias, far_cascade) * 0.16;
+    return visibility;
 }
 
 float sample_shadow(vec3 normal) {
     if (u_sun_visibility < 0.5 || u_shadows_enabled == 0) {
         return 1.0;
     }
-
-    vec3 projected = v_light_position.xyz / max(v_light_position.w, 0.0001);
-    projected = projected * 0.5 + 0.5;
-    if (projected.z > 1.0 || projected.x < 0.0 || projected.x > 1.0 || projected.y < 0.0 || projected.y > 1.0) {
-        return 1.0;
+    if (u_shadow_cascade_count <= 1) {
+        return sample_shadow_cascade(normal, false);
     }
 
-    vec2 texel_size = 1.0 / vec2(textureSize(u_shadow_map, 0));
-    float ndotl = max(dot(normalize(normal), normalize(u_sun_direction)), 0.0);
-    float bias = max(0.00065 * (1.0 - ndotl), 0.00012);
-    // Je garde un PCF en croix pour lisser les ombres sans payer neuf lectures texture par fragment.
-    float visibility = shadow_visibility_at(projected.xy, projected.z, bias) * 0.36;
-    visibility += shadow_visibility_at(projected.xy + vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
-    visibility += shadow_visibility_at(projected.xy - vec2(texel_size.x, 0.0), projected.z, bias) * 0.16;
-    visibility += shadow_visibility_at(projected.xy + vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
-    visibility += shadow_visibility_at(projected.xy - vec2(0.0, texel_size.y), projected.z, bias) * 0.16;
-    return visibility;
+    float view_depth = max(
+        dot(v_world_position - u_camera_position, u_camera_forward),
+        0.0);
+    float transition_width = max(u_shadow_transition_width, 0.0);
+    if (transition_width <= 0.0001) {
+        return sample_shadow_cascade(
+            normal,
+            view_depth > u_shadow_split_distance);
+    }
+
+    float half_width = transition_width * 0.5;
+    if (view_depth <= u_shadow_split_distance - half_width) {
+        return sample_shadow_cascade(normal, false);
+    }
+    if (view_depth >= u_shadow_split_distance + half_width) {
+        return sample_shadow_cascade(normal, true);
+    }
+
+    float blend = smoothstep(
+        u_shadow_split_distance - half_width,
+        u_shadow_split_distance + half_width,
+        view_depth);
+    return mix(
+        sample_shadow_cascade(normal, false),
+        sample_shadow_cascade(normal, true),
+        blend);
 }
 
 float hash12(vec2 p) {
@@ -5839,6 +8148,30 @@ void main() {
     float hard_material = smoothstep(0.44, 0.90, v_material_class);
     float soft_fiber = 1.0 - smoothstep(0.28, 0.58, v_material_class);
     float thin_surface = 1.0 - smoothstep(0.22, 0.50, v_material_class);
+    if (u_modern_pipeline != 0) {
+        // Je fixe le grain dans l'espace local de chaque pièce : la matière
+        // suit l'animation au lieu de glisser sur l'animal quand il avance.
+        float coarse_surface = value_noise2(
+            v_local_position.xz * 5.4 +
+            vec2(v_local_position.y * 1.7, v_material_class * 13.1));
+        float fine_surface = value_noise2(
+            v_local_position.xy * 12.0 +
+            vec2(v_local_position.z * 2.3, v_material_class * 7.7));
+        float surface_variation =
+            (coarse_surface - 0.5) * 0.12 +
+            (fine_surface - 0.5) * 0.045;
+        float organic_surface = 1.0 - hard_material;
+        albedo *= 1.0 + surface_variation * organic_surface;
+
+        // Une variation très légère sous le volume sépare mieux le ventre et
+        // les membres sans inventer un nouveau matériau ou modifier le rig.
+        float underside =
+            1.0 - smoothstep(-0.72, 0.10, normal.y);
+        albedo = mix(
+            albedo,
+            albedo * 1.065 + vec3(0.006),
+            underside * soft_fiber * 0.32);
+    }
 
     float cavity_occlusion = mix(1.0, 0.54, cavity * (0.62 + 0.14 * v_nightmare_factor));
     float ambient_strength = mix(0.42, 1.02, sky_mix) * mix(1.08, 0.84, hard_material) * cavity_occlusion;
@@ -5925,6 +8258,7 @@ void main() {
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
 layout(location = 7) in float a_material_class;
+layout(location = 8) in float a_wave_weight;
 
 uniform mat4 u_model;
 uniform mat4 u_light_view_projection;
@@ -5955,9 +8289,45 @@ vec2 vegetation_wind_offset(vec3 world_position, float material_class, float tim
     return vec2(gust_a * 0.70 + flutter * 0.30, gust_b * 0.60 - gust_a * 0.22) * amplitude * local_height;
 }
 
+vec3 fabric_wind_offset(
+    vec3 world_position,
+    float material_class,
+    float vertex_weight,
+    float time_phase
+) {
+    float fabric_mask = material_mask(material_class, 9.0);
+    float flexibility = clamp(vertex_weight, 0.0, 1.0) * fabric_mask;
+    if (flexibility <= 0.0) {
+        return vec3(0.0);
+    }
+
+    float wind = clamp(u_wind_strength, 0.0, 1.0);
+    vec2 wind_direction = normalize(vec2(0.82, 0.57));
+    vec2 transverse = vec2(-wind_direction.y, wind_direction.x);
+    float phase =
+        dot(world_position.xz, vec2(0.17, 0.11)) +
+        world_position.y * 0.19 +
+        time_phase * 1.24;
+    float billow = sin(phase) + sin(phase * 2.13 + 0.7) * 0.28;
+    float flutter = sin(phase * 3.71 - world_position.y * 0.31);
+    float amplitude = flexibility * (0.014 + wind * 0.082);
+    vec2 horizontal =
+        wind_direction * billow * amplitude +
+        transverse * flutter * amplitude * 0.24;
+    return vec3(
+        horizontal.x,
+        flutter * amplitude * 0.055,
+        horizontal.y);
+}
+
 void main() {
     vec4 world_position = u_model * vec4(a_position, 1.0);
     world_position.xz += vegetation_wind_offset(world_position.xyz, a_material_class, u_time_of_day * 8.0);
+    world_position.xyz += fabric_wind_offset(
+        world_position.xyz,
+        a_material_class,
+        a_wave_weight,
+        u_time_of_day * 8.0);
     gl_Position = u_light_view_projection * world_position;
     v_uv = a_uv;
     v_material_class = a_material_class;
@@ -6018,12 +8388,29 @@ in vec4 v_color;
 flat in float v_textured;
 
 uniform sampler2D u_atlas;
+uniform sampler2D u_font_atlas;
+uniform sampler2DArray u_model_icon_atlas;
 
 out vec4 frag_color;
 
+float median3(vec3 value) {
+    return max(min(value.r, value.g), min(max(value.r, value.g), value.b));
+}
+
 void main() {
     vec4 color = v_color;
-    if (v_textured > 0.5) {
+    if (v_textured > 2.5) {
+        float layer = floor(v_textured - 3.0 + 0.5);
+        color *= texture(u_model_icon_atlas, vec3(v_uv, layer));
+    } else if (v_textured > 1.5) {
+        float signed_distance = median3(texture(u_font_atlas, v_uv).rgb);
+        float antialias_width = max(fwidth(signed_distance), 1.0 / 255.0);
+        float coverage = smoothstep(
+            0.5 - antialias_width,
+            0.5 + antialias_width,
+            signed_distance);
+        color.a *= coverage;
+    } else if (v_textured > 0.5) {
         color *= texture(u_atlas, v_uv);
     }
     frag_color = color;
@@ -6070,7 +8457,12 @@ out vec4 frag_color;
 void main() {
     vec3 color = texture(u_scene_texture, v_uv).rgb;
     float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    float bloom = max(luminance - u_threshold, 0.0);
+    // Je conserve progressivement les hautes lumières autour du seuil afin
+    // d'éviter un halo qui apparaît brutalement d'une image à l'autre.
+    float knee = max(u_threshold * 0.45, 0.0001);
+    float soft = clamp(luminance - u_threshold + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee + 0.0001);
+    float bloom = max(luminance - u_threshold, soft);
     frag_color = vec4(color * bloom / max(luminance, 0.0001), 1.0);
 }
 )";
@@ -6305,6 +8697,8 @@ uniform vec3 u_night_tint_color;
 uniform float u_glow_strength;
 uniform float u_sharpen_strength;
 uniform float u_edge_strength;
+uniform int u_fxaa_enabled;
+uniform int u_modern_pipeline;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform float u_weather_exposure;
@@ -6318,6 +8712,85 @@ vec3 apply_saturation(vec3 color, float saturation) {
 
 vec3 sample_scene(vec2 uv) {
     return texture(u_scene_texture, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+}
+
+float scene_luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+vec3 sample_scene_fxaa(vec2 uv, vec2 texel) {
+    vec3 center = sample_scene(uv);
+    if (u_fxaa_enabled == 0) {
+        return center;
+    }
+
+    vec3 north_west = sample_scene(uv + vec2(-texel.x, texel.y));
+    vec3 north_east = sample_scene(uv + vec2(texel.x, texel.y));
+    vec3 south_west = sample_scene(uv + vec2(-texel.x, -texel.y));
+    vec3 south_east = sample_scene(uv + vec2(texel.x, -texel.y));
+    float luma_center = scene_luma(center);
+    float luma_north_west = scene_luma(north_west);
+    float luma_north_east = scene_luma(north_east);
+    float luma_south_west = scene_luma(south_west);
+    float luma_south_east = scene_luma(south_east);
+    float luma_min = min(
+        luma_center,
+        min(
+            min(luma_north_west, luma_north_east),
+            min(luma_south_west, luma_south_east)));
+    float luma_max = max(
+        luma_center,
+        max(
+            max(luma_north_west, luma_north_east),
+            max(luma_south_west, luma_south_east)));
+    if (luma_max - luma_min < max(0.0312, luma_max * 0.125)) {
+        return center;
+    }
+
+    vec2 direction;
+    direction.x =
+        -((luma_north_west + luma_north_east) -
+          (luma_south_west + luma_south_east));
+    direction.y =
+        (luma_north_west + luma_south_west) -
+        (luma_north_east + luma_south_east);
+    float direction_reduce = max(
+        (luma_north_west + luma_north_east +
+         luma_south_west + luma_south_east) *
+            0.03125,
+        0.0078125);
+    float reciprocal_minimum =
+        1.0 / (min(abs(direction.x), abs(direction.y)) + direction_reduce);
+    direction =
+        clamp(direction * reciprocal_minimum, vec2(-8.0), vec2(8.0)) *
+        texel;
+
+    vec3 result_a =
+        0.5 *
+        (sample_scene(uv + direction * (1.0 / 3.0 - 0.5)) +
+         sample_scene(uv + direction * (2.0 / 3.0 - 0.5)));
+    vec3 result_b =
+        result_a * 0.5 +
+        0.25 *
+        (sample_scene(uv + direction * -0.5) +
+         sample_scene(uv + direction * 0.5));
+    float result_b_luma = scene_luma(result_b);
+    return result_b_luma < luma_min || result_b_luma > luma_max
+               ? result_a
+               : result_b;
+}
+
+vec3 aces_fitted(vec3 color) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp(
+        (color * (a * color + b)) /
+            (color * (c * color + d) + e),
+        0.0,
+        1.0);
 }
 
 float linearize_depth(float depth_sample) {
@@ -6344,7 +8817,7 @@ vec3 apply_palette_grade(vec3 color, float storm, float lightning) {
 
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(u_scene_texture, 0));
-    vec3 scene = texture(u_scene_texture, v_uv).rgb;
+    vec3 scene = sample_scene_fxaa(v_uv, texel);
     float depth_edge = 0.0;
     float geometry_mask = 0.0;
 
@@ -6399,17 +8872,29 @@ void main() {
 
     vec3 glow = texture(u_glow_texture, v_uv).rgb * u_glow_strength;
     vec3 color = scene + glow;
-    color = vec3(1.0) - exp(-color * max(u_exposure, 0.001));
+    float weather_exposure = clamp(u_weather_exposure, 0.0, 1.0);
+    float flash_exposure = mix(0.12, 1.0, weather_exposure);
+    vec3 lightning =
+        vec3(0.62, 0.72, 1.00) *
+        clamp(u_lightning_intensity, 0.0, 1.0) *
+        flash_exposure *
+        (0.08 + clamp(u_storm_intensity, 0.0, 1.0) * 0.12);
+    if (u_modern_pipeline != 0) {
+        color = aces_fitted(
+            max(color + lightning, vec3(0.0)) *
+            max(u_exposure, 0.001));
+    } else {
+        // Je conserve strictement la courbe et l'ordre historiques pour que
+        // LegacyVoxel reste une référence visuelle fiable de la refonte.
+        color = vec3(1.0) -
+                exp(-color * max(u_exposure, 0.001));
+    }
     color = apply_saturation(color, u_saturation_boost);
     color = (color - 0.5) * u_contrast + 0.5;
     color = apply_palette_grade(color, clamp(u_storm_intensity, 0.0, 1.0), clamp(u_lightning_intensity, 0.0, 1.0));
-
-    float weather_exposure = clamp(u_weather_exposure, 0.0, 1.0);
-    float flash_exposure = mix(0.12, 1.0, weather_exposure);
-    color += vec3(0.62, 0.72, 1.00) *
-             clamp(u_lightning_intensity, 0.0, 1.0) *
-             flash_exposure *
-             (0.08 + clamp(u_storm_intensity, 0.0, 1.0) * 0.12);
+    if (u_modern_pipeline == 0) {
+        color += lightning;
+    }
 
     float vignette = smoothstep(0.92, 0.22, distance(v_uv, vec2(0.5)));
     color *= mix(1.0 - u_vignette_strength, 1.0, vignette);
@@ -6445,6 +8930,27 @@ void main() {
     world_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, world_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
+    modern_terrain_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            kModernTerrainVertexShaderSource.data()),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            kModernTerrainFragmentShaderSource.data()));
+    modern_architecture_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            kModernArchitectureVertexShaderSource.data()),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            kModernTerrainFragmentShaderSource.data()));
+    modern_terrain_shadow_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            kModernTerrainShadowVertexShaderSource.data()),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            kModernTerrainShadowFragmentShaderSource.data()));
     item_drop_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, item_drop_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
@@ -6485,10 +8991,238 @@ void main() {
         compile_shader(GL_VERTEX_SHADER, screen_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, menu_background_fragment_shader));
 
+    modern_terrain_uniforms_.model =
+        glGetUniformLocation(modern_terrain_program_, "u_model");
+    modern_terrain_uniforms_.view_projection =
+        glGetUniformLocation(modern_terrain_program_, "u_view_projection");
+    modern_terrain_uniforms_.light_view_projection =
+        glGetUniformLocation(modern_terrain_program_, "u_light_view_projection");
+    modern_terrain_uniforms_.light_view_projection_far =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_light_view_projection_far");
+    modern_terrain_uniforms_.camera_position =
+        glGetUniformLocation(modern_terrain_program_, "u_camera_position");
+    modern_terrain_uniforms_.camera_forward =
+        glGetUniformLocation(modern_terrain_program_, "u_camera_forward");
+    modern_terrain_uniforms_.sun_direction =
+        glGetUniformLocation(modern_terrain_program_, "u_sun_direction");
+    modern_terrain_uniforms_.sun_color =
+        glGetUniformLocation(modern_terrain_program_, "u_sun_color");
+    modern_terrain_uniforms_.ambient_color =
+        glGetUniformLocation(modern_terrain_program_, "u_ambient_color");
+    modern_terrain_uniforms_.fog_color =
+        glGetUniformLocation(modern_terrain_program_, "u_fog_color");
+    modern_terrain_uniforms_.distant_fog_color =
+        glGetUniformLocation(modern_terrain_program_, "u_distant_fog_color");
+    modern_terrain_uniforms_.night_tint_color =
+        glGetUniformLocation(modern_terrain_program_, "u_night_tint_color");
+    modern_terrain_uniforms_.daylight_factor =
+        glGetUniformLocation(modern_terrain_program_, "u_daylight_factor");
+    modern_terrain_uniforms_.sun_visibility =
+        glGetUniformLocation(modern_terrain_program_, "u_sun_visibility");
+    modern_terrain_uniforms_.precipitation_intensity =
+        glGetUniformLocation(modern_terrain_program_, "u_precipitation_intensity");
+    modern_terrain_uniforms_.storm_intensity =
+        glGetUniformLocation(modern_terrain_program_, "u_storm_intensity");
+    modern_terrain_uniforms_.lightning_intensity =
+        glGetUniformLocation(modern_terrain_program_, "u_lightning_intensity");
+    modern_terrain_uniforms_.triplanar_sharpness =
+        glGetUniformLocation(modern_terrain_program_, "u_triplanar_sharpness");
+    modern_terrain_uniforms_.material_detail_scale =
+        glGetUniformLocation(modern_terrain_program_, "u_material_detail_scale");
+    modern_terrain_uniforms_.shadows_enabled =
+        glGetUniformLocation(modern_terrain_program_, "u_shadows_enabled");
+    modern_terrain_uniforms_.material_albedo =
+        glGetUniformLocation(modern_terrain_program_, "u_material_albedo");
+    modern_terrain_uniforms_.material_normal_height =
+        glGetUniformLocation(modern_terrain_program_, "u_material_normal_height");
+    modern_terrain_uniforms_.material_orm_emission =
+        glGetUniformLocation(modern_terrain_program_, "u_material_orm_emission");
+    modern_terrain_uniforms_.shadow_map =
+        glGetUniformLocation(modern_terrain_program_, "u_shadow_map");
+    modern_terrain_uniforms_.shadow_map_far =
+        glGetUniformLocation(modern_terrain_program_, "u_shadow_map_far");
+    modern_terrain_uniforms_.shadow_cascade_count =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_shadow_cascade_count");
+    modern_terrain_uniforms_.shadow_split_distance =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_shadow_split_distance");
+    modern_terrain_uniforms_.shadow_transition_width =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_shadow_transition_width");
+
+    const auto load_modern_surface_uniforms =
+        [](GLuint program, ModernTerrainUniformLocations& uniforms) {
+            uniforms.model = glGetUniformLocation(program, "u_model");
+            uniforms.view_projection =
+                glGetUniformLocation(program, "u_view_projection");
+            uniforms.light_view_projection =
+                glGetUniformLocation(program, "u_light_view_projection");
+            uniforms.light_view_projection_far =
+                glGetUniformLocation(
+                    program,
+                    "u_light_view_projection_far");
+            uniforms.camera_position =
+                glGetUniformLocation(program, "u_camera_position");
+            uniforms.camera_forward =
+                glGetUniformLocation(program, "u_camera_forward");
+            uniforms.sun_direction =
+                glGetUniformLocation(program, "u_sun_direction");
+            uniforms.sun_color =
+                glGetUniformLocation(program, "u_sun_color");
+            uniforms.ambient_color =
+                glGetUniformLocation(program, "u_ambient_color");
+            uniforms.fog_color =
+                glGetUniformLocation(program, "u_fog_color");
+            uniforms.distant_fog_color =
+                glGetUniformLocation(program, "u_distant_fog_color");
+            uniforms.night_tint_color =
+                glGetUniformLocation(program, "u_night_tint_color");
+            uniforms.daylight_factor =
+                glGetUniformLocation(program, "u_daylight_factor");
+            uniforms.sun_visibility =
+                glGetUniformLocation(program, "u_sun_visibility");
+            uniforms.precipitation_intensity =
+                glGetUniformLocation(program, "u_precipitation_intensity");
+            uniforms.storm_intensity =
+                glGetUniformLocation(program, "u_storm_intensity");
+            uniforms.lightning_intensity =
+                glGetUniformLocation(program, "u_lightning_intensity");
+            uniforms.triplanar_sharpness =
+                glGetUniformLocation(program, "u_triplanar_sharpness");
+            uniforms.material_detail_scale =
+                glGetUniformLocation(program, "u_material_detail_scale");
+            uniforms.shadows_enabled =
+                glGetUniformLocation(program, "u_shadows_enabled");
+            uniforms.material_albedo =
+                glGetUniformLocation(program, "u_material_albedo");
+            uniforms.material_normal_height =
+                glGetUniformLocation(program, "u_material_normal_height");
+            uniforms.material_orm_emission =
+                glGetUniformLocation(program, "u_material_orm_emission");
+            uniforms.shadow_map =
+                glGetUniformLocation(program, "u_shadow_map");
+            uniforms.shadow_map_far =
+                glGetUniformLocation(program, "u_shadow_map_far");
+            uniforms.shadow_cascade_count =
+                glGetUniformLocation(
+                    program,
+                    "u_shadow_cascade_count");
+            uniforms.shadow_split_distance =
+                glGetUniformLocation(
+                    program,
+                    "u_shadow_split_distance");
+            uniforms.shadow_transition_width =
+                glGetUniformLocation(
+                    program,
+                    "u_shadow_transition_width");
+        };
+    load_modern_surface_uniforms(
+        modern_architecture_program_,
+        modern_architecture_uniforms_);
+    modern_terrain_shadow_uniforms_.model =
+        glGetUniformLocation(modern_terrain_shadow_program_, "u_model");
+    modern_terrain_shadow_uniforms_.light_view_projection =
+        glGetUniformLocation(
+            modern_terrain_shadow_program_,
+            "u_light_view_projection");
+
+    const std::array<GLint, 29> modern_terrain_uniform_locations {{
+        modern_terrain_uniforms_.model,
+        modern_terrain_uniforms_.view_projection,
+        modern_terrain_uniforms_.light_view_projection,
+        modern_terrain_uniforms_.light_view_projection_far,
+        modern_terrain_uniforms_.camera_position,
+        modern_terrain_uniforms_.camera_forward,
+        modern_terrain_uniforms_.sun_direction,
+        modern_terrain_uniforms_.sun_color,
+        modern_terrain_uniforms_.ambient_color,
+        modern_terrain_uniforms_.fog_color,
+        modern_terrain_uniforms_.distant_fog_color,
+        modern_terrain_uniforms_.night_tint_color,
+        modern_terrain_uniforms_.daylight_factor,
+        modern_terrain_uniforms_.sun_visibility,
+        modern_terrain_uniforms_.precipitation_intensity,
+        modern_terrain_uniforms_.storm_intensity,
+        modern_terrain_uniforms_.lightning_intensity,
+        modern_terrain_uniforms_.triplanar_sharpness,
+        modern_terrain_uniforms_.material_detail_scale,
+        modern_terrain_uniforms_.shadows_enabled,
+        modern_terrain_uniforms_.material_albedo,
+        modern_terrain_uniforms_.material_normal_height,
+        modern_terrain_uniforms_.material_orm_emission,
+        modern_terrain_uniforms_.shadow_map,
+        modern_terrain_uniforms_.shadow_map_far,
+        modern_terrain_uniforms_.shadow_cascade_count,
+        modern_terrain_uniforms_.shadow_split_distance,
+        modern_terrain_uniforms_.shadow_transition_width,
+        modern_terrain_shadow_uniforms_.model,
+    }};
+    if (std::any_of(
+            modern_terrain_uniform_locations.begin(),
+            modern_terrain_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            }) ||
+        modern_terrain_shadow_uniforms_.light_view_projection < 0) {
+        throw std::runtime_error(
+            "Modern terrain shader is missing one or more required uniforms");
+    }
+
+    const std::array<GLint, 28> modern_architecture_uniform_locations {{
+        modern_architecture_uniforms_.model,
+        modern_architecture_uniforms_.view_projection,
+        modern_architecture_uniforms_.light_view_projection,
+        modern_architecture_uniforms_.light_view_projection_far,
+        modern_architecture_uniforms_.camera_position,
+        modern_architecture_uniforms_.camera_forward,
+        modern_architecture_uniforms_.sun_direction,
+        modern_architecture_uniforms_.sun_color,
+        modern_architecture_uniforms_.ambient_color,
+        modern_architecture_uniforms_.fog_color,
+        modern_architecture_uniforms_.distant_fog_color,
+        modern_architecture_uniforms_.night_tint_color,
+        modern_architecture_uniforms_.daylight_factor,
+        modern_architecture_uniforms_.sun_visibility,
+        modern_architecture_uniforms_.precipitation_intensity,
+        modern_architecture_uniforms_.storm_intensity,
+        modern_architecture_uniforms_.lightning_intensity,
+        modern_architecture_uniforms_.triplanar_sharpness,
+        modern_architecture_uniforms_.material_detail_scale,
+        modern_architecture_uniforms_.shadows_enabled,
+        modern_architecture_uniforms_.material_albedo,
+        modern_architecture_uniforms_.material_normal_height,
+        modern_architecture_uniforms_.material_orm_emission,
+        modern_architecture_uniforms_.shadow_map,
+        modern_architecture_uniforms_.shadow_map_far,
+        modern_architecture_uniforms_.shadow_cascade_count,
+        modern_architecture_uniforms_.shadow_split_distance,
+        modern_architecture_uniforms_.shadow_transition_width,
+    }};
+    if (std::any_of(
+            modern_architecture_uniform_locations.begin(),
+            modern_architecture_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Modern architecture shader is missing one or more required uniforms");
+    }
+
     world_uniforms_.model = glGetUniformLocation(world_program_, "u_model");
     world_uniforms_.view_projection = glGetUniformLocation(world_program_, "u_view_projection");
     world_uniforms_.light_view_projection = glGetUniformLocation(world_program_, "u_light_view_projection");
+    world_uniforms_.light_view_projection_far =
+        glGetUniformLocation(
+            world_program_,
+            "u_light_view_projection_far");
     world_uniforms_.camera_position = glGetUniformLocation(world_program_, "u_camera_position");
+    world_uniforms_.camera_forward = glGetUniformLocation(world_program_, "u_camera_forward");
     world_uniforms_.sun_direction = glGetUniformLocation(world_program_, "u_sun_direction");
     world_uniforms_.sun_color = glGetUniformLocation(world_program_, "u_sun_color");
     world_uniforms_.ambient_color = glGetUniformLocation(world_program_, "u_ambient_color");
@@ -6576,6 +9310,20 @@ void main() {
     }
     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
+    world_uniforms_.shadow_map_far =
+        glGetUniformLocation(world_program_, "u_shadow_map_far");
+    world_uniforms_.shadow_cascade_count =
+        glGetUniformLocation(
+            world_program_,
+            "u_shadow_cascade_count");
+    world_uniforms_.shadow_split_distance =
+        glGetUniformLocation(
+            world_program_,
+            "u_shadow_split_distance");
+    world_uniforms_.shadow_transition_width =
+        glGetUniformLocation(
+            world_program_,
+            "u_shadow_transition_width");
     world_uniforms_.scene_color = glGetUniformLocation(world_program_, "u_scene_color");
     world_uniforms_.scene_depth = glGetUniformLocation(world_program_, "u_scene_depth");
     world_uniforms_.inverse_view_projection = glGetUniformLocation(world_program_, "u_inverse_view_projection");
@@ -6623,7 +9371,12 @@ void main() {
 
     item_drop_uniforms_.view_projection = glGetUniformLocation(item_drop_program_, "u_view_projection");
     item_drop_uniforms_.light_view_projection = glGetUniformLocation(item_drop_program_, "u_light_view_projection");
+    item_drop_uniforms_.light_view_projection_far =
+        glGetUniformLocation(
+            item_drop_program_,
+            "u_light_view_projection_far");
     item_drop_uniforms_.camera_position = glGetUniformLocation(item_drop_program_, "u_camera_position");
+    item_drop_uniforms_.camera_forward = glGetUniformLocation(item_drop_program_, "u_camera_forward");
     item_drop_uniforms_.sun_direction = glGetUniformLocation(item_drop_program_, "u_sun_direction");
     item_drop_uniforms_.sun_color = glGetUniformLocation(item_drop_program_, "u_sun_color");
     item_drop_uniforms_.ambient_color = glGetUniformLocation(item_drop_program_, "u_ambient_color");
@@ -6644,6 +9397,20 @@ void main() {
     item_drop_uniforms_.lightning_intensity = glGetUniformLocation(item_drop_program_, "u_lightning_intensity");
     item_drop_uniforms_.atlas = glGetUniformLocation(item_drop_program_, "u_atlas");
     item_drop_uniforms_.shadow_map = glGetUniformLocation(item_drop_program_, "u_shadow_map");
+    item_drop_uniforms_.shadow_map_far =
+        glGetUniformLocation(item_drop_program_, "u_shadow_map_far");
+    item_drop_uniforms_.shadow_cascade_count =
+        glGetUniformLocation(
+            item_drop_program_,
+            "u_shadow_cascade_count");
+    item_drop_uniforms_.shadow_split_distance =
+        glGetUniformLocation(
+            item_drop_program_,
+            "u_shadow_split_distance");
+    item_drop_uniforms_.shadow_transition_width =
+        glGetUniformLocation(
+            item_drop_program_,
+            "u_shadow_transition_width");
     item_drop_uniforms_.scene_color = glGetUniformLocation(item_drop_program_, "u_scene_color");
     item_drop_uniforms_.scene_depth = glGetUniformLocation(item_drop_program_, "u_scene_depth");
     item_drop_uniforms_.inverse_view_projection = glGetUniformLocation(item_drop_program_, "u_inverse_view_projection");
@@ -6719,7 +9486,12 @@ void main() {
 
     creature_uniforms_.view_projection = glGetUniformLocation(creature_program_, "u_view_projection");
     creature_uniforms_.light_view_projection = glGetUniformLocation(creature_program_, "u_light_view_projection");
+    creature_uniforms_.light_view_projection_far =
+        glGetUniformLocation(
+            creature_program_,
+            "u_light_view_projection_far");
     creature_uniforms_.camera_position = glGetUniformLocation(creature_program_, "u_camera_position");
+    creature_uniforms_.camera_forward = glGetUniformLocation(creature_program_, "u_camera_forward");
     creature_uniforms_.sun_direction = glGetUniformLocation(creature_program_, "u_sun_direction");
     creature_uniforms_.sun_color = glGetUniformLocation(creature_program_, "u_sun_color");
     creature_uniforms_.ambient_color = glGetUniformLocation(creature_program_, "u_ambient_color");
@@ -6738,10 +9510,26 @@ void main() {
     creature_uniforms_.lightning_intensity = glGetUniformLocation(creature_program_, "u_lightning_intensity");
     creature_uniforms_.atlas = glGetUniformLocation(creature_program_, "u_atlas");
     creature_uniforms_.shadow_map = glGetUniformLocation(creature_program_, "u_shadow_map");
+    creature_uniforms_.shadow_map_far =
+        glGetUniformLocation(creature_program_, "u_shadow_map_far");
+    creature_uniforms_.shadow_cascade_count =
+        glGetUniformLocation(
+            creature_program_,
+            "u_shadow_cascade_count");
+    creature_uniforms_.shadow_split_distance =
+        glGetUniformLocation(
+            creature_program_,
+            "u_shadow_split_distance");
+    creature_uniforms_.shadow_transition_width =
+        glGetUniformLocation(
+            creature_program_,
+            "u_shadow_transition_width");
     creature_uniforms_.shadows_enabled = glGetUniformLocation(creature_program_, "u_shadows_enabled");
     creature_uniforms_.time_of_day = glGetUniformLocation(creature_program_, "u_time_of_day");
     creature_uniforms_.player_light_strength = glGetUniformLocation(creature_program_, "u_player_light_strength");
     creature_uniforms_.super_vision_strength = glGetUniformLocation(creature_program_, "u_super_vision_strength");
+    creature_uniforms_.modern_pipeline =
+        glGetUniformLocation(creature_program_, "u_modern_pipeline");
     creature_shadow_light_view_projection_ =
         glGetUniformLocation(creature_shadow_program_, "u_light_view_projection");
 
@@ -6751,6 +9539,16 @@ void main() {
     shadow_uniforms_.wind_strength = glGetUniformLocation(shadow_program_, "u_wind_strength");
     shadow_uniforms_.atlas = glGetUniformLocation(shadow_program_, "u_atlas");
     hud_uniforms_.atlas = glGetUniformLocation(hud_program_, "u_atlas");
+    hud_uniforms_.font_atlas =
+        glGetUniformLocation(hud_program_, "u_font_atlas");
+    hud_uniforms_.model_icon_atlas =
+        glGetUniformLocation(hud_program_, "u_model_icon_atlas");
+    if (hud_uniforms_.atlas < 0 ||
+        hud_uniforms_.font_atlas < 0 ||
+        hud_uniforms_.model_icon_atlas < 0) {
+        throw std::runtime_error(
+            "HUD shader is missing one or more atlas uniforms");
+    }
     sky_uniforms_.inverse_view_projection = glGetUniformLocation(sky_program_, "u_inverse_view_projection");
     sky_uniforms_.sun_direction = glGetUniformLocation(sky_program_, "u_sun_direction");
     sky_uniforms_.daylight_factor = glGetUniformLocation(sky_program_, "u_daylight_factor");
@@ -6819,13 +9617,18 @@ void main() {
     post_process_uniforms_.glow_strength = glGetUniformLocation(post_process_program_, "u_glow_strength");
     post_process_uniforms_.sharpen_strength = glGetUniformLocation(post_process_program_, "u_sharpen_strength");
     post_process_uniforms_.edge_strength = glGetUniformLocation(post_process_program_, "u_edge_strength");
+    post_process_uniforms_.fxaa_enabled = glGetUniformLocation(post_process_program_, "u_fxaa_enabled");
+    post_process_uniforms_.modern_pipeline =
+        glGetUniformLocation(post_process_program_, "u_modern_pipeline");
     post_process_uniforms_.storm_intensity = glGetUniformLocation(post_process_program_, "u_storm_intensity");
     post_process_uniforms_.lightning_intensity = glGetUniformLocation(post_process_program_, "u_lightning_intensity");
     post_process_uniforms_.weather_exposure =
         glGetUniformLocation(post_process_program_, "u_weather_exposure");
-    if (post_process_uniforms_.weather_exposure < 0) {
+    if (post_process_uniforms_.weather_exposure < 0 ||
+        post_process_uniforms_.fxaa_enabled < 0 ||
+        post_process_uniforms_.modern_pipeline < 0) {
         throw std::runtime_error(
-            "Post-process shader is missing the weather exposure uniform");
+            "Post-process shader is missing a required modern uniform");
     }
     menu_background_uniforms_.scene_texture = glGetUniformLocation(menu_background_program_, "u_scene_texture");
     menu_background_uniforms_.blur_texture = glGetUniformLocation(menu_background_program_, "u_blur_texture");
@@ -6847,6 +9650,535 @@ void Renderer::create_atlas_texture() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
+auto Renderer::create_msdf_font_texture() -> bool {
+    if (msdf_font_texture_ != 0 &&
+        g_modern_hud_font_atlas.has_value()) {
+        g_modern_hud_font_enabled = true;
+        return true;
+    }
+
+    g_modern_hud_font_enabled = false;
+    std::error_code path_error;
+    const auto working_directory =
+        std::filesystem::current_path(path_error);
+    if (path_error) {
+        last_initialization_error_ =
+            "Unable to resolve the working directory for the UI font atlas";
+        return false;
+    }
+    const std::array candidates {
+        working_directory / "assets" / "fonts" /
+            "valcraft_ui_font.msdfa",
+        working_directory / "bin" / "assets" / "fonts" /
+            "valcraft_ui_font.msdfa",
+        working_directory.parent_path() / "assets" / "fonts" /
+            "valcraft_ui_font.msdfa",
+        working_directory.parent_path().parent_path() / "assets" /
+            "fonts" / "valcraft_ui_font.msdfa",
+    };
+
+    std::optional<MsdfFontAtlas> loaded_atlas;
+    for (const auto& candidate : candidates) {
+        std::error_code exists_error;
+        if (!std::filesystem::is_regular_file(
+                candidate,
+                exists_error) ||
+            exists_error) {
+            continue;
+        }
+        auto loaded = load_msdf_font_atlas_file(candidate);
+        if (!loaded) {
+            last_initialization_error_ =
+                "Invalid modern UI font atlas '" +
+                candidate.string() + "': " + loaded.error;
+            return false;
+        }
+        loaded_atlas = std::move(loaded.atlas);
+        break;
+    }
+    if (!loaded_atlas.has_value()) {
+        last_initialization_error_ =
+            "Unable to find assets/fonts/valcraft_ui_font.msdfa";
+        return false;
+    }
+
+    const auto& atlas = *loaded_atlas;
+    GLint maximum_texture_size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
+    if (atlas.metadata().width >
+            static_cast<std::uint32_t>(
+                std::max(maximum_texture_size, 0)) ||
+        atlas.metadata().height >
+            static_cast<std::uint32_t>(
+                std::max(maximum_texture_size, 0))) {
+        last_initialization_error_ =
+            "The modern UI font atlas exceeds GL_MAX_TEXTURE_SIZE";
+        return false;
+    }
+
+    // Je retire une éventuelle erreur antérieure avant de contrôler
+    // exclusivement les allocations de cette ressource.
+    for (int error_index = 0;
+         error_index < 16 && glGetError() != GL_NO_ERROR;
+         ++error_index) {
+    }
+    glGenTextures(1, &msdf_font_texture_);
+    glBindTexture(GL_TEXTURE_2D, msdf_font_texture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(
+        GL_TEXTURE_2D,
+        GL_TEXTURE_MIN_FILTER,
+        GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(
+        GL_TEXTURE_2D,
+        GL_TEXTURE_MAX_LEVEL,
+        static_cast<GLint>(atlas.metadata().mip_count - 1U));
+
+    const auto all_pixels = atlas.pixels();
+    for (std::size_t mip_index = 0U;
+         mip_index < atlas.mip_levels().size();
+         ++mip_index) {
+        const auto& mip = atlas.mip_levels()[mip_index];
+        if (mip.byte_offset > all_pixels.size() ||
+            mip.byte_size > all_pixels.size() - mip.byte_offset) {
+            destroy_msdf_font_texture();
+            last_initialization_error_ =
+                "The modern UI font mip chain is out of bounds";
+            return false;
+        }
+        const auto pixels =
+            all_pixels.subspan(mip.byte_offset, mip.byte_size);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            static_cast<GLint>(mip_index),
+            GL_RGB8,
+            static_cast<GLsizei>(mip.width),
+            static_cast<GLsizei>(mip.height),
+            0,
+            GL_RGB,
+            GL_UNSIGNED_BYTE,
+            pixels.data());
+    }
+    if (glGetError() != GL_NO_ERROR) {
+        destroy_msdf_font_texture();
+        last_initialization_error_ =
+            "OpenGL rejected the modern UI font atlas upload";
+        return false;
+    }
+
+    msdf_font_width_ = atlas.metadata().width;
+    msdf_font_height_ = atlas.metadata().height;
+    msdf_font_mips_ = atlas.metadata().mip_count;
+    g_modern_hud_font_atlas = std::move(*loaded_atlas);
+    g_modern_hud_font_enabled = true;
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+}
+
+void Renderer::destroy_msdf_font_texture() {
+    if (msdf_font_texture_ != 0) {
+        glDeleteTextures(1, &msdf_font_texture_);
+    }
+    msdf_font_texture_ = 0;
+    msdf_font_width_ = 0U;
+    msdf_font_height_ = 0U;
+    msdf_font_mips_ = 0U;
+    g_modern_hud_font_enabled = false;
+    g_modern_hud_font_atlas.reset();
+}
+
+auto Renderer::create_model_icon_texture() -> bool {
+    if (model_icon_texture_ != 0 && model_icon_layers_ > 0U) {
+        return true;
+    }
+
+    std::error_code path_error;
+    const auto working_directory =
+        std::filesystem::current_path(path_error);
+    if (path_error) {
+        last_initialization_error_ =
+            "Unable to resolve the working directory for the model icon atlas";
+        return false;
+    }
+    const std::array candidates {
+        working_directory / "assets" / "visual" /
+            "valcraft_model_icons.vmia",
+        working_directory / "bin" / "assets" / "visual" /
+            "valcraft_model_icons.vmia",
+        working_directory.parent_path() / "assets" / "visual" /
+            "valcraft_model_icons.vmia",
+        working_directory.parent_path().parent_path() / "assets" /
+            "visual" / "valcraft_model_icons.vmia",
+    };
+
+    std::optional<ModelIconAtlas> loaded_atlas;
+    for (const auto& candidate : candidates) {
+        std::error_code exists_error;
+        if (!std::filesystem::is_regular_file(
+                candidate,
+                exists_error) ||
+            exists_error) {
+            continue;
+        }
+        auto loaded = load_model_icon_atlas(candidate);
+        if (!loaded || !loaded.atlas.has_value()) {
+            last_initialization_error_ =
+                "Invalid modern model icon atlas '" +
+                candidate.string() + "': " + loaded.message;
+            return false;
+        }
+        loaded_atlas = std::move(loaded.atlas);
+        break;
+    }
+    if (!loaded_atlas.has_value()) {
+        last_initialization_error_ =
+            "Unable to find assets/visual/valcraft_model_icons.vmia";
+        return false;
+    }
+
+    const auto& atlas = *loaded_atlas;
+    GLint maximum_texture_size = 0;
+    GLint maximum_array_layers = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
+    glGetIntegerv(
+        GL_MAX_ARRAY_TEXTURE_LAYERS,
+        &maximum_array_layers);
+    if (atlas.metadata.width >
+            static_cast<std::uint16_t>(
+                std::max(maximum_texture_size, 0)) ||
+        atlas.metadata.height >
+            static_cast<std::uint16_t>(
+                std::max(maximum_texture_size, 0)) ||
+        atlas.layers.size() >
+            static_cast<std::size_t>(
+                std::max(maximum_array_layers, 0))) {
+        last_initialization_error_ =
+            "The modern model icon atlas exceeds the OpenGL 3.3 limits";
+        return false;
+    }
+
+    for (int error_index = 0;
+         error_index < 16 && glGetError() != GL_NO_ERROR;
+         ++error_index) {
+    }
+    glGenTextures(1, &model_icon_texture_);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, model_icon_texture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(
+        GL_TEXTURE_2D_ARRAY,
+        GL_TEXTURE_MIN_FILTER,
+        GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(
+        GL_TEXTURE_2D_ARRAY,
+        GL_TEXTURE_MAG_FILTER,
+        GL_LINEAR);
+    glTexParameteri(
+        GL_TEXTURE_2D_ARRAY,
+        GL_TEXTURE_WRAP_S,
+        GL_CLAMP_TO_EDGE);
+    glTexParameteri(
+        GL_TEXTURE_2D_ARRAY,
+        GL_TEXTURE_WRAP_T,
+        GL_CLAMP_TO_EDGE);
+    glTexParameteri(
+        GL_TEXTURE_2D_ARRAY,
+        GL_TEXTURE_MAX_LEVEL,
+        static_cast<GLint>(atlas.metadata.mip_count - 1U));
+
+    for (std::size_t mip_index = 0U;
+         mip_index < atlas.mip_levels.size();
+         ++mip_index) {
+        const auto& mip = atlas.mip_levels[mip_index];
+        glTexImage3D(
+            GL_TEXTURE_2D_ARRAY,
+            static_cast<GLint>(mip_index),
+            GL_SRGB8_ALPHA8,
+            static_cast<GLsizei>(mip.width),
+            static_cast<GLsizei>(mip.height),
+            static_cast<GLsizei>(atlas.layers.size()),
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            nullptr);
+        for (std::size_t layer_index = 0U;
+             layer_index < atlas.layers.size();
+             ++layer_index) {
+            const auto pixels = atlas.texels_for(
+                atlas.layers[layer_index].item_id,
+                static_cast<std::uint16_t>(mip_index));
+            if (pixels.size() != mip.byte_count) {
+                destroy_model_icon_texture();
+                last_initialization_error_ =
+                    "The modern model icon mip chain is out of bounds";
+                return false;
+            }
+            glTexSubImage3D(
+                GL_TEXTURE_2D_ARRAY,
+                static_cast<GLint>(mip_index),
+                0,
+                0,
+                static_cast<GLint>(layer_index),
+                static_cast<GLsizei>(mip.width),
+                static_cast<GLsizei>(mip.height),
+                1,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels.data());
+        }
+    }
+    if (glGetError() != GL_NO_ERROR) {
+        destroy_model_icon_texture();
+        last_initialization_error_ =
+            "OpenGL rejected the modern model icon atlas upload";
+        return false;
+    }
+
+    model_icon_layer_by_block_.fill(0U);
+    for (std::size_t block_index = 0U;
+         block_index < model_icon_layer_by_block_.size();
+         ++block_index) {
+        const auto layer_index = visual_item_layer_index(
+            static_cast<BlockId>(block_index));
+        if (layer_index < atlas.layers.size()) {
+            model_icon_layer_by_block_[block_index] =
+                static_cast<std::uint16_t>(layer_index + 1U);
+        }
+    }
+    model_icon_width_ = atlas.metadata.width;
+    model_icon_height_ = atlas.metadata.height;
+    model_icon_layers_ =
+        static_cast<std::uint16_t>(atlas.layers.size());
+    model_icon_mips_ = atlas.metadata.mip_count;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    return true;
+}
+
+void Renderer::destroy_model_icon_texture() {
+    if (model_icon_texture_ != 0) {
+        glDeleteTextures(1, &model_icon_texture_);
+    }
+    model_icon_texture_ = 0;
+    model_icon_width_ = 0U;
+    model_icon_height_ = 0U;
+    model_icon_layers_ = 0U;
+    model_icon_mips_ = 0U;
+    model_icon_layer_by_block_.fill(0U);
+}
+
+auto Renderer::hud_item_texture_mode(
+    BlockId block_id) const noexcept -> float {
+    const auto layer =
+        model_icon_layer_by_block_[static_cast<std::size_t>(block_id)];
+    if (options_.visual_pipeline != VisualPipeline::ModernStylized ||
+        model_icon_texture_ == 0 ||
+        layer == 0U) {
+        return 1.0F;
+    }
+    return 3.0F + static_cast<float>(layer - 1U);
+}
+
+void Renderer::bind_hud_textures() {
+    glUniform1i(hud_uniforms_.atlas, 0);
+    glUniform1i(hud_uniforms_.font_atlas, 1);
+    glUniform1i(hud_uniforms_.model_icon_atlas, 2);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, msdf_font_texture_);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, model_icon_texture_);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+auto Renderer::create_modern_material_textures() -> bool {
+    if (modern_material_albedo_texture_ != 0 &&
+        modern_material_normal_height_texture_ != 0 &&
+        modern_material_orm_emission_texture_ != 0) {
+        return true;
+    }
+
+    std::error_code path_error;
+    const auto working_directory = std::filesystem::current_path(path_error);
+    if (path_error) {
+        return false;
+    }
+    const std::array candidates {
+        working_directory / "assets" / "visual" /
+            "valcraft_visual_materials.vmp",
+        working_directory / "bin" / "assets" / "visual" /
+            "valcraft_visual_materials.vmp",
+        working_directory.parent_path() / "assets" / "visual" /
+            "valcraft_visual_materials.vmp",
+        working_directory.parent_path().parent_path() / "assets" / "visual" /
+            "valcraft_visual_materials.vmp",
+    };
+
+    const VisualMaterialPack* selected_pack = nullptr;
+    VisualMaterialPackLoadResult load_result {};
+    for (const auto& candidate : candidates) {
+        std::error_code exists_error;
+        if (!std::filesystem::is_regular_file(candidate, exists_error) ||
+            exists_error) {
+            continue;
+        }
+        load_result = load_visual_material_pack(candidate);
+        if (!load_result) {
+            return false;
+        }
+        selected_pack = &*load_result.pack;
+        break;
+    }
+    if (selected_pack == nullptr || selected_pack->layers.empty()) {
+        return false;
+    }
+
+    const auto& pack = *selected_pack;
+    GLint maximum_layers = 0;
+    GLint maximum_texture_size = 0;
+    glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &maximum_layers);
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
+    if (pack.layers.size() > static_cast<std::size_t>(
+                                 std::max(maximum_layers, 0)) ||
+        pack.width > static_cast<std::uint16_t>(
+                         std::max(maximum_texture_size, 0)) ||
+        pack.height > static_cast<std::uint16_t>(
+                          std::max(maximum_texture_size, 0))) {
+        return false;
+    }
+
+    const auto anisotropy_supported =
+        supports_gl_extension("GL_EXT_texture_filter_anisotropic") ||
+        supports_gl_extension("GL_ARB_texture_filter_anisotropic");
+    GLfloat maximum_anisotropy = 1.0F;
+    if (anisotropy_supported) {
+        glGetFloatv(kMaxTextureMaxAnisotropyExt, &maximum_anisotropy);
+    }
+
+    const auto upload_array =
+        [&pack, anisotropy_supported, maximum_anisotropy](
+            GLuint& texture,
+            VisualMaterialTexture material_texture,
+            GLint internal_format) -> bool {
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MIN_FILTER,
+            GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MAG_FILTER,
+            GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MAX_LEVEL,
+            static_cast<GLint>(pack.mip_count - 1U));
+        if (anisotropy_supported) {
+            glTexParameterf(
+                GL_TEXTURE_2D_ARRAY,
+                kTextureMaxAnisotropyExt,
+                std::min(maximum_anisotropy, 8.0F));
+        }
+
+        auto mip_width = pack.width;
+        auto mip_height = pack.height;
+        for (std::uint16_t mip = 0U; mip < pack.mip_count; ++mip) {
+            glTexImage3D(
+                GL_TEXTURE_2D_ARRAY,
+                static_cast<GLint>(mip),
+                internal_format,
+                static_cast<GLsizei>(mip_width),
+                static_cast<GLsizei>(mip_height),
+                static_cast<GLsizei>(pack.layers.size()),
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                nullptr);
+            for (std::size_t layer = 0U; layer < pack.layers.size(); ++layer) {
+                const auto texels = pack.texels_for(
+                    pack.layers[layer].material_id,
+                    material_texture,
+                    mip);
+                const auto expected_size =
+                    static_cast<std::size_t>(mip_width) *
+                    static_cast<std::size_t>(mip_height) *
+                    kVisualMaterialPackChannelCount;
+                if (texels.size() != expected_size) {
+                    return false;
+                }
+                glTexSubImage3D(
+                    GL_TEXTURE_2D_ARRAY,
+                    static_cast<GLint>(mip),
+                    0,
+                    0,
+                    static_cast<GLint>(layer),
+                    static_cast<GLsizei>(mip_width),
+                    static_cast<GLsizei>(mip_height),
+                    1,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    texels.data());
+            }
+            mip_width = std::max<std::uint16_t>(mip_width / 2U, 1U);
+            mip_height = std::max<std::uint16_t>(mip_height / 2U, 1U);
+        }
+        return glGetError() == GL_NO_ERROR;
+    };
+
+    if (!upload_array(
+            modern_material_albedo_texture_,
+            VisualMaterialTexture::Albedo,
+            GL_SRGB8_ALPHA8) ||
+        !upload_array(
+            modern_material_normal_height_texture_,
+            VisualMaterialTexture::NormalHeight,
+            GL_RGBA8) ||
+        !upload_array(
+            modern_material_orm_emission_texture_,
+            VisualMaterialTexture::OrmEmission,
+            GL_RGBA8)) {
+        destroy_modern_material_textures();
+        return false;
+    }
+
+    material_pack_version_ = pack.format_version;
+    material_pack_checksum_ = pack.content_checksum;
+    material_pack_width_ = pack.width;
+    material_pack_height_ = pack.height;
+    material_pack_layers_ =
+        static_cast<std::uint16_t>(pack.layers.size());
+    material_pack_mips_ = pack.mip_count;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    return true;
+}
+
+void Renderer::destroy_modern_material_textures() {
+    if (modern_material_orm_emission_texture_ != 0) {
+        glDeleteTextures(1, &modern_material_orm_emission_texture_);
+        modern_material_orm_emission_texture_ = 0;
+    }
+    if (modern_material_normal_height_texture_ != 0) {
+        glDeleteTextures(1, &modern_material_normal_height_texture_);
+        modern_material_normal_height_texture_ = 0;
+    }
+    if (modern_material_albedo_texture_ != 0) {
+        glDeleteTextures(1, &modern_material_albedo_texture_);
+        modern_material_albedo_texture_ = 0;
+    }
+    material_pack_checksum_ = 0U;
+    material_pack_version_ = 0U;
+    material_pack_width_ = 0U;
+    material_pack_height_ = 0U;
+    material_pack_layers_ = 0U;
+    material_pack_mips_ = 0U;
+}
+
 void Renderer::create_accent_texture() {
     const auto pixels = build_accent_atlas_pixels();
 
@@ -6862,6 +10194,10 @@ void Renderer::create_accent_texture() {
 
 void Renderer::create_creature_atlas_texture() {
     const auto pixels = build_creature_atlas_pixels();
+    const auto color_format =
+        is_modern_visual_pipeline(options_.visual_pipeline)
+            ? GL_SRGB8_ALPHA8
+            : GL_RGBA8;
 
     glGenTextures(1, &creature_atlas_texture_);
     glBindTexture(GL_TEXTURE_2D, creature_atlas_texture_);
@@ -6869,21 +10205,29 @@ void Renderer::create_creature_atlas_texture() {
     glTexImage2D(
         GL_TEXTURE_2D,
         0,
-        GL_RGBA8,
+        color_format,
         kCreatureAtlasSize,
         kCreatureAtlasSize,
         0,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
         pixels.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const auto filter =
+        is_modern_visual_pipeline(options_.visual_pipeline)
+            ? GL_LINEAR
+            : GL_NEAREST;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
 void Renderer::create_player_atlas_texture() {
     const auto pixels = build_player_atlas_pixels();
+    const auto color_format =
+        is_modern_visual_pipeline(options_.visual_pipeline)
+            ? GL_SRGB8_ALPHA8
+            : GL_RGBA8;
 
     glGenTextures(1, &player_atlas_texture_);
     glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
@@ -6891,66 +10235,144 @@ void Renderer::create_player_atlas_texture() {
     glTexImage2D(
         GL_TEXTURE_2D,
         0,
-        GL_RGBA8,
+        color_format,
         kPlayerAtlasSize,
         kPlayerAtlasSize,
         0,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
         pixels.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    const auto filter =
+        is_modern_visual_pipeline(options_.visual_pipeline)
+            ? GL_LINEAR
+            : GL_NEAREST;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
 void Renderer::create_shadow_map() {
-    glGenTextures(1, &shadow_map_);
-    glBindTexture(GL_TEXTURE_2D, shadow_map_);
+    const std::array<float, 4> border_color {{1.0F, 1.0F, 1.0F, 1.0F}};
+    const auto initialize_depth_texture =
+        [&](GLuint& texture) {
+            glGenTextures(1, &texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            if (!options_.shadows_enabled) {
+                const float depth_value = 1.0F;
+                glTexImage2D(
+                    GL_TEXTURE_2D,
+                    0,
+                    GL_DEPTH_COMPONENT24,
+                    1,
+                    1,
+                    0,
+                    GL_DEPTH_COMPONENT,
+                    GL_FLOAT,
+                    &depth_value);
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_MIN_FILTER,
+                    GL_NEAREST);
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_MAG_FILTER,
+                    GL_NEAREST);
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_WRAP_S,
+                    GL_CLAMP_TO_EDGE);
+                glTexParameteri(
+                    GL_TEXTURE_2D,
+                    GL_TEXTURE_WRAP_T,
+                    GL_CLAMP_TO_EDGE);
+                return;
+            }
+
+            const auto shadow_map_size =
+                std::max(options_.shadow_map_size, 1);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_DEPTH_COMPONENT24,
+                shadow_map_size,
+                shadow_map_size,
+                0,
+                GL_DEPTH_COMPONENT,
+                GL_FLOAT,
+                nullptr);
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR);
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_MAG_FILTER,
+                GL_LINEAR);
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_WRAP_S,
+                GL_CLAMP_TO_BORDER);
+            glTexParameteri(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_WRAP_T,
+                GL_CLAMP_TO_BORDER);
+            glTexParameterfv(
+                GL_TEXTURE_2D,
+                GL_TEXTURE_BORDER_COLOR,
+                border_color.data());
+        };
+    initialize_depth_texture(shadow_map_);
+    initialize_depth_texture(shadow_map_far_);
 
     if (!options_.shadows_enabled) {
-        const float depth_value = 1.0F;
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 1, 1, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &depth_value);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         return;
     }
 
-    const auto shadow_map_size = std::max(options_.shadow_map_size, 1);
-    glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_DEPTH_COMPONENT24,
-        shadow_map_size,
-        shadow_map_size,
-        0,
-        GL_DEPTH_COMPONENT,
-        GL_FLOAT,
-        nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    const std::array<float, 4> border_color {{1.0F, 1.0F, 1.0F, 1.0F}};
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border_color.data());
-
-    glGenFramebuffers(1, &shadow_framebuffer_);
-    glBindFramebuffer(GL_FRAMEBUFFER, shadow_framebuffer_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadow_map_, 0);
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        throw std::runtime_error("Shadow framebuffer is incomplete");
-    }
+    const auto initialize_framebuffer =
+        [](GLuint texture,
+           GLuint& framebuffer,
+           const char* label) {
+            glGenFramebuffers(1, &framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER,
+                GL_DEPTH_ATTACHMENT,
+                GL_TEXTURE_2D,
+                texture,
+                0);
+            glDrawBuffer(GL_NONE);
+            glReadBuffer(GL_NONE);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+                GL_FRAMEBUFFER_COMPLETE) {
+                throw std::runtime_error(
+                    std::string {label} +
+                    " shadow framebuffer is incomplete");
+            }
+        };
+    initialize_framebuffer(
+        shadow_map_,
+        shadow_framebuffer_,
+        "Near cascade");
+    initialize_framebuffer(
+        shadow_map_far_,
+        shadow_framebuffer_far_,
+        "Far cascade");
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void Renderer::destroy_shadow_map() {
+    if (shadow_framebuffer_far_ != 0) {
+        glDeleteFramebuffers(1, &shadow_framebuffer_far_);
+        shadow_framebuffer_far_ = 0;
+    }
     if (shadow_framebuffer_ != 0) {
         glDeleteFramebuffers(1, &shadow_framebuffer_);
         shadow_framebuffer_ = 0;
+    }
+    if (shadow_map_far_ != 0) {
+        glDeleteTextures(1, &shadow_map_far_);
+        shadow_map_far_ = 0;
     }
     if (shadow_map_ != 0) {
         glDeleteTextures(1, &shadow_map_);
@@ -6983,18 +10405,73 @@ void Renderer::create_creature_geometry() {
     glGenBuffers(1, &creature_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, creature_vbo_);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, creature_ebo_);
-    const auto& template_vertices = box_template_vertices();
-    const auto& template_indices = box_template_indices();
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(template_vertices.size() * sizeof(BoxTemplateVertex)),
-        template_vertices.data(),
-        GL_STATIC_DRAW);
-    glBufferData(
-        GL_ELEMENT_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(template_indices.size() * sizeof(std::uint32_t)),
-        template_indices.data(),
-        GL_STATIC_DRAW);
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        std::vector<StylizedPrimitiveVertex> template_vertices {};
+        std::vector<std::uint32_t> template_indices {};
+        const auto& primitive_cache = visual_entity_primitive_cache();
+        for (std::size_t slot = 0U;
+             slot < visual_entity_draw_ranges_.size();
+             ++slot) {
+            const auto primitive = visual_entity_primitive_for_slot(slot);
+            const auto lod = visual_entity_lod_for_slot(slot);
+            const auto& template_mesh =
+                primitive_cache.mesh(primitive, lod);
+            const auto base_vertex =
+                static_cast<std::uint32_t>(template_vertices.size());
+            auto& range = visual_entity_draw_ranges_[slot];
+            range.first_index = template_indices.size();
+            range.index_count =
+                static_cast<GLsizei>(template_mesh.indices.size());
+            range.primitive = primitive;
+            range.lod = lod;
+
+            template_vertices.insert(
+                template_vertices.end(),
+                template_mesh.vertices.begin(),
+                template_mesh.vertices.end());
+            template_indices.reserve(
+                template_indices.size() + template_mesh.indices.size());
+            for (const auto index : template_mesh.indices) {
+                template_indices.push_back(base_vertex + index);
+            }
+        }
+        creature_template_vertex_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_vertices.size() * sizeof(StylizedPrimitiveVertex));
+        creature_template_index_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_indices.size() * sizeof(std::uint32_t));
+        creature_template_index_count_ =
+            static_cast<GLsizei>(template_indices.size());
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            creature_template_vertex_buffer_bytes_,
+            template_vertices.data(),
+            GL_STATIC_DRAW);
+        glBufferData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            creature_template_index_buffer_bytes_,
+            template_indices.data(),
+            GL_STATIC_DRAW);
+    } else {
+        visual_entity_draw_ranges_ = {};
+        const auto& template_vertices = box_template_vertices();
+        const auto& template_indices = box_template_indices();
+        creature_template_vertex_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_vertices.size() * sizeof(BoxTemplateVertex));
+        creature_template_index_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_indices.size() * sizeof(std::uint32_t));
+        creature_template_index_count_ =
+            static_cast<GLsizei>(template_indices.size());
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            creature_template_vertex_buffer_bytes_,
+            template_vertices.data(),
+            GL_STATIC_DRAW);
+        glBufferData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            creature_template_index_buffer_bytes_,
+            template_indices.data(),
+            GL_STATIC_DRAW);
+    }
 
     glGenVertexArrays(1, &creature_vao_);
     glGenBuffers(1, &creature_instance_vbo_);
@@ -7019,18 +10496,45 @@ void Renderer::create_item_drop_geometry() {
     glGenBuffers(1, &item_drop_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, item_drop_vbo_);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, item_drop_ebo_);
-    const auto& template_vertices = box_template_vertices();
-    const auto& template_indices = box_template_indices();
-    glBufferData(
-        GL_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(template_vertices.size() * sizeof(BoxTemplateVertex)),
-        template_vertices.data(),
-        GL_STATIC_DRAW);
-    glBufferData(
-        GL_ELEMENT_ARRAY_BUFFER,
-        static_cast<GLsizeiptr>(template_indices.size() * sizeof(std::uint32_t)),
-        template_indices.data(),
-        GL_STATIC_DRAW);
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        const auto template_mesh =
+            build_stylized_rounded_box(StylizedPrimitiveLod::Low);
+        item_drop_template_vertex_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_mesh.vertices.size() * sizeof(StylizedPrimitiveVertex));
+        item_drop_template_index_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_mesh.indices.size() * sizeof(std::uint32_t));
+        item_drop_template_index_count_ =
+            static_cast<GLsizei>(template_mesh.indices.size());
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            item_drop_template_vertex_buffer_bytes_,
+            template_mesh.vertices.data(),
+            GL_STATIC_DRAW);
+        glBufferData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            item_drop_template_index_buffer_bytes_,
+            template_mesh.indices.data(),
+            GL_STATIC_DRAW);
+    } else {
+        const auto& template_vertices = box_template_vertices();
+        const auto& template_indices = box_template_indices();
+        item_drop_template_vertex_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_vertices.size() * sizeof(BoxTemplateVertex));
+        item_drop_template_index_buffer_bytes_ = static_cast<GLsizeiptr>(
+            template_indices.size() * sizeof(std::uint32_t));
+        item_drop_template_index_count_ =
+            static_cast<GLsizei>(template_indices.size());
+        glBufferData(
+            GL_ARRAY_BUFFER,
+            item_drop_template_vertex_buffer_bytes_,
+            template_vertices.data(),
+            GL_STATIC_DRAW);
+        glBufferData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            item_drop_template_index_buffer_bytes_,
+            template_indices.data(),
+            GL_STATIC_DRAW);
+    }
 
     glGenVertexArrays(1, &item_drop_vao_);
     glGenBuffers(1, &item_drop_instance_vbo_);
@@ -7551,7 +11055,11 @@ void Renderer::run_post_process(const EnvironmentState& environment,
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(glow_extract_program_);
     glUniform1i(glow_extract_uniforms_.scene_texture, 0);
-    glUniform1f(glow_extract_uniforms_.threshold, environment.glow_threshold);
+    glUniform1f(
+        glow_extract_uniforms_.threshold,
+        visual_pipeline_glow_threshold(
+            options_.visual_pipeline,
+            environment.glow_threshold));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, scene_color_texture_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -7581,16 +11089,37 @@ void Renderer::run_post_process(const EnvironmentState& environment,
     glUniform1i(post_process_uniforms_.scene_depth, 2);
     glUniform1f(post_process_uniforms_.exposure, environment.exposure);
     glUniform1f(post_process_uniforms_.saturation_boost, environment.saturation_boost);
-    glUniform1f(post_process_uniforms_.contrast, environment.contrast);
+    glUniform1f(
+        post_process_uniforms_.contrast,
+        visual_pipeline_post_contrast(
+            options_.visual_pipeline,
+            environment.contrast));
     glUniform1f(post_process_uniforms_.vignette_strength, environment.vignette_strength);
     glUniform3fv(post_process_uniforms_.night_tint_color, 1, glm::value_ptr(environment.night_tint_color));
-    glUniform1f(post_process_uniforms_.glow_strength, environment.glow_strength);
+    glUniform1f(
+        post_process_uniforms_.glow_strength,
+        visual_pipeline_glow_strength(
+            options_.visual_pipeline,
+            environment.glow_strength));
     glUniform1f(
         post_process_uniforms_.sharpen_strength,
         environment.post_sharpen_strength * quality_settings.post_detail_scale);
     glUniform1f(
         post_process_uniforms_.edge_strength,
-        environment.post_edge_strength * quality_settings.post_detail_scale);
+        environment.post_edge_strength *
+            quality_settings.post_detail_scale *
+            (options_.visual_pipeline == VisualPipeline::ModernStylized
+                 ? 0.32F
+                 : 1.0F));
+    glUniform1i(
+        post_process_uniforms_.fxaa_enabled,
+        is_modern_visual_pipeline(options_.visual_pipeline) &&
+                quality_settings.fxaa_enabled
+            ? 1
+            : 0);
+    glUniform1i(
+        post_process_uniforms_.modern_pipeline,
+        is_modern_visual_pipeline(options_.visual_pipeline) ? 1 : 0);
     glUniform1f(post_process_uniforms_.storm_intensity, environment.storm_intensity);
     glUniform1f(post_process_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1f(
@@ -8253,8 +11782,13 @@ void Renderer::draw_old_guard_effects(
 void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
                                const glm::mat4& view_projection,
                                const glm::mat4& light_view_projection,
+                               const glm::mat4& light_view_projection_far,
+                               int shadow_cascade_count,
+                               float shadow_split_distance,
+                               float shadow_transition_width,
                                const glm::mat4& inverse_view_projection,
                                const glm::vec3& camera_position,
+                               const glm::vec3& camera_forward,
                                const EnvironmentState& environment,
                                bool sun_visible) {
     if (item_drops.empty() || item_drop_program_ == 0 || item_drop_vao_ == 0 || item_drop_instance_vbo_ == 0 || item_drop_ebo_ == 0) {
@@ -8289,8 +11823,17 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
     glUseProgram(item_drop_program_);
     glUniformMatrix4fv(item_drop_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(item_drop_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniformMatrix4fv(
+        item_drop_uniforms_.light_view_projection_far,
+        1,
+        GL_FALSE,
+        glm::value_ptr(light_view_projection_far));
     glUniformMatrix4fv(item_drop_uniforms_.inverse_view_projection, 1, GL_FALSE, glm::value_ptr(inverse_view_projection));
     glUniform3fv(item_drop_uniforms_.camera_position, 1, glm::value_ptr(camera_position));
+    glUniform3fv(
+        item_drop_uniforms_.camera_forward,
+        1,
+        glm::value_ptr(camera_forward));
     glUniform3fv(item_drop_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
     glUniform3fv(item_drop_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
     glUniform3fv(item_drop_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
@@ -8311,6 +11854,16 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
     glUniform1f(item_drop_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1i(item_drop_uniforms_.atlas, 0);
     glUniform1i(item_drop_uniforms_.shadow_map, 1);
+    glUniform1i(item_drop_uniforms_.shadow_map_far, 7);
+    glUniform1i(
+        item_drop_uniforms_.shadow_cascade_count,
+        shadow_cascade_count);
+    glUniform1f(
+        item_drop_uniforms_.shadow_split_distance,
+        shadow_split_distance);
+    glUniform1f(
+        item_drop_uniforms_.shadow_transition_width,
+        shadow_transition_width);
     glUniform1i(item_drop_uniforms_.scene_color, 2);
     glUniform1i(item_drop_uniforms_.scene_depth, 3);
     glUniform1i(item_drop_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
@@ -8329,15 +11882,17 @@ void Renderer::draw_item_drops(std::span<const ItemDropRenderInstance> item_drop
     glBindTexture(GL_TEXTURE_2D, scene_bindings.color_texture);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, scene_bindings.depth_texture);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_far_);
 
     glDrawElementsInstanced(
         GL_TRIANGLES,
-        static_cast<GLsizei>(box_template_indices().size()),
+        item_drop_template_index_count_,
         GL_UNSIGNED_INT,
         nullptr,
         static_cast<GLsizei>(instances.size()));
     record_triangle_draw(
-        static_cast<GLsizei>(box_template_indices().size()),
+        item_drop_template_index_count_,
         static_cast<GLsizei>(instances.size()));
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
@@ -8468,6 +12023,109 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
     return parts;
 }
 
+void Renderer::prepare_visual_entity_batches(
+    std::span<const CreaturePartInstance> parts,
+    VisualEntityContext context,
+    const glm::vec3& focus,
+    bool simplified_shadow,
+    bool viewmodel) {
+
+    for (auto& batch : visual_entity_batches_) {
+        batch.clear();
+    }
+
+    for (const auto& part : parts) {
+        const auto classification =
+            classify_visual_entity_part(part, context);
+        if (!classification.valid_transform) {
+            continue;
+        }
+
+        auto lod = StylizedPrimitiveLod::Low;
+        if (viewmodel) {
+            lod = StylizedPrimitiveLod::High;
+        } else if (!simplified_shadow) {
+            const glm::vec3 position {part.transform[3]};
+            const auto offset = position - focus;
+            const auto distance_squared = glm::dot(offset, offset);
+            if (std::isfinite(distance_squared) &&
+                active_quality_settings_.terrain_lod_count >= 3 &&
+                distance_squared <= 18.0F * 18.0F) {
+                lod = StylizedPrimitiveLod::High;
+            } else if (std::isfinite(distance_squared) &&
+                       active_quality_settings_.terrain_lod_count >= 2 &&
+                       distance_squared <= 56.0F * 56.0F) {
+                lod = StylizedPrimitiveLod::Medium;
+            }
+        }
+
+        const auto slot =
+            visual_entity_batch_slot(classification.primitive, lod);
+        auto visual_part = part;
+        // Je compose uniquement le gabarit visuel dans le volume de la pièce.
+        // La matrice du rig source, ses sockets et ses animations restent
+        // strictement inchangés côté gameplay.
+        visual_part.transform =
+            part.transform * classification.primitive_to_part_local;
+        visual_entity_batches_[slot].push_back(std::move(visual_part));
+    }
+}
+
+void Renderer::draw_visual_entity_batches(
+    GLuint instance_vbo,
+    GLsizeiptr& instance_buffer_bytes) {
+
+    glBindBuffer(GL_ARRAY_BUFFER, instance_vbo);
+    for (std::size_t slot = 0U;
+         slot < visual_entity_batches_.size();
+         ++slot) {
+        const auto& batch = visual_entity_batches_[slot];
+        const auto& range = visual_entity_draw_ranges_[slot];
+        if (batch.empty() || range.index_count <= 0) {
+            continue;
+        }
+
+        const auto instance_bytes = static_cast<GLsizeiptr>(
+            batch.size() * sizeof(CreaturePartInstance));
+        if (instance_buffer_bytes < instance_bytes) {
+            instance_buffer_bytes = grow_buffer_capacity(
+                instance_buffer_bytes,
+                instance_bytes,
+                kInitialCreatureInstanceBufferBytes);
+        }
+        orphan_bound_buffer(GL_ARRAY_BUFFER, instance_buffer_bytes);
+        glBufferSubData(
+            GL_ARRAY_BUFFER,
+            0,
+            instance_bytes,
+            batch.data());
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(instance_bytes, 0));
+
+        const auto two_sided =
+            range.primitive == StylizedPrimitiveType::Panel ||
+            range.primitive == StylizedPrimitiveType::Ribbon;
+        if (two_sided) {
+            glDisable(GL_CULL_FACE);
+        } else {
+            glEnable(GL_CULL_FACE);
+        }
+        const auto index_byte_offset =
+            range.first_index * sizeof(std::uint32_t);
+        glDrawElementsInstanced(
+            GL_TRIANGLES,
+            range.index_count,
+            GL_UNSIGNED_INT,
+            reinterpret_cast<const void*>(
+                static_cast<std::uintptr_t>(index_byte_offset)),
+            static_cast<GLsizei>(batch.size()));
+        record_triangle_draw(
+            range.index_count,
+            static_cast<GLsizei>(batch.size()));
+    }
+    glEnable(GL_CULL_FACE);
+}
+
 void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> creatures,
                                      std::span<const CrewRenderInstance> crew,
                                      std::span<const OldGuardRenderInstance> old_guard,
@@ -8492,17 +12150,34 @@ void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> cre
     }
 
     glBindVertexArray(creature_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
-    const auto instance_bytes = static_cast<GLsizeiptr>(parts.size_bytes());
-    if (creature_instance_buffer_bytes_ < instance_bytes) {
-        creature_instance_buffer_bytes_ = grow_buffer_capacity(
-            creature_instance_buffer_bytes_,
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        prepare_visual_entity_batches(
+            parts,
+            VisualEntityContext::Creature,
+            shadow_focus,
+            true,
+            false);
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
+        const auto instance_bytes =
+            static_cast<GLsizeiptr>(parts.size_bytes());
+        if (creature_instance_buffer_bytes_ < instance_bytes) {
+            creature_instance_buffer_bytes_ = grow_buffer_capacity(
+                creature_instance_buffer_bytes_,
+                instance_bytes,
+                kInitialCreatureInstanceBufferBytes);
+        }
+        orphan_bound_buffer(
+            GL_ARRAY_BUFFER,
+            creature_instance_buffer_bytes_);
+        glBufferSubData(
+            GL_ARRAY_BUFFER,
+            0,
             instance_bytes,
-            kInitialCreatureInstanceBufferBytes);
+            parts.data());
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(instance_bytes, 0));
     }
-    orphan_bound_buffer(GL_ARRAY_BUFFER, creature_instance_buffer_bytes_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, parts.data());
-    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
 
     glUseProgram(creature_shadow_program_);
     glUniformMatrix4fv(
@@ -8510,15 +12185,21 @@ void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> cre
         1,
         GL_FALSE,
         glm::value_ptr(light_view_projection));
-    glDrawElementsInstanced(
-        GL_TRIANGLES,
-        static_cast<GLsizei>(box_template_indices().size()),
-        GL_UNSIGNED_INT,
-        nullptr,
-        static_cast<GLsizei>(parts.size()));
-    record_triangle_draw(
-        static_cast<GLsizei>(box_template_indices().size()),
-        static_cast<GLsizei>(parts.size()));
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        draw_visual_entity_batches(
+            creature_instance_vbo_,
+            creature_instance_buffer_bytes_);
+    } else {
+        glDrawElementsInstanced(
+            GL_TRIANGLES,
+            creature_template_index_count_,
+            GL_UNSIGNED_INT,
+            nullptr,
+            static_cast<GLsizei>(parts.size()));
+        record_triangle_draw(
+            creature_template_index_count_,
+            static_cast<GLsizei>(parts.size()));
+    }
 }
 
 void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
@@ -8526,7 +12207,12 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
                               std::span<const OldGuardRenderInstance> old_guard,
                               const glm::mat4& view_projection,
                               const glm::mat4& light_view_projection,
+                              const glm::mat4& light_view_projection_far,
+                              int shadow_cascade_count,
+                              float shadow_split_distance,
+                              float shadow_transition_width,
                               const glm::vec3& camera_position,
+                              const glm::vec3& camera_forward,
                               const EnvironmentState& environment,
                               bool player_light_active,
                               float super_vision_strength) {
@@ -8550,18 +12236,34 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     }
 
     glBindVertexArray(creature_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
-
-    const auto instance_bytes = static_cast<GLsizeiptr>(parts.size() * sizeof(CreaturePartInstance));
-    if (creature_instance_buffer_bytes_ < instance_bytes) {
-        creature_instance_buffer_bytes_ = grow_buffer_capacity(
-            creature_instance_buffer_bytes_,
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        prepare_visual_entity_batches(
+            parts,
+            VisualEntityContext::Creature,
+            camera_position,
+            false,
+            false);
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, creature_instance_vbo_);
+        const auto instance_bytes = static_cast<GLsizeiptr>(
+            parts.size() * sizeof(CreaturePartInstance));
+        if (creature_instance_buffer_bytes_ < instance_bytes) {
+            creature_instance_buffer_bytes_ = grow_buffer_capacity(
+                creature_instance_buffer_bytes_,
+                instance_bytes,
+                kInitialCreatureInstanceBufferBytes);
+        }
+        orphan_bound_buffer(
+            GL_ARRAY_BUFFER,
+            creature_instance_buffer_bytes_);
+        glBufferSubData(
+            GL_ARRAY_BUFFER,
+            0,
             instance_bytes,
-            kInitialCreatureInstanceBufferBytes);
+            parts.data());
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(instance_bytes, 0));
     }
-    orphan_bound_buffer(GL_ARRAY_BUFFER, creature_instance_buffer_bytes_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, parts.data());
-    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
 
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
@@ -8571,7 +12273,16 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUseProgram(creature_program_);
     glUniformMatrix4fv(creature_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(creature_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
+    glUniformMatrix4fv(
+        creature_uniforms_.light_view_projection_far,
+        1,
+        GL_FALSE,
+        glm::value_ptr(light_view_projection_far));
     glUniform3fv(creature_uniforms_.camera_position, 1, glm::value_ptr(camera_position));
+    glUniform3fv(
+        creature_uniforms_.camera_forward,
+        1,
+        glm::value_ptr(camera_forward));
     glUniform3fv(creature_uniforms_.sun_direction, 1, glm::value_ptr(environment.sun_direction));
     glUniform3fv(creature_uniforms_.sun_color, 1, glm::value_ptr(environment.sun_color));
     glUniform3fv(creature_uniforms_.ambient_color, 1, glm::value_ptr(environment.ambient_color));
@@ -8590,23 +12301,45 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUniform1f(creature_uniforms_.lightning_intensity, environment.lightning_intensity);
     glUniform1i(creature_uniforms_.atlas, 0);
     glUniform1i(creature_uniforms_.shadow_map, 1);
+    glUniform1i(creature_uniforms_.shadow_map_far, 7);
+    glUniform1i(
+        creature_uniforms_.shadow_cascade_count,
+        shadow_cascade_count);
+    glUniform1f(
+        creature_uniforms_.shadow_split_distance,
+        shadow_split_distance);
+    glUniform1f(
+        creature_uniforms_.shadow_transition_width,
+        shadow_transition_width);
     glUniform1i(creature_uniforms_.shadows_enabled, options_.shadows_enabled ? 1 : 0);
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glUniform1f(creature_uniforms_.player_light_strength, player_light_active ? 1.0F : 0.0F);
     glUniform1f(creature_uniforms_.super_vision_strength, std::clamp(super_vision_strength, 0.0F, 1.0F));
+    glUniform1i(
+        creature_uniforms_.modern_pipeline,
+        is_modern_visual_pipeline(options_.visual_pipeline) ? 1 : 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, creature_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
-    glDrawElementsInstanced(
-        GL_TRIANGLES,
-        static_cast<GLsizei>(box_template_indices().size()),
-        GL_UNSIGNED_INT,
-        nullptr,
-        static_cast<GLsizei>(parts.size()));
-    record_triangle_draw(
-        static_cast<GLsizei>(box_template_indices().size()),
-        static_cast<GLsizei>(parts.size()));
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, shadow_map_far_);
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        draw_visual_entity_batches(
+            creature_instance_vbo_,
+            creature_instance_buffer_bytes_);
+        glCullFace(GL_BACK);
+    } else {
+        glDrawElementsInstanced(
+            GL_TRIANGLES,
+            creature_template_index_count_,
+            GL_UNSIGNED_INT,
+            nullptr,
+            static_cast<GLsizei>(parts.size()));
+        record_triangle_draw(
+            creature_template_index_count_,
+            static_cast<GLsizei>(parts.size()));
+    }
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -8626,18 +12359,34 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     }
 
     glBindVertexArray(viewmodel_vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, viewmodel_instance_vbo_);
-
-    const auto instance_bytes = static_cast<GLsizeiptr>(viewmodel.parts.size() * sizeof(CreaturePartInstance));
-    if (viewmodel_instance_buffer_bytes_ < instance_bytes) {
-        viewmodel_instance_buffer_bytes_ = grow_buffer_capacity(
-            viewmodel_instance_buffer_bytes_,
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        prepare_visual_entity_batches(
+            viewmodel.parts,
+            VisualEntityContext::PlayerViewModel,
+            camera_position,
+            false,
+            true);
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, viewmodel_instance_vbo_);
+        const auto instance_bytes = static_cast<GLsizeiptr>(
+            viewmodel.parts.size() * sizeof(CreaturePartInstance));
+        if (viewmodel_instance_buffer_bytes_ < instance_bytes) {
+            viewmodel_instance_buffer_bytes_ = grow_buffer_capacity(
+                viewmodel_instance_buffer_bytes_,
+                instance_bytes,
+                kInitialCreatureInstanceBufferBytes);
+        }
+        orphan_bound_buffer(
+            GL_ARRAY_BUFFER,
+            viewmodel_instance_buffer_bytes_);
+        glBufferSubData(
+            GL_ARRAY_BUFFER,
+            0,
             instance_bytes,
-            kInitialCreatureInstanceBufferBytes);
+            viewmodel.parts.data());
+        frame_uploaded_bytes_ += static_cast<std::uint64_t>(
+            std::max<GLsizeiptr>(instance_bytes, 0));
     }
-    orphan_bound_buffer(GL_ARRAY_BUFFER, viewmodel_instance_buffer_bytes_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, instance_bytes, viewmodel.parts.data());
-    frame_uploaded_bytes_ += static_cast<std::uint64_t>(std::max<GLsizeiptr>(instance_bytes, 0));
 
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
@@ -8672,19 +12421,28 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glUniform1f(creature_uniforms_.player_light_strength, 0.0F);
     glUniform1f(creature_uniforms_.super_vision_strength, 0.0F);
+    glUniform1i(
+        creature_uniforms_.modern_pipeline,
+        is_modern_visual_pipeline(options_.visual_pipeline) ? 1 : 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, player_atlas_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, shadow_map_);
-    glDrawElementsInstanced(
-        GL_TRIANGLES,
-        static_cast<GLsizei>(box_template_indices().size()),
-        GL_UNSIGNED_INT,
-        nullptr,
-        static_cast<GLsizei>(viewmodel.parts.size()));
-    record_triangle_draw(
-        static_cast<GLsizei>(box_template_indices().size()),
-        static_cast<GLsizei>(viewmodel.parts.size()));
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        draw_visual_entity_batches(
+            viewmodel_instance_vbo_,
+            viewmodel_instance_buffer_bytes_);
+    } else {
+        glDrawElementsInstanced(
+            GL_TRIANGLES,
+            creature_template_index_count_,
+            GL_UNSIGNED_INT,
+            nullptr,
+            static_cast<GLsizei>(viewmodel.parts.size()));
+        record_triangle_draw(
+            creature_template_index_count_,
+            static_cast<GLsizei>(viewmodel.parts.size()));
+    }
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -8692,14 +12450,16 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::draw_block_break_overlay(const PlayerController& player) {
+void Renderer::draw_block_break_overlay(
+    const World& world,
+    const PlayerController& player) {
     const auto& break_progress = player.block_break_progress();
     if (!break_progress.active || break_progress.progress <= 0.0F) {
         block_break_overlay_mesh_.opaque_index_count = 0;
         return;
     }
 
-    upload_block_break_overlay_mesh(break_progress);
+    upload_block_break_overlay_mesh(world, break_progress);
     if (block_break_overlay_mesh_.vao == 0 || block_break_overlay_mesh_.opaque_index_count == 0) {
         return;
     }
@@ -8780,6 +12540,9 @@ void Renderer::draw_hotbar(const PlayerController& player,
 
         const auto viewport_width = static_cast<float>(width);
         const auto viewport_height = static_cast<float>(height);
+        const auto modern_hud =
+            is_modern_visual_pipeline(
+                options_.visual_pipeline);
         const auto draw_text_bottom = [&](float x,
                                           float bottom,
                                           float pixel_size,
@@ -8858,23 +12621,64 @@ void Renderer::draw_hotbar(const PlayerController& player,
                 {0.48F, 0.04F, 0.05F, damage_flash * 0.9F});
         }
 
-        const auto dock_palette = make_slate_panel_palette();
-        const auto rail_palette = make_warm_panel_palette({0.70F, 0.56F, 0.30F, 1.0F});
-        const auto heart_panel_palette = make_warm_panel_palette({0.90F, 0.28F, 0.32F, 1.0F});
-        const auto bubble_panel_palette = make_warm_panel_palette({0.42F, 0.80F, 0.98F, 1.0F});
-        const auto level_panel_palette = make_warm_panel_palette({0.78F, 0.66F, 0.36F, 1.0F});
+        const auto dock_palette =
+            modern_hud
+                ? make_modern_neutral_panel_palette()
+                : make_slate_panel_palette();
+        const auto rail_palette =
+            modern_hud
+                ? make_modern_glass_panel_palette(
+                      {0.83F, 0.67F, 0.34F, 1.0F},
+                      0.16F)
+                : make_warm_panel_palette(
+                      {0.70F, 0.56F, 0.30F, 1.0F});
+        const auto heart_panel_palette =
+            modern_hud
+                ? make_modern_glass_panel_palette(
+                      {0.94F, 0.30F, 0.38F, 1.0F},
+                      0.18F)
+                : make_warm_panel_palette(
+                      {0.90F, 0.28F, 0.32F, 1.0F});
+        const auto bubble_panel_palette =
+            modern_hud
+                ? make_modern_glass_panel_palette(
+                      {0.42F, 0.80F, 0.98F, 1.0F},
+                      0.16F)
+                : make_warm_panel_palette(
+                      {0.42F, 0.80F, 0.98F, 1.0F});
+        const auto level_panel_palette =
+            modern_hud
+                ? make_modern_glass_panel_palette(
+                      {0.88F, 0.72F, 0.35F, 1.0F},
+                      0.17F)
+                : make_warm_panel_palette(
+                      {0.78F, 0.66F, 0.36F, 1.0F});
 
-        append_stylized_panel_top_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            hud_layout.level.x,
-            hud_layout.level.y,
-            hud_layout.level.width,
-            hud_layout.level.height,
-            3.0F,
-            level_panel_palette,
-            true);
+        if (modern_hud) {
+            append_modern_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.level.x,
+                hud_layout.level.y,
+                hud_layout.level.width,
+                hud_layout.level.height,
+                3.0F,
+                level_panel_palette,
+                true);
+        } else {
+            append_stylized_panel_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.level.x,
+                hud_layout.level.y,
+                hud_layout.level.width,
+                hud_layout.level.height,
+                3.0F,
+                level_panel_palette,
+                true);
+        }
         append_hud_rect_top_left(
             vertices,
             viewport_width,
@@ -8921,28 +12725,53 @@ void Renderer::draw_hotbar(const PlayerController& player,
             hud_layout.hotbar_panel_height,
             14.0F,
             {0.0F, 0.0F, 0.0F, 0.24F});
-        append_stylized_panel_bottom_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            hud_layout.hotbar_panel_x,
-            hud_layout.hotbar_panel_bottom,
-            hud_layout.hotbar_panel_width,
-            hud_layout.hotbar_panel_height,
-            4.0F,
-            dock_palette,
-            false);
-        append_stylized_panel_bottom_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            hud_layout.hotbar_rail_x,
-            hud_layout.hotbar_rail_bottom,
-            hud_layout.hotbar_rail_width,
-            hud_layout.hotbar_rail_height,
-            2.0F,
-            rail_palette,
-            false);
+        if (modern_hud) {
+            append_modern_panel_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.hotbar_panel_x,
+                hud_layout.hotbar_panel_bottom,
+                hud_layout.hotbar_panel_width,
+                hud_layout.hotbar_panel_height,
+                4.0F,
+                dock_palette,
+                false);
+            append_modern_panel_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.hotbar_rail_x,
+                hud_layout.hotbar_rail_bottom,
+                hud_layout.hotbar_rail_width,
+                hud_layout.hotbar_rail_height,
+                2.0F,
+                rail_palette,
+                false);
+        } else {
+            append_stylized_panel_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.hotbar_panel_x,
+                hud_layout.hotbar_panel_bottom,
+                hud_layout.hotbar_panel_width,
+                hud_layout.hotbar_panel_height,
+                4.0F,
+                dock_palette,
+                false);
+            append_stylized_panel_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.hotbar_rail_x,
+                hud_layout.hotbar_rail_bottom,
+                hud_layout.hotbar_rail_width,
+                hud_layout.hotbar_rail_height,
+                2.0F,
+                rail_palette,
+                false);
+        }
         append_hud_rect(
             vertices,
             viewport_width,
@@ -8953,29 +12782,57 @@ void Renderer::draw_hotbar(const PlayerController& player,
             2.0F,
             {1.0F, 1.0F, 1.0F, 0.06F});
 
-        append_stylized_panel_bottom_left(
-            vertices,
-            viewport_width,
-            viewport_height,
-            hud_layout.hearts_panel_x,
-            hud_layout.hearts_panel_bottom,
-            hud_layout.hearts_panel_width,
-            hud_layout.hearts_panel_height,
-            3.0F,
-            heart_panel_palette,
-            false);
-        if (hud_layout.air_visible) {
+        if (modern_hud) {
+            append_modern_panel_bottom_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                hud_layout.hearts_panel_x,
+                hud_layout.hearts_panel_bottom,
+                hud_layout.hearts_panel_width,
+                hud_layout.hearts_panel_height,
+                3.0F,
+                heart_panel_palette,
+                false);
+        } else {
             append_stylized_panel_bottom_left(
                 vertices,
                 viewport_width,
                 viewport_height,
-                hud_layout.bubbles_panel_x,
-                hud_layout.bubbles_panel_bottom,
-                hud_layout.bubbles_panel_width,
-                hud_layout.bubbles_panel_height,
+                hud_layout.hearts_panel_x,
+                hud_layout.hearts_panel_bottom,
+                hud_layout.hearts_panel_width,
+                hud_layout.hearts_panel_height,
                 3.0F,
-                bubble_panel_palette,
+                heart_panel_palette,
                 false);
+        }
+        if (hud_layout.air_visible) {
+            if (modern_hud) {
+                append_modern_panel_bottom_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    hud_layout.bubbles_panel_x,
+                    hud_layout.bubbles_panel_bottom,
+                    hud_layout.bubbles_panel_width,
+                    hud_layout.bubbles_panel_height,
+                    3.0F,
+                    bubble_panel_palette,
+                    false);
+            } else {
+                append_stylized_panel_bottom_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    hud_layout.bubbles_panel_x,
+                    hud_layout.bubbles_panel_bottom,
+                    hud_layout.bubbles_panel_width,
+                    hud_layout.bubbles_panel_height,
+                    3.0F,
+                    bubble_panel_palette,
+                    false);
+            }
         }
 
         for (const auto& heart : hud_layout.hearts) {
@@ -8990,20 +12847,34 @@ void Renderer::draw_hotbar(const PlayerController& player,
         const auto stack_pixel_size = std::max(2.0F, static_cast<float>(std::floor(hud_layout.hotbar.slot_size / 18.0F)));
         for (const auto& slot : hud_layout.slots) {
             const auto palette = build_slot_palette(slot.slot, slot.is_selected, false, true);
-            append_stylized_slot_bottom_left(
-                vertices,
-                viewport_width,
-                viewport_height,
-                slot.x,
-                slot.bottom,
-                slot.size,
-                palette,
-                slot.has_icon);
+            if (modern_hud) {
+                append_modern_slot_bottom_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    slot.x,
+                    slot.bottom,
+                    slot.size,
+                    palette,
+                    slot.has_icon);
+            } else {
+                append_stylized_slot_bottom_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    slot.x,
+                    slot.bottom,
+                    slot.size,
+                    palette,
+                    slot.has_icon);
+            }
 
             if (!slot.has_icon) {
                 continue;
             }
 
+            const auto icon_texture_mode =
+                hud_item_texture_mode(slot.slot.block_id);
             append_hud_quad(
                 vertices,
                 viewport_width,
@@ -9013,8 +12884,10 @@ void Renderer::draw_hotbar(const PlayerController& player,
                 slot.icon_size,
                 slot.icon_size,
                 {1.0F, 1.0F, 1.0F, slot.is_selected ? 1.0F : 0.98F},
-                atlas_uv_rect(slot.icon_tile),
-                1.0F);
+                icon_texture_mode > 2.5F
+                    ? std::array<float, 4> {0.0F, 1.0F, 1.0F, 0.0F}
+                    : atlas_uv_rect(slot.icon_tile),
+                icon_texture_mode);
             if (slot.show_stack_count) {
                 append_stack_count_bottom_left(
                     vertices,
@@ -9035,18 +12908,41 @@ void Renderer::draw_hotbar(const PlayerController& player,
             const auto label_height = hud_layout.label.height + label_padding_y * 2.0F;
             const auto label_x = hud_layout.label.center_x - label_width * 0.5F;
             const auto label_y = bottom_to_top_left_y(viewport_height, hud_layout.label.bottom, label_height);
-            const auto label_palette = make_warm_panel_palette(ui_material_accent(hotbar.selected_slot().block_id));
-            append_stylized_panel_top_left(
-                vertices,
-                viewport_width,
-                viewport_height,
-                label_x,
-                label_y,
-                label_width,
-                label_height,
-                3.0F,
-                label_palette,
-                true);
+            const auto label_accent =
+                ui_material_accent(
+                    hotbar.selected_slot().block_id);
+            const auto label_palette =
+                modern_hud
+                    ? make_modern_glass_panel_palette(
+                          label_accent,
+                          0.18F)
+                    : make_warm_panel_palette(
+                          label_accent);
+            if (modern_hud) {
+                append_modern_panel_top_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    label_x,
+                    label_y,
+                    label_width,
+                    label_height,
+                    3.0F,
+                    label_palette,
+                    true);
+            } else {
+                append_stylized_panel_top_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    label_x,
+                    label_y,
+                    label_width,
+                    label_height,
+                    3.0F,
+                    label_palette,
+                    true);
+            }
             draw_text_bottom(
                 hud_layout.label.center_x,
                 hud_layout.label.bottom + label_padding_y - 1.0F,
@@ -9063,9 +12959,7 @@ void Renderer::draw_hotbar(const PlayerController& player,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
@@ -9323,9 +13217,7 @@ void Renderer::draw_maritime_hud(const MaritimeHudView& maritime_hud, int width,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
@@ -9425,9 +13317,7 @@ void Renderer::draw_gameplay_announcement(const GameplayHudAnnouncementView& ann
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
@@ -9662,11 +13552,7 @@ void Renderer::draw_command_console(
         GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(
-        GL_TEXTURE_2D,
-        atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(
@@ -10054,6 +13940,8 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
 
             const auto icon_size = std::max(8.0F, slot.size - layout.icon_inset * 2.0F);
             const auto icon_offset = (slot.size - icon_size) * 0.5F;
+            const auto icon_texture_mode =
+                hud_item_texture_mode(slot.slot.block_id);
             append_hud_quad_top_left(
                 vertices,
                 viewport_width,
@@ -10063,8 +13951,10 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
                 icon_size,
                 icon_size,
                 {1.0F, 1.0F, 1.0F, 1.0F},
-                atlas_uv_rect(slot.icon_tile),
-                1.0F);
+                icon_texture_mode > 2.5F
+                    ? std::array<float, 4> {0.0F, 1.0F, 1.0F, 0.0F}
+                    : atlas_uv_rect(slot.icon_tile),
+                icon_texture_mode);
             append_stack_count(
                 vertices,
                 viewport_width,
@@ -10097,6 +13987,8 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
         if (focus_item.has_item) {
             const auto icon_size = std::max(12.0F, detail_slot_size - detail_padding * 1.40F);
             const auto icon_offset = (detail_slot_size - icon_size) * 0.5F;
+            const auto icon_texture_mode =
+                hud_item_texture_mode(focus_item.slot.block_id);
             append_hud_quad_top_left(
                 vertices,
                 viewport_width,
@@ -10106,8 +13998,12 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
                 icon_size,
                 icon_size,
                 {1.0F, 1.0F, 1.0F, 1.0F},
-                atlas_uv_rect(inventory_slot_icon_tile(focus_item.slot.block_id)),
-                1.0F);
+                icon_texture_mode > 2.5F
+                    ? std::array<float, 4> {0.0F, 1.0F, 1.0F, 0.0F}
+                    : atlas_uv_rect(
+                          inventory_slot_icon_tile(
+                              focus_item.slot.block_id)),
+                icon_texture_mode);
             append_stack_count(
                 vertices,
                 viewport_width,
@@ -10319,6 +14215,9 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
 
             const auto icon_size = std::max(8.0F, carried_size - layout.icon_inset * 2.0F);
             const auto icon_offset = (carried_size - icon_size) * 0.5F;
+            const auto icon_texture_mode =
+                hud_item_texture_mode(
+                    inventory_menu.carried_slot.block_id);
             append_hud_quad_top_left(
                 vertices,
                 viewport_width,
@@ -10328,8 +14227,12 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
                 icon_size,
                 icon_size,
                 {1.0F, 1.0F, 1.0F, 1.0F},
-                atlas_uv_rect(inventory_slot_icon_tile(inventory_menu.carried_slot.block_id)),
-                1.0F);
+                icon_texture_mode > 2.5F
+                    ? std::array<float, 4> {0.0F, 1.0F, 1.0F, 0.0F}
+                    : atlas_uv_rect(
+                          inventory_slot_icon_tile(
+                              inventory_menu.carried_slot.block_id)),
+                icon_texture_mode);
             append_stack_count(
                 vertices,
                 viewport_width,
@@ -10347,9 +14250,7 @@ void Renderer::draw_inventory_menu(const InventoryMenuState& inventory_menu, con
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
@@ -10512,9 +14413,7 @@ void Renderer::draw_death_screen(const DeathScreenState& death_screen, int width
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
@@ -10833,9 +14732,7 @@ void Renderer::draw_pause_menu(const PauseMenuState& pause_menu, int width, int 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
 
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
@@ -10959,9 +14856,7 @@ void Renderer::draw_main_menu(const MainMenuState& main_menu, int width, int hei
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);
@@ -11119,9 +15014,7 @@ void Renderer::draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);
@@ -11205,9 +15098,7 @@ void Renderer::draw_options_menu(const OptionsMenuState& options_menu, int width
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);
@@ -11290,9 +15181,7 @@ void Renderer::draw_confirm_dialog(const ConfirmDialogState& confirm_dialog, int
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(hud_program_);
-    glUniform1i(hud_uniforms_.atlas, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_hud_textures();
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);

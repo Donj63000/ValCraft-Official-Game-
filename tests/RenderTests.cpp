@@ -1,12 +1,14 @@
 #include "app/LoadingScreen.h"
 #include "render/ShadowCulling.h"
 #include "render/ItemDropGeometry.h"
+#include "render/ModernHudStyle.h"
 #include "render/SceneSamplerBindings.h"
 #include "render/RendererQuality.h"
 #include "render/Renderer.h"
 #include "render/ShipMesh.h"
 #include "render/ShipProtectionShaderSource.h"
 #include "render/SkyShaderSource.h"
+#include "render/VisualPipeline.h"
 #include "world/BlockVisuals.h"
 
 #include <doctest/doctest.h>
@@ -203,6 +205,107 @@ TEST_CASE("renderer world resource reset progress handles initial empty and incr
     progress.consume_one();
     CHECK(progress.complete());
     CHECK(progress.remaining() == 0U);
+}
+
+TEST_CASE("visual pipeline contract keeps the legacy image as the renderer default") {
+    constexpr RendererOptions default_options {};
+    constexpr RendererFrameStats default_stats {};
+
+    CHECK(default_options.visual_pipeline ==
+          VisualPipeline::LegacyVoxel);
+    CHECK(default_stats.visual_pipeline ==
+          VisualPipeline::LegacyVoxel);
+    CHECK(visual_pipeline_name(VisualPipeline::LegacyVoxel) ==
+          std::string_view {"legacy"});
+    CHECK(visual_pipeline_name(VisualPipeline::ModernStylized) ==
+          std::string_view {"modern"});
+    CHECK_FALSE(
+        is_modern_visual_pipeline(VisualPipeline::LegacyVoxel));
+    CHECK(
+        is_modern_visual_pipeline(VisualPipeline::ModernStylized));
+    CHECK(parse_visual_pipeline("legacy") ==
+          VisualPipeline::LegacyVoxel);
+    CHECK(parse_visual_pipeline("modern") ==
+          VisualPipeline::ModernStylized);
+    CHECK_FALSE(parse_visual_pipeline("").has_value());
+    CHECK_FALSE(parse_visual_pipeline("stylized").has_value());
+
+    CHECK(visual_pipeline_post_contrast(
+              VisualPipeline::LegacyVoxel,
+              1.12F) ==
+          doctest::Approx(1.12F));
+    CHECK(visual_pipeline_post_contrast(
+              VisualPipeline::ModernStylized,
+              1.12F) ==
+          doctest::Approx(1.04F));
+    CHECK(visual_pipeline_glow_threshold(
+              VisualPipeline::LegacyVoxel,
+              0.78F) ==
+          doctest::Approx(0.78F));
+    CHECK(visual_pipeline_glow_threshold(
+              VisualPipeline::ModernStylized,
+              0.78F) ==
+          doctest::Approx(0.90F));
+    CHECK(visual_pipeline_glow_threshold(
+              VisualPipeline::ModernStylized,
+              0.96F) ==
+          doctest::Approx(1.0F));
+    CHECK(visual_pipeline_glow_strength(
+              VisualPipeline::LegacyVoxel,
+              0.20F) ==
+          doctest::Approx(0.20F));
+    CHECK(visual_pipeline_glow_strength(
+              VisualPipeline::ModernStylized,
+              0.20F) ==
+          doctest::Approx(0.11F));
+
+    auto modern_options = default_options;
+    modern_options.visual_pipeline =
+        VisualPipeline::ModernStylized;
+    CHECK(modern_options != default_options);
+}
+
+TEST_CASE("modern HUD rounded geometry stays finite and bounded") {
+    const auto compact =
+        modern_hud_rounded_rect_metrics(
+            48.0F,
+            48.0F,
+            9.0F);
+    CHECK(compact.radius == doctest::Approx(9.0F));
+    CHECK(compact.corner_segments >= 4);
+    CHECK(compact.corner_segments <= 10);
+    CHECK(compact.vertex_count >= 54U);
+    CHECK(compact.vertex_count <= 138U);
+
+    const auto ultrawide =
+        modern_hud_rounded_rect_metrics(
+            3840.0F,
+            120.0F,
+            64.0F);
+    CHECK(ultrawide.radius == doctest::Approx(60.0F));
+    CHECK(ultrawide.corner_segments == 10);
+    CHECK(ultrawide.vertex_count <= 138U);
+
+    const auto clamped_radius =
+        modern_hud_panel_radius(
+            40.0F,
+            18.0F,
+            12.0F);
+    CHECK(clamped_radius > 0.0F);
+    CHECK(clamped_radius <= 9.0F);
+
+    CHECK(
+        modern_hud_rounded_rect_metrics(
+            std::numeric_limits<float>::quiet_NaN(),
+            20.0F,
+            4.0F)
+            .vertex_count == 0U);
+    CHECK(
+        modern_hud_rounded_rect_metrics(
+            20.0F,
+            -1.0F,
+            4.0F)
+            .corner_segments == 0);
 }
 
 TEST_CASE("renderer ship mesh cache remains not ready until revision renderer and gpu agree") {
@@ -409,6 +512,69 @@ TEST_CASE("gpu timer conversion keeps asynchronous query units explicit") {
     CHECK(gpu_elapsed_nanoseconds_to_milliseconds(0U) == doctest::Approx(0.0));
     CHECK(gpu_elapsed_nanoseconds_to_milliseconds(1'000'000U) == doctest::Approx(1.0));
     CHECK(gpu_elapsed_nanoseconds_to_milliseconds(16'666'667U) == doctest::Approx(16.666667));
+}
+
+TEST_CASE("adaptive frame timing follows the slowest valid CPU or GPU sample") {
+    const auto cpu_bound =
+        resolve_adaptive_frame_time_sample(
+            4.0,
+            true,
+            24.0,
+            true);
+    REQUIRE(cpu_bound.valid);
+    CHECK(cpu_bound.frame_time_ms ==
+          doctest::Approx(24.0));
+
+    const auto gpu_bound =
+        resolve_adaptive_frame_time_sample(
+            31.0,
+            true,
+            7.0,
+            true);
+    REQUIRE(gpu_bound.valid);
+    CHECK(gpu_bound.frame_time_ms ==
+          doctest::Approx(31.0));
+
+    const auto cpu_only =
+        resolve_adaptive_frame_time_sample(
+            0.0,
+            false,
+            18.5,
+            true);
+    REQUIRE(cpu_only.valid);
+    CHECK(cpu_only.frame_time_ms ==
+          doctest::Approx(18.5));
+
+    const auto invalid =
+        resolve_adaptive_frame_time_sample(
+            std::numeric_limits<double>::quiet_NaN(),
+            true,
+            -1.0,
+            true);
+    CHECK_FALSE(invalid.valid);
+}
+
+TEST_CASE("adaptive stream radius sheds world work progressively") {
+    CHECK(
+        resolve_adaptive_stream_radius(
+            5,
+            RendererQuality::High) == 5);
+    CHECK(
+        resolve_adaptive_stream_radius(
+            5,
+            RendererQuality::Medium) == 4);
+    CHECK(
+        resolve_adaptive_stream_radius(
+            5,
+            RendererQuality::Low) == 3);
+    CHECK(
+        resolve_adaptive_stream_radius(
+            1,
+            RendererQuality::Low) == 0);
+    CHECK(
+        resolve_adaptive_stream_radius(
+            -4,
+            RendererQuality::Medium) == 0);
 }
 
 TEST_CASE("dynamic renderer quality downgrades quickly and upgrades with hysteresis") {

@@ -20,6 +20,11 @@
 #include "render/ItemDropGeometry.h"
 #include "render/RendererQuality.h"
 #include "render/ShadowCulling.h"
+#include "render/StylizedShipMesh.h"
+#include "render/VisualEntityPrimitives.h"
+#include "render/VisualMaterials.h"
+#include "render/VisualMesh.h"
+#include "render/VisualPipeline.h"
 #include "world/Environment.h"
 #include "world/PrecipitationField.h"
 #include "world/World.h"
@@ -28,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -87,26 +93,39 @@ private:
 
 class RendererShipMeshCacheState {
 public:
-    void remember(std::uint64_t geometry_revision, std::size_t part_count) noexcept {
+    void remember(
+        std::uint64_t geometry_revision,
+        std::size_t part_count,
+        std::uint8_t visual_variant = 0U) noexcept {
         geometry_revision_ = geometry_revision;
         part_count_ = part_count;
+        visual_variant_ = visual_variant;
     }
 
     void reset() noexcept {
         geometry_revision_ = 0U;
         part_count_ = 0U;
+        visual_variant_ = 0U;
     }
 
-    [[nodiscard]] auto matches(std::uint64_t geometry_revision, std::size_t part_count) const noexcept -> bool {
+    [[nodiscard]] auto matches(
+        std::uint64_t geometry_revision,
+        std::size_t part_count,
+        std::uint8_t visual_variant = 0U) const noexcept -> bool {
         return geometry_revision != 0U && part_count > 0U &&
-               geometry_revision_ == geometry_revision && part_count_ == part_count;
+               geometry_revision_ == geometry_revision &&
+               part_count_ == part_count &&
+               visual_variant_ == visual_variant;
     }
 
     [[nodiscard]] auto ready(std::uint64_t geometry_revision,
                              std::size_t part_count,
                              bool renderer_initialized,
-                             bool gpu_mesh_ready) const noexcept -> bool {
-        return renderer_initialized && gpu_mesh_ready && matches(geometry_revision, part_count);
+                             bool gpu_mesh_ready,
+                             std::uint8_t visual_variant = 0U) const noexcept -> bool {
+        return renderer_initialized &&
+               gpu_mesh_ready &&
+               matches(geometry_revision, part_count, visual_variant);
     }
 
 private:
@@ -114,6 +133,7 @@ private:
     // accidentelle d'un span qui pourrait etre reutilisee apres un rechargement.
     std::uint64_t geometry_revision_ = 0U;
     std::size_t part_count_ = 0U;
+    std::uint8_t visual_variant_ = 0U;
 };
 
 struct RendererOptions {
@@ -123,6 +143,7 @@ struct RendererOptions {
     bool collect_detailed_stats = false;
     float viewmodel_fov_degrees = 62.0F;
     RendererQuality quality = RendererQuality::High;
+    VisualPipeline visual_pipeline = VisualPipeline::LegacyVoxel;
 
     auto operator==(const RendererOptions&) const -> bool = default;
 };
@@ -160,6 +181,7 @@ struct RendererFrameStats {
     std::uint64_t gpu_buffer_bytes = 0;
     std::uint64_t gpu_texture_bytes = 0;
     RendererQuality resolved_quality = RendererQuality::High;
+    VisualPipeline visual_pipeline = VisualPipeline::LegacyVoxel;
     double adaptive_frame_ema_ms = 0.0;
     double adaptive_frame_p95_ms = 0.0;
     RendererGpuTimings gpu {};
@@ -290,7 +312,12 @@ public:
     auto upload_prepared_ship_mesh(const ShipRenderState& ship, const ChunkMeshData& mesh) -> bool;
     [[nodiscard]] auto ship_mesh_ready(const ShipRenderState& ship) const noexcept -> bool;
     [[nodiscard]] auto world_mesh_uploaded(const ChunkCoord& coord, std::uint64_t revision) const noexcept -> bool;
+    void submit_cpu_frame_time_sample(double active_frame_time_ms) noexcept;
     [[nodiscard]] auto last_frame_stats() const noexcept -> const RendererFrameStats&;
+    [[nodiscard]] auto material_pack_version() const noexcept -> std::uint16_t;
+    [[nodiscard]] auto material_pack_checksum() const noexcept -> std::uint64_t;
+    [[nodiscard]] auto last_initialization_error() const noexcept
+        -> std::string_view;
 
 private:
     enum class GpuTimedPass : std::size_t {
@@ -319,19 +346,83 @@ private:
         GLuint vbo = 0;
         GLuint ebo = 0;
         GLsizei opaque_index_count = 0;
+        GLuint water_vao = 0;
+        GLuint water_vbo = 0;
+        GLuint water_ebo = 0;
         GLsizei water_index_count = 0;
-        GLsizeiptr water_index_offset_bytes = 0;
         std::uint64_t revision = 0;
         GLsizeiptr vertex_buffer_bytes = 0;
         GLsizeiptr index_buffer_bytes = 0;
+        GLsizeiptr water_vertex_buffer_bytes = 0;
+        GLsizeiptr water_index_buffer_bytes = 0;
+        GLuint terrain_vao = 0;
+        GLuint terrain_vbo = 0;
+        GLuint terrain_ebo = 0;
+        GLsizei terrain_index_count = 0;
+        GLsizeiptr terrain_vertex_buffer_bytes = 0;
+        GLsizeiptr terrain_index_buffer_bytes = 0;
+        GLuint architecture_vao = 0;
+        GLuint architecture_vbo = 0;
+        GLuint architecture_ebo = 0;
+        GLsizei architecture_opaque_index_count = 0;
+        GLsizei architecture_transparent_index_count = 0;
+        GLsizeiptr architecture_transparent_index_offset_bytes = 0;
+        GLsizeiptr architecture_vertex_buffer_bytes = 0;
+        GLsizeiptr architecture_index_buffer_bytes = 0;
         ChunkBounds bounds {};
+    };
+
+    struct EntityPrimitiveDrawRange {
+        std::size_t first_index = 0U;
+        GLsizei index_count = 0;
+        StylizedPrimitiveType primitive =
+            StylizedPrimitiveType::RoundedBox;
+        StylizedPrimitiveLod lod = StylizedPrimitiveLod::Medium;
+    };
+
+    struct ModernTerrainUniformLocations {
+        GLint model = -1;
+        GLint view_projection = -1;
+        GLint light_view_projection = -1;
+        GLint light_view_projection_far = -1;
+        GLint camera_position = -1;
+        GLint camera_forward = -1;
+        GLint sun_direction = -1;
+        GLint sun_color = -1;
+        GLint ambient_color = -1;
+        GLint fog_color = -1;
+        GLint distant_fog_color = -1;
+        GLint night_tint_color = -1;
+        GLint daylight_factor = -1;
+        GLint sun_visibility = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
+        GLint triplanar_sharpness = -1;
+        GLint material_detail_scale = -1;
+        GLint shadows_enabled = -1;
+        GLint material_albedo = -1;
+        GLint material_normal_height = -1;
+        GLint material_orm_emission = -1;
+        GLint shadow_map = -1;
+        GLint shadow_map_far = -1;
+        GLint shadow_cascade_count = -1;
+        GLint shadow_split_distance = -1;
+        GLint shadow_transition_width = -1;
+    };
+
+    struct ModernTerrainShadowUniformLocations {
+        GLint model = -1;
+        GLint light_view_projection = -1;
     };
 
     struct WorldUniformLocations {
         GLint model = -1;
         GLint view_projection = -1;
         GLint light_view_projection = -1;
+        GLint light_view_projection_far = -1;
         GLint camera_position = -1;
+        GLint camera_forward = -1;
         GLint sun_direction = -1;
         GLint sun_color = -1;
         GLint ambient_color = -1;
@@ -361,6 +452,10 @@ private:
         GLint ocean_open_sea = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
+        GLint shadow_map_far = -1;
+        GLint shadow_cascade_count = -1;
+        GLint shadow_split_distance = -1;
+        GLint shadow_transition_width = -1;
         GLint scene_color = -1;
         GLint scene_depth = -1;
         GLint inverse_view_projection = -1;
@@ -387,6 +482,8 @@ private:
 
     struct HudUniformLocations {
         GLint atlas = -1;
+        GLint font_atlas = -1;
+        GLint model_icon_atlas = -1;
     };
 
     struct SkyUniformLocations {
@@ -427,6 +524,8 @@ private:
         GLint glow_strength = -1;
         GLint sharpen_strength = -1;
         GLint edge_strength = -1;
+        GLint fxaa_enabled = -1;
+        GLint modern_pipeline = -1;
         GLint storm_intensity = -1;
         GLint lightning_intensity = -1;
         GLint weather_exposure = -1;
@@ -490,7 +589,9 @@ private:
     struct CreatureUniformLocations {
         GLint view_projection = -1;
         GLint light_view_projection = -1;
+        GLint light_view_projection_far = -1;
         GLint camera_position = -1;
+        GLint camera_forward = -1;
         GLint sun_direction = -1;
         GLint sun_color = -1;
         GLint ambient_color = -1;
@@ -509,10 +610,15 @@ private:
         GLint lightning_intensity = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
+        GLint shadow_map_far = -1;
+        GLint shadow_cascade_count = -1;
+        GLint shadow_split_distance = -1;
+        GLint shadow_transition_width = -1;
         GLint shadows_enabled = -1;
         GLint time_of_day = -1;
         GLint player_light_strength = -1;
         GLint super_vision_strength = -1;
+        GLint modern_pipeline = -1;
     };
 
     struct VisibleChunk {
@@ -656,14 +762,36 @@ private:
     };
 
     void sync_gpu_meshes(World& world, RendererFrameStats& frame_stats, std::size_t max_events, double max_ms);
-    void upload_mesh(const ChunkCoord& coord, const ChunkMeshData& mesh, std::uint64_t revision);
+    void upload_mesh(const ChunkCoord& coord,
+                     const ChunkMeshData& mesh,
+                     const OrganicTerrainMesh* terrain_mesh,
+                     const ArchitecturalMesh* architectural_mesh,
+                     std::uint64_t revision);
     void upload_mesh_data(GpuMesh& gpu_mesh, const ChunkMeshData& mesh, std::uint64_t revision, const ChunkBounds& bounds);
-    void ensure_ship_mesh(const ShipRenderState& ship);
+    void upload_terrain_mesh_data(GpuMesh& gpu_mesh, const OrganicTerrainMesh& mesh);
+    void upload_architectural_mesh_data(
+        GpuMesh& gpu_mesh,
+        const ArchitecturalMesh& mesh);
+    void ensure_ship_mesh(
+        const ShipRenderState& ship,
+        StylizedShipLod lod = StylizedShipLod::Near);
+    [[nodiscard]] auto ship_mesh_ready(
+        const ShipRenderState& ship,
+        StylizedShipLod lod) const noexcept -> bool;
     void destroy_gpu_mesh(GpuMesh& mesh);
     auto compile_shader(GLenum type, const char* source) -> GLuint;
     auto link_program(GLuint vertex_shader, GLuint fragment_shader) -> GLuint;
     void create_programs();
     void create_atlas_texture();
+    auto create_msdf_font_texture() -> bool;
+    void destroy_msdf_font_texture();
+    auto create_model_icon_texture() -> bool;
+    void destroy_model_icon_texture();
+    void bind_hud_textures();
+    [[nodiscard]] auto hud_item_texture_mode(
+        BlockId block_id) const noexcept -> float;
+    auto create_modern_material_textures() -> bool;
+    void destroy_modern_material_textures();
     void create_accent_texture();
     void create_creature_atlas_texture();
     void create_player_atlas_texture();
@@ -676,7 +804,9 @@ private:
     void create_old_guard_effect_geometry();
     void create_screen_quad_geometry();
     void create_crosshair_geometry();
-    void upload_block_break_overlay_mesh(const BlockBreakProgress& break_progress);
+    void upload_block_break_overlay_mesh(
+        const World& world,
+        const BlockBreakProgress& break_progress);
     void create_hud_geometry();
     void ensure_post_process_targets(int width, int height, bool require_glow_targets);
     void destroy_post_process_targets();
@@ -695,8 +825,13 @@ private:
     void draw_item_drops(std::span<const ItemDropRenderInstance> item_drops,
                          const glm::mat4& view_projection,
                          const glm::mat4& light_view_projection,
+                         const glm::mat4& light_view_projection_far,
+                         int shadow_cascade_count,
+                         float shadow_split_distance,
+                         float shadow_transition_width,
                          const glm::mat4& inverse_view_projection,
                          const glm::vec3& camera_position,
+                         const glm::vec3& camera_forward,
                          const EnvironmentState& environment,
                          bool sun_visible);
     void draw_creatures(std::span<const CreatureRenderInstance> creatures,
@@ -704,7 +839,12 @@ private:
                         std::span<const OldGuardRenderInstance> old_guard,
                         const glm::mat4& view_projection,
                         const glm::mat4& light_view_projection,
+                        const glm::mat4& light_view_projection_far,
+                        int shadow_cascade_count,
+                        float shadow_split_distance,
+                        float shadow_transition_width,
                         const glm::vec3& camera_position,
+                        const glm::vec3& camera_forward,
                         const EnvironmentState& environment,
                         bool player_light_active,
                         float super_vision_strength);
@@ -729,6 +869,15 @@ private:
                                std::span<const OldGuardRenderInstance> old_guard,
                                const glm::mat4& light_view_projection,
                                const glm::vec3& shadow_focus);
+    void prepare_visual_entity_batches(
+        std::span<const CreaturePartInstance> parts,
+        VisualEntityContext context,
+        const glm::vec3& focus,
+        bool simplified_shadow,
+        bool viewmodel);
+    void draw_visual_entity_batches(
+        GLuint instance_vbo,
+        GLsizeiptr& instance_buffer_bytes);
     [[nodiscard]] auto collect_visible_creature_parts(std::span<const CreatureRenderInstance> creatures,
                                                       std::span<const CrewRenderInstance> crew,
                                                       std::span<const OldGuardRenderInstance> old_guard,
@@ -743,7 +892,9 @@ private:
                                const glm::mat4& light_view_projection,
                                const glm::vec3& camera_position,
                                const EnvironmentState& environment);
-    void draw_block_break_overlay(const PlayerController& player);
+    void draw_block_break_overlay(
+        const World& world,
+        const PlayerController& player);
     void draw_hotbar(const PlayerController& player,
                      const HotbarState& hotbar,
                      const PlayerProgressionState& progression,
@@ -775,6 +926,9 @@ private:
     [[nodiscard]] auto estimate_gpu_texture_bytes() const noexcept -> std::uint64_t;
 
     GLuint world_program_ = 0;
+    GLuint modern_terrain_program_ = 0;
+    GLuint modern_architecture_program_ = 0;
+    GLuint modern_terrain_shadow_program_ = 0;
     GLuint creature_program_ = 0;
     GLuint creature_shadow_program_ = 0;
     GLuint item_drop_program_ = 0;
@@ -789,11 +943,18 @@ private:
     GLuint glow_blur_program_ = 0;
     GLuint menu_background_program_ = 0;
     GLuint atlas_texture_ = 0;
+    GLuint msdf_font_texture_ = 0;
+    GLuint model_icon_texture_ = 0;
+    GLuint modern_material_albedo_texture_ = 0;
+    GLuint modern_material_normal_height_texture_ = 0;
+    GLuint modern_material_orm_emission_texture_ = 0;
     GLuint accent_texture_ = 0;
     GLuint creature_atlas_texture_ = 0;
     GLuint player_atlas_texture_ = 0;
     GLuint shadow_map_ = 0;
     GLuint shadow_framebuffer_ = 0;
+    GLuint shadow_map_far_ = 0;
+    GLuint shadow_framebuffer_far_ = 0;
     GLuint scene_fallback_color_texture_ = 0;
     GLuint scene_fallback_depth_texture_ = 0;
     GLuint water_scene_framebuffer_ = 0;
@@ -833,6 +994,9 @@ private:
     RendererQualitySettings active_quality_settings_ {};
     RendererAdaptiveQualityController adaptive_quality_controller_ {};
     WorldUniformLocations world_uniforms_ {};
+    ModernTerrainUniformLocations modern_terrain_uniforms_ {};
+    ModernTerrainUniformLocations modern_architecture_uniforms_ {};
+    ModernTerrainShadowUniformLocations modern_terrain_shadow_uniforms_ {};
     CreatureUniformLocations creature_uniforms_ {};
     GLint creature_shadow_light_view_projection_ = -1;
     WorldUniformLocations item_drop_uniforms_ {};
@@ -855,6 +1019,12 @@ private:
     GLsizeiptr creature_instance_buffer_bytes_ = 0;
     GLsizeiptr viewmodel_instance_buffer_bytes_ = 0;
     GLsizeiptr item_drop_instance_buffer_bytes_ = 0;
+    GLsizeiptr creature_template_vertex_buffer_bytes_ = 0;
+    GLsizeiptr creature_template_index_buffer_bytes_ = 0;
+    GLsizeiptr item_drop_template_vertex_buffer_bytes_ = 0;
+    GLsizeiptr item_drop_template_index_buffer_bytes_ = 0;
+    GLsizei creature_template_index_count_ = 0;
+    GLsizei item_drop_template_index_count_ = 0;
     GLsizeiptr precipitation_instance_buffer_bytes_ = 0;
     GLsizeiptr old_guard_effect_instance_buffer_bytes_ = 0;
     GLsizeiptr hud_vertex_buffer_bytes_ = 0;
@@ -864,8 +1034,18 @@ private:
     std::vector<PrecipitationGpuInstance> precipitation_instances_scratch_ {};
     std::vector<OldGuardEffectGpuInstance> old_guard_effect_instances_scratch_ {};
     std::vector<CreaturePartInstance> creature_parts_scratch_ {};
-    std::vector<std::uint32_t> translated_water_indices_scratch_ {};
+    std::array<
+        std::vector<CreaturePartInstance>,
+        kVisualEntityPrimitiveTypeCount * kVisualEntityPrimitiveLodCount>
+        visual_entity_batches_ {};
+    std::array<
+        EntityPrimitiveDrawRange,
+        kVisualEntityPrimitiveTypeCount * kVisualEntityPrimitiveLodCount>
+        visual_entity_draw_ranges_ {};
     ChunkMeshData chunk_upload_scratch_ {};
+    OrganicTerrainMesh terrain_upload_scratch_ {};
+    ArchitecturalMesh architecture_upload_scratch_ {};
+    std::vector<std::uint32_t> architecture_indices_scratch_ {};
     ChunkMeshData block_break_overlay_scratch_ {};
     std::vector<HudVertex> loading_vertices_scratch_ {};
     std::vector<HudVertex> gameplay_announcement_vertices_scratch_ {};
@@ -892,14 +1072,32 @@ private:
     RendererGpuTimings last_gpu_timings_ {};
     std::uint64_t gpu_frame_index_ = 0;
     std::uint64_t adaptive_last_gpu_source_frame_ = 0;
+    double pending_cpu_frame_time_ms_ = 0.0;
+    std::uint64_t material_pack_checksum_ = 0;
+    std::uint16_t material_pack_version_ = 0;
+    std::uint16_t material_pack_width_ = 0;
+    std::uint16_t material_pack_height_ = 0;
+    std::uint16_t material_pack_layers_ = 0;
+    std::uint16_t material_pack_mips_ = 0;
+    std::uint32_t msdf_font_width_ = 0;
+    std::uint32_t msdf_font_height_ = 0;
+    std::uint32_t msdf_font_mips_ = 0;
+    std::uint16_t model_icon_width_ = 0;
+    std::uint16_t model_icon_height_ = 0;
+    std::uint16_t model_icon_layers_ = 0;
+    std::uint16_t model_icon_mips_ = 0;
+    std::array<std::uint16_t, 256> model_icon_layer_by_block_ {};
+    std::string last_initialization_error_ {};
     std::size_t frame_draw_calls_ = 0;
     std::uint64_t frame_triangles_ = 0;
     std::uint64_t frame_uploaded_bytes_ = 0;
     RendererResourceResetProgress world_resource_reset_progress_ {};
     RendererShipMeshCacheState ship_mesh_cache_ {};
+    StylizedShipLod active_ship_lod_ = StylizedShipLod::Near;
     int active_gpu_query_frame_ = -1;
     int active_gpu_pass_ = -1;
     bool adaptive_gpu_sample_consumed_ = false;
+    bool pending_cpu_frame_time_valid_ = false;
     bool gpu_timers_supported_ = false;
     bool gl_api_ready_ = false;
     bool initialized_ = false;

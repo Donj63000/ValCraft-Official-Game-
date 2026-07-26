@@ -1,0 +1,31 @@
+ValCraft audit summary [sea_tempest]
+  session_id=20260726-191247-323-3060-0 mode=measure status=completed
+  duration_seconds=4.875 recorded_frames=480 written_frames=67 dropped_frames=0 second_samples=5 dropped_second_samples=0
+  events_written=47 events_dropped=0 spike_windows=15
+  run_directory=C:\Users\nodig\CLionProjects\ValCraft\performancesaudit\perf-suite\codex-fps-sea-20260726-2115\runs\20260726-191247-20260726-191247-323-3060-0-measure-sea_tempest
+ValCraft performance summary [sea_tempest]
+  capture_mode=measure
+  visual_pipeline=modern material_pack_version=1 material_pack_checksum=0x1e684b7f8a55b223
+  render_flags shadows=on post_process=on shadow_map_size=1024
+  frame_total_ms_avg=8.024 p95=21.557 p99=34.060 max=66.081
+  cpu_stages_ms_avg events=0.018 simulation=0.186 audio=0.079 render_prep=0.004 render=3.541 render_overhead=0.108 present=2.140 telemetry=0.090 residual=0.166
+  streaming_ms_avg=0.069 p95=0.003 max=24.146
+  generation_ms_avg=0.019 p95=0.004 max=6.211 chunks_max=0
+  fluid_ms_avg=0.534 p95=1.234 max=26.692 cells_max=256 pending_max=64283
+  lighting_ms_avg=0.081 p95=0.002 max=3.935 nodes_max=5025 jobs_total=12
+  meshing_ms_avg=1.097 p95=3.264 max=20.403 chunks_max=3
+  upload_ms_avg=0.016 p95=0.102 max=0.809 uploads_max=3
+  shadow_ms_avg=0.913 p95=2.572 max=8.239 chunks_max=30
+  world_ms_avg=2.504 p95=6.060 max=23.504 chunks_max=16
+  gpu_ms_avg frame=5.571 shadow=0.354 world=1.899 sky=0.741 water=1.542 entities=0.128 post=0.805 hud=0.103
+  render_categories_cpu_ms_avg terrain=2.504 vegetation=0.000 entities=0.000 ship=0.000 water=0.000 atmosphere=0.000 post_process=0.000 ui=0.000 shadows=0.913
+  render_categories_gpu_ms_avg terrain=1.899 vegetation=0.000 entities=0.128 ship=0.000 water=1.542 atmosphere=0.741 post_process=0.805 ui=0.103 shadows=0.354
+  memory_peak_mib working_set=339.859 private=351.031 world=23.568 mesh=6.335 overrides=0.137 gpu_buffers=9.248 gpu_textures=61.322
+  pending_generation_avg=0.000 max=0
+  pending_mesh_avg=83.986 max=119
+  pending_lighting_avg=0.178 max=9
+  visible_chunks_avg=13.658 max=16
+  lag_frames_16_7=27 lag_frames_33_3=5 lag_frames_50_0=1
+  hotspot_worst_frame=present spike_windows=15
+  events_total=0 block_breaks=0 block_places=0
+  scheduler_stream_changes=0 generation_enqueued=0 generation_pruned=0 unloaded_chunks=40

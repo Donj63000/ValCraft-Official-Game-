@@ -46,13 +46,18 @@ jobs:
 
       - name: Run performance suite
         run: |
-          $perfArgs = @(
-            "-BuildDir", (Join-Path $PWD "cmake-build-perf"),
-            "-ArtifactDir", (Join-Path $PWD "perf-artifacts"),
-            "-SmokeFrames", "${{ github.event.inputs.smoke_frames }}"
-          )
+          $perfArgs = @{
+            BuildDir = (Join-Path $PWD "cmake-build-perf")
+            ArtifactDir = (Join-Path $PWD "perf-artifacts")
+            Configuration = "Release"
+            SmokeFrames = [int]"${{ github.event.inputs.smoke_frames }}"
+            WarmupFrames = 180
+            Repetitions = 5
+            Scenarios = @("baseline", "world_stress", "sea_tempest", "terrain_edit_stress", "port_dense")
+            EnforceThresholds = $true
+          }
           if ("${{ github.event.inputs.trace }}" -eq "true") {
-            $perfArgs += "-Trace"
+            $perfArgs.Trace = $true
           }
           ./scripts/perf.ps1 @perfArgs
 

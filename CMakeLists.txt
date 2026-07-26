@@ -6,6 +6,16 @@ endif()
 
 project(ValCraft VERSION 0.1.0 LANGUAGES C CXX)
 
+# Je fournis explicitement à Ninja le préfixe /showIncludes français avec ses
+# espaces insécables. Sa détection automatique les réencodait sur certaines
+# consoles, supprimait les dépendances de headers et pouvait ainsi conserver
+# des objets ABI obsolètes.
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    set(CMAKE_C_CL_SHOWINCLUDES_PREFIX "Remarque : inclusion du fichier :")
+    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "Remarque : inclusion du fichier :")
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "Remarque : inclusion du fichier :")
+endif()
+
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
@@ -22,6 +32,7 @@ include(CheckIPOSupported)
 enable_testing()
 option(VALCRAFT_STRICT_WARNINGS "Enable strict warnings on project targets" ON)
 option(VALCRAFT_ENABLE_COVERAGE "Enable gcov coverage for critical modules" OFF)
+option(VALCRAFT_ENABLE_ADDRESS_SANITIZER "Instrument ValCraft targets with AddressSanitizer" OFF)
 option(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS "Register SDL/OpenGL smoke tests in the default CTest suite" ON)
 
 check_ipo_supported(RESULT VALCRAFT_IPO_SUPPORTED OUTPUT VALCRAFT_IPO_ERROR)
@@ -110,6 +121,22 @@ function(valcraft_enable_coverage_for target)
     target_link_options(${target} PRIVATE --coverage)
 endfunction()
 
+function(valcraft_enable_address_sanitizer_for target)
+    if(NOT VALCRAFT_ENABLE_ADDRESS_SANITIZER)
+        return()
+    endif()
+
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /fsanitize=address /Zi)
+        target_link_options(${target} PRIVATE /fsanitize=address /INCREMENTAL:NO)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address)
+    else()
+        message(FATAL_ERROR "AddressSanitizer is unsupported by this compiler")
+    endif()
+endfunction()
+
 function(valcraft_enable_ipo_for target)
     if(NOT VALCRAFT_IPO_SUPPORTED)
         return()
@@ -175,6 +202,8 @@ add_library(valcraft_core
     src/app/GameOptions.cpp
     src/app/ProcessMemory.cpp
     src/app/SaveGame.cpp
+    src/app/SmokeCamera.cpp
+    src/app/TerrainEditStress.cpp
     src/audio/ProceduralMusic.cpp
     src/audio/ProceduralSfx.cpp
     src/creatures/CrewAnimation.cpp
@@ -187,6 +216,7 @@ add_library(valcraft_core
     src/world/World.cpp
     src/world/WorldGenerator.cpp
     src/world/ChunkMesher.cpp
+    src/world/OrganicTerrainMesher.cpp
     src/world/Environment.cpp
     src/world/OceanSimulation.cpp
     src/world/PrecipitationField.cpp
@@ -199,7 +229,20 @@ add_library(valcraft_core
     src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp
     src/gameplay/OldGuard.cpp
+    src/render/ArchitecturalFixtureMesh.cpp
+    src/render/ArchitecturalMesher.cpp
     src/render/ItemDropGeometry.cpp
+    src/render/ModelIconAtlas.cpp
+    src/render/MsdfFontAtlas.cpp
+    src/render/ShadowCascades.cpp
+    src/render/StylizedPrimitives.cpp
+    src/render/StylizedShipMesh.cpp
+    src/render/TerrainVisualSample.cpp
+    src/render/VisualEntityPrimitives.cpp
+    src/render/VisualItemModel.cpp
+    src/render/VisualMaterials.cpp
+    src/render/VisualVegetation.cpp
+    src/render/VisualVegetationMesh.cpp
 )
 
 target_include_directories(valcraft_core
@@ -224,6 +267,7 @@ target_compile_definitions(valcraft_core
 )
 valcraft_apply_strict_warnings(valcraft_core)
 valcraft_enable_coverage_for(valcraft_core)
+valcraft_enable_address_sanitizer_for(valcraft_core)
 valcraft_enable_ipo_for(valcraft_core)
 
 add_executable(ValCraft
@@ -250,6 +294,7 @@ if(WIN32)
 endif()
 valcraft_apply_strict_warnings(ValCraft)
 valcraft_enable_coverage_for(ValCraft)
+valcraft_enable_address_sanitizer_for(ValCraft)
 valcraft_enable_ipo_for(ValCraft)
 
 valcraft_copy_runtime_dlls(ValCraft)
@@ -263,6 +308,22 @@ add_custom_command(TARGET ValCraft POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/Images/valcraft_icon.png
         $<TARGET_FILE_DIR:ValCraft>/Images/valcraft_icon.png
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:ValCraft>/assets/visual
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/visual/valcraft_visual_materials.vmp
+        $<TARGET_FILE_DIR:ValCraft>/assets/visual/valcraft_visual_materials.vmp
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/visual/valcraft_model_icons.vmia
+        $<TARGET_FILE_DIR:ValCraft>/assets/visual/valcraft_model_icons.vmia
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:ValCraft>/assets/fonts
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/valcraft_ui_font.msdfa
+        $<TARGET_FILE_DIR:ValCraft>/assets/fonts/valcraft_ui_font.msdfa
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/OFL.txt
+        $<TARGET_FILE_DIR:ValCraft>/assets/fonts/OFL.txt
 )
 
 add_executable(valcraft_tests
@@ -275,11 +336,31 @@ add_executable(valcraft_tests
     tests/OldGuardCombatTests.cpp
     tests/OldGuardSaveTests.cpp
     tests/OldGuardTests.cpp
+    tests/ArchitecturalFixtureMeshTests.cpp
+    tests/ArchitecturalMesherTests.cpp
+    tests/PerformanceReportV3Tests.cpp
+    tests/TerrainEditStressTests.cpp
     tests/RenderTests.cpp
+    tests/ModelIconAtlasTests.cpp
+    tests/MsdfFontAtlasTests.cpp
+    tests/ShadowCascadeTests.cpp
+    tests/SmokeCameraTests.cpp
+    tests/StylizedPrimitiveTests.cpp
+    tests/StylizedShipMeshTests.cpp
+    tests/TerrainVisualSampleTests.cpp
+    tests/VisualEntityPrimitiveTests.cpp
+    tests/VisualGameplayDifferentialTests.cpp
+    tests/VisualMaterialTests.cpp
+    tests/VisualRemeshStateTests.cpp
+    tests/VisualVegetationTests.cpp
+    tests/VisualVegetationMeshTests.cpp
+    tests/WaterVertexTests.cpp
     tests/ShipCrewTests.cpp
     tests/StartingPortTests.cpp
     tests/WorldSchedulingTests.cpp
     tests/WorldTests.cpp
+    tests/OrganicTerrainMesherTests.cpp
+    tests/VisualWorldTests.cpp
     tests/PlayerTests.cpp
     tests/PrecipitationTests.cpp
     tests/ProceduralSfxTests.cpp
@@ -294,14 +375,123 @@ target_link_libraries(valcraft_tests
 target_compile_definitions(valcraft_tests PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 valcraft_apply_strict_warnings(valcraft_tests)
 valcraft_enable_coverage_for(valcraft_tests)
+valcraft_enable_address_sanitizer_for(valcraft_tests)
 valcraft_copy_runtime_dlls(valcraft_tests)
 valcraft_copy_mingw_runtime_dlls(valcraft_tests)
+
+add_executable(valcraft_model_icon_atlas_tool EXCLUDE_FROM_ALL
+    tools/generate_model_icon_atlas.cpp
+)
+target_link_libraries(valcraft_model_icon_atlas_tool PRIVATE valcraft_core)
+valcraft_apply_strict_warnings(valcraft_model_icon_atlas_tool)
+valcraft_enable_address_sanitizer_for(valcraft_model_icon_atlas_tool)
+# Je rends l'outil disponible avant CTest, même lorsque la CI ne construit
+# explicitement que le binaire de tests.
+add_dependencies(valcraft_tests valcraft_model_icon_atlas_tool)
+
+add_custom_target(valcraft_regenerate_model_icon_atlas
+    COMMAND $<TARGET_FILE:valcraft_model_icon_atlas_tool>
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS valcraft_model_icon_atlas_tool
+    COMMENT "Regenerating deterministic model-based item icon atlas"
+    VERBATIM
+)
+
+add_custom_target(valcraft_check_model_icon_atlas
+    COMMAND $<TARGET_FILE:valcraft_model_icon_atlas_tool> --check
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS valcraft_model_icon_atlas_tool
+    COMMENT "Checking deterministic model-based item icon atlas"
+    VERBATIM
+)
+
+add_test(
+    NAME valcraft_model_icon_atlas_determinism
+    COMMAND $<TARGET_FILE:valcraft_model_icon_atlas_tool> --check
+)
+set_tests_properties(
+    valcraft_model_icon_atlas_determinism
+    PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        LABELS "assets;determinism;visual"
+)
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(valcraft_tests)
 
+find_program(
+    VALCRAFT_POWERSHELL_TEST_EXECUTABLE
+    NAMES pwsh powershell
+)
+if(VALCRAFT_POWERSHELL_TEST_EXECUTABLE)
+    add_test(
+        NAME valcraft_perf_script_self_test
+        COMMAND
+            ${VALCRAFT_POWERSHELL_TEST_EXECUTABLE}
+            -NoProfile
+            -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/scripts/perf.ps1
+            -SelfTest
+    )
+    set_tests_properties(
+        valcraft_perf_script_self_test
+        PROPERTIES LABELS "performance;script;unit"
+    )
+endif()
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_custom_target(valcraft_regenerate_visual_material_pack
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_visual_material_pack.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Regenerating deterministic stylized material pack"
+        VERBATIM
+    )
+
+    add_custom_target(valcraft_check_visual_material_pack
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_visual_material_pack.py --check
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Checking deterministic stylized material pack"
+        VERBATIM
+    )
+
+    add_custom_target(valcraft_regenerate_msdf_font_atlas
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_msdf_font_atlas.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Regenerating deterministic Montserrat UI font atlas"
+        VERBATIM
+    )
+
+    add_custom_target(valcraft_check_msdf_font_atlas
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_msdf_font_atlas.py --check
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Checking deterministic Montserrat UI font atlas"
+        VERBATIM
+    )
+
+    add_test(
+        NAME valcraft_visual_capture_comparator_self_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/compare_visual_capture.py --self-test
+    )
+
+    add_test(
+        NAME valcraft_visual_material_pack_determinism
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_visual_material_pack.py --check
+    )
+    set_tests_properties(
+        valcraft_visual_material_pack_determinism
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME valcraft_msdf_font_atlas_determinism
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_msdf_font_atlas.py --check
+    )
+    set_tests_properties(
+        valcraft_msdf_font_atlas_determinism
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
     add_custom_target(valcraft_regenerate_block_texture_tiles
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_block_texture_tiles.py
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -335,17 +525,33 @@ add_custom_target(valcraft_check_smoke
     USES_TERMINAL
 )
 
+add_custom_target(valcraft_check_modern_visual_smoke
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test
+        --smoke-frames=240
+        --hidden-window
+        --visual-pipeline=modern
+        --fixed-render-quality
+        --window-width=1920
+        --window-height=1080
+        --capture-frame=${CMAKE_BINARY_DIR}/artifacts/modern/continental-day.bmp
+    DEPENDS ValCraft
+    USES_TERMINAL
+)
+
 add_custom_target(valcraft_check_sea_loading_smoke
     COMMAND $<TARGET_FILE:ValCraft>
         --smoke-test
         --smoke-session=sea-new
         --smoke-frames=240
         --hidden-window
+        --visual-pipeline=modern
     COMMAND $<TARGET_FILE:ValCraft>
         --smoke-test
         --smoke-session=sea-legacy
         --smoke-frames=240
         --hidden-window
+        --visual-pipeline=modern
     DEPENDS ValCraft
     USES_TERMINAL
 )
@@ -355,12 +561,33 @@ add_custom_target(valcraft_check_sea_loading_smoke
 # poste equipe pour valider le vrai chemin SDL/GPU.
 if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
     add_test(
+        NAME valcraft_modern_visual_smoke
+        COMMAND $<TARGET_FILE:ValCraft>
+            --smoke-test
+            --smoke-frames=240
+            --hidden-window
+            --visual-pipeline=modern
+            --fixed-render-quality
+            --window-width=1920
+            --window-height=1080
+            --capture-frame=${CMAKE_BINARY_DIR}/artifacts/modern/continental-day.bmp
+    )
+    set_tests_properties(
+        valcraft_modern_visual_smoke
+        PROPERTIES
+            LABELS "gpu;integration;modern;capture"
+            TIMEOUT 180
+            RESOURCE_LOCK valcraft_gpu
+    )
+
+    add_test(
         NAME valcraft_sea_new_loading_smoke
         COMMAND $<TARGET_FILE:ValCraft>
             --smoke-test
             --smoke-session=sea-new
             --smoke-frames=240
             --hidden-window
+            --visual-pipeline=modern
     )
     add_test(
         NAME valcraft_sea_legacy_loading_smoke
@@ -369,6 +596,7 @@ if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
             --smoke-session=sea-legacy
             --smoke-frames=240
             --hidden-window
+            --visual-pipeline=modern
     )
     set_tests_properties(
         valcraft_sea_new_loading_smoke
@@ -386,6 +614,7 @@ if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
                 --smoke-test
                 --smoke-session=sea-new
                 --smoke-ship-view=${ship_view}
+                --visual-pipeline=modern
                 --initial-weather-time=${weather_time}
                 --smoke-frames=240
                 --window-width=1280
@@ -411,6 +640,16 @@ if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
         deck
         2685.0979
         deck)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_bow_smoke
+        bow
+        2685.0979
+        bow)
+    valcraft_add_tempest_gpu_smoke(
+        valcraft_tempest_stern_smoke
+        stern
+        2685.0979
+        stern)
     valcraft_add_tempest_gpu_smoke(
         valcraft_tempest_interior_smoke
         interior

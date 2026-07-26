@@ -64,6 +64,16 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             result.options.performance.adaptive_quality = false;
             continue;
         }
+        if (argument.starts_with("--visual-pipeline=")) {
+            constexpr auto prefix = std::string_view {"--visual-pipeline="};
+            const auto parsed_pipeline =
+                parse_visual_pipeline(argument.substr(prefix.size()));
+            if (!parsed_pipeline.has_value()) {
+                return make_error("Invalid value for --visual-pipeline");
+            }
+            result.options.visual_pipeline = *parsed_pipeline;
+            continue;
+        }
         if (argument == "--perf-report") {
             result.options.performance.report_frame_stats = true;
             result.options.audit.enabled = true;

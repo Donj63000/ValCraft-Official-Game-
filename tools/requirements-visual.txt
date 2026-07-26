@@ -1,0 +1,3 @@
+# Je verrouille les bibliothèques qui participent aux octets des assets visuels.
+numpy==2.2.3
+Pillow==11.1.0

@@ -128,14 +128,28 @@ void Chunk::set_sky_light_local(int x, int y, int z, std::uint8_t light_level) {
     if (!in_bounds_local(x, y, z)) {
         throw std::out_of_range("Chunk::set_sky_light_local coordinates out of bounds");
     }
-    sky_light_[index_of(x, y, z)] = static_cast<std::uint8_t>(std::min<int>(light_level, 15));
+    const auto clamped_light =
+        static_cast<std::uint8_t>(std::min<int>(light_level, 15));
+    auto& current_light = sky_light_[index_of(x, y, z)];
+    if (current_light == clamped_light) {
+        return;
+    }
+    current_light = clamped_light;
+    bump_mesh_input_revision();
 }
 
 void Chunk::set_block_light_local(int x, int y, int z, std::uint8_t light_level) {
     if (!in_bounds_local(x, y, z)) {
         throw std::out_of_range("Chunk::set_block_light_local coordinates out of bounds");
     }
-    block_light_[index_of(x, y, z)] = static_cast<std::uint8_t>(std::min<int>(light_level, 15));
+    const auto clamped_light =
+        static_cast<std::uint8_t>(std::min<int>(light_level, 15));
+    auto& current_light = block_light_[index_of(x, y, z)];
+    if (current_light == clamped_light) {
+        return;
+    }
+    current_light = clamped_light;
+    bump_mesh_input_revision();
 }
 
 void Chunk::fill(BlockId block_id) {
@@ -152,16 +166,19 @@ void Chunk::fill(BlockId block_id) {
     meshable_count_per_y_.fill(static_cast<std::uint16_t>(meshable ? kChunkSizeX * kChunkSizeZ : 0));
     surface_heightmap_.fill(is_block_surface_support(block_id) ? kWorldMaxY : 0);
     dirty_sections_.set();
+    bump_mesh_input_revision();
     lighting_dirty_ = true;
 }
 
 void Chunk::fill_water(WaterState water_state) noexcept {
     std::fill(water_.begin(), water_.end(), water_state);
+    bump_mesh_input_revision();
 }
 
 void Chunk::clear_lighting() noexcept {
     std::fill(sky_light_.begin(), sky_light_.end(), 0);
     std::fill(block_light_.begin(), block_light_.end(), 0);
+    bump_mesh_input_revision();
 }
 
 auto Chunk::rebuild_sky_light_column(int x, int z) -> std::bitset<kChunkSectionCount> {
@@ -185,6 +202,9 @@ auto Chunk::rebuild_sky_light_column(int x, int z) -> std::bitset<kChunkSectionC
         }
     }
 
+    if (changed_sections.any()) {
+        bump_mesh_input_revision();
+    }
     return changed_sections;
 }
 
@@ -214,6 +234,7 @@ void Chunk::copy_blocks_from(const BlockId* data, std::size_t count) {
 
     rebuild_meshable_bounds();
     dirty_sections_.set();
+    bump_mesh_input_revision();
     lighting_dirty_ = true;
 }
 
@@ -224,6 +245,7 @@ void Chunk::copy_water_from(const WaterState* data, std::size_t count) {
 
     std::memcpy(water_.data(), data, count * sizeof(WaterState));
     dirty_sections_.set();
+    bump_mesh_input_revision();
 }
 
 void Chunk::copy_block_light_from(const std::uint8_t* data, std::size_t count) {
@@ -231,6 +253,7 @@ void Chunk::copy_block_light_from(const std::uint8_t* data, std::size_t count) {
         throw std::out_of_range("Chunk::copy_block_light_from size mismatch");
     }
     std::memcpy(block_light_.data(), data, count * sizeof(std::uint8_t));
+    bump_mesh_input_revision();
 }
 
 auto Chunk::blocks() const noexcept -> const std::array<BlockId, kChunkVolume>& {
@@ -284,13 +307,19 @@ auto Chunk::dirty_section_count() const noexcept -> std::size_t {
     return dirty_sections_.count();
 }
 
+auto Chunk::mesh_input_revision() const noexcept -> std::uint64_t {
+    return mesh_input_revision_;
+}
+
 void Chunk::mark_dirty() noexcept {
     dirty_sections_.set();
+    bump_mesh_input_revision();
 }
 
 void Chunk::mark_section_dirty(std::size_t section_index) noexcept {
     if (section_index < dirty_sections_.size()) {
         dirty_sections_.set(section_index);
+        bump_mesh_input_revision();
     }
 }
 
@@ -307,6 +336,7 @@ void Chunk::mark_section_dirty_for_y(int y) noexcept {
     if (y < kWorldMaxY && y % kChunkSectionHeight == kChunkSectionHeight - 1 && section_index + 1 < dirty_sections_.size()) {
         dirty_sections_.set(section_index + 1);
     }
+    bump_mesh_input_revision();
 }
 
 void Chunk::mark_lighting_dirty() noexcept {
@@ -337,6 +367,13 @@ auto Chunk::surface_index_of(int x, int z) noexcept -> std::size_t {
 
 auto Chunk::section_index_of_y(int y) noexcept -> std::size_t {
     return static_cast<std::size_t>(y / kChunkSectionHeight);
+}
+
+void Chunk::bump_mesh_input_revision() noexcept {
+    ++mesh_input_revision_;
+    if (mesh_input_revision_ == 0U) {
+        mesh_input_revision_ = 1U;
+    }
 }
 
 void Chunk::rebuild_meshable_bounds() noexcept {

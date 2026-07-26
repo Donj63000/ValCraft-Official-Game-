@@ -12,6 +12,7 @@ CMakeUserPresets.json
 perf-artifacts/
 performancesaudit/runs/
 performancesaudit/legacy-live/
+performancesaudit/visual-refactor-baseline-*/
 tmp-perf-probe/
 tmp-perf-review/
 

@@ -2462,10 +2462,55 @@ TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
     CHECK(mesh.water_face_count == 6);
     CHECK(mesh.water_vertices.size() == 37);
     CHECK(mesh.water_indices.size() == 78);
-    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const WaterVertex& vertex) {
         return vertex.ao == doctest::Approx(1.0F);
     }));
     CHECK_FALSE(mesh.empty());
+}
+
+TEST_CASE("chunk mesher range fills its halo at section and world height boundaries") {
+    World world(1183, 1);
+    const ChunkCoord origin {0, 0};
+    test::make_chunk_empty(world, origin);
+    auto* chunk = world.find_chunk(origin);
+    REQUIRE(chunk != nullptr);
+
+    const auto stone = to_block_id(BlockType::Stone);
+    constexpr auto lower_section_edge_y = kChunkSectionHeight - 1;
+    constexpr auto upper_section_edge_y = kChunkSectionHeight;
+    chunk->set_local(2, kWorldMinY, 2, stone);
+    chunk->set_local(4, kWorldMaxY, 4, stone);
+    chunk->set_local(8, lower_section_edge_y, 8, stone);
+    chunk->set_local(8, upper_section_edge_y, 8, stone);
+
+    const ChunkMesher mesher {};
+    const auto world_min_mesh =
+        mesher.build_mesh_range(world, origin, kWorldMinY, kWorldMinY);
+    const auto world_max_mesh =
+        mesher.build_mesh_range(world, origin, kWorldMaxY, kWorldMaxY);
+    const auto lower_section_edge_mesh =
+        mesher.build_mesh_range(
+            world,
+            origin,
+            lower_section_edge_y,
+            lower_section_edge_y);
+    const auto upper_section_edge_mesh =
+        mesher.build_mesh_range(
+            world,
+            origin,
+            upper_section_edge_y,
+            upper_section_edge_y);
+
+    // Je verifie les deux sorties du monde et le halo partage entre deux
+    // tranches : les cubes extremes ont six faces, les cubes adjacents cinq.
+    CHECK(world_min_mesh.face_count == 6U);
+    CHECK(world_min_mesh.vertices.size() == 24U);
+    CHECK(world_min_mesh.indices.size() == 36U);
+    CHECK(world_max_mesh.face_count == 6U);
+    CHECK(world_max_mesh.vertices.size() == 24U);
+    CHECK(world_max_mesh.indices.size() == 36U);
+    CHECK(lower_section_edge_mesh.face_count == 5U);
+    CHECK(upper_section_edge_mesh.face_count == 5U);
 }
 
 TEST_CASE("chunk mesher keeps top water UVs continuous across adjacent blocks") {
@@ -2649,12 +2694,12 @@ TEST_CASE("chunk mesher tags only exposed water surface vertices for wave animat
     ChunkMesher mesher {};
     const auto mesh = mesher.build_mesh(world, {0, 0});
 
-    const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+    const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const WaterVertex& vertex) {
         return vertex.wave_weight > 0.5F;
     });
 
     CHECK(animated_vertex_count == 21);
-    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+    CHECK(std::all_of(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const WaterVertex& vertex) {
         return vertex.wave_weight == 0.0F || vertex.wave_weight == 1.0F;
     }));
 }
@@ -2676,14 +2721,14 @@ TEST_CASE("water surfaces above sea level stay outside ocean swell") {
     ChunkMesher mesher {};
     const auto mesh = mesher.build_mesh(world, {0, 0});
 
-    const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const ChunkVertex& vertex) {
+    const auto animated_vertex_count = std::count_if(mesh.water_vertices.begin(), mesh.water_vertices.end(), [](const WaterVertex& vertex) {
         return vertex.wave_weight > 0.5F;
     });
     CHECK(animated_vertex_count == 0);
     CHECK(std::all_of(
         mesh.water_vertices.begin(),
         mesh.water_vertices.end(),
-        [](const ChunkVertex& vertex) {
+        [](const WaterVertex& vertex) {
             return vertex.wave_weight == 0.0F;
         }));
 }

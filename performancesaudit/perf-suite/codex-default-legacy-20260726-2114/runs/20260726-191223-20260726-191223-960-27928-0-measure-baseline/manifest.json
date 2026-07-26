@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "20260726-191223-960-27928-0",
+  "label": "baseline",
+  "mode": "measure",
+  "status": "completed",
+  "platform": "windows",
+  "build_type": "RelWithDebInfo",
+  "working_directory": "C:\\Users\\nodig\\CLionProjects\\ValCraft",
+  "arguments": ["--smoke-test", "--smoke-frames=300", "--perf-warmup-frames=60", "--window-width=1600", "--window-height=900", "--hidden-window", "--freeze-time", "--perf-report", "--perf-json=.\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\baseline.json", "--perf-scenario=baseline", "--audit-dir=.\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114", "--audit-mode=measure", "--stream-radius=5"],
+  "started_at_utc": "2026-07-26T19:12:23Z",
+  "ended_at_utc": "2026-07-26T19:12:25Z",
+  "duration_seconds": 1.595532,
+  "written_event_counts": {"session": 3, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 21, "items": 0},
+  "dropped_event_counts": {"session": 0, "input_raw": 0, "input_action": 0, "ui": 0, "player": 0, "world": 0, "render": 0, "performance": 0, "creatures": 0, "items": 0},
+  "second_samples": 2,
+  "dropped_second_samples": 0,
+  "recorded_frames": 300,
+  "written_frames": 0,
+  "dropped_frames": 0,
+  "errors": [],
+  "produced_files": ["C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\manifest.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\summary.json", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\summary.txt", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\events.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\seconds.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\frames.jsonl", "C:\\Users\\nodig\\CLionProjects\\ValCraft\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\runs\\20260726-191223-20260726-191223-960-27928-0-measure-baseline\\spikes.json", ".\\performancesaudit\\perf-suite\\codex-default-legacy-20260726-2114\\baseline.json"]
+}

@@ -318,6 +318,48 @@ TEST_CASE("game option parser accepts smoke perf flags and values") {
     CHECK(parsed.options.performance.stream_radius == 14);
 }
 
+TEST_CASE("game option parser selects an explicit visual pipeline without changing the safe default") {
+    const auto default_parse =
+        parse_game_options(std::vector<std::string_view> {});
+    REQUIRE(default_parse.ok);
+    CHECK(default_parse.options.visual_pipeline ==
+          VisualPipeline::LegacyVoxel);
+
+    const auto legacy_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--visual-pipeline=legacy",
+            });
+    REQUIRE(legacy_parse.ok);
+    CHECK(legacy_parse.options.visual_pipeline ==
+          VisualPipeline::LegacyVoxel);
+
+    const auto modern_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--visual-pipeline=modern",
+            });
+    REQUIRE(modern_parse.ok);
+    CHECK(modern_parse.options.visual_pipeline ==
+          VisualPipeline::ModernStylized);
+
+    for (const auto argument : {
+             std::string_view {"--visual-pipeline="},
+             std::string_view {"--visual-pipeline=stylized"},
+             std::string_view {"--visual-pipeline=MODERN"},
+         }) {
+        const auto parsed =
+            parse_game_options(
+                std::vector<std::string_view> {
+                    argument,
+                });
+        CAPTURE(argument);
+        CHECK_FALSE(parsed.ok);
+        CHECK(parsed.error_message ==
+              "Invalid value for --visual-pipeline");
+    }
+}
+
 TEST_CASE("game option parser accepts explicit smoke session modes") {
     const auto default_parse = parse_game_options(std::vector<std::string_view> {});
     REQUIRE(default_parse.ok);
@@ -978,7 +1020,10 @@ TEST_CASE("performance report JSON includes schema metadata hotspots and optiona
     const auto report = build_performance_report(metadata, samples, true, 10, events);
     const auto json = format_performance_json(report);
 
-    CHECK(json.find("\"schema_version\": 2") != std::string::npos);
+    CHECK(json.find("\"schema_version\": 3") != std::string::npos);
+    CHECK(json.find("\"visual_pipeline\": \"legacy\"") != std::string::npos);
+    CHECK(json.find("\"material_pack_version\": 0") != std::string::npos);
+    CHECK(json.find("\"render_categories\": {") != std::string::npos);
     CHECK(json.find("\"capture_mode\": \"interactive\"") != std::string::npos);
     CHECK(json.find("\"scenario\": \"no_shadows\"") != std::string::npos);
     CHECK(json.find("\"post_process_enabled\": false") != std::string::npos);
@@ -994,7 +1039,7 @@ TEST_CASE("performance report JSON includes schema metadata hotspots and optiona
     CHECK(json.find("\"frames\": [") != std::string::npos);
 }
 
-TEST_CASE("performance report v2 attributes complete CPU stages and memory peaks") {
+TEST_CASE("performance report v3 attributes complete CPU stages and memory peaks") {
     FramePerformanceSample sample {};
     sample.frame_index = 7;
     sample.frame_total_ms = 18.0;
@@ -1018,7 +1063,7 @@ TEST_CASE("performance report v2 attributes complete CPU stages and memory peaks
 
     const auto report = build_performance_report({}, {sample}, true, 1);
 
-    CHECK(report.schema_version == 2);
+    CHECK(report.schema_version == 3);
     CHECK(report.hotspots.worst_frame_stage == PerformanceStage::World);
     CHECK(report.summary.event_processing_ms.maximum == doctest::Approx(0.4));
     CHECK(report.summary.render_cpu_ms.maximum == doctest::Approx(7.0));

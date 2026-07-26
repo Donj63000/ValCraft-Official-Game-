@@ -1,7 +1,12 @@
 #pragma once
 
+#include "render/ArchitecturalMesher.h"
+#include "render/TerrainVisualSample.h"
+#include "render/VisualPipeline.h"
+#include "render/VisualVegetation.h"
 #include "world/Chunk.h"
 #include "world/ChunkMesher.h"
+#include "world/OrganicTerrainMesher.h"
 #include "world/WorldGenerator.h"
 
 #include <glm/vec3.hpp>
@@ -11,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -118,6 +124,42 @@ struct WorldSaveRestoreStats {
     float progress = 1.0F;
 };
 
+// Je borne le travail organique indivisible a deux couches pour qu'une seule
+// tranche ne puisse plus monopoliser une frame pendant le streaming.
+inline constexpr int kModernVisualRemeshSliceHeight = 2;
+inline constexpr std::size_t kModernVisualRemeshSlicesPerSection =
+    static_cast<std::size_t>(kChunkSectionHeight / kModernVisualRemeshSliceHeight);
+inline constexpr std::size_t kModernVisualRemeshSliceCount =
+    static_cast<std::size_t>(kChunkHeight / kModernVisualRemeshSliceHeight);
+static_assert(kChunkSectionHeight % kModernVisualRemeshSliceHeight == 0);
+static_assert(kChunkHeight % kModernVisualRemeshSliceHeight == 0);
+
+struct ModernVisualRemeshState {
+    std::uint64_t source_revision = 0U;
+    std::bitset<kChunkSectionCount> target_sections {};
+    std::bitset<kChunkSectionCount> organic_sections {};
+    std::bitset<kChunkSectionCount> architectural_sections {};
+    std::bitset<kChunkSectionCount> vegetation_sections {};
+    std::size_t next_slice = 0U;
+    std::size_t completed_slices = 0U;
+    std::size_t total_slices = 0U;
+    std::array<ChunkMeshData, kChunkSectionCount> staged_section_meshes {};
+    std::array<OrganicTerrainMesh, kChunkSectionCount> staged_organic_meshes {};
+    std::array<ArchitecturalMesh, kChunkSectionCount> staged_architectural_meshes {};
+    std::array<OrganicTerrainMesh, kChunkSectionCount> vegetation_section_meshes {};
+    std::optional<VisualVegetationBuild> canonical_vegetation {};
+};
+
+struct VisualRemeshStatus {
+    bool active = false;
+    std::uint64_t source_revision = 0U;
+    std::uint64_t published_revision = 0U;
+    std::bitset<kChunkSectionCount> target_sections {};
+    std::size_t next_slice = 0U;
+    std::size_t completed_slices = 0U;
+    std::size_t total_slices = 0U;
+};
+
 class World {
 public:
     struct ChunkRecord {
@@ -134,6 +176,8 @@ public:
         Chunk chunk;
         mutable ChunkMeshData mesh {};
         std::array<ChunkMeshData, kChunkSectionCount> section_meshes {};
+        std::array<OrganicTerrainMesh, kChunkSectionCount> organic_section_meshes {};
+        std::array<ArchitecturalMesh, kChunkSectionCount> architectural_section_meshes {};
         mutable bool mesh_cache_dirty = false;
         std::uint64_t mesh_revision = 0;
         std::vector<BlockCoord> emissive_blocks {};
@@ -142,12 +186,19 @@ public:
         mutable std::size_t mesh_index_capacity_hint = 0;
         std::array<std::size_t, kChunkSectionCount> section_mesh_vertex_capacity_hints {};
         std::array<std::size_t, kChunkSectionCount> section_mesh_index_capacity_hints {};
+        std::array<std::size_t, kChunkSectionCount> organic_vertex_capacity_hints {};
+        std::array<std::size_t, kChunkSectionCount> organic_index_capacity_hints {};
+        std::array<std::size_t, kChunkSectionCount> architectural_vertex_capacity_hints {};
+        std::array<std::size_t, kChunkSectionCount> architectural_index_capacity_hints {};
+        std::bitset<kChunkSectionCount> published_vegetation_sections {};
+        std::unique_ptr<ModernVisualRemeshState> modern_remesh {};
     };
 
     explicit World(int seed = 1337,
                    int stream_radius = kDefaultStreamRadius,
                    WorldGenerationProfile generation_profile = WorldGenerationProfile::Continental,
-                   WorldGenerationVersion generation_version = WorldGenerationVersion::Latest);
+                   WorldGenerationVersion generation_version = WorldGenerationVersion::Latest,
+                   VisualPipeline visual_pipeline = VisualPipeline::LegacyVoxel);
 
     [[nodiscard]] auto get_block(int x, int y, int z) const -> BlockId;
     [[nodiscard]] auto water_level(int x, int y, int z) const -> std::uint8_t;
@@ -196,7 +247,17 @@ public:
     [[nodiscard]] auto mesh_for(const ChunkCoord& coord) const -> const ChunkMeshData*;
     [[nodiscard]] auto section_meshes_for(const ChunkCoord& coord) const
         -> const std::array<ChunkMeshData, kChunkSectionCount>*;
+    [[nodiscard]] auto organic_section_meshes_for(const ChunkCoord& coord) const
+        -> const std::array<OrganicTerrainMesh, kChunkSectionCount>*;
+    [[nodiscard]] auto architectural_section_meshes_for(const ChunkCoord& coord) const
+        -> const std::array<ArchitecturalMesh, kChunkSectionCount>*;
     [[nodiscard]] auto mesh_revision(const ChunkCoord& coord) const -> std::uint64_t;
+    [[nodiscard]] auto visual_remesh_status(const ChunkCoord& coord) const noexcept
+        -> VisualRemeshStatus;
+    // Je réserve cet échantillonnage aux pieds, particules et décalcomanies
+    // visuels. Il ne remplace jamais les collisions ni le raycast DDA.
+    [[nodiscard]] auto sample_visual_terrain(const TerrainVisualQuery& query) const
+        -> std::optional<TerrainVisualSample>;
     [[nodiscard]] auto chunk_records() const noexcept -> const std::unordered_map<ChunkCoord, ChunkRecord, ChunkCoordHash>&;
     void enqueue_loaded_mesh_uploads();
     [[nodiscard]] auto consume_pending_gpu_uploads(std::size_t max_count) -> std::vector<ChunkCoord>;
@@ -206,6 +267,8 @@ public:
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto generation_profile() const noexcept -> WorldGenerationProfile;
     [[nodiscard]] auto generation_version() const noexcept -> WorldGenerationVersion;
+    [[nodiscard]] auto visual_pipeline() const noexcept -> VisualPipeline;
+    void set_visual_pipeline(VisualPipeline visual_pipeline);
     [[nodiscard]] auto stream_radius() const noexcept -> int;
     [[nodiscard]] auto surface_height(int world_x, int world_z) -> int;
     [[nodiscard]] auto loaded_surface_height(int world_x, int world_z) const -> std::optional<int>;
@@ -326,6 +389,14 @@ private:
     void finalize_lighting_job(const LightingJob& job);
     [[nodiscard]] auto unload_far_chunks(const ChunkCoord& center) -> std::size_t;
     [[nodiscard]] auto rebuild_chunk_mesh(ChunkRecord& record) -> bool;
+    [[nodiscard]] auto rebuild_modern_chunk_mesh(ChunkRecord& record) -> bool;
+    [[nodiscard]] auto visual_mesh_source_revision(const ChunkCoord& coord) const noexcept
+        -> std::uint64_t;
+    void begin_modern_visual_remesh(ChunkRecord& record);
+    void build_modern_visual_remesh_slice(ChunkRecord& record,
+                                          ModernVisualRemeshState& state,
+                                          std::size_t slice_index);
+    void publish_modern_visual_remesh(ChunkRecord& record);
     void rebuild_chunk_mesh_cache(const ChunkRecord& record) const;
     void enqueue_gpu_upload(const ChunkCoord& coord);
     void enqueue_gpu_unload(const ChunkCoord& coord);
@@ -383,6 +454,9 @@ private:
     int stream_radius_ = kDefaultStreamRadius;
     WorldGenerator generator_;
     ChunkMesher mesher_;
+    OrganicTerrainMesher organic_mesher_;
+    ArchitecturalMesher architectural_mesher_;
+    VisualPipeline visual_pipeline_ = VisualPipeline::LegacyVoxel;
     std::unordered_map<ChunkCoord, ChunkRecord, ChunkCoordHash> chunks_ {};
     std::unordered_map<ChunkCoord, ChunkOverrideEntry, ChunkCoordHash> chunk_overrides_ {};
     std::deque<ChunkCoord> pending_generation_queue_ {};

@@ -39,6 +39,53 @@ enum class PerformanceEventKind {
     BlockPlace,
 };
 
+enum class PerformanceRenderCategory : std::size_t {
+    Terrain = 0,
+    Vegetation,
+    Entities,
+    Ship,
+    Water,
+    Atmosphere,
+    PostProcess,
+    Ui,
+    Shadows,
+    Count,
+};
+
+inline constexpr std::array<PerformanceRenderCategory, 9>
+    kPerformanceRenderCategories {{
+        PerformanceRenderCategory::Terrain,
+        PerformanceRenderCategory::Vegetation,
+        PerformanceRenderCategory::Entities,
+        PerformanceRenderCategory::Ship,
+        PerformanceRenderCategory::Water,
+        PerformanceRenderCategory::Atmosphere,
+        PerformanceRenderCategory::PostProcess,
+        PerformanceRenderCategory::Ui,
+        PerformanceRenderCategory::Shadows,
+    }};
+
+static_assert(
+    kPerformanceRenderCategories.size() ==
+    static_cast<std::size_t>(
+        PerformanceRenderCategory::Count));
+
+struct PerformanceRenderCategoryTimes {
+    std::array<double, kPerformanceRenderCategories.size()> values {};
+
+    [[nodiscard]] auto operator[](
+        PerformanceRenderCategory category) noexcept -> double& {
+        return values[static_cast<std::size_t>(category)];
+    }
+
+    [[nodiscard]] auto operator[](
+        PerformanceRenderCategory category) const noexcept -> const double& {
+        return values[static_cast<std::size_t>(category)];
+    }
+
+    auto operator==(const PerformanceRenderCategoryTimes&) const -> bool = default;
+};
+
 constexpr auto kPerformanceLagThreshold16Ms = 16.7;
 constexpr auto kPerformanceLagThreshold33Ms = 33.3;
 constexpr auto kPerformanceLagThreshold50Ms = 50.0;
@@ -126,6 +173,8 @@ struct FramePerformanceSample {
     std::uint8_t resolved_quality = 0;
     double adaptive_frame_ema_ms = 0.0;
     double adaptive_frame_p95_ms = 0.0;
+    PerformanceRenderCategoryTimes render_category_cpu_ms {};
+    PerformanceRenderCategoryTimes render_category_gpu_ms {};
 };
 
 struct PerformanceEvent {
@@ -158,6 +207,9 @@ struct PerformanceReportMetadata {
     std::string scenario = "default";
     std::string quality_profile = "fixed";
     std::string vsync_mode = "unknown";
+    std::string visual_pipeline = "legacy";
+    std::uint32_t material_pack_version = 0U;
+    std::uint64_t material_pack_checksum = 0U;
     bool trace_included = false;
 };
 
@@ -172,6 +224,23 @@ struct PerformanceMetricSummary {
 struct PerformanceCounterSummary {
     double average = 0.0;
     std::uint64_t maximum = 0;
+};
+
+struct PerformanceRenderCategorySummary {
+    std::array<PerformanceMetricSummary, kPerformanceRenderCategories.size()> cpu_ms {};
+    std::array<PerformanceMetricSummary, kPerformanceRenderCategories.size()> gpu_ms {};
+
+    [[nodiscard]] auto cpu(
+        PerformanceRenderCategory category) const noexcept
+        -> const PerformanceMetricSummary& {
+        return cpu_ms[static_cast<std::size_t>(category)];
+    }
+
+    [[nodiscard]] auto gpu(
+        PerformanceRenderCategory category) const noexcept
+        -> const PerformanceMetricSummary& {
+        return gpu_ms[static_cast<std::size_t>(category)];
+    }
 };
 
 struct PerformanceLagBuckets {
@@ -208,6 +277,7 @@ struct PerformanceReportSummary {
     PerformanceMetricSummary gpu_post_process_ms {};
     PerformanceMetricSummary gpu_hud_ms {};
     PerformanceMetricSummary gpu_frame_ms {};
+    PerformanceRenderCategorySummary render_categories {};
     PerformanceCounterSummary pending_generation {};
     PerformanceCounterSummary pending_mesh {};
     PerformanceCounterSummary pending_lighting {};
@@ -261,7 +331,8 @@ struct SpikeWindow {
 };
 
 struct PerformanceRunReport {
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
+    static constexpr int kMinimumSupportedSchemaVersion = 2;
 
     int schema_version = kSchemaVersion;
     PerformanceReportMetadata metadata {};
@@ -273,6 +344,15 @@ struct PerformanceRunReport {
     std::vector<FramePerformanceSample> frames {};
     std::vector<PerformanceEvent> events {};
 };
+
+[[nodiscard]] constexpr auto is_supported_performance_report_schema(
+    int schema_version) noexcept -> bool {
+
+    return schema_version >=
+               PerformanceRunReport::kMinimumSupportedSchemaVersion &&
+           schema_version <=
+               PerformanceRunReport::kSchemaVersion;
+}
 
 inline auto performance_stage_name(PerformanceStage stage) -> std::string_view {
     switch (stage) {
@@ -320,6 +400,129 @@ inline auto performance_event_kind_name(PerformanceEventKind kind) -> std::strin
         return "block_place";
     default:
         return "unknown";
+    }
+}
+
+inline auto performance_render_category_name(
+    PerformanceRenderCategory category) noexcept -> std::string_view {
+
+    switch (category) {
+    case PerformanceRenderCategory::Terrain:
+        return "terrain";
+    case PerformanceRenderCategory::Vegetation:
+        return "vegetation";
+    case PerformanceRenderCategory::Entities:
+        return "entities";
+    case PerformanceRenderCategory::Ship:
+        return "ship";
+    case PerformanceRenderCategory::Water:
+        return "water";
+    case PerformanceRenderCategory::Atmosphere:
+        return "atmosphere";
+    case PerformanceRenderCategory::PostProcess:
+        return "post_process";
+    case PerformanceRenderCategory::Ui:
+        return "ui";
+    case PerformanceRenderCategory::Shadows:
+        return "shadows";
+    case PerformanceRenderCategory::Count:
+    default:
+        return "unknown";
+    }
+}
+
+[[nodiscard]] inline auto normalize_performance_visual_pipeline(
+    std::string_view visual_pipeline) -> std::string {
+
+    if (visual_pipeline == "legacy" ||
+        visual_pipeline == "modern") {
+        return std::string(visual_pipeline);
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline auto sanitize_performance_duration(
+    double milliseconds) noexcept -> double {
+
+    return std::isfinite(milliseconds) &&
+                   milliseconds >= 0.0
+               ? milliseconds
+               : 0.0;
+}
+
+inline void sanitize_render_category_times(
+    PerformanceRenderCategoryTimes& times) noexcept {
+
+    for (auto& value : times.values) {
+        value =
+            sanitize_performance_duration(
+                value);
+    }
+}
+
+inline void populate_legacy_render_category_fallbacks(
+    FramePerformanceSample& sample) noexcept {
+
+    auto& cpu =
+        sample.render_category_cpu_ms;
+    auto& gpu =
+        sample.render_category_gpu_ms;
+    const auto no_explicit_cpu_opaque =
+        cpu[PerformanceRenderCategory::Terrain] <= 0.0 &&
+        cpu[PerformanceRenderCategory::Vegetation] <= 0.0 &&
+        cpu[PerformanceRenderCategory::Ship] <= 0.0;
+    const auto no_explicit_gpu_opaque =
+        gpu[PerformanceRenderCategory::Terrain] <= 0.0 &&
+        gpu[PerformanceRenderCategory::Vegetation] <= 0.0 &&
+        gpu[PerformanceRenderCategory::Ship] <= 0.0;
+
+    // Je replie seulement les passes historiquement equivalentes. Le temps
+    // opaque v2 devient temporairement le terrain si aucune sous-categorie v3
+    // n'a encore ete mesuree, sans le compter une seconde fois.
+    if (no_explicit_cpu_opaque) {
+        cpu[PerformanceRenderCategory::Terrain] =
+            sanitize_performance_duration(
+                sample.world_ms);
+    }
+    if (no_explicit_gpu_opaque) {
+        gpu[PerformanceRenderCategory::Terrain] =
+            sanitize_performance_duration(
+                sample.gpu_world_ms);
+    }
+    if (cpu[PerformanceRenderCategory::Shadows] <= 0.0) {
+        cpu[PerformanceRenderCategory::Shadows] =
+            sanitize_performance_duration(
+                sample.shadow_ms);
+    }
+    if (gpu[PerformanceRenderCategory::Entities] <= 0.0) {
+        gpu[PerformanceRenderCategory::Entities] =
+            sanitize_performance_duration(
+                sample.gpu_entities_ms);
+    }
+    if (gpu[PerformanceRenderCategory::Water] <= 0.0) {
+        gpu[PerformanceRenderCategory::Water] =
+            sanitize_performance_duration(
+                sample.gpu_water_ms);
+    }
+    if (gpu[PerformanceRenderCategory::Atmosphere] <= 0.0) {
+        gpu[PerformanceRenderCategory::Atmosphere] =
+            sanitize_performance_duration(
+                sample.gpu_sky_ms);
+    }
+    if (gpu[PerformanceRenderCategory::PostProcess] <= 0.0) {
+        gpu[PerformanceRenderCategory::PostProcess] =
+            sanitize_performance_duration(
+                sample.gpu_post_process_ms);
+    }
+    if (gpu[PerformanceRenderCategory::Ui] <= 0.0) {
+        gpu[PerformanceRenderCategory::Ui] =
+            sanitize_performance_duration(
+                sample.gpu_hud_ms);
+    }
+    if (gpu[PerformanceRenderCategory::Shadows] <= 0.0) {
+        gpu[PerformanceRenderCategory::Shadows] =
+            sanitize_performance_duration(
+                sample.gpu_shadow_ms);
     }
 }
 
@@ -449,6 +652,9 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
                                      const std::vector<PerformanceEvent>& raw_events = {}) -> PerformanceRunReport {
     PerformanceRunReport report {};
     report.metadata = metadata;
+    report.metadata.visual_pipeline =
+        normalize_performance_visual_pipeline(
+            metadata.visual_pipeline);
     report.metadata.trace_included = include_full_trace;
     report.events = raw_events;
     report.event_summary.total_events = raw_events.size();
@@ -467,6 +673,11 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
 
     std::vector<FramePerformanceSample> samples = raw_samples;
     for (auto& sample : samples) {
+        sanitize_render_category_times(
+            sample.render_category_cpu_ms);
+        sanitize_render_category_times(
+            sample.render_category_gpu_ms);
+        populate_legacy_render_category_fallbacks(sample);
         sample.dominant_stage = detect_dominant_stage(sample);
     }
 
@@ -501,6 +712,10 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
     std::vector<double> gpu_post_process_values;
     std::vector<double> gpu_hud_values;
     std::vector<double> gpu_frame_values;
+    std::array<std::vector<double>, kPerformanceRenderCategories.size()>
+        render_category_cpu_values;
+    std::array<std::vector<double>, kPerformanceRenderCategories.size()>
+        render_category_gpu_values;
     std::vector<std::size_t> pending_generation_values;
     std::vector<std::size_t> pending_mesh_values;
     std::vector<std::size_t> pending_lighting_values;
@@ -542,6 +757,12 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
     gpu_post_process_values.reserve(samples.size());
     gpu_hud_values.reserve(samples.size());
     gpu_frame_values.reserve(samples.size());
+    for (auto& values : render_category_cpu_values) {
+        values.reserve(samples.size());
+    }
+    for (auto& values : render_category_gpu_values) {
+        values.reserve(samples.size());
+    }
     pending_generation_values.reserve(samples.size());
     pending_mesh_values.reserve(samples.size());
     pending_lighting_values.reserve(samples.size());
@@ -576,6 +797,12 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
         present_values.push_back(sample.present_ms);
         telemetry_values.push_back(sample.telemetry_ms);
         residual_values.push_back(sample.residual_ms);
+        for (std::size_t category_index = 0;
+             category_index < kPerformanceRenderCategories.size();
+             ++category_index) {
+            render_category_cpu_values[category_index].push_back(
+                sample.render_category_cpu_ms.values[category_index]);
+        }
         if (sample.gpu_timing_valid) {
             gpu_shadow_values.push_back(sample.gpu_shadow_ms);
             gpu_world_values.push_back(sample.gpu_world_ms);
@@ -585,6 +812,12 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
             gpu_post_process_values.push_back(sample.gpu_post_process_ms);
             gpu_hud_values.push_back(sample.gpu_hud_ms);
             gpu_frame_values.push_back(sample.gpu_frame_ms);
+            for (std::size_t category_index = 0;
+                 category_index < kPerformanceRenderCategories.size();
+                 ++category_index) {
+                render_category_gpu_values[category_index].push_back(
+                    sample.render_category_gpu_ms.values[category_index]);
+            }
             ++report.summary.gpu_timing_samples;
         }
         pending_generation_values.push_back(sample.pending_generation);
@@ -659,6 +892,16 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
     report.summary.gpu_post_process_ms = summarize_metric(gpu_post_process_values);
     report.summary.gpu_hud_ms = summarize_metric(gpu_hud_values);
     report.summary.gpu_frame_ms = summarize_metric(gpu_frame_values);
+    for (std::size_t category_index = 0;
+         category_index < kPerformanceRenderCategories.size();
+         ++category_index) {
+        report.summary.render_categories.cpu_ms[category_index] =
+            summarize_metric(
+                render_category_cpu_values[category_index]);
+        report.summary.render_categories.gpu_ms[category_index] =
+            summarize_metric(
+                render_category_gpu_values[category_index]);
+    }
     report.summary.pending_generation = summarize_counter(pending_generation_values);
     report.summary.pending_mesh = summarize_counter(pending_mesh_values);
     report.summary.pending_lighting = summarize_counter(pending_lighting_values);
@@ -725,14 +968,35 @@ inline auto json_escape(std::string_view text) -> std::string {
     return escaped;
 }
 
-inline void append_metric_json(std::ostringstream& stream, std::string_view name, const PerformanceMetricSummary& summary, bool trailing_comma = true) {
-    stream << "    \"" << name << "\": {"
+inline auto format_performance_checksum(
+    std::uint64_t checksum) -> std::string {
+
+    std::ostringstream stream;
+    stream << "0x"
+           << std::hex
+           << std::nouppercase
+           << std::setfill('0')
+           << std::setw(16)
+           << checksum;
+    return stream.str();
+}
+
+inline void append_metric_json_value(
+    std::ostringstream& stream,
+    const PerformanceMetricSummary& summary) {
+
+    stream << "{"
            << "\"avg\": " << summary.average
            << ", \"max\": " << summary.maximum
            << ", \"p50\": " << summary.p50
            << ", \"p95\": " << summary.p95
            << ", \"p99\": " << summary.p99
            << "}";
+}
+
+inline void append_metric_json(std::ostringstream& stream, std::string_view name, const PerformanceMetricSummary& summary, bool trailing_comma = true) {
+    stream << "    \"" << name << "\": ";
+    append_metric_json_value(stream, summary);
     if (trailing_comma) {
         stream << ',';
     }
@@ -750,7 +1014,70 @@ inline void append_counter_json(std::ostringstream& stream, std::string_view nam
     stream << '\n';
 }
 
-inline void append_sample_json(std::ostringstream& stream, const FramePerformanceSample& sample, std::string_view indent) {
+inline void append_render_category_summary_json(
+    std::ostringstream& stream,
+    const PerformanceRenderCategorySummary& summary) {
+
+    stream << "    \"render_categories\": {\n";
+    for (std::size_t category_index = 0;
+         category_index < kPerformanceRenderCategories.size();
+         ++category_index) {
+        const auto category =
+            kPerformanceRenderCategories[category_index];
+        stream << "      \""
+               << performance_render_category_name(category)
+               << "\": {\"cpu_ms\": ";
+        append_metric_json_value(
+            stream,
+            summary.cpu_ms[category_index]);
+        stream << ", \"gpu_ms\": ";
+        append_metric_json_value(
+            stream,
+            summary.gpu_ms[category_index]);
+        stream << "}";
+        if (category_index + 1 !=
+            kPerformanceRenderCategories.size()) {
+            stream << ',';
+        }
+        stream << '\n';
+    }
+    stream << "    },\n";
+}
+
+inline void append_render_category_sample_json(
+    std::ostringstream& stream,
+    const FramePerformanceSample& sample) {
+
+    stream << ", \"render_categories\": {";
+    for (std::size_t category_index = 0;
+         category_index < kPerformanceRenderCategories.size();
+         ++category_index) {
+        const auto category =
+            kPerformanceRenderCategories[category_index];
+        if (category_index != 0) {
+            stream << ", ";
+        }
+        stream << "\""
+               << performance_render_category_name(category)
+               << "\": {\"cpu_ms\": "
+               << sanitize_performance_duration(
+                      sample.render_category_cpu_ms
+                          .values[category_index])
+               << ", \"gpu_ms\": "
+               << sanitize_performance_duration(
+                      sample.render_category_gpu_ms
+                          .values[category_index])
+               << "}";
+    }
+    stream << "}";
+}
+
+inline void append_sample_json(
+    std::ostringstream& stream,
+    const FramePerformanceSample& sample,
+    std::string_view indent,
+    bool include_render_categories) {
+
     stream << indent << "{"
            << "\"frame_index\": " << sample.frame_index
            << ", \"frame_total_ms\": " << sample.frame_total_ms
@@ -778,8 +1105,11 @@ inline void append_sample_json(std::ostringstream& stream, const FramePerformanc
            << ", \"gpu_entities_ms\": " << sample.gpu_entities_ms
            << ", \"gpu_post_process_ms\": " << sample.gpu_post_process_ms
            << ", \"gpu_hud_ms\": " << sample.gpu_hud_ms
-           << ", \"gpu_frame_ms\": " << sample.gpu_frame_ms
-           << ", \"gpu_source_frame\": " << sample.gpu_source_frame
+           << ", \"gpu_frame_ms\": " << sample.gpu_frame_ms;
+    if (include_render_categories) {
+        append_render_category_sample_json(stream, sample);
+    }
+    stream << ", \"gpu_source_frame\": " << sample.gpu_source_frame
            << ", \"gpu_latency_frames\": " << sample.gpu_latency_frames
            << ", \"gpu_timing_valid\": " << (sample.gpu_timing_valid ? "true" : "false")
            << ", \"resolved_quality\": " << static_cast<unsigned int>(sample.resolved_quality)
@@ -854,6 +1184,18 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
     stream << "    \"scenario\": \"" << json_escape(report.metadata.scenario) << "\",\n";
     stream << "    \"quality_profile\": \"" << json_escape(report.metadata.quality_profile) << "\",\n";
     stream << "    \"vsync_mode\": \"" << json_escape(report.metadata.vsync_mode) << "\",\n";
+    if (report.schema_version >= 3) {
+        stream << "    \"visual_pipeline\": \""
+               << json_escape(report.metadata.visual_pipeline)
+               << "\",\n";
+        stream << "    \"material_pack_version\": "
+               << report.metadata.material_pack_version
+               << ",\n";
+        stream << "    \"material_pack_checksum\": \""
+               << format_performance_checksum(
+                      report.metadata.material_pack_checksum)
+               << "\",\n";
+    }
     stream << "    \"trace_included\": " << (report.metadata.trace_included ? "true" : "false") << '\n';
     stream << "  },\n";
     stream << "  \"summary\": {\n";
@@ -884,6 +1226,11 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
     append_metric_json(stream, "gpu_post_process_ms", report.summary.gpu_post_process_ms);
     append_metric_json(stream, "gpu_hud_ms", report.summary.gpu_hud_ms);
     append_metric_json(stream, "gpu_frame_ms", report.summary.gpu_frame_ms);
+    if (report.schema_version >= 3) {
+        append_render_category_summary_json(
+            stream,
+            report.summary.render_categories);
+    }
     append_counter_json(stream, "pending_generation", report.summary.pending_generation);
     append_counter_json(stream, "pending_mesh", report.summary.pending_mesh);
     append_counter_json(stream, "pending_lighting", report.summary.pending_lighting);
@@ -943,7 +1290,11 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
            << "},\n";
     stream << "  \"worst_frames\": [\n";
     for (std::size_t index = 0; index < report.worst_frames.size(); ++index) {
-        append_sample_json(stream, report.worst_frames[index], "    ");
+        append_sample_json(
+            stream,
+            report.worst_frames[index],
+            "    ",
+            report.schema_version >= 3);
         if (index + 1 != report.worst_frames.size()) {
             stream << ',';
         }
@@ -978,7 +1329,11 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
         stream << ",\n";
         stream << "  \"frames\": [\n";
         for (std::size_t index = 0; index < report.frames.size(); ++index) {
-            append_sample_json(stream, report.frames[index], "    ");
+            append_sample_json(
+                stream,
+                report.frames[index],
+                "    ",
+                report.schema_version >= 3);
             if (index + 1 != report.frames.size()) {
                 stream << ',';
             }
@@ -1005,6 +1360,16 @@ inline auto format_performance_report(const PerformanceRunReport& report) -> std
     }
     stream << '\n';
     stream << "  capture_mode=" << report.metadata.capture_mode << '\n';
+    if (report.schema_version >= 3) {
+        stream << "  visual_pipeline="
+               << report.metadata.visual_pipeline
+               << " material_pack_version="
+               << report.metadata.material_pack_version
+               << " material_pack_checksum="
+               << format_performance_checksum(
+                      report.metadata.material_pack_checksum)
+               << '\n';
+    }
     stream << "  render_flags shadows=" << (report.metadata.shadows_enabled ? "on" : "off")
            << " post_process=" << (report.metadata.post_process_enabled ? "on" : "off")
            << " shadow_map_size=" << report.metadata.shadow_map_size << '\n';
@@ -1062,6 +1427,34 @@ inline auto format_performance_report(const PerformanceRunReport& report) -> std
            << " entities=" << report.summary.gpu_entities_ms.average
            << " post=" << report.summary.gpu_post_process_ms.average
            << " hud=" << report.summary.gpu_hud_ms.average << '\n';
+    if (report.schema_version >= 3) {
+        stream << "  render_categories_cpu_ms_avg";
+        for (std::size_t category_index = 0;
+             category_index < kPerformanceRenderCategories.size();
+             ++category_index) {
+            stream << ' '
+                   << performance_render_category_name(
+                          kPerformanceRenderCategories[category_index])
+                   << '='
+                   << report.summary.render_categories
+                          .cpu_ms[category_index]
+                          .average;
+        }
+        stream << '\n';
+        stream << "  render_categories_gpu_ms_avg";
+        for (std::size_t category_index = 0;
+             category_index < kPerformanceRenderCategories.size();
+             ++category_index) {
+            stream << ' '
+                   << performance_render_category_name(
+                          kPerformanceRenderCategories[category_index])
+                   << '='
+                   << report.summary.render_categories
+                          .gpu_ms[category_index]
+                          .average;
+        }
+        stream << '\n';
+    }
     constexpr auto bytes_per_mebibyte = 1024.0 * 1024.0;
     stream << "  memory_peak_mib working_set="
            << static_cast<double>(report.summary.process_working_set_bytes.maximum) / bytes_per_mebibyte

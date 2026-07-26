@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/Audit.h"
+#include "render/VisualPipeline.h"
 #include "world/World.h"
 
 #include <span>
@@ -83,6 +84,7 @@ struct GameOptions {
     float initial_weather_time_seconds = 0.0F;
     StartupUiOverlay startup_ui_overlay = StartupUiOverlay::None;
     std::string frame_capture_path {};
+    VisualPipeline visual_pipeline = VisualPipeline::LegacyVoxel;
     PerformanceOptions performance {};
     AuditOptions audit {};
     std::vector<std::string> raw_arguments {};

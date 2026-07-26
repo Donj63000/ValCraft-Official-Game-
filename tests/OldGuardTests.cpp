@@ -223,7 +223,7 @@ TEST_CASE("les soldats suivent exactement la translation le roulis et le tangage
 }
 
 TEST_CASE("la portee de perception est inclusive a cinquante metres") {
-    for (const auto [distance, expected_shot] :
+    for (const auto& [distance, expected_shot] :
          std::array<std::pair<float, bool>, 3> {{
              {49.99F, true},
              {50.00F, true},

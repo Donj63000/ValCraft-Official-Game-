@@ -238,9 +238,10 @@ if ($testCount -lt $MinimumTests) {
 
 Write-Host "==> Running smoke mode across day-cycle checkpoints"
 $smokeScenarios = @(
-    @{ Name = "day"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--initial-time=8") },
-    @{ Name = "dusk"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--initial-time=18.5") },
-    @{ Name = "night"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--initial-time=0") }
+    @{ Name = "legacy-day"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=legacy", "--initial-time=8") },
+    @{ Name = "modern-day"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=8") },
+    @{ Name = "modern-dusk"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=18.5") },
+    @{ Name = "modern-night"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=0") }
 )
 foreach ($scenario in $smokeScenarios) {
     Write-Host ("   -> smoke checkpoint '{0}'" -f $scenario.Name)

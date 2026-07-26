@@ -17,6 +17,7 @@
 #include "app/SaveGame.h"
 #include "app/SaveSlotMenu.h"
 #include "app/SessionSaveState.h"
+#include "app/TerrainEditStress.h"
 #include "creatures/CreatureSystem.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/PlayerController.h"
@@ -417,6 +418,7 @@ private:
     Renderer renderer_ {};
     GameMusic music_ {};
     World world_ {};
+    TerrainEditStressScenario terrain_edit_stress_ {};
     PlayerController player_ {};
     PlayerController preview_player_ {};
     PlayerProgression progression_ {};

@@ -1,11 +1,14 @@
 #include "world/ChunkMesher.h"
 
+#include "render/ArchitecturalMesher.h"
 #include "world/BlockVisuals.h"
 #include "world/OceanAdventureLayout.h"
+#include "world/OrganicTerrainMesher.h"
 #include "world/World.h"
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <utility>
@@ -51,18 +54,52 @@ constexpr float kBlockAtlasHalfTexelUv = 0.5F / static_cast<float>(kBlockAtlasSi
 using Float2 = std::array<float, 2>;
 using Float3 = std::array<float, 3>;
 
+[[nodiscard]] auto is_modern_procedural_decoration(
+    BlockId block_id) noexcept -> bool {
+    switch (static_cast<BlockType>(block_id)) {
+    case BlockType::Leaves:
+    case BlockType::PineLeaves:
+    case BlockType::TallGrass:
+    case BlockType::RedFlower:
+    case BlockType::YellowFlower:
+    case BlockType::Cactus:
+        return true;
+    default:
+        return false;
+    }
+}
+
 auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
 }
 
 struct Neighborhood {
     std::array<const Chunk*, 9> chunks {};
-    std::array<BlockId, kCachedNeighborhoodVolume> blocks {};
-    std::array<std::uint8_t, kCachedNeighborhoodVolume> water_levels {};
-    std::array<std::uint8_t, kCachedNeighborhoodVolume> sky_light {};
-    std::array<std::uint8_t, kCachedNeighborhoodVolume> block_light {};
+    // Je laisse volontairement ces quatre caches sans remise a zero globale :
+    // le constructeur remplit chaque cellule de la bande verticale consultable.
+    std::array<BlockId, kCachedNeighborhoodVolume> blocks;
+    std::array<std::uint8_t, kCachedNeighborhoodVolume> water_levels;
+    std::array<std::uint8_t, kCachedNeighborhoodVolume> sky_light;
+    std::array<std::uint8_t, kCachedNeighborhoodVolume> block_light;
     int min_cached_y = kWorldMinY;
     int max_cached_y = kWorldMaxY;
+
+    Neighborhood(const World& world, const ChunkCoord& coord, int min_y, int max_y) {
+        // Je capture tout le halo horizontal [-1, taille] avant de remplir la
+        // bande ; aucun accesseur ne peut ainsi observer une cellule indeterminee.
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const auto index = static_cast<std::size_t>((dz + 1) * 3 + (dx + 1));
+                chunks[index] = world.find_chunk({coord.x + dx, coord.z + dz});
+            }
+        }
+        populate(min_y, max_y);
+    }
+
+    Neighborhood(const Neighborhood&) = delete;
+    auto operator=(const Neighborhood&) -> Neighborhood& = delete;
+    Neighborhood(Neighborhood&&) = delete;
+    auto operator=(Neighborhood&&) -> Neighborhood& = delete;
 
     [[nodiscard]] auto sample_chunk(int x, int z, int& local_x, int& local_z) const -> const Chunk* {
         const auto chunk_x = x < 0 ? -1 : (x >= kChunkSizeX ? 1 : 0);
@@ -74,6 +111,9 @@ struct Neighborhood {
     }
 
     [[nodiscard]] static auto cache_index(int x, int y, int z) noexcept -> std::size_t {
+        assert(x >= -1 && x <= kChunkSizeX);
+        assert(z >= -1 && z <= kChunkSizeZ);
+        assert(is_world_y_valid(y));
         return static_cast<std::size_t>(((y * kCachedSpanZ) + (z + 1)) * kCachedSpanX + (x + 1));
     }
 
@@ -238,20 +278,6 @@ auto to_visual_face(Face face) noexcept -> BlockVisualFace {
     default:
         return BlockVisualFace::NegativeZ;
     }
-}
-
-auto build_neighborhood(const World& world, const ChunkCoord& coord, int min_y, int max_y) -> Neighborhood {
-    Neighborhood neighborhood {};
-    // AO and vertex lighting sample the full 3x3 chunk neighborhood around the mesh,
-    // so neighbor load/unload events must invalidate already-built border meshes.
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dx = -1; dx <= 1; ++dx) {
-            const auto index = static_cast<std::size_t>((dz + 1) * 3 + (dx + 1));
-            neighborhood.chunks[index] = world.find_chunk({coord.x + dx, coord.z + dz});
-        }
-    }
-    neighborhood.populate(min_y, max_y);
-    return neighborhood;
 }
 
 auto is_occluder(const Neighborhood& neighborhood, const BlockCoord& local_coord) -> bool {
@@ -887,7 +913,7 @@ void append_water_face(ChunkMeshData& mesh,
                 }
             }
 
-            mesh.water_vertices.push_back({
+            mesh.water_vertices.push_back(make_water_vertex(
                 position[0],
                 position[1],
                 position[2],
@@ -901,8 +927,7 @@ void append_water_face(ChunkMeshData& mesh,
                 bilerp_float(corner_sky_values, u_lerp, v_lerp),
                 bilerp_float(corner_block_values, u_lerp, v_lerp),
                 material_class,
-                wave_weight,
-            });
+                wave_weight));
         }
     }
 
@@ -1063,7 +1088,8 @@ void append_water_mesh(ChunkMeshData& mesh,
 auto ChunkMesher::build_mesh(const World& world,
                              const ChunkCoord& coord,
                              std::size_t vertex_reserve_hint,
-                             std::size_t index_reserve_hint) const -> ChunkMeshData {
+                             std::size_t index_reserve_hint,
+                             ChunkMeshContent content) const -> ChunkMeshData {
     const auto* chunk = world.find_chunk(coord);
     if (chunk == nullptr) {
         return {};
@@ -1075,7 +1101,8 @@ auto ChunkMesher::build_mesh(const World& world,
         kWorldMinY,
         kWorldMaxY,
         vertex_reserve_hint,
-        index_reserve_hint);
+        index_reserve_hint,
+        content);
 }
 
 auto ChunkMesher::build_mesh_range(const World& world,
@@ -1083,7 +1110,8 @@ auto ChunkMesher::build_mesh_range(const World& world,
                                    int min_y,
                                    int max_y,
                                    std::size_t vertex_reserve_hint,
-                                   std::size_t index_reserve_hint) const -> ChunkMeshData {
+                                   std::size_t index_reserve_hint,
+                                   ChunkMeshContent content) const -> ChunkMeshData {
     ChunkMeshData mesh {};
     const auto* chunk = world.find_chunk(coord);
     if (chunk == nullptr) {
@@ -1103,7 +1131,7 @@ auto ChunkMesher::build_mesh_range(const World& world,
 
     const auto cached_min_y = std::max(kWorldMinY, clamped_min_y - 1);
     const auto cached_max_y = std::min(kWorldMaxY, clamped_max_y + 1);
-    const auto neighborhood = build_neighborhood(world, coord, cached_min_y, cached_max_y);
+    const Neighborhood neighborhood {world, coord, cached_min_y, cached_max_y};
     const auto chunk_world_x = coord.x * kChunkSizeX;
     const auto chunk_world_z = coord.z * kChunkSizeZ;
     const auto& chunk_blocks = chunk->blocks();
@@ -1117,6 +1145,16 @@ auto ChunkMesher::build_mesh_range(const World& world,
                     append_water_mesh(mesh, world, neighborhood, local_coord, chunk_world_x, chunk_world_z);
                 }
                 if (!has_block_mesh(block_id)) {
+                    continue;
+                }
+                if (content == ChunkMeshContent::ModernNonOrganic &&
+                    (is_organic_terrain_block(block_id) ||
+                     is_modern_procedural_decoration(block_id) ||
+                     is_architectural_solid_block(block_id) ||
+                     is_architectural_fixture_block(block_id))) {
+                    // Je remplace la peau naturelle et les décorations par
+                    // leurs maillages modernes; les cellules restent dans le
+                    // voisinage d'occlusion et dans toute la logique.
                     continue;
                 }
 

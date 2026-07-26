@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render/WaterVertex.h"
 #include "world/Block.h"
 
 #include <cstdint>
@@ -8,6 +9,11 @@
 namespace valcraft {
 
 class World;
+
+enum class ChunkMeshContent : std::uint8_t {
+    LegacyAll = 0,
+    ModernNonOrganic,
+};
 
 struct ChunkVertex {
     float x = 0.0F;
@@ -29,7 +35,7 @@ struct ChunkVertex {
 struct ChunkMeshData {
     std::vector<ChunkVertex> vertices;
     std::vector<std::uint32_t> indices;
-    std::vector<ChunkVertex> water_vertices;
+    std::vector<WaterVertex> water_vertices;
     std::vector<std::uint32_t> water_indices;
     std::size_t face_count = 0;
     std::size_t water_face_count = 0;
@@ -52,13 +58,15 @@ public:
     [[nodiscard]] auto build_mesh(const World& world,
                                   const ChunkCoord& coord,
                                   std::size_t vertex_reserve_hint = 0,
-                                  std::size_t index_reserve_hint = 0) const -> ChunkMeshData;
+                                  std::size_t index_reserve_hint = 0,
+                                  ChunkMeshContent content = ChunkMeshContent::LegacyAll) const -> ChunkMeshData;
     [[nodiscard]] auto build_mesh_range(const World& world,
                                         const ChunkCoord& coord,
                                         int min_y,
                                         int max_y,
                                         std::size_t vertex_reserve_hint = 0,
-                                        std::size_t index_reserve_hint = 0) const -> ChunkMeshData;
+                                        std::size_t index_reserve_hint = 0,
+                                        ChunkMeshContent content = ChunkMeshContent::LegacyAll) const -> ChunkMeshData;
 };
 
 } // namespace valcraft

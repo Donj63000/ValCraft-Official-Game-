@@ -27,6 +27,15 @@ struct RendererQualitySettings {
     std::size_t precipitation_drop_budget = 6'000U;
     std::size_t precipitation_impact_budget = 96U;
     float precipitation_radius = 38.0F;
+    int terrain_lod_count = 3;
+    float terrain_lod_distance = 144.0F;
+    int vegetation_lod_count = 3;
+    float vegetation_draw_distance = 128.0F;
+    int shadow_cascade_count = 2;
+    int material_resolution = 256;
+    float material_detail_scale = 1.0F;
+    float water_surface_detail = 1.0F;
+    bool fxaa_enabled = true;
 
     auto operator==(const RendererQualitySettings&) const -> bool = default;
 };
@@ -63,6 +72,15 @@ struct RendererQualitySettings {
             3'000U,
             48U,
             28.0F,
+            2,
+            112.0F,
+            2,
+            92.0F,
+            1,
+            128,
+            0.65F,
+            0.70F,
+            true,
         };
 
     case RendererQuality::Low:
@@ -78,6 +96,15 @@ struct RendererQualitySettings {
             1'200U,
             16U,
             18.0F,
+            1,
+            80.0F,
+            1,
+            60.0F,
+            1,
+            128,
+            0.35F,
+            0.30F,
+            false,
         };
 
     case RendererQuality::High:
@@ -95,6 +122,15 @@ struct RendererQualitySettings {
             6'000U,
             96U,
             38.0F,
+            3,
+            144.0F,
+            3,
+            128.0F,
+            2,
+            256,
+            1.0F,
+            1.0F,
+            true,
         };
     }
 }
@@ -102,6 +138,53 @@ struct RendererQualitySettings {
 [[nodiscard]] constexpr auto gpu_elapsed_nanoseconds_to_milliseconds(std::uint64_t elapsed_nanoseconds) noexcept
     -> double {
     return static_cast<double>(elapsed_nanoseconds) / 1'000'000.0;
+}
+
+struct RendererAdaptiveFrameTimeSample {
+    double frame_time_ms = 0.0;
+    bool valid = false;
+};
+
+[[nodiscard]] inline auto resolve_adaptive_frame_time_sample(
+    double gpu_frame_time_ms,
+    bool gpu_sample_valid,
+    double cpu_frame_time_ms,
+    bool cpu_sample_valid) noexcept -> RendererAdaptiveFrameTimeSample {
+    const auto valid_gpu_sample =
+        gpu_sample_valid && std::isfinite(gpu_frame_time_ms) &&
+        gpu_frame_time_ms > 0.0;
+    const auto valid_cpu_sample =
+        cpu_sample_valid && std::isfinite(cpu_frame_time_ms) &&
+        cpu_frame_time_ms > 0.0;
+
+    if (!valid_gpu_sample && !valid_cpu_sample) {
+        return {};
+    }
+
+    // Je pilote la qualite sur le goulet reel de la frame : le GPU ou le
+    // travail CPU actif, sans compter l'attente VSync ni le frame pacing.
+    return {
+        valid_gpu_sample && valid_cpu_sample
+            ? std::max(gpu_frame_time_ms, cpu_frame_time_ms)
+            : (valid_gpu_sample ? gpu_frame_time_ms : cpu_frame_time_ms),
+        true,
+    };
+}
+
+[[nodiscard]] constexpr auto resolve_adaptive_stream_radius(
+    int configured_radius,
+    RendererQuality resolved_quality) noexcept -> int {
+    const auto safe_radius = std::max(configured_radius, 0);
+    switch (resolved_quality) {
+    case RendererQuality::Medium:
+        return std::max(safe_radius - 1, 0);
+    case RendererQuality::Low:
+        return std::max(safe_radius - 2, 0);
+    case RendererQuality::High:
+    case RendererQuality::Dynamic:
+    default:
+        return safe_radius;
+    }
 }
 
 struct RendererAdaptiveQualityState {

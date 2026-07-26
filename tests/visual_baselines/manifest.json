@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "reference_commit": "e182e40",
+  "reference_pipeline": "legacy",
+  "modern_pipeline": "modern",
+  "capture_policy": {
+    "ssim_minimum": 0.985,
+    "strong_pixel_difference_ratio_maximum": 0.01,
+    "animated_regions_require_masks": true,
+    "reference_updates_require_explicit_approval": true
+  },
+  "profiles": [
+    {
+      "name": "low_720p",
+      "width": 1280,
+      "height": 720,
+      "quality": "low"
+    },
+    {
+      "name": "high_1080p",
+      "width": 1920,
+      "height": 1080,
+      "quality": "high"
+    },
+    {
+      "name": "dynamic_1440p",
+      "width": 2560,
+      "height": 1440,
+      "quality": "dynamic"
+    },
+    {
+      "name": "high_4k",
+      "width": 3840,
+      "height": 2160,
+      "quality": "high"
+    }
+  ],
+  "scenes": [
+    "continental_day",
+    "continental_night",
+    "coast",
+    "village",
+    "cave",
+    "organic_tunnel",
+    "rain",
+    "sea_storm_deck",
+    "sea_storm_bow",
+    "sea_storm_stern",
+    "sea_storm_port",
+    "sea_storm_starboard",
+    "sea_storm_interior",
+    "sea_storm_cabin",
+    "sea_storm_cargo",
+    "sea_storm_crew",
+    "player",
+    "creatures",
+    "viewmodel",
+    "hud",
+    "inventory",
+    "menus",
+    "console",
+    "death_screen",
+    "loading"
+  ]
+}

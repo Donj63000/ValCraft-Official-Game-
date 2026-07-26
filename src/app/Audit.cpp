@@ -122,7 +122,9 @@ auto indent_block(std::string text, std::string_view indent) -> std::string {
 auto frame_sample_to_json(const FramePerformanceSample& sample) -> std::string {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(6);
-    append_sample_json(stream, sample, "");
+    // Je conserve le schéma compact des événements d'audit : le détail v3
+    // des catégories reste porté par le rapport de performance principal.
+    append_sample_json(stream, sample, "", false);
     return stream.str();
 }
 

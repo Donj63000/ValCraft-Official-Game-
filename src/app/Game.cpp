@@ -1,9 +1,11 @@
 #include "app/Game.h"
+#include "app/SmokeCamera.h"
 #include "app/GameBranding.h"
 #include "app/InputBindings.h"
 #include "app/GameLoop.h"
 #include "gameplay/StartingPort.h"
 #include "render/ShipMesh.h"
+#include "render/StylizedShipMesh.h"
 #include "world/OceanSimulation.h"
 
 #include <glm/geometric.hpp>
@@ -265,7 +267,12 @@ void save_current_backbuffer_bmp(const std::filesystem::path& output_path, int w
 Game::Game(const GameOptions& options)
     : environment_(options.initial_time_of_day, options.freeze_time || options.smoke_test, 1337U),
       renderer_(),
-      world_(1337, options.performance.stream_radius),
+      world_(
+          1337,
+          options.performance.stream_radius,
+          WorldGenerationProfile::Continental,
+          WorldGenerationVersion::Latest,
+          options.visual_pipeline),
       options_(options) {
     window_width_ =
         std::clamp(
@@ -347,6 +354,13 @@ auto Game::run() -> int {
                                       completed_stats.meshing_ms + completed_stats.render_cpu_ms +
                                       completed_stats.present_ms + completed_stats.telemetry_ms;
             completed_stats.residual_ms = std::max(0.0, completed_stats.frame_total_ms - accounted_ms);
+            // Je transmets le cout actif complet au controleur adaptatif. Je
+            // retire la presentation, car elle contient la VSync et le pacing.
+            renderer_.submit_cpu_frame_time_sample(
+                std::max(
+                    0.0,
+                    completed_stats.frame_total_ms -
+                        completed_stats.present_ms));
             recording_frame_index_ = completed_stats.frame_index;
             record_frame_stats(completed_stats);
             recording_frame_index_.reset();
@@ -632,6 +646,15 @@ auto Game::initialize() -> bool {
     }
 
     if (!renderer_.initialize(current_renderer_options())) {
+        if (!renderer_.last_initialization_error().empty()) {
+            const auto renderer_error =
+                std::string("Renderer initialization failed: ") +
+                std::string(renderer_.last_initialization_error());
+            std::cerr << "ValCraft " << renderer_error << std::endl;
+            if (audit_) {
+                audit_->record_error(renderer_error);
+            }
+        }
         return false;
     }
 
@@ -763,6 +786,7 @@ void Game::initialize_audit() {
             {"shadow_map_size", audit_json_number(options_.performance.shadow_map_size)},
             {"shadows_enabled", audit_json_bool(options_.performance.shadows_enabled)},
             {"post_process_enabled", audit_json_bool(options_.performance.post_process_enabled)},
+            {"visual_pipeline", audit_json_string(visual_pipeline_name(options_.visual_pipeline))},
         }),
         AuditPriority::Critical);
 }
@@ -1521,6 +1545,42 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         } else {
             update_smoke_player(dt);
         }
+
+        if (terrain_edit_stress_enabled(options_)) {
+            const auto stress_frame =
+                static_cast<std::size_t>(
+                    std::max(rendered_frames_, 0));
+            const auto smoke_frame_count =
+                static_cast<std::size_t>(
+                    std::max(options_.smoke_frames, 0));
+            // Je ne commence une paire que si sa restauration dispose encore
+            // d'une frame de simulation. Le smoke ne laisse ainsi aucun bloc
+            // de benchmark dans le monde au moment de produire son rapport.
+            const auto remaining_frames =
+                stress_frame < smoke_frame_count
+                    ? smoke_frame_count - stress_frame
+                    : 0U;
+            const auto operation =
+                terrain_edit_stress_.update(
+                    world_,
+                    player_.position(),
+                    stress_frame,
+                    remaining_frames >
+                        kTerrainEditStressIntervalFrames);
+            if (operation.has_value()) {
+                const auto is_break =
+                    operation->action ==
+                    TerrainEditStressAction::Break;
+                record_performance_event(
+                    is_break
+                        ? PerformanceEventKind::BlockBreak
+                        : PerformanceEventKind::BlockPlace,
+                    operation->block,
+                    is_break
+                        ? "terrain_edit_stress_break"
+                        : "terrain_edit_stress_place");
+            }
+        }
     } else {
         const auto gameplay_input_enabled =
             !inventory_visible_ &&
@@ -1999,7 +2059,16 @@ void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
     }
 
     const auto stream_start = clock::now();
-    const auto stream_stats = world_.update_streaming(streaming_focus_position());
+    const auto active_stream_radius =
+        options_.performance.adaptive_quality
+            ? resolve_adaptive_stream_radius(
+                  options_.performance.stream_radius,
+                  renderer_.last_frame_stats().resolved_quality)
+            : options_.performance.stream_radius;
+    const auto stream_stats =
+        world_.update_streaming(
+            streaming_focus_position(),
+            active_stream_radius);
     frame_stats.streaming_ms +=
         std::chrono::duration<double, std::milli>(clock::now() - stream_start).count();
     frame_stats.stream_chunk_changes += stream_stats.chunk_changed ? 1U : 0U;
@@ -3288,6 +3357,7 @@ auto Game::current_renderer_options() const noexcept -> RendererOptions {
     renderer_options.post_process_enabled = runtime_post_process_enabled_;
     renderer_options.collect_detailed_stats = should_capture_performance();
     renderer_options.quality = options_.performance.adaptive_quality ? RendererQuality::Dynamic : RendererQuality::High;
+    renderer_options.visual_pipeline = options_.visual_pipeline;
     return renderer_options;
 }
 
@@ -3428,9 +3498,24 @@ auto Game::prepare_ship_mesh_during_loading(
 
     const auto dispatch_begin = clock::now();
     auto parts = std::vector<ShipPart> {ship.parts.begin(), ship.parts.end()};
+    const auto* blueprint = ship.blueprint;
+    const auto geometry_revision = ship.geometry_revision;
+    const auto visual_pipeline = options_.visual_pipeline;
     auto mesh_future = std::async(
         std::launch::async,
-        [parts = std::move(parts)] {
+        [parts = std::move(parts), blueprint, geometry_revision, visual_pipeline] {
+            if (visual_pipeline == VisualPipeline::ModernStylized &&
+                blueprint != nullptr) {
+                // Je construis la coque organique hors du thread OpenGL tout en
+                // conservant exactement le plan logique et sa revision.
+                auto local_blueprint = *blueprint;
+                local_blueprint.parts = std::span<const ShipPart> {parts};
+                local_blueprint.geometry_revision = geometry_revision;
+                return build_stylized_ship_mesh(
+                           local_blueprint,
+                           StylizedShipLod::Near)
+                    .mesh;
+            }
             return build_ship_mesh_data(std::span<const ShipPart> {parts});
         });
     record_loading_step(
@@ -3739,8 +3824,9 @@ void Game::install_prepared_world(World prepared_world) {
             [retired_world, release_ready = std::move(release_ready)]() mutable {
                 release_ready.wait();
                 retired_world.reset();
-            });
+        });
         world_ = std::move(prepared_world);
+        terrain_edit_stress_.reset();
     } catch (...) {
         world_ = std::move(*retired_world);
         try {
@@ -4022,7 +4108,13 @@ void Game::sync_menu_preview_environment() noexcept {
 
 void Game::initialize_preview_world() {
     present_loading_screen("VALCRAFT", "CREATION DU MONDE DE MENU", 0.12F);
-    world_ = World(1337, options_.performance.stream_radius);
+    world_ = World(
+        1337,
+        options_.performance.stream_radius,
+        WorldGenerationProfile::Continental,
+        WorldGenerationVersion::Latest,
+        options_.visual_pipeline);
+    terrain_edit_stress_.reset();
     creatures_.clear();
     item_drops_.clear();
     hotbar_ = make_default_hotbar_state();
@@ -4234,7 +4326,8 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
             options_.performance.stream_radius,
             generation_profile,
             sea_mode ? WorldGenerationVersion::SparseArchipelagoV2
-                     : WorldGenerationVersion::LegacyV1);
+                     : WorldGenerationVersion::LegacyV1,
+            options_.visual_pipeline);
         SeaAdventureSystem prepared_sea_adventure {};
         StartingVillageLayout prepared_village {};
         CreatureSystem prepared_creatures {};
@@ -4611,7 +4704,8 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
             snapshot.metadata.seed,
             options_.performance.stream_radius,
             generation_profile,
-            generation_version);
+            generation_version,
+            options_.visual_pipeline);
         prepared_world.begin_restore_save_plan(std::move(snapshot.world_save_plan));
         record_loading_step("save_restore_begin", world_begin);
         while (running_ && prepared_world.has_pending_save_restore()) {
@@ -5140,15 +5234,46 @@ void Game::update_menu_preview_camera(float dt) {
 
 void Game::update_smoke_player(float dt) {
     smoke_elapsed_seconds_ += dt;
-    constexpr float kSmokeSpeedX = 8.0F;
-    constexpr float kSmokeSpeedZ = 3.0F;
+    const auto streaming_stress =
+        options_.performance.perf_scenario == "world_stress";
+    const auto horizontal_pose =
+        make_land_smoke_camera_pose(
+            smoke_elapsed_seconds_,
+            0,
+            streaming_stress);
+    const auto world_x =
+        static_cast<int>(std::floor(horizontal_pose.position.x));
+    const auto world_z =
+        static_cast<int>(std::floor(horizontal_pose.position.z));
+    const auto previous_surface =
+        static_cast<int>(
+            std::floor(
+                std::max(
+                    player_.position().y - 2.40F,
+                    0.0F)));
+    const auto surface_height =
+        world_.loaded_surface_height(world_x, world_z)
+            .value_or(previous_surface);
+    const auto pose =
+        make_land_smoke_camera_pose(
+            smoke_elapsed_seconds_,
+            surface_height,
+            streaming_stress);
 
-    player_.set_position({
-        0.5F + smoke_elapsed_seconds_ * kSmokeSpeedX,
-        80.0F,
-        0.5F + smoke_elapsed_seconds_ * kSmokeSpeedZ,
-    });
-    player_.set_velocity({});
+    auto state = player_.state();
+    state.position = pose.position;
+    state.velocity = {};
+    state.fly_mode = true;
+    state.on_ground = false;
+    state.dead = false;
+    state.head_underwater = false;
+    state.swimming = false;
+    state.yaw_degrees = pose.yaw_degrees;
+    state.pitch_degrees = pose.pitch_degrees;
+    state.body_yaw_degrees = pose.yaw_degrees;
+    state.look_sway_yaw = 0.0F;
+    state.look_sway_pitch = 0.0F;
+    player_.load_state(state);
 }
 
 void Game::update_smoke_ship_camera() {
@@ -5530,6 +5655,39 @@ auto Game::make_performance_sample(const FramePerformanceStats& frame_stats) con
     sample.override_bytes = frame_stats.override_bytes;
     sample.gpu_buffer_bytes = frame_stats.gpu_buffer_bytes;
     sample.gpu_texture_bytes = frame_stats.gpu_texture_bytes;
+
+    // Je conserve ici les passes effectivement chronometrees par le renderer.
+    // La passe opaque historique contient encore terrain, vegetation et navire :
+    // je l'attribue donc une seule fois au terrain tant que ces sous-passes ne
+    // disposent pas de requetes separees, afin de ne jamais gonfler le total.
+    sample.render_category_cpu_ms[
+        PerformanceRenderCategory::Terrain] =
+        frame_stats.world_ms;
+    sample.render_category_cpu_ms[
+        PerformanceRenderCategory::Shadows] =
+        frame_stats.shadow_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::Terrain] =
+        frame_stats.gpu_world_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::Entities] =
+        frame_stats.gpu_entities_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::Water] =
+        frame_stats.gpu_water_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::Atmosphere] =
+        frame_stats.gpu_sky_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::PostProcess] =
+        frame_stats.gpu_post_process_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::Ui] =
+        frame_stats.gpu_hud_ms;
+    sample.render_category_gpu_ms[
+        PerformanceRenderCategory::Shadows] =
+        frame_stats.gpu_shadow_ms;
+
     sample.dominant_stage = detect_dominant_stage(sample);
     return sample;
 }
@@ -5960,6 +6118,15 @@ auto Game::build_performance_report() const -> PerformanceRunReport {
                             : options_.audit.label;
     metadata.quality_profile = options_.performance.adaptive_quality ? "adaptive" : "fixed_high";
     metadata.vsync_mode = vsync_mode_;
+    metadata.visual_pipeline =
+        std::string(
+            visual_pipeline_name(
+                options_.visual_pipeline));
+    metadata.material_pack_version =
+        static_cast<std::uint32_t>(
+            renderer_.material_pack_version());
+    metadata.material_pack_checksum =
+        renderer_.material_pack_checksum();
     return valcraft::build_performance_report(
         metadata,
         frame_samples_,

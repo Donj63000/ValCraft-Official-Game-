@@ -24,6 +24,50 @@ struct ChunkBounds {
     glm::vec3 center {0.0F};
 };
 
+class ExactAabbAccumulator {
+public:
+    void add(float x, float y, float z) noexcept {
+        const glm::vec3 point {x, y, z};
+        if (empty_) {
+            // Je prends le premier point comme AABB initiale afin de ne pas
+            // introduire de sentinelle infinie ni de marge artificielle.
+            min_corner_ = point;
+            max_corner_ = point;
+            empty_ = false;
+            return;
+        }
+
+        min_corner_.x = std::min(min_corner_.x, point.x);
+        min_corner_.y = std::min(min_corner_.y, point.y);
+        min_corner_.z = std::min(min_corner_.z, point.z);
+        max_corner_.x = std::max(max_corner_.x, point.x);
+        max_corner_.y = std::max(max_corner_.y, point.y);
+        max_corner_.z = std::max(max_corner_.z, point.z);
+    }
+
+    [[nodiscard]] auto empty() const noexcept -> bool {
+        return empty_;
+    }
+
+    [[nodiscard]] auto bounds_or(const ChunkBounds& fallback) const noexcept
+        -> ChunkBounds {
+        if (empty_) {
+            return fallback;
+        }
+
+        // Je divise chaque borne avant l'addition pour garder un centre fini
+        // meme lorsque les coordonnees valides approchent la limite d'un float.
+        const auto center =
+            min_corner_ * 0.5F + max_corner_ * 0.5F;
+        return {min_corner_, max_corner_, center};
+    }
+
+private:
+    glm::vec3 min_corner_ {0.0F};
+    glm::vec3 max_corner_ {0.0F};
+    bool empty_ = true;
+};
+
 struct ShadowPassContext {
     std::array<FrustumPlane, 6> frustum {};
     glm::vec3 focus {0.0F};
