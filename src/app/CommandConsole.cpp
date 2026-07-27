@@ -51,6 +51,7 @@ auto parse_command_console_input(std::string_view input)
         return {
             CommandConsoleCommand::StartTempest,
             CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Weather,
         };
     }
     if (command == "/meteo" ||
@@ -58,6 +59,22 @@ auto parse_command_console_input(std::string_view input)
         return {
             CommandConsoleCommand::None,
             CommandConsoleParseStatus::InvalidUsage,
+            CommandConsoleFamily::Weather,
+        };
+    }
+    if (command == "/give fusil") {
+        return {
+            CommandConsoleCommand::GiveMusket,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Give,
+        };
+    }
+    if (command == "/give" ||
+        command.starts_with("/give ")) {
+        return {
+            CommandConsoleCommand::None,
+            CommandConsoleParseStatus::InvalidUsage,
+            CommandConsoleFamily::Give,
         };
     }
     return {

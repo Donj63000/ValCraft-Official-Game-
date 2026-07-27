@@ -1,4 +1,5 @@
 #include "creatures/CrewAnimation.h"
+#include "gameplay/MusketCombat.h"
 #include "gameplay/SeaAdventure.h"
 #include "gameplay/ShipCrew.h"
 
@@ -979,6 +980,140 @@ TEST_CASE("un marin assomme conserve son travail puis recupere sans mourir") {
     CHECK(restored.members()[1].health == doctest::Approx(14.0F));
     CHECK(restored.members()[1].work_progress == doctest::Approx(57.0F));
     CHECK(restored.render_instances()[1].activity == CrewVisualActivity::Recover);
+}
+
+TEST_CASE("la requete de rayon equipage reste pure avant l'application unique des degats") {
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(4'404, ship);
+    auto state = crew.save_state();
+    place_at_station(
+        state.members[1],
+        ShipCrewStation::PortFishing);
+    crew.load_state(state, 4'404, ship);
+
+    std::array<float, kShipCrewMemberCount> initial_health {};
+    for (std::size_t index = 0U;
+         index < initial_health.size();
+         ++index) {
+        initial_health[index] =
+            crew.members()[index].health;
+    }
+    const auto target =
+        crew.render_instances()[1].position +
+        glm::vec3 {0.0F, 0.95F, 0.0F};
+    const auto origin =
+        target +
+        glm::vec3 {0.0F, 0.0F, -3.0F};
+
+    const auto query =
+        crew.raycast_first_living(
+            ship,
+            origin,
+            {0.0F, 0.0F, 1.0F},
+            5.0F);
+    REQUIRE(query.hit);
+    CHECK(query.member_id == 1U);
+    CHECK(query.distance <= 5.0F);
+    CHECK(
+        glm::length(
+            query.position -
+            (origin +
+             glm::vec3 {0.0F, 0.0F, 1.0F} *
+                 query.distance)) <
+        1.0e-5F);
+
+    const auto repeated_query =
+        crew.raycast_first_living(
+            ship,
+            origin,
+            {0.0F, 0.0F, 1.0F},
+            5.0F);
+    REQUIRE(repeated_query.hit);
+    CHECK(repeated_query.member_id == query.member_id);
+    CHECK(repeated_query.distance ==
+          doctest::Approx(query.distance));
+    for (std::size_t index = 0U;
+         index < initial_health.size();
+         ++index) {
+        CHECK(crew.members()[index].health ==
+              doctest::Approx(initial_health[index]));
+    }
+
+    const auto wall_distance =
+        std::max(query.distance - 0.20F, 0.0F);
+    const std::array blocked_candidates {
+        MusketHit {
+            MusketHitKind::Crew,
+            query.position,
+            query.distance,
+            query.member_id,
+        },
+        MusketHit {
+            MusketHitKind::World,
+            origin +
+                glm::vec3 {0.0F, 0.0F, 1.0F} *
+                    wall_distance,
+            wall_distance,
+            0U,
+        },
+    };
+    const auto blocked_hit =
+        select_nearest_musket_hit(
+            blocked_candidates,
+            5.0F);
+    REQUIRE(blocked_hit.hit());
+    CHECK(blocked_hit.kind == MusketHitKind::World);
+    CHECK_FALSE(
+        musket_hit_can_receive_damage(
+            blocked_hit.kind));
+    for (std::size_t index = 0U;
+         index < initial_health.size();
+         ++index) {
+        // Je verifie que la requete d'equipage et la selection du mur
+        // n'endommagent ni le marin masque, ni un autre membre du bord.
+        CHECK(crew.members()[index].health ==
+              doctest::Approx(initial_health[index]));
+    }
+
+    const std::array exposed_candidate {
+        blocked_candidates[0],
+    };
+    const auto exposed_hit =
+        select_nearest_musket_hit(
+            exposed_candidate,
+            5.0F);
+    REQUIRE(exposed_hit.hit());
+    REQUIRE(exposed_hit.kind == MusketHitKind::Crew);
+
+    const auto applied =
+        crew.apply_damage(
+            static_cast<std::uint8_t>(
+                exposed_hit.target_id),
+            4.0F,
+            exposed_hit.distance);
+    REQUIRE(applied.hit);
+    CHECK(applied.member_id == query.member_id);
+    CHECK(applied.damage == doctest::Approx(4.0F));
+    CHECK(applied.distance ==
+          doctest::Approx(query.distance));
+    CHECK(crew.members()[1].health ==
+          doctest::Approx(initial_health[1] - 4.0F));
+    for (std::size_t index = 0U;
+         index < initial_health.size();
+         ++index) {
+        if (index != 1U) {
+            CHECK(crew.members()[index].health ==
+                  doctest::Approx(initial_health[index]));
+        }
+    }
+
+    CHECK_FALSE(
+        crew.apply_damage(
+            255U,
+            4.0F)
+            .hit);
 }
 
 TEST_CASE("un marin assomme en transport reprend sa livraison apres rechargement") {

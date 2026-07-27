@@ -6,6 +6,7 @@
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
 #include "player/PlayerGeometry.h"
+#include "render/MusketVisualRecipe.h"
 #include "world/OceanAdventureLayout.h"
 #include "world/OceanSimulation.h"
 
@@ -185,6 +186,26 @@ auto item_socket_in_camera_space(const PlayerViewModelMesh& viewmodel, const Pla
         glm::dot(relative, camera_up),
         glm::dot(relative, camera_forward),
     };
+}
+
+auto transformed_musket_socket(
+    const glm::mat4& transform,
+    const glm::vec3& socket) -> glm::vec3 {
+    return glm::vec3 {
+        transform *
+        glm::vec4 {socket, 1.0F},
+    };
+}
+
+auto finite_transform(const glm::mat4& transform) -> bool {
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            if (!std::isfinite(transform[column][row])) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 void settle_viewmodel(PlayerController& player, const World& world, int frames = 18) {
@@ -4624,6 +4645,53 @@ TEST_CASE("item drops are picked up into inventory and respect 64 item stacks") 
     CHECK(drop_system.active_drop_count() == 0);
 }
 
+TEST_CASE("un fusil depose puis ramasse conserve individuellement sa chambre vide") {
+    World world(3'620, 1);
+    test::make_chunk_empty(
+        world,
+        {0, 0});
+    test::make_flat_floor(
+        world,
+        -2,
+        2,
+        0,
+        -2,
+        2);
+
+    ItemDropSystem drop_system {};
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    auto empty_musket =
+        inventory_make_slot(
+            to_block_id(
+                BlockType::Musket),
+            1U);
+    set_musket_loaded(
+        empty_musket,
+        false);
+    drop_system.spawn_drop(
+        empty_musket,
+        {0.5F, 1.08F, 0.5F},
+        {});
+
+    drop_system.update(
+        0.25F,
+        world,
+        {0.5F, 1.001F, 0.5F},
+        inventory,
+        hotbar);
+
+    CHECK(
+        drop_system.active_drop_count() ==
+        0U);
+    REQUIRE(
+        is_musket_item(
+            hotbar.slots[0]));
+    CHECK_FALSE(
+        is_musket_loaded(
+            hotbar.slots[0]));
+}
+
 TEST_CASE("item drops stay in the world when the inventory is full") {
     World world(363, 1);
     test::make_chunk_empty(world, {0, 0});
@@ -5210,6 +5278,130 @@ TEST_CASE("player first person viewmodel adds a sword model when the held item i
     };
     CHECK(glm::distance(socket_position, blade_position) > 0.20F);
     CHECK(glm::distance(socket_position, blade_position) < 0.70F);
+}
+
+TEST_CASE("player musket shares the canonical recipe and aligns both sights in ADS") {
+    World world(6'041, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    settle_viewmodel(player, world);
+
+    PlayerMusketView hip {};
+    hip.active = true;
+    const auto hip_parts =
+        build_player_viewmodel_parts(
+            player,
+            to_block_id(BlockType::Musket),
+            hip);
+    REQUIRE_FALSE(hip_parts.empty());
+    CHECK(
+        hip_parts.parts.size() ==
+        musket_visual_parts().size() + 4U);
+    CHECK(
+        glm::distance(
+            hip_parts.pose.wrist_position,
+            hip_parts.pose.offhand_position) >
+        0.20F);
+    CHECK(
+        glm::distance(
+            hip_parts.pose.wrist_position,
+            transformed_musket_socket(
+                hip_parts.pose.item_socket_transform,
+                kMusketVisualSockets.rear_hand)) <
+        1.0e-4F);
+    CHECK(
+        glm::distance(
+            hip_parts.pose.offhand_position,
+            transformed_musket_socket(
+                hip_parts.pose.item_socket_transform,
+                kMusketVisualSockets.forward_hand)) <
+        1.0e-4F);
+
+    auto ads = hip;
+    ads.aim_requested = true;
+    ads.aim_ratio = 1.0F;
+    const auto aimed =
+        build_player_viewmodel_parts(
+            player,
+            to_block_id(BlockType::Musket),
+            ads);
+    REQUIRE_FALSE(aimed.empty());
+    const auto rear_sight =
+        transformed_musket_socket(
+            aimed.pose.item_socket_transform,
+            kMusketVisualSockets.rear_sight);
+    const auto front_sight =
+        transformed_musket_socket(
+            aimed.pose.item_socket_transform,
+            kMusketVisualSockets.front_sight);
+    const auto sight_direction =
+        glm::normalize(front_sight - rear_sight);
+    const auto camera_forward =
+        glm::normalize(player.look_direction());
+    const auto camera_right =
+        glm::normalize(
+            glm::cross(
+                camera_forward,
+                glm::vec3 {0.0F, 1.0F, 0.0F}));
+    const auto camera_up =
+        glm::normalize(
+            glm::cross(
+                camera_right,
+                camera_forward));
+    const auto rear_from_eye =
+        rear_sight - player.eye_position();
+
+    CHECK(glm::dot(sight_direction, camera_forward) > 0.9999F);
+    CHECK(glm::dot(aimed.pose.muzzle_forward, camera_forward) > 0.9999F);
+    CHECK(std::abs(glm::dot(rear_from_eye, camera_right)) < 1.0e-4F);
+    CHECK(std::abs(glm::dot(rear_from_eye, camera_up)) < 1.0e-4F);
+
+    constexpr std::array<float, 7> kReloadSamples {{
+        0.06F,
+        0.18F,
+        0.31F,
+        0.45F,
+        0.62F,
+        0.79F,
+        0.93F,
+    }};
+    auto previous_root = glm::vec3 {0.0F};
+    auto has_previous_root = false;
+    for (std::size_t stage = 0U;
+         stage < kReloadSamples.size();
+         ++stage) {
+        auto reload = hip;
+        reload.state = PlayerMusketState::Reloading;
+        reload.reload_progress = kReloadSamples[stage];
+        reload.reload_stage =
+            musket_reload_stage(
+                reload.reload_progress);
+        const auto pose =
+            build_player_viewmodel_parts(
+                player,
+                to_block_id(BlockType::Musket),
+                reload);
+        CAPTURE(stage);
+        REQUIRE(
+            pose.parts.size() ==
+            musket_visual_parts().size() + 4U);
+        CHECK(pose.pose.musket_reload_stage == stage);
+        CHECK(finite_transform(pose.pose.item_socket_transform));
+        for (const auto& part : pose.parts) {
+            CHECK(finite_transform(part.transform));
+        }
+        if (has_previous_root) {
+            CHECK(
+                glm::distance(
+                    pose.pose.root_position,
+                    previous_root) >
+                1.0e-4F);
+        }
+        previous_root = pose.pose.root_position;
+        has_previous_root = true;
+    }
 }
 
 TEST_CASE("player avatar action triggers deterministically change the first person pose") {

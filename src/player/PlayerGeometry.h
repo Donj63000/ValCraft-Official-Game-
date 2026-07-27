@@ -2,6 +2,7 @@
 
 #include "creatures/CreatureGeometry.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerMusket.h"
 #include "world/Block.h"
 
 #include <glm/mat4x4.hpp>
@@ -39,7 +40,11 @@ enum class PlayerAtlasTile : std::uint8_t {
     SwordGuard = 18,
     SwordGrip = 19,
     SwordPommel = 20,
-    Count = 21,
+    MusketWalnut = 21,
+    MusketSteel = 22,
+    MusketBrass = 23,
+    MusketFlint = 24,
+    Count = 25,
 };
 
 enum class PlayerMeshView : std::uint8_t {
@@ -52,11 +57,19 @@ struct PlayerViewModelPose {
     glm::vec3 shoulder_position {0.0F};
     glm::vec3 elbow_position {0.0F};
     glm::vec3 wrist_position {0.0F};
+    glm::vec3 offhand_position {0.0F};
+    glm::vec3 muzzle_position {0.0F};
+    glm::vec3 muzzle_forward {0.0F, 0.0F, -1.0F};
     glm::mat4 item_socket_transform {1.0F};
     float look_sway_yaw = 0.0F;
     float look_sway_pitch = 0.0F;
     float walk_bob = 0.0F;
     float action_swing = 0.0F;
+    float musket_aim_ratio = 0.0F;
+    float musket_reload_progress = 0.0F;
+    float musket_recoil_ratio = 0.0F;
+    std::uint8_t musket_reload_stage = 0U;
+    bool musket_active = false;
 };
 
 struct PlayerViewModelMesh {
@@ -82,9 +95,15 @@ struct PlayerViewModelParts {
 [[nodiscard]] auto build_player_world_avatar_parts(const PlayerController& player) -> std::vector<CreaturePartInstance>;
 [[nodiscard]] auto build_player_viewmodel_parts(const PlayerController& player,
                                                 BlockId held_item = to_block_id(BlockType::Air)) -> PlayerViewModelParts;
+[[nodiscard]] auto build_player_viewmodel_parts(const PlayerController& player,
+                                                BlockId held_item,
+                                                const PlayerMusketView& musket) -> PlayerViewModelParts;
 [[nodiscard]] auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureMeshData;
 [[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player,
                                                BlockId held_item = to_block_id(BlockType::Air)) -> PlayerViewModelMesh;
+[[nodiscard]] auto build_player_viewmodel_mesh(const PlayerController& player,
+                                               BlockId held_item,
+                                               const PlayerMusketView& musket) -> PlayerViewModelMesh;
 [[nodiscard]] auto build_player_mesh(const PlayerController& player,
                                      PlayerMeshView view = PlayerMeshView::FirstPerson) -> CreatureMeshData;
 

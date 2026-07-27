@@ -1,5 +1,7 @@
 #include "player/PlayerGeometry.h"
 
+#include "render/MusketVisualRecipe.h"
+
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -18,6 +20,7 @@ constexpr float kMaterialSkin = 0.32F;
 constexpr float kMaterialFabric = 0.24F;
 constexpr float kMaterialDenim = 0.48F;
 constexpr float kMaterialLeather = 0.64F;
+constexpr float kMaterialWood = 0.58F;
 constexpr float kMaterialRubber = 0.72F;
 constexpr float kMaterialMetal = 0.92F;
 constexpr float kHurtFlashDuration = 0.35F;
@@ -478,6 +481,44 @@ auto sample_player_tile(PlayerAtlasTile tile, int x, int y) noexcept -> std::arr
                          126.0F + shine * 56.0F + rim * 14.0F + grain * 6.0F,
                          0.0F);
     }
+    case PlayerAtlasTile::MusketWalnut: {
+        const auto vein =
+            0.5F + 0.5F * std::sin(ny * 22.0F + nx * 5.0F + grain * 4.0F);
+        const auto pore = soft_grain * 10.0F;
+        return make_rgba(
+            82.0F + vein * 42.0F + pore,
+            47.0F + vein * 25.0F + pore * 0.45F,
+            25.0F + vein * 14.0F + pore * 0.24F,
+            0.0F);
+    }
+    case PlayerAtlasTile::MusketSteel: {
+        const auto brushing =
+            0.5F + 0.5F * std::sin(nx * 28.0F + ny * 3.0F);
+        const auto patina = soft_grain * 16.0F;
+        return make_rgba(
+            72.0F + brushing * 52.0F + patina,
+            76.0F + brushing * 56.0F + patina,
+            78.0F + brushing * 60.0F + patina,
+            0.0F);
+    }
+    case PlayerAtlasTile::MusketBrass: {
+        const auto shine =
+            line_mask(nx, 0.38F + std::sin(ny * 8.0F) * 0.05F, 0.11F);
+        return make_rgba(
+            154.0F + shine * 72.0F + grain * 9.0F,
+            105.0F + shine * 54.0F + soft_grain * 7.0F,
+            38.0F + shine * 26.0F + grain * 5.0F,
+            0.0F);
+    }
+    case PlayerAtlasTile::MusketFlint: {
+        const auto chipped =
+            1.0F - smoothstep01(edge_distance(nx, ny) / 0.24F);
+        return make_rgba(
+            45.0F + grain * 24.0F + chipped * 18.0F,
+            51.0F + soft_grain * 25.0F + chipped * 20.0F,
+            55.0F + grain * 28.0F + chipped * 24.0F,
+            0.0F);
+    }
 
     case PlayerAtlasTile::Count:
         break;
@@ -519,7 +560,9 @@ auto build_world_avatar_pose(const PlayerController& player) -> PlayerWorldAvata
 auto build_viewmodel_rig_state(const PlayerController& player, BlockId held_item) -> PlayerViewModelRigState {
     const auto& state = player.state();
     const auto held_item_id = block_item_id(held_item);
-    const auto weapon_pose = held_item_id == to_block_id(BlockType::Sword);
+    const auto weapon_pose =
+        held_item_id == to_block_id(BlockType::Sword) ||
+        held_item_id == to_block_id(BlockType::Musket);
     const auto hurt_amount = saturate(state.hurt_timer / kHurtFlashDuration);
     const auto walk_reference_speed = state.swimming ? 3.8F : (state.fly_mode ? 10.0F : 5.6F);
     const auto walk_amount = saturate(glm::length(glm::vec2 {state.velocity.x, state.velocity.z}) / std::max(walk_reference_speed, 0.001F));
@@ -900,6 +943,200 @@ void append_viewmodel_arm(PlayerViewModelParts& output, const PlayerController& 
     output.pose.action_swing = std::max(std::max(rig.mine_arc, rig.place_arc), std::max(rig.mine_pull, rig.place_pull));
 }
 
+auto player_musket_tile(MusketVisualMaterial material) noexcept
+    -> PlayerAtlasTile {
+    switch (material) {
+    case MusketVisualMaterial::Walnut:
+        return PlayerAtlasTile::MusketWalnut;
+    case MusketVisualMaterial::Brass:
+        return PlayerAtlasTile::MusketBrass;
+    case MusketVisualMaterial::Flint:
+    case MusketVisualMaterial::DarkBore:
+        return PlayerAtlasTile::MusketFlint;
+    case MusketVisualMaterial::PatinatedSteel:
+    default:
+        return PlayerAtlasTile::MusketSteel;
+    }
+}
+
+auto player_musket_material(MusketVisualMaterial material) noexcept -> float {
+    return material == MusketVisualMaterial::Walnut
+               ? kMaterialWood
+               : kMaterialMetal;
+}
+
+auto transformed_point(const glm::mat4& transform,
+                       const glm::vec3& point) noexcept -> glm::vec3 {
+    return glm::vec3 {transform * glm::vec4 {point, 1.0F}};
+}
+
+void append_viewmodel_musket(PlayerViewModelParts& output,
+                             const PlayerController& player,
+                             const PlayerViewModelRigState& rig,
+                             const PlayerMusketView& musket_view) {
+    auto& mesh = output.parts;
+    const auto aim = saturate(musket_view.aim_ratio);
+    const auto recoil = saturate(musket_view.recoil_ratio);
+    const auto reload =
+        musket_view.reloading()
+            ? saturate(musket_view.reload_progress)
+            : 0.0F;
+    const auto reload_lift =
+        musket_view.reloading()
+            ? std::sin(reload * kPi)
+            : 0.0F;
+
+    auto camera_root = glm::mat4 {1.0F};
+    camera_root[0] = glm::vec4 {rig.camera.right, 0.0F};
+    camera_root[1] = glm::vec4 {rig.camera.up, 0.0F};
+    camera_root[2] = glm::vec4 {-rig.camera.forward, 0.0F};
+    camera_root[3] = glm::vec4 {player.eye_position(), 1.0F};
+
+    // Je place les organes de visee sur l'axe de la camera en ADS. A la
+    // hanche, je decale l'arme pour garder sa longue silhouette lisible.
+    const auto root_translation = glm::vec3 {
+        glm::mix(0.27F + rig.bob_side, 0.0F, aim),
+        glm::mix(
+            -0.255F + rig.bob_vertical,
+            -kMusketVisualSockets.rear_sight.y,
+            aim) -
+            reload_lift * 0.20F,
+        -glm::mix(
+            0.72F + rig.bob_depth - recoil * 0.105F,
+            0.64F - recoil * 0.105F,
+            aim),
+    };
+    const auto musket_rotation = glm::vec3 {
+        -rig.look_sway_pitch * glm::mix(0.10F, 0.025F, aim),
+        kPi * 0.5F +
+            rig.look_sway_yaw * glm::mix(0.12F, 0.025F, aim),
+        reload_lift * 0.72F +
+            recoil * 0.025F -
+            rig.bob_roll * glm::mix(0.45F, 0.08F, aim),
+    };
+    const auto musket_root = make_frame_transform(
+        camera_root,
+        root_translation,
+        musket_rotation);
+    const auto ramrod_offset = musket_ramrod_offset(reload);
+
+    for (const auto& recipe_part : musket_visual_parts()) {
+        auto center = recipe_part.center;
+        if (recipe_part.kind == MusketVisualPartKind::Ramrod) {
+            center.x += ramrod_offset;
+        }
+        append_box(
+            mesh,
+            musket_root,
+            center,
+            recipe_part.half_extent,
+            recipe_part.rotation_radians,
+            uniform_tiles(player_musket_tile(recipe_part.material)),
+            player_musket_material(recipe_part.material),
+            recipe_part.kind == MusketVisualPartKind::Stock ? 0.13F : 0.05F,
+            0.0F);
+    }
+
+    const auto sleeve_tiles = uniform_tiles(PlayerAtlasTile::Sleeve);
+    const auto hand_tiles = uniform_tiles(PlayerAtlasTile::Skin);
+    const auto support_shift =
+        musket_view.reload_stage >= 1U &&
+                musket_view.reload_stage <= 3U
+            ? glm::vec3 {-0.31F, 0.31F, -0.03F}
+            : glm::vec3 {0.0F};
+    const auto ramrod_hand_shift =
+        musket_view.reload_stage == 4U ||
+                musket_view.reload_stage == 5U
+            ? glm::vec3 {
+                  0.40F - ramrod_offset,
+                  0.13F,
+                  0.0F,
+              }
+            : glm::vec3 {0.0F};
+    const auto rear_hand = kMusketVisualSockets.rear_hand;
+    const auto forward_hand =
+        kMusketVisualSockets.forward_hand +
+        support_shift +
+        ramrod_hand_shift;
+
+    // Je montre deux bras distincts : la main forte tient la poignee et la
+    // main faible accompagne le fut ou la baguette pendant le rechargement.
+    append_box(
+        mesh,
+        musket_root,
+        glm::mix(glm::vec3 {-0.66F, -0.30F, 0.29F}, rear_hand, 0.48F),
+        glm::vec3 {0.245F, 0.065F, 0.075F},
+        glm::vec3 {0.12F, 0.06F, 0.48F},
+        sleeve_tiles,
+        kMaterialFabric,
+        0.08F,
+        0.0F);
+    append_box(
+        mesh,
+        musket_root,
+        rear_hand,
+        glm::vec3 {0.073F, 0.060F, 0.065F},
+        glm::vec3 {0.0F},
+        hand_tiles,
+        kMaterialSkin,
+        0.06F,
+        0.0F);
+    append_box(
+        mesh,
+        musket_root,
+        glm::mix(glm::vec3 {-0.34F, -0.33F, -0.34F}, forward_hand, 0.52F),
+        glm::vec3 {0.300F, 0.064F, 0.074F},
+        glm::vec3 {-0.10F, -0.04F, -0.38F},
+        sleeve_tiles,
+        kMaterialFabric,
+        0.08F,
+        0.0F);
+    append_box(
+        mesh,
+        musket_root,
+        forward_hand,
+        glm::vec3 {0.076F, 0.058F, 0.064F},
+        glm::vec3 {0.0F},
+        hand_tiles,
+        kMaterialSkin,
+        0.06F,
+        0.0F);
+
+    const auto muzzle = transformed_point(
+        musket_root,
+        kMusketVisualSockets.muzzle);
+    const auto muzzle_ahead = transformed_point(
+        musket_root,
+        kMusketVisualSockets.muzzle + glm::vec3 {1.0F, 0.0F, 0.0F});
+    output.pose.root_position = transformed_point(
+        musket_root,
+        glm::vec3 {0.0F});
+    output.pose.shoulder_position = transformed_point(
+        musket_root,
+        glm::vec3 {-0.66F, -0.30F, 0.29F});
+    output.pose.elbow_position = transformed_point(
+        musket_root,
+        glm::mix(glm::vec3 {-0.66F, -0.30F, 0.29F}, rear_hand, 0.48F));
+    output.pose.wrist_position = transformed_point(musket_root, rear_hand);
+    output.pose.offhand_position =
+        transformed_point(musket_root, forward_hand);
+    output.pose.muzzle_position = muzzle;
+    output.pose.muzzle_forward = safe_normalize(
+        muzzle_ahead - muzzle,
+        rig.camera.forward);
+    output.pose.item_socket_transform = musket_root;
+    output.pose.look_sway_yaw = rig.look_sway_yaw;
+    output.pose.look_sway_pitch = rig.look_sway_pitch;
+    output.pose.walk_bob = rig.bob_vertical;
+    output.pose.action_swing = recoil;
+    output.pose.musket_aim_ratio = aim;
+    output.pose.musket_reload_progress = reload;
+    output.pose.musket_recoil_ratio = recoil;
+    output.pose.musket_reload_stage =
+        std::min<std::uint8_t>(musket_view.reload_stage, 6U);
+    output.pose.musket_active = true;
+}
+
 void append_viewmodel_held_item(PlayerViewModelParts& output, BlockId held_item) {
     held_item = block_item_id(held_item);
     if (held_item != to_block_id(BlockType::Sword)) {
@@ -1082,9 +1319,26 @@ auto build_player_world_avatar_parts(const PlayerController& player) -> std::vec
 }
 
 auto build_player_viewmodel_parts(const PlayerController& player, BlockId held_item) -> PlayerViewModelParts {
+    PlayerMusketView musket {};
+    musket.active =
+        block_item_id(held_item) == to_block_id(BlockType::Musket);
+    return build_player_viewmodel_parts(player, held_item, musket);
+}
+
+auto build_player_viewmodel_parts(const PlayerController& player,
+                                  BlockId held_item,
+                                  const PlayerMusketView& musket)
+    -> PlayerViewModelParts {
     PlayerViewModelParts output {};
+    const auto rig = build_viewmodel_rig_state(player, held_item);
+    if (block_item_id(held_item) == to_block_id(BlockType::Musket)) {
+        output.parts.reserve(musket_visual_parts().size() + 4U);
+        append_viewmodel_musket(output, player, rig, musket);
+        return output;
+    }
+
     output.parts.reserve(18U);
-    append_viewmodel_arm(output, player, build_viewmodel_rig_state(player, held_item));
+    append_viewmodel_arm(output, player, rig);
     append_viewmodel_held_item(output, held_item);
     return output;
 }
@@ -1095,7 +1349,18 @@ auto build_player_world_avatar_mesh(const PlayerController& player) -> CreatureM
 }
 
 auto build_player_viewmodel_mesh(const PlayerController& player, BlockId held_item) -> PlayerViewModelMesh {
-    const auto parts = build_player_viewmodel_parts(player, held_item);
+    PlayerMusketView musket {};
+    musket.active =
+        block_item_id(held_item) == to_block_id(BlockType::Musket);
+    return build_player_viewmodel_mesh(player, held_item, musket);
+}
+
+auto build_player_viewmodel_mesh(const PlayerController& player,
+                                 BlockId held_item,
+                                 const PlayerMusketView& musket)
+    -> PlayerViewModelMesh {
+    const auto parts =
+        build_player_viewmodel_parts(player, held_item, musket);
     PlayerViewModelMesh output {};
     output.mesh = build_creature_mesh(std::span<const CreaturePartInstance>(parts.parts.data(), parts.parts.size()));
     output.pose = parts.pose;

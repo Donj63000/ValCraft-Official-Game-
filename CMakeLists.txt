@@ -221,6 +221,8 @@ add_library(valcraft_core
     src/world/OceanSimulation.cpp
     src/world/PrecipitationField.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/PlayerMusket.cpp
+    src/gameplay/PlayerMusketEffects.cpp
     src/gameplay/PlayerProgression.cpp
     src/gameplay/SeaAdventure.cpp
     src/gameplay/ShipCrew.cpp
@@ -362,6 +364,10 @@ add_executable(valcraft_tests
     tests/OrganicTerrainMesherTests.cpp
     tests/VisualWorldTests.cpp
     tests/PlayerTests.cpp
+    tests/PlayerMusketTests.cpp
+    tests/PlayerMusketEffectsTests.cpp
+    tests/MusketCombatTests.cpp
+    tests/MusketHudTests.cpp
     tests/PrecipitationTests.cpp
     tests/ProceduralSfxTests.cpp
 )
@@ -497,6 +503,24 @@ if(Python3_Interpreter_FOUND)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "Regenerating baked block texture tiles from Textures/*.png"
         VERBATIM
+    )
+
+    add_custom_target(valcraft_check_block_texture_tiles
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_block_texture_tiles.py --check
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Checking deterministic baked block texture tiles"
+        VERBATIM
+    )
+
+    add_test(
+        NAME valcraft_block_texture_tiles_determinism
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_block_texture_tiles.py --check
+    )
+    set_tests_properties(
+        valcraft_block_texture_tiles_determinism
+        PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            LABELS "assets;determinism;visual"
     )
 
     add_custom_target(valcraft_regenerate_window_icon

@@ -268,6 +268,8 @@ enum class ShipAtlasMaterial : std::uint8_t {
         return {6, 6};
     case BlockType::Shovel:
         return {7, 6};
+    case BlockType::Musket:
+        return {4, 2};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -317,6 +319,8 @@ enum class ShipAtlasMaterial : std::uint8_t {
         return {6, 6};
     case BlockType::Shovel:
         return {7, 6};
+    case BlockType::Musket:
+        return {4, 2};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }
@@ -371,6 +375,7 @@ enum class ShipAtlasMaterial : std::uint8_t {
     case BlockType::RoundShield:
     case BlockType::Sword:
     case BlockType::Spear:
+    case BlockType::Musket:
     case BlockType::Pickaxe:
     case BlockType::Shovel:
         return BlockVisualMaterial::Rock;

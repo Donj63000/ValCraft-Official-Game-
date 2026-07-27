@@ -137,6 +137,10 @@ encore des systems a approfondir, des bugs a corriger et du contenu a enrichir.
 - hotbar `9` slots avec selection clavier et roulette
 - inventaire jouable avec UI modernisee, drag/drop, split de stack, echanges hotbar et drop d'objets
 - casse de blocs au clic gauche et pose de blocs au clic droit
+- fusil a silex utilisable en FPS dans les rendus Modern Stylized et Legacy :
+  tir unique, visee ADS, recul, rechargement anime et fumee de poudre noire
+- commande `/give fusil` depuis la console `²`, avec insertion atomique dans
+  la hotbar puis repli vers le stockage
 - torches placables avec lumiere
 - objets recoltes transformes en item drops recuperables
 - ecran de mort, respawn et menu pause modernise
@@ -239,6 +243,10 @@ Cette verification controle notamment :
 | Pause / reprendre | `Escape` |
 | Casser un bloc | `Clic gauche` |
 | Poser un bloc | `Clic droit` |
+| Tirer avec le fusil selectionne | `Clic gauche` |
+| Viser avec le fusil selectionne | `Clic droit` maintenu |
+| Recharger le fusil selectionne | `R` |
+| Ouvrir / fermer la console de commandes | `²` |
 | Selection hotbar | `1` a `9` / roulette souris |
 | Drop d'objet | `Q` |
 | Drop de pile complete | `Ctrl + Q` |
@@ -255,6 +263,24 @@ Cette verification controle notamment :
 - `doctest`
 
 Toutes les dependances sont recuperees automatiquement via `FetchContent`.
+
+### Regeneration des visuels proceduraux
+
+Apres une modification de la recette du fusil ou des autres objets visuels,
+regenerer les deux familles d'assets puis executer les controles deterministes :
+
+```powershell
+cmake --build cmake-build-relwithdebinfo --target valcraft_regenerate_model_icon_atlas
+cmake --build cmake-build-relwithdebinfo --target valcraft_regenerate_block_texture_tiles
+cmake --build cmake-build-relwithdebinfo --target valcraft_check_model_icon_atlas
+cmake --build cmake-build-relwithdebinfo --target valcraft_check_block_texture_tiles
+ctest --test-dir cmake-build-relwithdebinfo --output-on-failure -L assets
+```
+
+L'atlas de modeles alimente les icones Modern Stylized. La silhouette generee
+dans l'atlas de blocs couvre le rendu Legacy ; leurs checksums versionnes
+empechent qu'une regeneration partielle ou non deterministe soit acceptee. Les
+cibles `valcraft_check_*` comparent les assets existants sans les reecrire.
 
 ## Architecture
 

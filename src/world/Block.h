@@ -50,6 +50,7 @@ enum class BlockType : BlockId {
     Pickaxe = 37,
     Axe = 38,
     Shovel = 39,
+    Musket = 40,
 };
 
 enum class BlockMeshType : std::uint8_t {
@@ -124,7 +125,7 @@ inline constexpr auto to_block_id(BlockType type) noexcept -> BlockId {
 }
 
 inline constexpr auto is_known_block_id(BlockId block_id) noexcept -> bool {
-    return block_id <= to_block_id(BlockType::Shovel);
+    return block_id <= to_block_id(BlockType::Musket);
 }
 
 inline constexpr WaterState kWaterSourceBit = static_cast<WaterState>(1U << 7U);
@@ -194,6 +195,7 @@ inline constexpr auto is_torch_block(BlockId block_id) noexcept -> bool {
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     default:
         return false;
     }
@@ -236,6 +238,7 @@ inline constexpr auto is_wall_torch_block(BlockId block_id) noexcept -> bool {
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     default:
         return false;
     }
@@ -291,6 +294,7 @@ inline constexpr auto is_resource_ore(BlockId block_id) noexcept -> bool {
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     default:
         return false;
     }
@@ -308,6 +312,7 @@ inline constexpr auto is_inventory_only_item(BlockId block_id) noexcept -> bool 
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
         return true;
     case BlockType::Air:
     case BlockType::Grass:
@@ -347,7 +352,9 @@ inline constexpr auto is_inventory_only_item(BlockId block_id) noexcept -> bool 
 
 inline constexpr auto is_weapon_item(BlockId block_id) noexcept -> bool {
     block_id = block_item_id(block_id);
-    return block_id == to_block_id(BlockType::Sword) || block_id == to_block_id(BlockType::Spear);
+    return block_id == to_block_id(BlockType::Sword) ||
+           block_id == to_block_id(BlockType::Spear) ||
+           block_id == to_block_id(BlockType::Musket);
 }
 
 inline constexpr auto is_tool_item(BlockId block_id) noexcept -> bool {
@@ -449,6 +456,7 @@ inline constexpr auto torch_support_offset(BlockId block_id) noexcept -> BlockCo
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     case BlockType::CoalOre:
     case BlockType::IronOre:
     case BlockType::GoldOre:
@@ -511,6 +519,7 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
         return {false, false, false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     case BlockType::Grass:
     case BlockType::Dirt:
@@ -637,6 +646,7 @@ inline constexpr auto block_break_duration_seconds(BlockId block_id) noexcept ->
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
         return 0.0F;
     default:
         return 0.80F;

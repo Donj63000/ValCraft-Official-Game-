@@ -18,7 +18,9 @@ inline constexpr std::array<std::uint8_t, 8> kModelIconAtlasMagic {
     'V', 'C', 'I', 'C', 'O', 'N', '0', '1',
 };
 inline constexpr std::uint16_t kModelIconAtlasVersion = 1U;
-inline constexpr std::uint32_t kModelIconRecipeVersion = 1U;
+// Je change la recette lorsque le cadrage ou le catalogue visuel evolue afin
+// qu'un ancien atlas ne puisse jamais etre accepte silencieusement.
+inline constexpr std::uint32_t kModelIconRecipeVersion = 2U;
 inline constexpr std::uint16_t kModelIconAtlasHeaderSize = 64U;
 inline constexpr std::uint32_t kModelIconAtlasLayerRecordSize = 32U;
 inline constexpr std::uint16_t kModelIconSize = 128U;

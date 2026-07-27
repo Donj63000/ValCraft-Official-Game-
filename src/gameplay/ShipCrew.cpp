@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <optional>
 
@@ -1710,6 +1711,28 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
                                              float damage) noexcept
     -> ShipCrewDamageResult {
 
+    const auto hit =
+        raycast_first_living(
+            ship,
+            origin,
+            direction,
+            max_distance);
+    if (!hit.hit) {
+        return {};
+    }
+
+    return apply_damage(
+        hit.member_id,
+        damage,
+        hit.distance);
+}
+
+auto ShipCrewSystem::raycast_first_living(
+    const ShipEntity& ship,
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float max_distance) const noexcept -> ShipCrewRayHit {
+
     if (!std::isfinite(origin.x) ||
         !std::isfinite(origin.y) ||
         !std::isfinite(origin.z) ||
@@ -1717,14 +1740,13 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
         !std::isfinite(direction.y) ||
         !std::isfinite(direction.z) ||
         !std::isfinite(max_distance) ||
-        !std::isfinite(damage) ||
         max_distance <= 0.0F ||
-        damage <= 0.0F ||
         glm::dot(direction, direction) <= 1.0e-6F) {
         return {};
     }
 
-    const auto ray_direction = glm::normalize(direction);
+    const auto ray_direction =
+        glm::normalize(direction);
     const auto hit = find_crew_ray_hit(
         ship,
         state_.members,
@@ -1737,10 +1759,51 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
         return {};
     }
 
-    auto& member = state_.members[hit->index];
-    auto& runtime = runtime_[hit->index];
+    return {
+        true,
+        state_.members[hit->index].id,
+        origin +
+            ray_direction *
+                hit->distance,
+        hit->distance,
+    };
+}
+
+auto ShipCrewSystem::apply_damage(
+    std::uint8_t member_id,
+    float damage,
+    float hit_distance) noexcept -> ShipCrewDamageResult {
+
+    if (!std::isfinite(damage) ||
+        damage <= 0.0F) {
+        return {};
+    }
+
+    const auto iterator =
+        std::find_if(
+            state_.members.begin(),
+            state_.members.end(),
+            [member_id](const ShipCrewMemberSaveState& member) {
+                return member.id == member_id;
+            });
+    if (iterator == state_.members.end()) {
+        return {};
+    }
+
+    const auto index =
+        static_cast<std::size_t>(
+            std::distance(
+                state_.members.begin(),
+                iterator));
+    auto& member = *iterator;
+    if (member.health <= 0.0F ||
+        member.recovery_timer > 0.0F) {
+        return {};
+    }
+
+    auto& runtime = runtime_[index];
     const auto hit_position =
-        render_instances_[hit->index].position;
+        render_instances_[index].position;
     const auto applied_damage =
         std::min(member.health, damage);
     member.health =
@@ -1757,12 +1820,12 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
         runtime.blocked = false;
         runtime.blocked_timer = 0.0F;
         runtime.recover_timer = 0.0F;
-        render_instances_[hit->index].activity =
+        render_instances_[index].activity =
             CrewVisualActivity::KnockedOut;
-        render_instances_[hit->index].knockout_amount =
+        render_instances_[index].knockout_amount =
             1.0F;
     } else {
-        render_instances_[hit->index].hurt_amount =
+        render_instances_[index].hurt_amount =
             1.0F;
     }
 
@@ -1773,7 +1836,9 @@ auto ShipCrewSystem::try_damage_from_player(const ShipEntity& ship,
         hit_position,
         applied_damage,
         member.health,
-        hit->distance,
+        std::isfinite(hit_distance)
+            ? std::max(hit_distance, 0.0F)
+            : 0.0F,
     };
 }
 

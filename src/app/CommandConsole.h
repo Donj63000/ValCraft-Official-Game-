@@ -15,6 +15,13 @@ inline constexpr std::size_t kCommandConsoleMaxHistoryEntries = 20U;
 enum class CommandConsoleCommand : std::uint8_t {
     None = 0,
     StartTempest = 1,
+    GiveMusket = 2,
+};
+
+enum class CommandConsoleFamily : std::uint8_t {
+    None = 0,
+    Weather = 1,
+    Give = 2,
 };
 
 enum class CommandConsoleParseStatus : std::uint8_t {
@@ -33,6 +40,7 @@ enum class CommandConsoleToggleAction : std::uint8_t {
 struct CommandConsoleParseResult {
     CommandConsoleCommand command = CommandConsoleCommand::None;
     CommandConsoleParseStatus status = CommandConsoleParseStatus::Empty;
+    CommandConsoleFamily family = CommandConsoleFamily::None;
 
     auto operator==(const CommandConsoleParseResult&) const -> bool = default;
 };
@@ -65,6 +73,18 @@ struct CommandConsoleTextWindow {
 
 [[nodiscard]] auto parse_command_console_input(std::string_view input)
     -> CommandConsoleParseResult;
+[[nodiscard]] constexpr auto command_console_usage(CommandConsoleFamily family) noexcept
+    -> std::string_view {
+    switch (family) {
+    case CommandConsoleFamily::Weather:
+        return "UTILISATION : /METEO TEMPETE";
+    case CommandConsoleFamily::Give:
+        return "UTILISATION : /GIVE FUSIL";
+    case CommandConsoleFamily::None:
+    default:
+        return {};
+    }
+}
 [[nodiscard]] auto build_command_console_layout(int width, int height) noexcept
     -> CommandConsoleLayout;
 [[nodiscard]] auto build_command_console_text_window(

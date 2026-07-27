@@ -4,6 +4,7 @@
 #include "render/ItemDropGeometry.h"
 #include "render/ModelIconAtlas.h"
 #include "render/ModernHudStyle.h"
+#include "render/MusketHudLayout.h"
 #include "render/ModernTerrainShaderSource.h"
 #include "render/MsdfFontAtlas.h"
 #include "render/SceneSamplerBindings.h"
@@ -727,45 +728,49 @@ void configure_item_drop_instance_attributes(GLuint vao, GLuint instance_vbo) {
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, instance_vbo);
 
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, center)));
-    glVertexAttribDivisor(4, 1);
-
-    glEnableVertexAttribArray(5);
-    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, size)));
-    glVertexAttribDivisor(5, 1);
-
-    glEnableVertexAttribArray(6);
-    glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, rotation)));
-    glVertexAttribDivisor(6, 1);
-
-    glEnableVertexAttribArray(7);
-    glVertexAttribIPointer(7, 1, GL_UNSIGNED_BYTE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, block_id)));
-    glVertexAttribDivisor(7, 1);
+    constexpr GLuint kTransformLocation = 4;
+    for (GLuint column = 0; column < 4; ++column) {
+        const auto location = kTransformLocation + column;
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(
+            location,
+            4,
+            GL_FLOAT,
+            GL_FALSE,
+            sizeof(ItemDropGpuInstance),
+            reinterpret_cast<void*>(
+                offsetof(ItemDropGpuInstance, transform) +
+                sizeof(glm::vec4) * column));
+        glVertexAttribDivisor(location, 1);
+    }
 
     glEnableVertexAttribArray(8);
-    glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, sky_light)));
+    glVertexAttribIPointer(8, 1, GL_UNSIGNED_BYTE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, block_id)));
     glVertexAttribDivisor(8, 1);
 
     glEnableVertexAttribArray(9);
-    glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, block_light)));
+    glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, sky_light)));
     glVertexAttribDivisor(9, 1);
 
     glEnableVertexAttribArray(10);
-    glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, material_class)));
+    glVertexAttribPointer(10, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, block_light)));
     glVertexAttribDivisor(10, 1);
 
     glEnableVertexAttribArray(11);
-    glVertexAttribPointer(11, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_0_1)));
+    glVertexAttribPointer(11, 1, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, material_class)));
     glVertexAttribDivisor(11, 1);
 
     glEnableVertexAttribArray(12);
-    glVertexAttribPointer(12, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_2_3)));
+    glVertexAttribPointer(12, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_0_1)));
     glVertexAttribDivisor(12, 1);
 
     glEnableVertexAttribArray(13);
-    glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_4_5)));
+    glVertexAttribPointer(13, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_2_3)));
     glVertexAttribDivisor(13, 1);
+
+    glEnableVertexAttribArray(14);
+    glVertexAttribPointer(14, 4, GL_FLOAT, GL_FALSE, sizeof(ItemDropGpuInstance), reinterpret_cast<void*>(offsetof(ItemDropGpuInstance, face_tiles_4_5)));
+    glVertexAttribDivisor(14, 1);
 }
 
 auto quantize_hud_value(float value, float steps_per_unit) -> int {
@@ -2544,6 +2549,9 @@ auto resolve_inventory_focus_item(const InventoryMenuState& inventory, const Hot
 
 auto resolve_viewmodel_held_item(const InventoryMenuState& inventory, const HotbarState& hotbar) noexcept -> BlockId {
     const auto& selected_slot = hotbar.selected_slot();
+    if (is_musket_item(selected_slot)) {
+        return to_block_id(BlockType::Musket);
+    }
     if (hotbar_slot_has_item(selected_slot) && is_tool_item(selected_slot.block_id)) {
         return to_block_id(BlockType::Air);
     }
@@ -3775,6 +3783,7 @@ void Renderer::shutdown() {
 
 void Renderer::render_frame(World& world,
                             const PlayerController& player,
+                            const PlayerMusketView& player_musket,
                             const HotbarState& hotbar,
                             const InventoryMenuState& inventory_menu,
                             const DeathScreenState& death_screen,
@@ -3797,6 +3806,7 @@ void Renderer::render_frame(World& world,
     render_frame(
         world,
         player,
+        player_musket,
         hotbar,
         inventory_menu,
         death_screen,
@@ -3808,6 +3818,8 @@ void Renderer::render_frame(World& world,
         creatures,
         std::span<const CrewRenderInstance> {},
         std::span<const OldGuardRenderInstance> {},
+        std::span<const OldGuardMuzzleFlashInstance> {},
+        std::span<const OldGuardSmokeInstance> {},
         std::span<const OldGuardMuzzleFlashInstance> {},
         std::span<const OldGuardSmokeInstance> {},
         item_drops,
@@ -3824,6 +3836,7 @@ void Renderer::render_frame(World& world,
 
 void Renderer::render_frame(World& world,
                             const PlayerController& player,
+                            const PlayerMusketView& player_musket,
                             const HotbarState& hotbar,
                             const InventoryMenuState& inventory_menu,
                             const DeathScreenState& death_screen,
@@ -3837,6 +3850,8 @@ void Renderer::render_frame(World& world,
                             std::span<const OldGuardRenderInstance> old_guard,
                             std::span<const OldGuardMuzzleFlashInstance> old_guard_flashes,
                             std::span<const OldGuardSmokeInstance> old_guard_smoke,
+                            std::span<const OldGuardMuzzleFlashInstance> player_musket_flashes,
+                            std::span<const OldGuardSmokeInstance> player_musket_smoke,
                             std::span<const ItemDropRenderInstance> item_drops,
                             const ShipRenderState& ship,
                             const PlayerProgressionState& progression,
@@ -3969,9 +3984,33 @@ void Renderer::render_frame(World& world,
     frame_stats.upload_ms = std::chrono::duration<double, std::milli>(clock::now() - upload_start).count();
 
     const auto aspect = static_cast<float>(render_width) / static_cast<float>(render_height);
-    const auto projection = glm::perspective(glm::radians(75.0F), aspect, 0.1F, 320.0F);
+    const auto musket_aim_ratio =
+        player_musket.active
+            ? std::clamp(
+                  player_musket.aim_ratio,
+                  0.0F,
+                  1.0F)
+            : 0.0F;
+    const auto world_fov =
+        player_musket_world_fov(
+            musket_aim_ratio);
+    const auto projection =
+        glm::perspective(
+            glm::radians(world_fov),
+            aspect,
+            0.1F,
+            320.0F);
+    const auto base_viewmodel_fov =
+        glm::clamp(
+            options_.viewmodel_fov_degrees,
+            35.0F,
+            100.0F);
+    const auto musket_viewmodel_fov =
+        player_musket_viewmodel_fov(
+            base_viewmodel_fov,
+            musket_aim_ratio);
     const auto viewmodel_projection = glm::perspective(
-        glm::radians(glm::clamp(options_.viewmodel_fov_degrees, 35.0F, 100.0F)),
+        glm::radians(musket_viewmodel_fov),
         aspect,
         0.02F,
         8.0F);
@@ -5055,18 +5094,34 @@ void Renderer::render_frame(World& world,
         view_projection,
         inverse_view,
         eye);
+    draw_old_guard_effects(
+        std::span<const OldGuardMuzzleFlashInstance> {},
+        player_musket_smoke,
+        view_projection,
+        inverse_view,
+        eye);
     end_gpu_pass(GpuTimedPass::Water);
 
     draw_block_break_overlay(world, player);
 
     if (!menu_preview_visible) {
-        draw_player_viewmodel(
+        const auto viewmodel_pose =
+            draw_player_viewmodel(
             player,
             resolve_viewmodel_held_item(inventory_menu, hotbar),
+            player_musket,
             viewmodel_projection * view,
             light_view_projection,
             eye,
             environment);
+        draw_old_guard_effects(
+            player_musket_flashes,
+            std::span<const OldGuardSmokeInstance> {},
+            viewmodel_projection * view,
+            inverse_view,
+            eye,
+            true,
+            &viewmodel_pose);
     }
 
     auto camera_weather_exposure = 1.0F;
@@ -5138,7 +5193,14 @@ void Renderer::render_frame(World& world,
     } else {
         draw_hotbar(player, hotbar, progression, environment, width, height);
         draw_maritime_hud(maritime_hud, width, height);
-        draw_crosshair();
+        if (player_musket.active) {
+            draw_musket_hud(
+                player_musket,
+                width,
+                height);
+        } else {
+            draw_crosshair();
+        }
         draw_gameplay_announcement(gameplay_announcement, width, height);
     }
     if (confirm_dialog.visible) {
@@ -7228,16 +7290,14 @@ layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_face_uv;
 layout(location = 3) in float a_face_index;
-layout(location = 4) in vec3 i_center;
-layout(location = 5) in float i_size;
-layout(location = 6) in float i_rotation;
-layout(location = 7) in uint i_block_id;
-layout(location = 8) in float i_sky_light;
-layout(location = 9) in float i_block_light;
-layout(location = 10) in float i_material_class;
-layout(location = 11) in vec4 i_face_tiles_0_1;
-layout(location = 12) in vec4 i_face_tiles_2_3;
-layout(location = 13) in vec4 i_face_tiles_4_5;
+layout(location = 4) in mat4 i_transform;
+layout(location = 8) in uint i_block_id;
+layout(location = 9) in float i_sky_light;
+layout(location = 10) in float i_block_light;
+layout(location = 11) in float i_material_class;
+layout(location = 12) in vec4 i_face_tiles_0_1;
+layout(location = 13) in vec4 i_face_tiles_2_3;
+layout(location = 14) in vec4 i_face_tiles_4_5;
 
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
@@ -7296,19 +7356,13 @@ float face_shade(float face_index) {
     return 0.75;
 }
 
-vec3 rotate_y(vec3 value, float cos_rotation, float sin_rotation) {
-    return vec3(
-        value.x * cos_rotation - value.z * sin_rotation,
-        value.y,
-        value.x * sin_rotation + value.z * cos_rotation
-    );
-}
-
 void main() {
-    float cos_rotation = cos(i_rotation);
-    float sin_rotation = sin(i_rotation);
-    vec3 world_position3 = i_center + rotate_y(a_position * i_size, cos_rotation, sin_rotation);
-    vec3 world_normal = normalize(rotate_y(a_normal, cos_rotation, sin_rotation));
+    vec3 world_position3 =
+        (i_transform * vec4(a_position, 1.0)).xyz;
+    mat3 normal_matrix =
+        transpose(inverse(mat3(i_transform)));
+    vec3 world_normal =
+        normalize(normal_matrix * a_normal);
     vec4 uv_rect = block_uv_rect(uint(a_face_index + 0.5));
     vec2 uv = mix(uv_rect.xy, uv_rect.zw, a_face_uv);
     vec4 world_position = vec4(world_position3, 1.0);
@@ -10634,7 +10688,7 @@ void Renderer::create_item_drop_geometry() {
     glGenBuffers(1, &item_drop_ebo_);
     glBindBuffer(GL_ARRAY_BUFFER, item_drop_vbo_);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, item_drop_ebo_);
-    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+    if (item_drop_uses_rounded_template(options_.visual_pipeline)) {
         const auto template_mesh =
             build_stylized_rounded_box(StylizedPrimitiveLod::Low);
         item_drop_template_vertex_buffer_bytes_ = static_cast<GLsizeiptr>(
@@ -11863,7 +11917,9 @@ void Renderer::draw_old_guard_effects(
     std::span<const OldGuardSmokeInstance> smoke,
     const glm::mat4& view_projection,
     const glm::mat4& inverse_view,
-    const glm::vec3& camera_position) {
+    const glm::vec3& camera_position,
+    bool viewmodel_overlay,
+    const PlayerViewModelPose* viewmodel_pose) {
     if ((flashes.empty() && smoke.empty()) ||
         old_guard_effect_program_ == 0 ||
         old_guard_effect_vao_ == 0 ||
@@ -11954,12 +12010,26 @@ void Renderer::draw_old_guard_effects(
         }
         const auto age_ratio =
             std::clamp(flash.age / flash.lifetime, 0.0F, 1.0F);
+        const auto flash_position =
+            viewmodel_overlay &&
+                    viewmodel_pose != nullptr &&
+                    viewmodel_pose->musket_active
+                ? viewmodel_pose->muzzle_position
+                : flash.position;
+        const auto flash_direction =
+            viewmodel_overlay &&
+                    viewmodel_pose != nullptr &&
+                    viewmodel_pose->musket_active
+                ? viewmodel_pose->muzzle_forward
+                : flash.direction;
         append_if_visible(
-            flash.position,
+            flash_position,
             flash.size * (1.0F + age_ratio * 0.55F),
             (1.0F - age_ratio) * (1.0F - age_ratio),
             1.0F,
-            std::atan2(flash.direction.y, flash.direction.x),
+            std::atan2(
+                flash_direction.y,
+                flash_direction.x),
             flash.intensity);
     }
     if (instances.empty()) {
@@ -12014,7 +12084,14 @@ void Renderer::draw_old_guard_effects(
     const auto camera_up =
         glm::normalize(glm::vec3 {inverse_view[1]});
 
-    glEnable(GL_DEPTH_TEST);
+    if (viewmodel_overlay) {
+        // Je dessine le flash avec la projection du fusil et sans profondeur :
+        // il reste ainsi solidaire du viewmodel avant que la fumee ne vive
+        // independamment dans le monde.
+        glDisable(GL_DEPTH_TEST);
+    } else {
+        glEnable(GL_DEPTH_TEST);
+    }
     glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
@@ -12607,19 +12684,26 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glActiveTexture(GL_TEXTURE0);
 }
 
-void Renderer::draw_player_viewmodel(const PlayerController& player,
-                                     BlockId held_item,
-                                     const glm::mat4& view_projection,
-                                     const glm::mat4& light_view_projection,
-                                     const glm::vec3& camera_position,
-                                     const EnvironmentState& environment) {
+auto Renderer::draw_player_viewmodel(
+    const PlayerController& player,
+    BlockId held_item,
+    const PlayerMusketView& player_musket,
+    const glm::mat4& view_projection,
+    const glm::mat4& light_view_projection,
+    const glm::vec3& camera_position,
+    const EnvironmentState& environment)
+    -> PlayerViewModelPose {
     if (player.is_dead() || creature_program_ == 0 || viewmodel_vao_ == 0 || viewmodel_instance_vbo_ == 0 || creature_ebo_ == 0 || player_atlas_texture_ == 0) {
-        return;
+        return {};
     }
 
-    const auto viewmodel = build_player_viewmodel_parts(player, held_item);
+    const auto viewmodel =
+        build_player_viewmodel_parts(
+            player,
+            held_item,
+            player_musket);
     if (viewmodel.empty()) {
-        return;
+        return {};
     }
 
     glBindVertexArray(viewmodel_vao_);
@@ -12712,6 +12796,7 @@ void Renderer::draw_player_viewmodel(const PlayerController& player,
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glActiveTexture(GL_TEXTURE0);
+    return viewmodel.pose;
 }
 
 void Renderer::draw_block_break_overlay(
@@ -15448,6 +15533,279 @@ void Renderer::draw_confirm_dialog(const ConfirmDialogState& confirm_dialog, int
     bind_hud_textures();
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_musket_hud(
+    const PlayerMusketView& musket,
+    int width,
+    int height) {
+    if (!musket.active ||
+        width <= 0 ||
+        height <= 0 ||
+        hud_program_ == 0 ||
+        hud_vao_ == 0 ||
+        hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto layout =
+        resolve_musket_hud_layout(
+            width,
+            height,
+            musket.aim_ratio);
+    if (!layout.valid) {
+        return;
+    }
+    const auto viewport_width =
+        layout.viewport_width;
+    const auto viewport_height =
+        layout.viewport_height;
+    const auto hud_scale =
+        layout.scale;
+    const auto center_x =
+        layout.center_x;
+    const auto center_y =
+        layout.center_y;
+    const auto outline =
+        layout.outline;
+    const auto dark = std::array<float, 4> {0.015F, 0.018F, 0.022F, 0.92F};
+    const auto white = std::array<float, 4> {0.98F, 0.985F, 1.0F, 0.98F};
+    const auto red = std::array<float, 4> {0.96F, 0.035F, 0.025F, 1.0F};
+
+    std::vector<HudVertex> vertices;
+    vertices.reserve(1'024U);
+
+    const auto append_outlined_rect =
+        [&](float x, float y, float rectangle_width, float rectangle_height) {
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x - outline,
+                y - outline,
+                rectangle_width + outline * 2.0F,
+                rectangle_height + outline * 2.0F,
+                dark);
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x,
+                y,
+                rectangle_width,
+                rectangle_height,
+                white);
+        };
+
+    for (const auto& branch : layout.branches) {
+        append_outlined_rect(
+            branch.x,
+            branch.y,
+            branch.width,
+            branch.height);
+    }
+
+    const auto dot_outline_size =
+        layout.dot_outline_size;
+    const auto dot_size =
+        layout.dot_size;
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - dot_outline_size * 0.5F,
+        center_y - dot_outline_size * 0.5F,
+        dot_outline_size,
+        dot_outline_size,
+        dark);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - dot_size * 0.5F,
+        center_y - dot_size * 0.5F,
+        dot_size,
+        dot_size,
+        red);
+
+    const auto text_pixel_size = std::max(1.25F, 1.55F * hud_scale);
+    const auto text_y =
+        layout.text_y;
+    std::string status_text;
+    std::string ammo_prefix;
+    std::string ammo_suffix;
+    auto show_infinite_reserve = false;
+    if (musket.reloading()) {
+        const auto percentage = std::clamp(
+            static_cast<int>(std::lround(
+                std::clamp(musket.reload_progress, 0.0F, 1.0F) * 100.0F)),
+            0,
+            100);
+        status_text = "RECHARGEMENT " + std::to_string(percentage) + "%";
+    } else if (musket.loaded()) {
+        ammo_prefix = "1 / ";
+        show_infinite_reserve = true;
+    } else {
+        ammo_prefix = "0 / ";
+        ammo_suffix = " - R RECHARGER";
+        show_infinite_reserve = true;
+    }
+
+    const auto infinity_width =
+        text_pixel_size * 10.0F;
+    const auto status_width =
+        show_infinite_reserve
+            ? measure_pixel_text(
+                  ammo_prefix,
+                  text_pixel_size) +
+                  infinity_width +
+                  measure_pixel_text(
+                      ammo_suffix,
+                      text_pixel_size)
+            : measure_pixel_text(
+                  status_text,
+                  text_pixel_size);
+    const auto panel_padding_x = 5.0F * hud_scale;
+    const auto panel_padding_y = 3.0F * hud_scale;
+    const auto text_height = text_pixel_size * 7.0F;
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        center_x - status_width * 0.5F - panel_padding_x,
+        text_y - panel_padding_y,
+        status_width + panel_padding_x * 2.0F,
+        text_height + panel_padding_y * 2.0F,
+        {0.01F, 0.012F, 0.016F, 0.58F});
+    if (!show_infinite_reserve) {
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            center_x,
+            text_y,
+            text_pixel_size,
+            status_text,
+            white,
+            true);
+    } else {
+        auto cursor_x =
+            center_x -
+            status_width * 0.5F;
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            cursor_x,
+            text_y,
+            text_pixel_size,
+            ammo_prefix,
+            white);
+        cursor_x +=
+            measure_pixel_text(
+                ammo_prefix,
+                text_pixel_size);
+
+        // Je trace moi-meme l'infini pour qu'il existe aussi dans la fonte
+        // pixel Legacy et ne depende jamais d'un glyphe optionnel de l'atlas.
+        constexpr std::array<std::uint16_t, 5U> kInfinityRows {{
+            0b011000110U,
+            0b100101001U,
+            0b100010001U,
+            0b100101001U,
+            0b011000110U,
+        }};
+        for (std::size_t row = 0U;
+             row < kInfinityRows.size();
+             ++row) {
+            for (int column = 0;
+                 column < 9;
+                 ++column) {
+                const auto bit =
+                    static_cast<std::uint16_t>(
+                        1U <<
+                        (8 - column));
+                if ((kInfinityRows[row] &
+                     bit) == 0U) {
+                    continue;
+                }
+                append_hud_rect_top_left(
+                    vertices,
+                    viewport_width,
+                    viewport_height,
+                    cursor_x +
+                        static_cast<float>(
+                            column) *
+                            text_pixel_size,
+                    text_y +
+                        (static_cast<float>(
+                             row) +
+                         1.0F) *
+                            text_pixel_size,
+                    text_pixel_size,
+                    text_pixel_size,
+                    white);
+            }
+        }
+        cursor_x += infinity_width;
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            cursor_x,
+            text_y,
+            text_pixel_size,
+            ammo_suffix,
+            white);
+    }
+
+    if (musket.reloading()) {
+        const auto bar_width = std::max(94.0F * hud_scale, status_width);
+        const auto bar_height = std::max(2.0F, 2.5F * hud_scale);
+        const auto bar_y = text_y + text_height + 6.0F * hud_scale;
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            center_x - bar_width * 0.5F - outline,
+            bar_y - outline,
+            bar_width + outline * 2.0F,
+            bar_height + outline * 2.0F,
+            dark);
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            center_x - bar_width * 0.5F,
+            bar_y,
+            bar_width,
+            bar_height,
+            {0.18F, 0.18F, 0.20F, 0.86F});
+        append_hud_rect_top_left(
+            vertices,
+            viewport_width,
+            viewport_height,
+            center_x - bar_width * 0.5F,
+            bar_y,
+            bar_width * std::clamp(musket.reload_progress, 0.0F, 1.0F),
+            bar_height,
+            {0.84F, 0.63F, 0.25F, 0.98F});
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    bind_hud_textures();
+    upload_hud_vertices(vertices);
+    glDrawArrays(
+        GL_TRIANGLES,
+        0,
+        static_cast<GLsizei>(vertices.size()));
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST);

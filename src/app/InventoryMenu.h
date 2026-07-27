@@ -151,6 +151,12 @@ inline constexpr auto inventory_make_slot(BlockId block_id, std::uint8_t count =
     return make_item_stack(block_id, count);
 }
 
+inline constexpr auto inventory_make_slot_with_state(BlockId block_id,
+                                                     std::uint8_t count,
+                                                     std::uint8_t instance_state) noexcept -> HotbarSlot {
+    return make_item_stack_with_state(block_id, count, instance_state);
+}
+
 inline constexpr auto inventory_empty_slot() noexcept -> HotbarSlot {
     return empty_item_stack();
 }
@@ -159,16 +165,19 @@ inline constexpr auto inventory_slot_has_item(const HotbarSlot& slot) noexcept -
     return hotbar_slot_has_item(slot);
 }
 
-inline constexpr auto inventory_can_merge(const HotbarSlot& slot, BlockId block_id) noexcept -> bool {
+inline constexpr auto inventory_can_merge(const HotbarSlot& slot, const HotbarSlot& source) noexcept -> bool {
     return inventory_slot_has_item(slot) &&
-           block_item_id(slot.block_id) == block_item_id(block_id) &&
-           slot.count < max_item_stack_count(block_id);
+           inventory_slot_has_item(source) &&
+           block_item_id(slot.block_id) == block_item_id(source.block_id) &&
+           slot.instance_state == source.instance_state &&
+           slot.count < max_item_stack_count(source.block_id);
 }
 
 inline constexpr auto inventory_same_item(const HotbarSlot& lhs, const HotbarSlot& rhs) noexcept -> bool {
     return inventory_slot_has_item(lhs) &&
            inventory_slot_has_item(rhs) &&
-           block_item_id(lhs.block_id) == block_item_id(rhs.block_id);
+           block_item_id(lhs.block_id) == block_item_id(rhs.block_id) &&
+           lhs.instance_state == rhs.instance_state;
 }
 
 inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::string_view {
@@ -244,6 +253,8 @@ inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::st
         return "HACHE";
     case BlockType::Shovel:
         return "PELLE";
+    case BlockType::Musket:
+        return "FUSIL";
     case BlockType::Air:
     default:
         return "";
@@ -298,7 +309,9 @@ inline constexpr auto inventory_equipment_resistance_percent(const InventoryMenu
 inline constexpr auto inventory_active_weapon_stats(const InventoryMenuState& inventory,
                                                     const HotbarState& hotbar) noexcept -> std::optional<WeaponStats> {
     const auto& selected_slot = hotbar.selected_slot();
-    if (hotbar_slot_has_item(selected_slot) && is_tool_item(selected_slot.block_id)) {
+    if (hotbar_slot_has_item(selected_slot) &&
+        (is_tool_item(selected_slot.block_id) ||
+         is_musket_item(selected_slot))) {
         return std::nullopt;
     }
     return equipped_weapon_stats(inventory.equipment_slots, hotbar);
@@ -369,7 +382,11 @@ inline constexpr auto inventory_take_from_slot(HotbarSlot& slot, std::uint8_t co
     }
 
     const auto removed_count = static_cast<std::uint8_t>(std::min<std::uint8_t>(slot.count, count));
-    HotbarSlot removed {slot.block_id, removed_count};
+    const auto removed =
+        make_item_stack_with_state(
+            slot.block_id,
+            removed_count,
+            slot.instance_state);
     slot.count = static_cast<std::uint8_t>(slot.count - removed_count);
     normalize_item_stack(slot);
     return removed;
@@ -397,14 +414,20 @@ inline constexpr void inventory_merge_into_slot(HotbarSlot& target, HotbarSlot& 
 
     if (!inventory_slot_has_item(target)) {
         const auto moved = static_cast<std::uint8_t>(std::min<std::uint8_t>(source.count, max_item_stack_count(source.block_id)));
-        target = {source.block_id, moved};
+        target =
+            make_item_stack_with_state(
+                source.block_id,
+                moved,
+                source.instance_state);
         source.count = static_cast<std::uint8_t>(source.count - moved);
         normalize_item_stack(source);
         return;
     }
 
     const auto max_count = max_item_stack_count(target.block_id);
-    if (target.block_id != source.block_id || target.count >= max_count) {
+    if (target.block_id != source.block_id ||
+        target.instance_state != source.instance_state ||
+        target.count >= max_count) {
         return;
     }
 
@@ -425,7 +448,7 @@ inline void inventory_try_store_stack_in_slots(std::span<HotbarSlot> slots,
     for (auto& slot : slots) {
         normalize_item_stack(slot);
         if (matching_only) {
-            if (!inventory_can_merge(slot, stack.block_id)) {
+            if (!inventory_can_merge(slot, stack)) {
                 continue;
             }
         } else if (inventory_slot_has_item(slot)) {
@@ -456,6 +479,53 @@ inline auto inventory_try_store_stack(InventoryMenuState& inventory,
     normalize_inventory_state(inventory, hotbar);
     normalize_item_stack(stack);
     return stack;
+}
+
+inline auto inventory_try_grant_loaded_musket(InventoryMenuState& inventory,
+                                              HotbarState& hotbar) noexcept
+    -> std::optional<InventorySlotRef> {
+    auto next_inventory = inventory;
+    auto next_hotbar = hotbar;
+    normalize_inventory_state(next_inventory, next_hotbar);
+
+    const auto musket =
+        inventory_make_slot(
+            to_block_id(BlockType::Musket),
+            1U);
+    for (std::size_t index = 0U;
+         index < next_hotbar.slots.size();
+         ++index) {
+        if (inventory_slot_has_item(next_hotbar.slots[index])) {
+            continue;
+        }
+        next_hotbar.slots[index] = musket;
+        select_hotbar_index(next_hotbar, index);
+        inventory = next_inventory;
+        hotbar = next_hotbar;
+        return InventorySlotRef {
+            InventorySlotGroup::Hotbar,
+            index,
+        };
+    }
+
+    for (std::size_t index = 0U;
+         index < next_inventory.storage_slots.size();
+         ++index) {
+        if (inventory_slot_has_item(
+                next_inventory.storage_slots[index])) {
+            continue;
+        }
+        next_inventory.storage_slots[index] = musket;
+        inventory = next_inventory;
+        hotbar = next_hotbar;
+        return InventorySlotRef {
+            InventorySlotGroup::Storage,
+            index,
+        };
+    }
+
+    // Je ne valide mes copies qu'apres avoir trouve une destination complete.
+    return std::nullopt;
 }
 
 inline constexpr auto inventory_is_tool_crafting_material(BlockId block_id) noexcept -> bool {

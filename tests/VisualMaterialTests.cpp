@@ -551,8 +551,8 @@ TEST_CASE("le shader terrain réduit les normales et le PCF selon la qualité") 
     CHECK(medium.material_detail_scale < 0.999F);
     CHECK(low.material_detail_scale < 0.50F);
     CHECK(source.find(
-              "if (u_material_detail_scale >= "
-              "k_normal_mapping_detail_threshold)") !=
+              "u_material_detail_scale >= "
+              "k_normal_mapping_detail_threshold") !=
           std::string_view::npos);
     CHECK(source.find(
               "if (u_material_detail_scale < "

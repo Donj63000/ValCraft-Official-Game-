@@ -1,6 +1,7 @@
 #include "creatures/OldGuardAnimation.h"
 #include "creatures/OldGuardGeometry.h"
 #include "gameplay/OldGuard.h"
+#include "render/MusketVisualRecipe.h"
 
 #include <doctest/doctest.h>
 
@@ -511,6 +512,69 @@ TEST_CASE("le sampler partage les sockets de feu et une geometrie bornee") {
     const auto mesh = build_old_guard_mesh(render);
     CHECK(mesh.part_count == first_parts.size());
     CHECK_FALSE(mesh.empty());
+}
+
+TEST_CASE("les six gardes respectent le budget et les sept poses partagees") {
+    OldGuardSystem guards {};
+    guards.reset(7'411);
+    OldGuardUpdateContext context {};
+    static_cast<void>(guards.update(context, 0.0F));
+    REQUIRE(
+        guards.render_instances().size() ==
+        kOldGuardMemberCount);
+
+    auto total_part_count = std::size_t {0U};
+    for (const auto& render :
+         guards.render_instances()) {
+        const auto parts =
+            build_old_guard_parts(render);
+        CHECK(
+            parts.size() <=
+            kOldGuardVisualPartBudget);
+        CHECK(
+            parts.size() >
+            musket_visual_parts().size());
+        total_part_count += parts.size();
+    }
+    CHECK(
+        total_part_count <=
+        kOldGuardMemberCount *
+            kOldGuardVisualPartBudget);
+
+    constexpr std::array<float, 7> kReloadSamples {{
+        0.06F,
+        0.18F,
+        0.31F,
+        0.45F,
+        0.62F,
+        0.79F,
+        0.93F,
+    }};
+    for (std::size_t stage = 0U;
+         stage < kReloadSamples.size();
+         ++stage) {
+        OldGuardRenderInstance render {};
+        render.action = OldGuardAction::Reload;
+        render.aim_direction = {1.0F, 0.0F, 0.0F};
+        render.reload_remaining =
+            (1.0F - kReloadSamples[stage]) *
+            kOldGuardReloadSeconds;
+        const auto pose =
+            sample_old_guard_pose(render);
+        CAPTURE(stage);
+        CHECK(
+            static_cast<std::uint8_t>(
+                pose.reload_stage) ==
+            stage);
+        CHECK(matrix_is_finite(pose.musket_transform));
+        if (stage == 4U || stage == 5U) {
+            CHECK(pose.ramrod_offset > 0.0F);
+        } else {
+            CHECK(
+                pose.ramrod_offset ==
+                doctest::Approx(0.0F));
+        }
+    }
 }
 
 TEST_CASE("les variations d'apparence sont deterministes mais distinguent le roster") {

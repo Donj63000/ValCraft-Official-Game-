@@ -4928,6 +4928,40 @@ auto SeaAdventureSystem::try_damage_crew(const glm::vec3& origin,
     return result;
 }
 
+auto SeaAdventureSystem::raycast_crew(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float max_distance) const noexcept -> ShipCrewRayHit {
+
+    if (!state_.active) {
+        return {};
+    }
+    return crew_.raycast_first_living(
+        ship_,
+        origin,
+        direction,
+        max_distance);
+}
+
+auto SeaAdventureSystem::apply_damage_crew(
+    std::uint8_t member_id,
+    float damage,
+    float hit_distance) noexcept -> ShipCrewDamageResult {
+
+    if (!state_.active) {
+        return {};
+    }
+    auto result =
+        crew_.apply_damage(
+            member_id,
+            damage,
+            hit_distance);
+    if (result.hit) {
+        state_.crew = crew_.save_state();
+    }
+    return result;
+}
+
 auto SeaAdventureSystem::intercept_old_guard(const glm::vec3& origin,
                                              const glm::vec3& direction,
                                              float max_distance) const noexcept -> OldGuardRayHit {

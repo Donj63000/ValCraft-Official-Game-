@@ -1,4 +1,5 @@
 #include "render/ModelIconAtlas.h"
+#include "render/MusketVisualRecipe.h"
 #include "render/VisualItemModel.h"
 #include "render/VisualMaterials.h"
 
@@ -25,7 +26,7 @@ namespace {
 constexpr std::uint64_t kExpectedMaterialChecksum =
     0x1E684B7F8A55B223ULL;
 constexpr std::uint64_t kExpectedIconContentChecksum =
-    0x9E4699C8E4743D55ULL;
+    0x74D3CC0F846DA790ULL;
 
 [[nodiscard]] auto find_project_asset(
     const std::filesystem::path& relative_path)
@@ -137,7 +138,7 @@ void refresh_global_checksum(
 
 TEST_CASE(
     "les recettes partagees couvrent tous les objets affichables sans toucher aux BlockId") {
-    CHECK(kVisualItemModelCount == 35U);
+    CHECK(kVisualItemModelCount == 36U);
     CHECK_FALSE(is_visual_item_displayable(
         to_block_id(BlockType::Air)));
     CHECK_FALSE(is_visual_item_displayable(
@@ -212,6 +213,105 @@ TEST_CASE(
             wall_model.geometry_checksum ==
             torch_model.geometry_checksum);
     }
+}
+
+TEST_CASE("la recette canonique du fusil contient toutes ses pieces historiques") {
+    std::array<std::size_t, 5> material_counts {};
+    std::array<std::size_t, 8> part_counts {};
+    for (const auto& part : musket_visual_parts()) {
+        const auto material =
+            static_cast<std::size_t>(part.material);
+        const auto kind =
+            static_cast<std::size_t>(part.kind);
+        REQUIRE(material < material_counts.size());
+        REQUIRE(kind < part_counts.size());
+        ++material_counts[material];
+        ++part_counts[kind];
+        CHECK(std::isfinite(part.center.x));
+        CHECK(std::isfinite(part.center.y));
+        CHECK(std::isfinite(part.center.z));
+        CHECK(std::isfinite(part.rotation_radians.x));
+        CHECK(std::isfinite(part.rotation_radians.y));
+        CHECK(std::isfinite(part.rotation_radians.z));
+        CHECK(part.half_extent.x > 0.0F);
+        CHECK(part.half_extent.y > 0.0F);
+        CHECK(part.half_extent.z > 0.0F);
+    }
+
+    CHECK(musket_visual_parts().size() == 30U);
+    CHECK(
+        material_counts[
+            static_cast<std::size_t>(
+                MusketVisualMaterial::Walnut)] >=
+        8U);
+    CHECK(
+        material_counts[
+            static_cast<std::size_t>(
+                MusketVisualMaterial::PatinatedSteel)] >=
+        10U);
+    CHECK(
+        material_counts[
+            static_cast<std::size_t>(
+                MusketVisualMaterial::Brass)] >=
+        3U);
+    CHECK(
+        material_counts[
+            static_cast<std::size_t>(
+                MusketVisualMaterial::Flint)] ==
+        1U);
+    CHECK(
+        material_counts[
+            static_cast<std::size_t>(
+                MusketVisualMaterial::DarkBore)] ==
+        1U);
+    CHECK(
+        part_counts[
+            static_cast<std::size_t>(
+                MusketVisualPartKind::Band)] ==
+        3U);
+    CHECK(
+        part_counts[
+            static_cast<std::size_t>(
+                MusketVisualPartKind::Muzzle)] ==
+        1U);
+
+    CHECK(
+        kMusketVisualSockets.front_sight.y ==
+        doctest::Approx(
+            kMusketVisualSockets.rear_sight.y));
+    CHECK(
+        kMusketVisualSockets.front_sight.z ==
+        doctest::Approx(
+            kMusketVisualSockets.rear_sight.z));
+    CHECK(
+        kMusketVisualSockets.front_sight.x >
+        kMusketVisualSockets.rear_sight.x);
+    CHECK(
+        kMusketVisualSockets.muzzle.x >
+        kMusketVisualSockets.front_sight.x);
+    CHECK(
+        kMusketVisualSockets.bayonet_tip.x >
+        kMusketVisualSockets.muzzle.x);
+
+    const auto first =
+        build_visual_item_model(
+            to_block_id(BlockType::Musket));
+    const auto second =
+        build_visual_item_model(
+            to_block_id(BlockType::Musket));
+    REQUIRE_FALSE(first.empty());
+    CHECK(
+        first.model_class ==
+        VisualItemModelClass::Weapon);
+    CHECK(
+        first.primitives.size() ==
+        musket_visual_parts().size());
+    CHECK(
+        first.geometry_checksum ==
+        second.geometry_checksum);
+    CHECK(
+        first.geometry_checksum ==
+        visual_item_model_fingerprint(first));
 }
 
 TEST_CASE(
@@ -374,6 +474,79 @@ TEST_CASE(
             0U);
         CHECK(std::ranges::equal(torch, wall));
     }
+
+    const auto musket = atlas.texels_for(
+        to_block_id(BlockType::Musket),
+        0U);
+    REQUIRE_FALSE(musket.empty());
+    auto warm_wood_pixels = std::size_t {0U};
+    auto neutral_steel_pixels = std::size_t {0U};
+    auto dark_pixels = std::size_t {0U};
+    auto transparent_pixels = std::size_t {0U};
+    auto minimum_x = std::size_t {kModelIconSize};
+    auto minimum_y = std::size_t {kModelIconSize};
+    auto maximum_x = std::size_t {0U};
+    auto maximum_y = std::size_t {0U};
+    for (std::size_t y = 0U; y < kModelIconSize; ++y) {
+        for (std::size_t x = 0U; x < kModelIconSize; ++x) {
+            const auto offset =
+                (y * kModelIconSize + x) *
+                kModelIconChannelCount;
+            const auto red = musket[offset + 0U];
+            const auto green = musket[offset + 1U];
+            const auto blue = musket[offset + 2U];
+            const auto alpha = musket[offset + 3U];
+            if (alpha == 0U) {
+                ++transparent_pixels;
+                continue;
+            }
+            minimum_x = std::min(minimum_x, x);
+            minimum_y = std::min(minimum_y, y);
+            maximum_x = std::max(maximum_x, x);
+            maximum_y = std::max(maximum_y, y);
+            warm_wood_pixels +=
+                red > green + 8U &&
+                        green > blue + 8U
+                    ? 1U
+                    : 0U;
+            const auto maximum_channel =
+                std::max({red, green, blue});
+            const auto minimum_channel =
+                std::min({red, green, blue});
+            neutral_steel_pixels +=
+                maximum_channel - minimum_channel < 34U &&
+                        maximum_channel > 58U
+                    ? 1U
+                    : 0U;
+            dark_pixels +=
+                maximum_channel < 70U
+                    ? 1U
+                    : 0U;
+        }
+    }
+    REQUIRE(minimum_x <= maximum_x);
+    REQUIRE(minimum_y <= maximum_y);
+    const auto silhouette_width =
+        maximum_x - minimum_x + 1U;
+    const auto silhouette_height =
+        maximum_y - minimum_y + 1U;
+    CHECK(transparent_pixels > 4'000U);
+    CHECK(warm_wood_pixels > 16U);
+    CHECK(neutral_steel_pixels > 16U);
+    CHECK(dark_pixels > 0U);
+    CHECK(
+        std::max(
+            silhouette_width,
+            silhouette_height) >
+        80U);
+    CHECK(
+        std::max(
+            silhouette_width,
+            silhouette_height) >
+        std::min(
+            silhouette_width,
+            silhouette_height) *
+            2U);
 }
 
 TEST_CASE(

@@ -1,6 +1,7 @@
 #include "creatures/OldGuardAnimation.h"
 
 #include "creatures/CrewAnimation.h"
+#include "render/MusketVisualRecipe.h"
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
@@ -95,13 +96,8 @@ auto make_weapon_transform(const glm::vec3& origin,
 }
 
 auto reload_stage(float progress) noexcept -> OldGuardReloadStage {
-    if (progress < 0.12F) return OldGuardReloadStage::RecoilAndHalfCock;
-    if (progress < 0.24F) return OldGuardReloadStage::Cartridge;
-    if (progress < 0.38F) return OldGuardReloadStage::Prime;
-    if (progress < 0.52F) return OldGuardReloadStage::Powder;
-    if (progress < 0.72F) return OldGuardReloadStage::Ramrod;
-    if (progress < 0.86F) return OldGuardReloadStage::ReturnRamrod;
-    return OldGuardReloadStage::Shoulder;
+    return static_cast<OldGuardReloadStage>(
+        musket_reload_stage(progress));
 }
 
 auto triangular(float value, float peak) noexcept -> float {
@@ -320,7 +316,7 @@ auto sample_old_guard_pose(const OldGuardRenderInstance& guard) noexcept
         pose.stature_scale);
     pose.muzzle_position = transformed_point(
         pose.musket_transform,
-        glm::vec3 {1.24F, 0.0F, 0.0F});
+        kMusketVisualSockets.muzzle);
     pose.muzzle_forward = safe_direction(
         transformed_point(
             pose.musket_transform,
@@ -331,17 +327,17 @@ auto sample_old_guard_pose(const OldGuardRenderInstance& guard) noexcept
         body_forward);
     pose.bayonet_base = transformed_point(
         pose.musket_transform,
-        glm::vec3 {1.10F, 0.035F, 0.0F});
+        kMusketVisualSockets.bayonet_base);
     pose.bayonet_tip = transformed_point(
         pose.musket_transform,
-        glm::vec3 {1.76F, 0.035F, 0.0F});
+        kMusketVisualSockets.bayonet_tip);
 
     const auto rear_hand = transformed_point(
         pose.musket_transform,
-        glm::vec3 {-0.12F, -0.04F, 0.04F});
+        kMusketVisualSockets.rear_hand);
     auto forward_hand = transformed_point(
         pose.musket_transform,
-        glm::vec3 {0.48F, -0.035F, -0.035F});
+        kMusketVisualSockets.forward_hand);
     if (guard.action == OldGuardAction::Reload &&
         (pose.reload_stage == OldGuardReloadStage::Cartridge ||
          pose.reload_stage == OldGuardReloadStage::Prime ||

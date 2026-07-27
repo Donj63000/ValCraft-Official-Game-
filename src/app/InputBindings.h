@@ -36,6 +36,10 @@ inline auto is_super_vision_action_key(const SDL_Keysym& keysym) noexcept -> boo
     return keysym.scancode == SDL_SCANCODE_V;
 }
 
+inline auto is_reload_action_key(const SDL_Keysym& keysym) noexcept -> bool {
+    return keysym.scancode == SDL_SCANCODE_R;
+}
+
 inline auto is_command_console_key(const SDL_Keysym& keysym) noexcept -> bool {
     // Je cible la position physique sous Echap : elle correspond a ² sur AZERTY.
     return keysym.scancode == SDL_SCANCODE_GRAVE;

@@ -201,6 +201,7 @@ inline constexpr std::array<VisualMaterialDefinition, kVisualMaterialCount>
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
         return VisualMaterialId::ToolWoodSteel;
     case BlockType::Air:
     default:

@@ -98,6 +98,7 @@ inline constexpr auto item_equipment_slot(BlockId block_id) noexcept -> std::opt
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     default:
         return std::nullopt;
     }
@@ -159,6 +160,7 @@ inline constexpr auto armor_resistance_percent(BlockId block_id) noexcept -> flo
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     default:
         return 0.0F;
     }
@@ -208,6 +210,7 @@ inline constexpr auto weapon_stats(BlockId block_id) noexcept -> std::optional<W
     case BlockType::Pickaxe:
     case BlockType::Axe:
     case BlockType::Shovel:
+    case BlockType::Musket:
     default:
         return std::nullopt;
     }

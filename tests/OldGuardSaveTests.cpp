@@ -86,6 +86,64 @@ auto read_all_bytes(const std::filesystem::path& path)
     return bytes;
 }
 
+void erase_item_extension_without_drops(
+    std::vector<char>& bytes) {
+    constexpr auto magic =
+        std::array<char, 4> {'I', 'T', 'E', 'M'};
+    constexpr auto extension_byte_count =
+        magic.size() +
+        kHotbarSlotCount +
+        kInventoryStorageSlotCount +
+        1U +
+        kEquipmentSlotCount +
+        sizeof(std::uint64_t);
+    REQUIRE(bytes.size() >= extension_byte_count);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            extension_byte_count);
+    REQUIRE(std::equal(
+        magic.begin(),
+        magic.end(),
+        extension_begin));
+    bytes.erase(extension_begin, bytes.end());
+}
+
+void write_save_version(
+    std::vector<char>& bytes,
+    std::uint32_t version) {
+    REQUIRE(
+        bytes.size() >=
+        8U + sizeof(version));
+    std::memcpy(
+        bytes.data() + 8U,
+        &version,
+        sizeof(version));
+}
+
+void write_all_bytes(
+    const std::filesystem::path& path,
+    const std::vector<char>& bytes) {
+    std::ofstream output(
+        path,
+        std::ios::binary |
+            std::ios::trunc);
+    REQUIRE(output.good());
+    output.write(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(output.good());
+}
+
+void downgrade_to_version_11(
+    const std::filesystem::path& path) {
+    auto bytes = read_all_bytes(path);
+    erase_item_extension_without_drops(bytes);
+    write_save_version(bytes, 11U);
+    write_all_bytes(path, bytes);
+}
+
 void downgrade_to_version_10(
     const std::filesystem::path& path,
     SeaVoyagePhase phase,
@@ -111,26 +169,9 @@ void downgrade_to_version_10(
         guard_begin +
             static_cast<std::ptrdiff_t>(
                 kSerializedOldGuardPayloadBytes));
-
-    constexpr std::uint32_t kVersion10 = 10U;
-    REQUIRE(
-        bytes.size() >=
-        8U + sizeof(kVersion10));
-    std::memcpy(
-        bytes.data() + 8U,
-        &kVersion10,
-        sizeof(kVersion10));
-
-    std::ofstream output(
-        path,
-        std::ios::binary |
-            std::ios::trunc);
-    REQUIRE(output.good());
-    output.write(
-        bytes.data(),
-        static_cast<std::streamsize>(
-            bytes.size()));
-    REQUIRE(output.good());
+    erase_item_extension_without_drops(bytes);
+    write_save_version(bytes, 10U);
+    write_all_bytes(path, bytes);
 }
 
 } // namespace
@@ -170,6 +211,10 @@ TEST_CASE("la sauvegarde v11 restaure exactement le rechargement des six gardes"
         save_root,
         0U,
         snapshot);
+    downgrade_to_version_11(
+        save_slot_file_path(
+            save_root,
+            0U));
     const auto loaded =
         load_save_slot(
             save_root,
@@ -287,7 +332,7 @@ TEST_CASE("un payload v11 tronque au milieu des gardes est refuse") {
         save_slot_file_path(
             save_root,
             0U);
-    const auto bytes =
+    auto bytes =
         read_all_bytes(path);
     const auto departure =
         find_departure_extension(
@@ -300,6 +345,8 @@ TEST_CASE("un payload v11 tronque au milieu des gardes est refuse") {
             departure - bytes.begin()) +
         sizeof(std::uint8_t) +
         sizeof(float);
+    write_save_version(bytes, 11U);
+    write_all_bytes(path, bytes);
     std::filesystem::resize_file(
         path,
         payload_offset +

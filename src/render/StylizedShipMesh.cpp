@@ -1,5 +1,6 @@
 #include "render/StylizedShipMesh.h"
 
+#include "render/ShipMesh.h"
 #include "world/BlockVisuals.h"
 
 #include <glm/common.hpp>
@@ -176,6 +177,156 @@ struct LodSettings {
                ShipMaterial::CreamCanvas ||
            material ==
                ShipMaterial::BlackCanvas;
+}
+
+[[nodiscard]] constexpr auto is_volume_shape(
+    ShipPartShape shape) noexcept -> bool {
+
+    return shape ==
+               ShipPartShape::Box ||
+           shape ==
+               ShipPartShape::Slab ||
+           shape ==
+               ShipPartShape::Stair;
+}
+
+[[nodiscard]] auto is_flexible_sail_panel(
+    const ShipPart& part) noexcept -> bool {
+
+    if (part.shape !=
+            ShipPartShape::Panel ||
+        !is_canvas(
+            part.material)) {
+        return false;
+    }
+
+    const auto absolute_normal =
+        glm::abs(part.orientation);
+    const auto vertical_span =
+        std::abs(
+            part.local_end.y -
+            part.local_start.y);
+
+    // Les couchettes et tapis utilisent eux aussi un matériau textile, mais
+    // leur normale pointe vers Y. Les traiter comme des voiles les redressait
+    // et faisait disparaître leur vraie surface horizontale.
+    const auto vertical_panel =
+        absolute_normal.y <
+        std::max(
+            absolute_normal.x,
+            absolute_normal.z);
+
+    return vertical_panel &&
+           vertical_span >= 0.75F;
+}
+
+[[nodiscard]] auto is_legacy_hull_proxy(
+    const ShipPart& part,
+    const ShipProtectionProfile& profile) noexcept -> bool {
+
+    if (part.material !=
+            ShipMaterial::DarkHull ||
+        !is_volume_shape(
+            part.shape)) {
+        return false;
+    }
+
+    const auto bounds =
+        bounds_for(part);
+    if (!valid_bounds(bounds)) {
+        return false;
+    }
+
+    const auto extent =
+        bounds.max -
+        bounds.min;
+    const auto hull_length =
+        profile.bow_z -
+        profile.stern_z;
+    const auto maximum_absolute_x =
+        std::max(
+            std::abs(bounds.min.x),
+            std::abs(bounds.max.x));
+
+    // La longue boîte centrale est uniquement le proxy physique de la quille.
+    // Le maillage organique la remplace entièrement dans la version moderne.
+    const auto central_keel =
+        extent.z >=
+            hull_length *
+                0.90F &&
+        bounds.min.x < 0.0F &&
+        bounds.max.x > 0.0F &&
+        maximum_absolute_x <= 0.75F &&
+        bounds.max.y <=
+            profile.upper_hull_min_y;
+
+    if (central_keel) {
+        return true;
+    }
+
+    // Les bandes historiques de coque font une tranche d'environ un mètre,
+    // restent d'un seul côté de l'axe et suivent l'une des trois largeurs du
+    // profil. Les volumes de proue, de poupe et les détails décoratifs ne
+    // satisfont volontairement pas ces critères et restent donc visibles.
+    if (extent.z > 1.05F ||
+        extent.x > 0.65F ||
+        bounds.min.z <
+            profile.stern_z -
+                0.05F ||
+        bounds.max.z >
+            profile.bow_z +
+                0.05F ||
+        bounds.max.y >
+            profile.main_deck_top_y +
+                0.05F ||
+        bounds.min.y >
+            profile.upper_hull_min_y +
+                0.05F) {
+        return false;
+    }
+
+    const auto lies_on_one_side =
+        bounds.max.x <= -0.20F ||
+        bounds.min.x >= 0.20F;
+    if (!lies_on_one_side) {
+        return false;
+    }
+
+    const auto center_z =
+        (
+            bounds.min.z +
+            bounds.max.z
+        ) *
+        0.5F;
+    const auto upper_half_width =
+        profile.half_width_at(
+            center_z);
+    const auto middle_half_width =
+        std::max(
+            profile.middle_minimum_half_width,
+            upper_half_width -
+                profile.middle_width_inset);
+    const auto lower_half_width =
+        std::max(
+            profile.lower_minimum_half_width,
+            upper_half_width -
+                profile.lower_width_inset);
+
+    constexpr auto width_tolerance =
+        0.20F;
+
+    return std::abs(
+               maximum_absolute_x -
+               upper_half_width) <=
+               width_tolerance ||
+           std::abs(
+               maximum_absolute_x -
+               middle_half_width) <=
+               width_tolerance ||
+           std::abs(
+               maximum_absolute_x -
+               lower_half_width) <=
+               width_tolerance;
 }
 
 [[nodiscard]] auto material_visual(
@@ -1068,130 +1219,524 @@ void append_hull(
             profile.bow_z);
 }
 
-void append_cuboid(
-    ChunkMeshData& mesh,
-    const LocalBounds& bounds,
-    ShipMaterial material) {
+struct SideWindowOpening {
+    LocalBounds bounds {};
+    float side_sign = 1.0F;
+};
 
-    if (!valid_bounds(bounds)) {
-        return;
-    }
-    const auto& minimum =
-        bounds.min;
-    const auto& maximum =
-        bounds.max;
-    append_quad(
-        mesh,
-        {{
-            {maximum.x, minimum.y, minimum.z},
-            {maximum.x, maximum.y, minimum.z},
-            {maximum.x, maximum.y, maximum.z},
-            {maximum.x, minimum.y, maximum.z},
-        }},
-        {1.0F, 0.0F, 0.0F},
-        material);
-    append_quad(
-        mesh,
-        {{
-            {minimum.x, minimum.y, maximum.z},
-            {minimum.x, maximum.y, maximum.z},
-            {minimum.x, maximum.y, minimum.z},
-            {minimum.x, minimum.y, minimum.z},
-        }},
-        {-1.0F, 0.0F, 0.0F},
-        material);
-    append_quad(
-        mesh,
-        {{
-            {minimum.x, maximum.y, maximum.z},
-            {maximum.x, maximum.y, maximum.z},
-            {maximum.x, maximum.y, minimum.z},
-            {minimum.x, maximum.y, minimum.z},
-        }},
-        {0.0F, 1.0F, 0.0F},
-        material);
-    append_quad(
-        mesh,
-        {{
-            {minimum.x, minimum.y, minimum.z},
-            {maximum.x, minimum.y, minimum.z},
-            {maximum.x, minimum.y, maximum.z},
-            {minimum.x, minimum.y, maximum.z},
-        }},
-        {0.0F, -1.0F, 0.0F},
-        material);
-    append_quad(
-        mesh,
-        {{
-            {maximum.x, minimum.y, maximum.z},
-            {maximum.x, maximum.y, maximum.z},
-            {minimum.x, maximum.y, maximum.z},
-            {minimum.x, minimum.y, maximum.z},
-        }},
-        {0.0F, 0.0F, 1.0F},
-        material);
-    append_quad(
-        mesh,
-        {{
-            {minimum.x, minimum.y, minimum.z},
-            {minimum.x, maximum.y, minimum.z},
-            {maximum.x, maximum.y, minimum.z},
-            {maximum.x, minimum.y, minimum.z},
-        }},
-        {0.0F, 0.0F, -1.0F},
-        material);
-}
+[[nodiscard]] auto main_deck_underside(
+    std::span<const ShipPart> parts,
+    const ShipProtectionProfile& profile) noexcept -> float {
 
-void append_decks(
-    ChunkMeshData& mesh,
-    StylizedShipMeshMetrics& metrics,
-    std::span<const ShipPart> parts) {
+    auto underside =
+        profile.main_deck_top_y -
+        0.35F;
+    auto found_surface =
+        false;
 
     for (const auto& part : parts) {
         if (!part.supports_player ||
             part.material !=
                 ShipMaterial::LightDeck ||
-            (part.shape !=
-                 ShipPartShape::Box &&
-             part.shape !=
-                 ShipPartShape::Slab &&
-             part.shape !=
-                 ShipPartShape::Stair)) {
+            !is_volume_shape(
+                part.shape)) {
             continue;
         }
+
         const auto bounds =
             bounds_for(part);
         if (!valid_bounds(bounds)) {
             continue;
         }
-        const auto deck_y =
-            bounds.max.y;
-        append_quad(
+
+        const auto extent =
+            bounds.max -
+            bounds.min;
+
+        if (std::abs(
+                bounds.max.y -
+                profile.main_deck_top_y) >
+                0.02F ||
+            extent.y > 0.75F) {
+            continue;
+        }
+
+        // Je sélectionne les dalles minces du pont principal et non les
+        // escaliers qui atteignent ponctuellement la même hauteur.
+        underside =
+            found_surface
+                ? std::max(
+                      underside,
+                      bounds.min.y)
+                : bounds.min.y;
+        found_surface =
+            true;
+    }
+
+    return std::clamp(
+        underside,
+        profile.upper_hull_min_y +
+            0.10F,
+        profile.main_deck_top_y -
+            0.05F);
+}
+
+[[nodiscard]] auto collect_side_window_openings(
+    std::span<const ShipPart> parts,
+    const ShipProtectionProfile& profile)
+    -> std::vector<SideWindowOpening> {
+
+    std::vector<SideWindowOpening> openings;
+    openings.reserve(16U);
+
+    for (const auto& part : parts) {
+        if (part.shape !=
+                ShipPartShape::Panel ||
+            part.material !=
+                ShipMaterial::Glass) {
+            continue;
+        }
+
+        const auto absolute_normal =
+            glm::abs(part.orientation);
+
+        if (absolute_normal.x <
+                absolute_normal.y ||
+            absolute_normal.x <
+                absolute_normal.z) {
+
+            // Les vitrages horizontaux du compas et ceux du tableau arrière
+            // ne sont pas des ouvertures dans les murailles latérales.
+            continue;
+        }
+
+        const auto bounds =
+            bounds_for(part);
+
+        if (!valid_bounds(bounds) ||
+            bounds.max.z <=
+                profile.stern_z ||
+            bounds.min.z >=
+                profile.bow_z ||
+            bounds.max.y <=
+                profile.upper_hull_min_y ||
+            bounds.min.y >=
+                profile.main_deck_top_y) {
+            continue;
+        }
+
+        const auto center_x =
+            (
+                bounds.min.x +
+                bounds.max.x
+            ) *
+            0.5F;
+
+        if (std::abs(center_x) <=
+            0.20F) {
+            continue;
+        }
+
+        openings.push_back({
+            bounds,
+            center_x >= 0.0F
+                ? 1.0F
+                : -1.0F,
+        });
+    }
+
+    return openings;
+}
+
+[[nodiscard]] auto interior_hull_breakpoints(
+    const ShipProtectionProfile& profile,
+    const LodSettings& settings,
+    std::span<const SideWindowOpening> openings)
+    -> std::vector<float> {
+
+    std::vector<float> breakpoints;
+    breakpoints.reserve(
+        static_cast<std::size_t>(
+            settings.hull_segments +
+            1) +
+        openings.size() *
+            2U);
+
+    const auto hull_length =
+        profile.bow_z -
+        profile.stern_z;
+
+    for (int segment = 0;
+         segment <=
+             settings.hull_segments;
+         ++segment) {
+
+        const auto ratio =
+            static_cast<float>(segment) /
+            static_cast<float>(
+                settings.hull_segments);
+
+        breakpoints.push_back(
+            profile.stern_z +
+            hull_length *
+                ratio);
+    }
+
+    // Les limites des fenêtres deviennent aussi des limites de segment. Une
+    // ouverture ne peut donc jamais être coupée en diagonale par la doublure.
+    for (const auto& opening : openings) {
+        breakpoints.push_back(
+            std::clamp(
+                opening.bounds.min.z,
+                profile.stern_z,
+                profile.bow_z));
+
+        breakpoints.push_back(
+            std::clamp(
+                opening.bounds.max.z,
+                profile.stern_z,
+                profile.bow_z));
+    }
+
+    std::sort(
+        breakpoints.begin(),
+        breakpoints.end());
+
+    breakpoints.erase(
+        std::unique(
+            breakpoints.begin(),
+            breakpoints.end(),
+            [](float first,
+               float second) {
+                return std::abs(
+                           first -
+                           second) <=
+                       1.0e-4F;
+            }),
+        breakpoints.end());
+
+    return breakpoints;
+}
+
+[[nodiscard]] auto interior_half_width(
+    const ShipProtectionProfile& profile,
+    float local_z) noexcept -> float {
+
+    const auto outer_half_width =
+        profile.half_width_at(
+            local_z);
+
+    // Cette formule est identique à celle du blueprint physique dans
+    // SeaAdventure.cpp. Le mur visible suit donc sa vraie collision.
+    const auto wall_thickness =
+        std::min(
+            0.48F,
+            outer_half_width *
+                0.24F);
+
+    return std::max(
+        0.55F,
+        outer_half_width -
+            wall_thickness);
+}
+
+void append_interior_hull_lining(
+    ChunkMeshData& mesh,
+    std::span<const ShipPart> parts,
+    const ShipProtectionProfile& profile,
+    const LodSettings& settings,
+    const ship_mesh_detail::LightingContext& lighting) {
+
+    // La doublure est inutile à longue distance puisque l'intérieur ne peut
+    // alors pas être distingué.
+    if (!settings.keep_small_structures) {
+        return;
+    }
+
+    const auto wall_min_y =
+        profile.upper_hull_min_y +
+        0.015F;
+
+    const auto wall_max_y =
+        main_deck_underside(
+            parts,
+            profile) -
+        0.015F;
+
+    if (wall_max_y <=
+        wall_min_y +
+            kGeometryEpsilon) {
+        return;
+    }
+
+    const auto openings =
+        collect_side_window_openings(
+            parts,
+            profile);
+
+    const auto breakpoints =
+        interior_hull_breakpoints(
+            profile,
+            settings,
+            openings);
+
+    if (breakpoints.size() < 2U) {
+        return;
+    }
+
+    constexpr auto generated_source_index =
+        (std::numeric_limits<std::size_t>::max)();
+
+    for (std::size_t segment = 0U;
+         segment + 1U <
+             breakpoints.size();
+         ++segment) {
+
+        const auto first_z =
+            breakpoints[segment];
+        const auto second_z =
+            breakpoints[segment + 1U];
+
+        if (second_z <=
+            first_z +
+                kGeometryEpsilon) {
+            continue;
+        }
+
+        const auto center_z =
+            (
+                first_z +
+                second_z
+            ) *
+            0.5F;
+
+        const auto first_half_width =
+            interior_half_width(
+                profile,
+                first_z);
+
+        const auto second_half_width =
+            interior_half_width(
+                profile,
+                second_z);
+
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+
+            std::vector<std::array<float, 2>>
+                blocked_intervals;
+
+            blocked_intervals.reserve(
+                openings.size());
+
+            for (const auto& opening :
+                 openings) {
+
+                if (opening.side_sign !=
+                        side_sign ||
+                    center_z <
+                        opening.bounds.min.z -
+                            kGeometryEpsilon ||
+                    center_z >
+                        opening.bounds.max.z +
+                            kGeometryEpsilon) {
+                    continue;
+                }
+
+                const auto minimum =
+                    std::max(
+                        wall_min_y,
+                        opening.bounds.min.y);
+
+                const auto maximum =
+                    std::min(
+                        wall_max_y,
+                        opening.bounds.max.y);
+
+                if (maximum >
+                    minimum +
+                        kGeometryEpsilon) {
+                    blocked_intervals.push_back({
+                        minimum,
+                        maximum,
+                    });
+                }
+            }
+
+            std::sort(
+                blocked_intervals.begin(),
+                blocked_intervals.end(),
+                [](const auto& first,
+                   const auto& second) {
+                    return first[0] <
+                           second[0];
+                });
+
+            const auto append_wall_interval =
+                [&](float minimum_y,
+                    float maximum_y) {
+
+                    if (maximum_y <=
+                        minimum_y +
+                            kGeometryEpsilon) {
+                        return;
+                    }
+
+                    const auto first_lower =
+                        glm::vec3 {
+                            side_sign *
+                                first_half_width,
+                            minimum_y,
+                            first_z,
+                        };
+
+                    const auto second_lower =
+                        glm::vec3 {
+                            side_sign *
+                                second_half_width,
+                            minimum_y,
+                            second_z,
+                        };
+
+                    const auto second_upper =
+                        glm::vec3 {
+                            side_sign *
+                                second_half_width,
+                            maximum_y,
+                            second_z,
+                        };
+
+                    const auto first_upper =
+                        glm::vec3 {
+                            side_sign *
+                                first_half_width,
+                            maximum_y,
+                            first_z,
+                        };
+
+                    const auto longitudinal =
+                        second_lower -
+                        first_lower;
+
+                    // La normale pointe vers l'intérieur du navire. La coque
+                    // reste donc visible malgré le back-face culling.
+                    const auto inward_normal =
+                        side_sign > 0.0F
+                            ? safe_normalize(
+                                  glm::cross(
+                                      longitudinal,
+                                      glm::vec3 {
+                                          0.0F,
+                                          1.0F,
+                                          0.0F,
+                                      }),
+                                  glm::vec3 {
+                                      -1.0F,
+                                      0.0F,
+                                      0.0F,
+                                  })
+                            : safe_normalize(
+                                  glm::cross(
+                                      glm::vec3 {
+                                          0.0F,
+                                          1.0F,
+                                          0.0F,
+                                      },
+                                      longitudinal),
+                                  glm::vec3 {
+                                      1.0F,
+                                      0.0F,
+                                      0.0F,
+                                  });
+
+                    ship_mesh_detail::append_tiled_quad(
+                        mesh,
+                        {{
+                            first_lower,
+                            second_lower,
+                            second_upper,
+                            first_upper,
+                        }},
+                        inward_normal,
+                        ShipMaterial::DarkHull,
+                        lighting,
+                        generated_source_index);
+                };
+
+            auto visible_minimum =
+                wall_min_y;
+
+            for (const auto& blocked :
+                 blocked_intervals) {
+
+                if (blocked[0] >
+                    visible_minimum +
+                        kGeometryEpsilon) {
+
+                    append_wall_interval(
+                        visible_minimum,
+                        blocked[0]);
+                }
+
+                visible_minimum =
+                    std::max(
+                        visible_minimum,
+                        blocked[1]);
+            }
+
+            append_wall_interval(
+                visible_minimum,
+                wall_max_y);
+        }
+    }
+}
+
+void append_decks(
+    ChunkMeshData& mesh,
+    StylizedShipMeshMetrics& metrics,
+    std::span<const ShipPart> parts,
+    const ship_mesh_detail::LightingContext& lighting) {
+
+    for (std::size_t index = 0U;
+         index < parts.size();
+         ++index) {
+
+        const auto& part =
+            parts[index];
+
+        if (!part.supports_player ||
+            part.material !=
+                ShipMaterial::LightDeck ||
+            !is_volume_shape(
+                part.shape)) {
+            continue;
+        }
+
+        const auto bounds =
+            ship_mesh_detail::render_bounds(
+                part);
+
+        if (!ship_mesh_detail::valid_bounds(
+                bounds)) {
+            continue;
+        }
+
+        // Une surface de collision doit toujours avoir un volume visible.
+        // Les côtés et dessous évitent les murs invisibles autour des meubles,
+        // des marches, des hiloires et des différents niveaux de pont.
+        ship_mesh_detail::append_cuboid(
             mesh,
-            {{
-                {
-                    bounds.min.x,
-                    deck_y,
-                    bounds.max.z,
-                },
-                {
-                    bounds.max.x,
-                    deck_y,
-                    bounds.max.z,
-                },
-                {
-                    bounds.max.x,
-                    deck_y,
-                    bounds.min.z,
-                },
-                {
-                    bounds.min.x,
-                    deck_y,
-                    bounds.min.z,
-                },
-            }},
-            {0.0F, 1.0F, 0.0F},
-            ShipMaterial::LightDeck);
+            bounds,
+            part.material,
+            lighting,
+            index,
+            true);
+
+        const auto deck_y =
+            std::max(
+                part.local_start.y,
+                part.local_end.y);
+
         metrics.maximum_deck_alignment_error =
             std::max(
                 metrics.maximum_deck_alignment_error,
@@ -1201,148 +1746,120 @@ void append_decks(
     }
 }
 
-void append_panel(
-    ChunkMeshData& mesh,
-    const ShipPart& part) {
-
-    const auto bounds =
-        bounds_for(part);
-    if (!valid_bounds(bounds)) {
-        return;
-    }
-    const auto normal =
-        safe_normalize(
-            part.orientation,
-            glm::vec3 {
-                0.0F,
-                0.0F,
-                1.0F,
-            });
-    const auto absolute_normal =
-        glm::abs(normal);
-    std::array<glm::vec3, 4> front {};
-    std::array<glm::vec3, 4> back {};
-    if (absolute_normal.x >=
-            absolute_normal.y &&
-        absolute_normal.x >=
-            absolute_normal.z) {
-        const auto front_x =
-            normal.x >= 0.0F
-                ? bounds.max.x
-                : bounds.min.x;
-        const auto back_x =
-            normal.x >= 0.0F
-                ? bounds.min.x
-                : bounds.max.x;
-        front = {{
-            {front_x, bounds.min.y, bounds.min.z},
-            {front_x, bounds.min.y, bounds.max.z},
-            {front_x, bounds.max.y, bounds.max.z},
-            {front_x, bounds.max.y, bounds.min.z},
-        }};
-        back = {{
-            {back_x, bounds.min.y, bounds.min.z},
-            {back_x, bounds.max.y, bounds.min.z},
-            {back_x, bounds.max.y, bounds.max.z},
-            {back_x, bounds.min.y, bounds.max.z},
-        }};
-    } else if (
-        absolute_normal.y >=
-        absolute_normal.z) {
-        const auto front_y =
-            normal.y >= 0.0F
-                ? bounds.max.y
-                : bounds.min.y;
-        const auto back_y =
-            normal.y >= 0.0F
-                ? bounds.min.y
-                : bounds.max.y;
-        front = {{
-            {bounds.min.x, front_y, bounds.max.z},
-            {bounds.max.x, front_y, bounds.max.z},
-            {bounds.max.x, front_y, bounds.min.z},
-            {bounds.min.x, front_y, bounds.min.z},
-        }};
-        back = {{
-            {bounds.min.x, back_y, bounds.min.z},
-            {bounds.max.x, back_y, bounds.min.z},
-            {bounds.max.x, back_y, bounds.max.z},
-            {bounds.min.x, back_y, bounds.max.z},
-        }};
-    } else {
-        const auto front_z =
-            normal.z >= 0.0F
-                ? bounds.max.z
-                : bounds.min.z;
-        const auto back_z =
-            normal.z >= 0.0F
-                ? bounds.min.z
-                : bounds.max.z;
-        front = {{
-            {bounds.min.x, bounds.min.y, front_z},
-            {bounds.max.x, bounds.min.y, front_z},
-            {bounds.max.x, bounds.max.y, front_z},
-            {bounds.min.x, bounds.max.y, front_z},
-        }};
-        back = {{
-            {bounds.min.x, bounds.min.y, back_z},
-            {bounds.min.x, bounds.max.y, back_z},
-            {bounds.max.x, bounds.max.y, back_z},
-            {bounds.max.x, bounds.min.y, back_z},
-        }};
-    }
-    append_quad(
-        mesh,
-        front,
-        normal,
-        part.material);
-    append_quad(
-        mesh,
-        back,
-        -normal,
-        part.material);
-}
-
 void append_structures(
     ChunkMeshData& mesh,
     std::span<const ShipPart> parts,
-    const LodSettings& settings) {
+    const ShipProtectionProfile& profile,
+    const LodSettings& settings,
+    const ship_mesh_detail::LightingContext& lighting) {
 
-    for (const auto& part : parts) {
+    // La coque organique ne possède qu'une peau extérieure. Cette doublure
+    // intérieure suit la même tonture, reste ouverte aux fenêtres et empêche
+    // le back-face culling de transformer les murailles en trous.
+    append_interior_hull_lining(
+        mesh,
+        parts,
+        profile,
+        settings,
+        lighting);
+
+    for (std::size_t index = 0U;
+         index < parts.size();
+         ++index) {
+
+        const auto& part =
+            parts[index];
+
         if (part.shape ==
-                ShipPartShape::Panel &&
-            !is_canvas(
-                part.material)) {
-            append_panel(
+            ShipPartShape::Glyph) {
+
+            if (settings.keep_small_structures) {
+                ship_mesh_detail::append_glyph(
+                    mesh,
+                    part,
+                    lighting,
+                    index);
+            }
+
+            continue;
+        }
+
+        if (part.shape ==
+            ShipPartShape::Panel) {
+
+            // Les vraies voiles seront émises dans la plage dédiée.
+            if (is_flexible_sail_panel(
+                    part)) {
+                continue;
+            }
+
+            const auto bounds =
+                ship_mesh_detail::render_bounds(
+                    part);
+
+            if (!ship_mesh_detail::valid_bounds(
+                    bounds)) {
+                continue;
+            }
+
+            const auto extent =
+                bounds.max -
+                bounds.min;
+
+            const auto maximum_extent =
+                std::max(
+                    extent.x,
+                    std::max(
+                        extent.y,
+                        extent.z));
+
+            if (!settings.keep_small_structures &&
+                maximum_extent < 0.35F) {
+                continue;
+            }
+
+            // Les panneaux rigides et les textiles horizontaux reçoivent aussi
+            // leurs quatre chants. Leur volume visible correspond ainsi à leur
+            // AABB physique, y compris lorsqu'on les regarde de profil.
+            ship_mesh_detail::append_cuboid(
                 mesh,
-                part);
+                bounds,
+                part.material,
+                lighting,
+                index,
+                false);
+
             continue;
         }
-        if (part.shape !=
-                ShipPartShape::Box &&
-            part.shape !=
-                ShipPartShape::Slab &&
-            part.shape !=
-                ShipPartShape::Stair) {
+
+        if (!is_volume_shape(
+                part.shape) ||
+            is_legacy_hull_proxy(
+                part,
+                profile)) {
             continue;
         }
-        if (part.material ==
-            ShipMaterial::DarkHull) {
-            continue;
-        }
+
         if (part.supports_player &&
             part.material ==
                 ShipMaterial::LightDeck) {
+
+            // Ces volumes complets sont déjà émis dans la plage des ponts.
             continue;
         }
+
         const auto bounds =
-            bounds_for(part);
-        if (!valid_bounds(bounds)) {
+            ship_mesh_detail::render_bounds(
+                part);
+
+        if (!ship_mesh_detail::valid_bounds(
+                bounds)) {
             continue;
         }
+
         const auto extent =
-            bounds.max -
-            bounds.min;
+            bounds.max - bounds.min;
+
         const auto maximum_extent =
             std::max(
                 extent.x,
@@ -1353,10 +1870,17 @@ void append_structures(
             maximum_extent < 0.35F) {
             continue;
         }
-        append_cuboid(
+
+        // Seules les anciennes tranches physiques de coque sont remplacées.
+        // L'étrave, le tableau arrière et tout détail DarkHull légitime restent
+        // donc présents dans le rendu moderne.
+        ship_mesh_detail::append_cuboid(
             mesh,
             bounds,
-            part.material);
+            part.material,
+            lighting,
+            index,
+            true);
     }
 }
 
@@ -1373,6 +1897,7 @@ void append_cylinder(
         start;
     const auto length =
         glm::length(axis);
+
     if (!finite_vec3(start) ||
         !finite_vec3(end) ||
         !std::isfinite(diameter) ||
@@ -1387,6 +1912,7 @@ void append_cylinder(
     const auto direction =
         axis /
         length;
+
     const auto reference =
         std::abs(direction.y) <
                 0.92F
@@ -1400,6 +1926,7 @@ void append_cylinder(
                   0.0F,
                   0.0F,
               };
+
     const auto side =
         safe_normalize(
             glm::cross(
@@ -1410,6 +1937,7 @@ void append_cylinder(
                 0.0F,
                 0.0F,
             });
+
     const auto up =
         safe_normalize(
             glm::cross(
@@ -1420,25 +1948,47 @@ void append_cylinder(
                 0.0F,
                 1.0F,
             });
+
     const auto radius =
         std::max(
             diameter *
                 0.5F,
             0.01F);
 
+    // Une vergue de quinze mètres ne doit pas étirer un seul texel de bois sur
+    // toute sa longueur. Le plafond évite toutefois toute explosion de maillage
+    // si une donnée corrompue fournit un segment démesuré.
+    const auto maximum_texture_span =
+        material ==
+                ShipMaterial::Rope
+            ? 1.25F
+            : 1.75F;
+
+    const auto axial_segments =
+        std::clamp(
+            static_cast<int>(
+                std::ceil(
+                    length /
+                    maximum_texture_span)),
+            1,
+            96);
+
     for (int segment = 0;
          segment < radial_segments;
          ++segment) {
+
         const auto first_angle =
             kTau *
             static_cast<float>(segment) /
             static_cast<float>(
                 radial_segments);
+
         const auto second_angle =
             kTau *
             static_cast<float>(segment + 1) /
             static_cast<float>(
                 radial_segments);
+
         const auto first_offset =
             (
                 side *
@@ -1447,6 +1997,7 @@ void append_cylinder(
                     std::sin(first_angle)
             ) *
             radius;
+
         const auto second_offset =
             (
                 side *
@@ -1455,52 +2006,87 @@ void append_cylinder(
                     std::sin(second_angle)
             ) *
             radius;
+
         const auto normal =
             safe_normalize(
                 first_offset +
                     second_offset,
                 side);
+
         const auto first_normal =
             safe_normalize(
                 first_offset,
                 normal);
+
         const auto second_normal =
             safe_normalize(
                 second_offset,
                 normal);
+
         const auto first_ratio =
             static_cast<float>(segment) /
             static_cast<float>(
                 radial_segments);
+
         const auto second_ratio =
             static_cast<float>(segment + 1) /
             static_cast<float>(
                 radial_segments);
-        append_quad_with_normals(
-            mesh,
-            {{
+
+        for (int axial_segment = 0;
+             axial_segment <
+                 axial_segments;
+             ++axial_segment) {
+
+            const auto axial_min =
+                static_cast<float>(
+                    axial_segment) /
+                static_cast<float>(
+                    axial_segments);
+
+            const auto axial_max =
+                static_cast<float>(
+                    axial_segment + 1) /
+                static_cast<float>(
+                    axial_segments);
+
+            const auto slice_start =
                 start +
-                    first_offset,
-                end +
-                    first_offset,
-                end +
-                    second_offset,
+                axis *
+                    axial_min;
+
+            const auto slice_end =
                 start +
-                    second_offset,
-            }},
-            {
-                first_normal,
-                first_normal,
-                second_normal,
-                second_normal,
-            },
-            material,
-            {{
-                {first_ratio, 0.0F},
-                {first_ratio, 1.0F},
-                {second_ratio, 1.0F},
-                {second_ratio, 0.0F},
-            }});
+                axis *
+                    axial_max;
+
+            append_quad_with_normals(
+                mesh,
+                {{
+                    slice_start +
+                        first_offset,
+                    slice_end +
+                        first_offset,
+                    slice_end +
+                        second_offset,
+                    slice_start +
+                        second_offset,
+                }},
+                {
+                    first_normal,
+                    first_normal,
+                    second_normal,
+                    second_normal,
+                },
+                material,
+                {{
+                    {first_ratio, 0.0F},
+                    {first_ratio, 1.0F},
+                    {second_ratio, 1.0F},
+                    {second_ratio, 0.0F},
+                }});
+        }
+
         const auto first_cap_uv =
             glm::vec2 {
                 0.5F +
@@ -1510,6 +2096,7 @@ void append_cylinder(
                     std::sin(first_angle) *
                         0.5F,
             };
+
         const auto second_cap_uv =
             glm::vec2 {
                 0.5F +
@@ -1536,6 +2123,7 @@ void append_cylinder(
                     second_cap_uv,
                     first_cap_uv,
                 }));
+
         static_cast<void>(
             append_triangle(
                 mesh,
@@ -2341,10 +2929,8 @@ void append_sails(
     const LodSettings& settings) {
 
     for (const auto& part : parts) {
-        if (part.shape !=
-                ShipPartShape::Panel ||
-            !is_canvas(
-                part.material)) {
+        if (!is_flexible_sail_panel(
+                part)) {
             continue;
         }
         const auto bounds =
@@ -2382,6 +2968,89 @@ void append_sails(
                 part,
                 settings);
         }
+    }
+}
+
+void apply_ship_lighting(
+    ChunkMeshData& mesh,
+    const ship_mesh_detail::LightingContext& lighting) noexcept {
+
+    for (auto& vertex : mesh.vertices) {
+        const auto position =
+            glm::vec3 {
+                vertex.x,
+                vertex.y,
+                vertex.z,
+            };
+
+        const auto normal =
+            safe_normalize(
+                glm::vec3 {
+                    vertex.nx,
+                    vertex.ny,
+                    vertex.nz,
+                },
+                glm::vec3 {
+                    0.0F,
+                    1.0F,
+                    0.0F,
+                });
+
+        const auto lighting_point =
+            position +
+            normal *
+                0.02F;
+
+        const auto sky =
+            std::clamp(
+                lighting.sky_light(
+                    lighting_point),
+                0.0F,
+                1.0F);
+
+        const auto sampled_block =
+            std::clamp(
+                lighting.block_light(
+                    lighting_point),
+                0.0F,
+                1.0F);
+
+        const auto existing_block =
+            std::isfinite(
+                vertex.block_light)
+                ? std::clamp(
+                      vertex.block_light,
+                      0.0F,
+                      1.0F)
+                : 0.0F;
+
+        // Toutes les familles géométriques partagent maintenant exactement le
+        // même éclairage. L'intérieur n'est plus traité comme s'il était à ciel
+        // ouvert et les lanternes éclairent aussi la coque, les mâts et cordages.
+        vertex.nx =
+            normal.x;
+        vertex.ny =
+            normal.y;
+        vertex.nz =
+            normal.z;
+
+        vertex.face_shade =
+            face_shade_for(
+                normal);
+
+        vertex.sky_light =
+            sky;
+
+        vertex.block_light =
+            std::max(
+                existing_block,
+                sampled_block);
+
+        vertex.ao =
+            lighting.ambient_occlusion(
+                lighting_point,
+                normal,
+                sky);
     }
 }
 
@@ -2660,23 +3329,30 @@ auto build_stylized_ship_mesh(
 
     const auto settings =
         settings_for(lod);
-    // Je reserve un budget proportionnel aux pieces sans faire dependre le
-    // resultat de la capacite choisie par l'allocateur.
+
+    const auto lighting =
+        ship_mesh_detail::make_lighting_context(
+            blueprint.parts);
+
+    // La subdivision des grandes faces et des cylindres augmente volontairement
+    // le budget initial. Ce n'est qu'une réservation : les limites réelles
+    // restent contrôlées par les segments de LOD et les plafonds géométriques.
     output.mesh.vertices.reserve(
         blueprint.parts.size() *
         (
             lod ==
                     StylizedShipLod::Near
-                ? 36U
-                : 18U
+                ? 96U
+                : 42U
         ));
+
     output.mesh.indices.reserve(
         blueprint.parts.size() *
         (
             lod ==
                     StylizedShipLod::Near
-                ? 54U
-                : 27U
+                ? 144U
+                : 63U
         ));
 
     begin_range(
@@ -2698,7 +3374,8 @@ auto build_stylized_ship_mesh(
     append_decks(
         output.mesh,
         output.metrics,
-        blueprint.parts);
+        blueprint.parts,
+        lighting);
     finish_range(
         output.metrics.decks,
         output.mesh);
@@ -2709,7 +3386,9 @@ auto build_stylized_ship_mesh(
     append_structures(
         output.mesh,
         blueprint.parts,
-        settings);
+        blueprint.protection_profile,
+        settings,
+        lighting);
     finish_range(
         output.metrics.structures,
         output.mesh);
@@ -2735,6 +3414,10 @@ auto build_stylized_ship_mesh(
     finish_range(
         output.metrics.sails,
         output.mesh);
+
+    apply_ship_lighting(
+        output.mesh,
+        lighting);
 
     finish_bounds(
         output.metrics,

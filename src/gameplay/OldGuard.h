@@ -17,7 +17,9 @@ namespace valcraft {
 
 inline constexpr std::size_t kOldGuardMemberCount = 6U;
 inline constexpr std::size_t kOldGuardRoutePointCount = 4U;
-inline constexpr std::size_t kOldGuardVisualPartBudget = 64U;
+// Je reserve assez de pieces pour conserver la silhouette du soldat et tous
+// les organes lisibles du mousquet a silex, baionnette comprise.
+inline constexpr std::size_t kOldGuardVisualPartBudget = 80U;
 inline constexpr std::size_t kOldGuardSmokeCapacity = 128U;
 inline constexpr std::size_t kOldGuardFlashCapacity = kOldGuardMemberCount;
 inline constexpr float kOldGuardRenderDistance = 96.0F;

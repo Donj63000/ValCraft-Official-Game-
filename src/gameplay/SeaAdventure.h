@@ -390,6 +390,12 @@ public:
                                        const glm::vec3& direction,
                                        float max_distance,
                                        float damage) noexcept -> ShipCrewDamageResult;
+    [[nodiscard]] auto raycast_crew(const glm::vec3& origin,
+                                    const glm::vec3& direction,
+                                    float max_distance) const noexcept -> ShipCrewRayHit;
+    [[nodiscard]] auto apply_damage_crew(std::uint8_t member_id,
+                                         float damage,
+                                         float hit_distance) noexcept -> ShipCrewDamageResult;
     [[nodiscard]] auto intercept_old_guard(const glm::vec3& origin,
                                            const glm::vec3& direction,
                                            float max_distance) const noexcept -> OldGuardRayHit;

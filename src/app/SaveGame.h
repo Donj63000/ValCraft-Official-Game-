@@ -45,6 +45,7 @@ struct SaveGameSnapshot {
     SeaAdventureSaveState sea_adventure {};
     HotbarState hotbar {};
     InventoryMenuState inventory {};
+    std::uint64_t musket_shot_sequence = 0U;
     std::vector<CreatureInstance> creatures {};
     std::vector<ItemDrop> item_drops {};
     // Je conserve les donnees de monde sous leur forme compacte au chargement,

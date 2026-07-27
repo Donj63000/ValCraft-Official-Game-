@@ -11,6 +11,7 @@ namespace valcraft {
 
 constexpr std::size_t kHotbarSlotCount = 9;
 constexpr std::uint8_t kMaxItemStackCount = 64;
+constexpr std::uint8_t kMusketLoadedInstanceState = static_cast<std::uint8_t>(1U << 0U);
 
 inline constexpr auto max_item_stack_count(BlockId block_id) noexcept -> std::uint8_t {
     return is_inventory_only_item(block_id) ? static_cast<std::uint8_t>(1U) : kMaxItemStackCount;
@@ -19,6 +20,7 @@ inline constexpr auto max_item_stack_count(BlockId block_id) noexcept -> std::ui
 struct HotbarSlot {
     BlockId block_id = to_block_id(BlockType::Air);
     std::uint8_t count = 0;
+    std::uint8_t instance_state = 0;
 
     auto operator==(const HotbarSlot&) const -> bool = default;
 };
@@ -34,13 +36,39 @@ struct HotbarState {
     }
 };
 
-inline constexpr auto make_item_stack(BlockId block_id, std::uint8_t count) noexcept -> HotbarSlot {
+inline constexpr auto default_item_instance_state(BlockId block_id) noexcept -> std::uint8_t {
+    return block_item_id(block_id) == to_block_id(BlockType::Musket)
+               ? kMusketLoadedInstanceState
+               : static_cast<std::uint8_t>(0U);
+}
+
+inline constexpr auto sanitized_item_instance_state(BlockId block_id,
+                                                    std::uint8_t instance_state) noexcept -> std::uint8_t {
+    return block_item_id(block_id) == to_block_id(BlockType::Musket)
+               ? static_cast<std::uint8_t>(instance_state & kMusketLoadedInstanceState)
+               : static_cast<std::uint8_t>(0U);
+}
+
+inline constexpr auto make_item_stack_with_state(BlockId block_id,
+                                                 std::uint8_t count,
+                                                 std::uint8_t instance_state) noexcept -> HotbarSlot {
     block_id = block_item_id(block_id);
     if (block_id == to_block_id(BlockType::Air) || count == 0) {
         return {};
     }
     const auto max_count = max_item_stack_count(block_id);
-    return {block_id, static_cast<std::uint8_t>(count > max_count ? max_count : count)};
+    return {
+        block_id,
+        static_cast<std::uint8_t>(count > max_count ? max_count : count),
+        sanitized_item_instance_state(block_id, instance_state),
+    };
+}
+
+inline constexpr auto make_item_stack(BlockId block_id, std::uint8_t count) noexcept -> HotbarSlot {
+    return make_item_stack_with_state(
+        block_id,
+        count,
+        default_item_instance_state(block_id));
 }
 
 inline constexpr auto empty_item_stack() noexcept -> HotbarSlot {
@@ -65,6 +93,31 @@ inline constexpr void normalize_item_stack(HotbarSlot& slot) noexcept {
     if (slot.count > max_count) {
         slot.count = max_count;
     }
+    slot.instance_state =
+        sanitized_item_instance_state(
+            slot.block_id,
+            slot.instance_state);
+}
+
+inline constexpr auto is_musket_item(const HotbarSlot& slot) noexcept -> bool {
+    return hotbar_slot_has_item(slot) &&
+           block_item_id(slot.block_id) == to_block_id(BlockType::Musket);
+}
+
+inline constexpr auto is_musket_loaded(const HotbarSlot& slot) noexcept -> bool {
+    return is_musket_item(slot) &&
+           (slot.instance_state & kMusketLoadedInstanceState) != 0U;
+}
+
+inline constexpr void set_musket_loaded(HotbarSlot& slot, bool loaded) noexcept {
+    normalize_item_stack(slot);
+    if (!is_musket_item(slot)) {
+        return;
+    }
+    slot.instance_state =
+        loaded
+            ? kMusketLoadedInstanceState
+            : static_cast<std::uint8_t>(0U);
 }
 
 inline auto make_default_hotbar_state() noexcept -> HotbarState {

@@ -20,7 +20,10 @@
 #include "app/TerrainEditStress.h"
 #include "creatures/CreatureSystem.h"
 #include "gameplay/ItemDropSystem.h"
+#include "gameplay/MusketCombat.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerMusket.h"
+#include "gameplay/PlayerMusketEffects.h"
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
 #include "gameplay/StartingVillage.h"
@@ -294,6 +297,13 @@ private:
     void queue_gameplay_announcement(std::string title, std::string detail, float duration_seconds = 3.25F);
     void queue_level_up_announcements(std::uint32_t previous_level, std::uint32_t current_level);
     void update_gameplay_announcements(float dt) noexcept;
+    [[nodiscard]] auto selected_musket_active() const noexcept -> bool;
+    void reset_musket_interaction(bool forget_bound_slot = true) noexcept;
+    void resolve_player_musket_shot(
+        const PlayerMusketEvents& shot,
+        bool maritime_session_active);
+    [[nodiscard]] auto current_wind_velocity(
+        const EnvironmentState& environment) const noexcept -> glm::vec3;
     [[nodiscard]] auto current_gameplay_announcement_view() const noexcept -> GameplayHudAnnouncementView;
     [[nodiscard]] auto current_maritime_hud_view() const noexcept -> MaritimeHudView;
     void sync_selected_hotbar_slot() noexcept;
@@ -372,7 +382,8 @@ private:
         const glm::vec3& focus,
         std::string_view loading_title,
         std::string_view loading_detail);
-    void prepare_game_session();
+    void prepare_game_session(
+        std::uint64_t musket_shot_sequence = 0U);
     void open_main_menu(bool from_session = false);
     void open_save_slot_menu(SaveSlotMenuMode mode,
                              SaveSlotMenuParent parent,
@@ -402,6 +413,10 @@ private:
     bool pending_primary_attack_ = false;
     bool pending_place_block_ = false;
     bool pending_fishing_ = false;
+    bool musket_fire_held_ = false;
+    bool pending_musket_fire_press_ = false;
+    bool musket_aim_held_ = false;
+    bool pending_musket_reload_ = false;
     float pending_look_x_ = 0.0F;
     float pending_look_y_ = 0.0F;
     int window_width_ = 1600;
@@ -420,6 +435,9 @@ private:
     World world_ {};
     TerrainEditStressScenario terrain_edit_stress_ {};
     PlayerController player_ {};
+    PlayerMusketController player_musket_ {};
+    PlayerMusketEffects player_musket_effects_ {};
+    std::optional<std::size_t> bound_musket_hotbar_slot_ {};
     PlayerController preview_player_ {};
     PlayerProgression progression_ {};
     std::deque<GameplayAnnouncement> gameplay_announcements_ {};

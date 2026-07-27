@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
 
@@ -97,6 +98,53 @@ namespace {
 
     return range.first_index +
            range.index_count;
+}
+
+[[nodiscard]] auto maximum_triangle_edge(
+    const StylizedShipMeshData& result,
+    const StylizedShipIndexRange& range) noexcept -> float {
+
+    auto maximum_length =
+        0.0F;
+
+    const auto end =
+        range_end(range);
+
+    for (auto index = range.first_index;
+         index + 2U < end;
+         index += 3U) {
+
+        const auto first =
+            vertex_position(
+                result.mesh.vertices[
+                    result.mesh.indices[index]]);
+
+        const auto second =
+            vertex_position(
+                result.mesh.vertices[
+                    result.mesh.indices[index + 1U]]);
+
+        const auto third =
+            vertex_position(
+                result.mesh.vertices[
+                    result.mesh.indices[index + 2U]]);
+
+        maximum_length =
+            std::max({
+                maximum_length,
+                glm::length(
+                    second -
+                    first),
+                glm::length(
+                    third -
+                    second),
+                glm::length(
+                    first -
+                    third),
+            });
+    }
+
+    return maximum_length;
 }
 
 void check_valid_range(
@@ -378,19 +426,23 @@ TEST_CASE("stylized ship far lod reduces hull rigging and sail geometry") {
           near_mesh.metrics.sails.triangle_count());
 }
 
-TEST_CASE("stylized ship decks stay exactly on existing support surfaces") {
+TEST_CASE("stylized ship renders every support volume instead of collision-only surfaces") {
     const auto& blueprint =
         amelie_ship_blueprint();
+
     const auto result =
         build_stylized_ship_mesh(
             blueprint,
             StylizedShipLod::Near);
+
     REQUIRE(result.metrics.decks.index_count >
             0U);
+
     CHECK(result.metrics.maximum_deck_alignment_error ==
           doctest::Approx(0.0F));
 
-    std::vector<float> support_heights;
+    std::vector<ShipBounds> support_bounds;
+
     for (const auto& part : blueprint.parts) {
         if (part.supports_player &&
             part.material ==
@@ -401,19 +453,34 @@ TEST_CASE("stylized ship decks stay exactly on existing support surfaces") {
                  ShipPartShape::Slab ||
              part.shape ==
                  ShipPartShape::Stair)) {
-            support_heights.push_back(
-                std::max(
-                    part.local_start.y,
-                    part.local_end.y));
+
+            support_bounds.push_back({
+                glm::min(
+                    part.local_start,
+                    part.local_end),
+                glm::max(
+                    part.local_start,
+                    part.local_end),
+            });
         }
     }
-    REQUIRE_FALSE(support_heights.empty());
+
+    REQUIRE_FALSE(support_bounds.empty());
+
+    constexpr auto tolerance =
+        1.0e-4F;
 
     auto found_main_deck =
         false;
+    auto found_visible_underside =
+        false;
+    auto found_visible_side =
+        false;
+
     const auto deck_end =
         range_end(
             result.metrics.decks);
+
     for (auto index =
              result.metrics.decks.first_index;
          index < deck_end;
@@ -421,25 +488,287 @@ TEST_CASE("stylized ship decks stay exactly on existing support surfaces") {
         const auto& vertex =
             result.mesh.vertices[
                 result.mesh.indices[index]];
-        const auto matches_support =
+
+        const auto point =
+            vertex_position(vertex);
+
+        const auto matches_support_surface =
             std::any_of(
-                support_heights.begin(),
-                support_heights.end(),
-                [&](float height) {
-                    return std::abs(
-                               vertex.y -
-                               height) <=
-                           1.0e-6F;
+                support_bounds.begin(),
+                support_bounds.end(),
+                [&](const ShipBounds& bounds) {
+
+                    const auto inside =
+                        point.x >=
+                            bounds.min.x -
+                                tolerance &&
+                        point.x <=
+                            bounds.max.x +
+                                tolerance &&
+                        point.y >=
+                            bounds.min.y -
+                                tolerance &&
+                        point.y <=
+                            bounds.max.y +
+                                tolerance &&
+                        point.z >=
+                            bounds.min.z -
+                                tolerance &&
+                        point.z <=
+                            bounds.max.z +
+                                tolerance;
+
+                    const auto on_boundary =
+                        std::abs(
+                            point.x -
+                            bounds.min.x) <=
+                            tolerance ||
+                        std::abs(
+                            point.x -
+                            bounds.max.x) <=
+                            tolerance ||
+                        std::abs(
+                            point.y -
+                            bounds.min.y) <=
+                            tolerance ||
+                        std::abs(
+                            point.y -
+                            bounds.max.y) <=
+                            tolerance ||
+                        std::abs(
+                            point.z -
+                            bounds.min.z) <=
+                            tolerance ||
+                        std::abs(
+                            point.z -
+                            bounds.max.z) <=
+                            tolerance;
+
+                    return inside &&
+                           on_boundary;
                 });
-        CHECK(matches_support);
+
+        CHECK(matches_support_surface);
+
         found_main_deck =
             found_main_deck ||
             std::abs(
                 vertex.y -
                 blueprint.protection_profile.main_deck_top_y) <=
-                1.0e-6F;
+                tolerance;
+
+        found_visible_underside =
+            found_visible_underside ||
+            vertex.ny < -0.90F;
+
+        found_visible_side =
+            found_visible_side ||
+            std::abs(vertex.ny) <
+                0.10F;
     }
+
     CHECK(found_main_deck);
+    CHECK(found_visible_underside);
+    CHECK(found_visible_side);
+
+    // Une tuile n'est plus étirée sur toute la largeur du pont.
+    CHECK(
+        maximum_triangle_edge(
+            result,
+            result.metrics.decks) <
+        3.0F);
+}
+
+TEST_CASE("stylized ship keeps visible inward hull walls and sheltered lighting") {
+    const auto& blueprint =
+        amelie_ship_blueprint();
+
+    const auto result =
+        build_stylized_ship_mesh(
+            blueprint,
+            StylizedShipLod::Near);
+
+    REQUIRE(result.metrics.structures.index_count >
+            0U);
+
+    auto inward_wall_vertex_count =
+        std::size_t {0U};
+
+    auto minimum_interior_sky =
+        1.0F;
+
+    const auto structure_end =
+        range_end(
+            result.metrics.structures);
+
+    for (auto index =
+             result.metrics.structures.first_index;
+         index < structure_end;
+         ++index) {
+
+        const auto& vertex =
+            result.mesh.vertices[
+                result.mesh.indices[index]];
+
+        const auto point =
+            vertex_position(vertex);
+
+        const auto normal =
+            vertex_normal(vertex);
+
+        const auto upper_interior_wall =
+            point.y >
+                blueprint.protection_profile.upper_hull_min_y &&
+            point.y <
+                blueprint.protection_profile.main_deck_top_y -
+                    0.20F &&
+            std::abs(point.x) >
+                0.70F &&
+            std::abs(normal.x) >
+                0.70F &&
+            point.x *
+                    normal.x <
+                -0.30F;
+
+        if (!upper_interior_wall) {
+            continue;
+        }
+
+        ++inward_wall_vertex_count;
+
+        minimum_interior_sky =
+            std::min(
+                minimum_interior_sky,
+                vertex.sky_light);
+    }
+
+    CHECK(inward_wall_vertex_count >
+          100U);
+
+    CHECK(minimum_interior_sky <
+          0.90F);
+}
+
+TEST_CASE("stylized ship keeps interior textiles horizontal and reserves sail deformation for real sails") {
+    const auto result =
+        build_stylized_ship_mesh(
+            amelie_ship_blueprint(),
+            StylizedShipLod::Near);
+
+    const auto fabric_material =
+        block_visual_material_value(
+            BlockVisualMaterial::Fabric);
+
+    auto found_horizontal_interior_textile =
+        false;
+
+    const auto structure_end =
+        range_end(
+            result.metrics.structures);
+
+    for (auto index =
+             result.metrics.structures.first_index;
+         index < structure_end;
+         ++index) {
+
+        const auto& vertex =
+            result.mesh.vertices[
+                result.mesh.indices[index]];
+
+        found_horizontal_interior_textile =
+            found_horizontal_interior_textile ||
+            (
+                vertex.y < 2.10F &&
+                std::abs(vertex.ny) >
+                    0.90F &&
+                std::abs(
+                    vertex.material_class -
+                    fabric_material) <
+                    0.01F
+            );
+    }
+
+    CHECK(found_horizontal_interior_textile);
+
+    auto minimum_sail_height =
+        (std::numeric_limits<float>::max)();
+
+    const auto sail_end =
+        range_end(
+            result.metrics.sails);
+
+    for (auto index =
+             result.metrics.sails.first_index;
+         index < sail_end;
+         ++index) {
+
+        const auto& vertex =
+            result.mesh.vertices[
+                result.mesh.indices[index]];
+
+        minimum_sail_height =
+            std::min(
+                minimum_sail_height,
+                vertex.y);
+    }
+
+    // Les matelas et tapis situés vers Y=1 ne doivent plus apparaître dans la
+    // plage géométrique des voiles.
+    CHECK(minimum_sail_height >
+          7.50F);
+}
+
+TEST_CASE("stylized ship renders identity glyphs and bounds texture stretching") {
+    const auto result =
+        build_stylized_ship_mesh(
+            amelie_ship_blueprint(),
+            StylizedShipLod::Near);
+
+    auto found_main_mast_glyph =
+        false;
+
+    const auto structure_end =
+        range_end(
+            result.metrics.structures);
+
+    for (auto index =
+             result.metrics.structures.first_index;
+         index < structure_end;
+         ++index) {
+
+        const auto& vertex =
+            result.mesh.vertices[
+                result.mesh.indices[index]];
+
+        found_main_mast_glyph =
+            found_main_mast_glyph ||
+            (
+                std::abs(vertex.x) <
+                    0.20F &&
+                vertex.y >
+                    14.0F &&
+                vertex.y <
+                    19.1F &&
+                vertex.z >
+                    -0.25F &&
+                vertex.z <
+                    -0.18F
+            );
+    }
+
+    CHECK(found_main_mast_glyph);
+
+    CHECK(
+        maximum_triangle_edge(
+            result,
+            result.metrics.structures) <
+        3.0F);
+
+    CHECK(
+        maximum_triangle_edge(
+            result,
+            result.metrics.rigging) <
+        2.25F);
 }
 
 TEST_CASE("stylized hull follows the protection profile and keeps tapered ends") {

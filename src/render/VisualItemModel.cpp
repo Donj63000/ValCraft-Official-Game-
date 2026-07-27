@@ -1,8 +1,11 @@
 #include "render/VisualItemModel.h"
 
+#include "render/MusketVisualRecipe.h"
+
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/trigonometric.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
@@ -213,6 +216,53 @@ void append_handle(
         rotation_degrees,
         scale,
         glm::vec4 {0.90F, 0.82F, 0.70F, 1.0F});
+}
+
+[[nodiscard]] auto musket_visual_material(
+    MusketVisualMaterial material) noexcept -> VisualMaterialId {
+    switch (material) {
+    case MusketVisualMaterial::Walnut:
+        return VisualMaterialId::OakBark;
+    case MusketVisualMaterial::Brass:
+        return VisualMaterialId::BronzeArmor;
+    case MusketVisualMaterial::DarkBore:
+    case MusketVisualMaterial::Flint:
+    case MusketVisualMaterial::PatinatedSteel:
+    default:
+        return VisualMaterialId::ForgedSteel;
+    }
+}
+
+[[nodiscard]] auto musket_visual_tint(
+    MusketVisualMaterial material) noexcept -> glm::vec4 {
+    switch (material) {
+    case MusketVisualMaterial::Walnut:
+        return {0.72F, 0.48F, 0.30F, 1.0F};
+    case MusketVisualMaterial::PatinatedSteel:
+        return {0.62F, 0.66F, 0.68F, 1.0F};
+    case MusketVisualMaterial::Brass:
+        return {0.92F, 0.74F, 0.38F, 1.0F};
+    case MusketVisualMaterial::DarkBore:
+        return {0.045F, 0.052F, 0.055F, 1.0F};
+    case MusketVisualMaterial::Flint:
+    default:
+        return {0.24F, 0.28F, 0.31F, 1.0F};
+    }
+}
+
+void append_musket(VisualItemModel& model) {
+    // Je garde l'arme dans son repere canonique. La camera orthographique lui
+    // donne naturellement une diagonale lisible sans fausser les sockets.
+    for (const auto& part : musket_visual_parts()) {
+        append_primitive(
+            model,
+            StylizedPrimitiveType::RoundedBox,
+            musket_visual_material(part.material),
+            part.center,
+            glm::degrees(part.rotation_radians),
+            part.half_extent * 2.0F,
+            musket_visual_tint(part.material));
+    }
 }
 
 [[nodiscard]] auto finite_transform(const glm::mat4& transform) noexcept -> bool {
@@ -645,6 +695,9 @@ auto build_visual_item_model(BlockId block_id) -> VisualItemModel {
             glm::vec3 {0.0F, 0.0F, -6.0F},
             glm::vec3 {0.52F, 0.62F, 0.18F},
             glm::vec4 {1.02F, 1.04F, 1.07F, 1.0F});
+        break;
+    case BlockType::Musket:
+        append_musket(model);
         break;
     case BlockType::Air:
     case BlockType::TorchWallPositiveX:

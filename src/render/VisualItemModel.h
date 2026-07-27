@@ -52,7 +52,7 @@ struct VisualItemModel {
 
 // Je conserve une couche par objet canonique. Les quatre orientations de
 // torche murale pointent vers la couche de la torche et ne dupliquent rien.
-inline constexpr std::array<BlockId, 35> kVisualItemCanonicalIds {{
+inline constexpr std::array<BlockId, 36> kVisualItemCanonicalIds {{
     to_block_id(BlockType::Grass),
     to_block_id(BlockType::Dirt),
     to_block_id(BlockType::Stone),
@@ -88,6 +88,7 @@ inline constexpr std::array<BlockId, 35> kVisualItemCanonicalIds {{
     to_block_id(BlockType::Pickaxe),
     to_block_id(BlockType::Axe),
     to_block_id(BlockType::Shovel),
+    to_block_id(BlockType::Musket),
 }};
 
 inline constexpr std::size_t kVisualItemModelCount =
@@ -153,6 +154,7 @@ inline constexpr std::size_t kVisualItemModelCount =
         return VisualItemModelClass::Shield;
     case BlockType::Sword:
     case BlockType::Spear:
+    case BlockType::Musket:
         return VisualItemModelClass::Weapon;
     case BlockType::Shoes:
     case BlockType::Pants:

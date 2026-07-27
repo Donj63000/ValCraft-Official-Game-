@@ -95,6 +95,47 @@ void truncate_inside_unique_binary_sequence(const std::filesystem::path& path,
     std::filesystem::resize_file(path, sequence_offset + byte_count / 2U);
 }
 
+void downgrade_current_save_to_v11(
+    const std::filesystem::path& path,
+    std::size_t item_drop_count = 0U) {
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    const auto raw_size = std::filesystem::file_size(path);
+    REQUIRE(raw_size <= (std::numeric_limits<std::size_t>::max)());
+    auto bytes = std::vector<char>(static_cast<std::size_t>(raw_size));
+    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(input.gcount() == static_cast<std::streamsize>(bytes.size()));
+    input.close();
+
+    constexpr auto magic = std::array<char, 4> {'I', 'T', 'E', 'M'};
+    const auto extension_byte_count =
+        magic.size() +
+        kHotbarSlotCount +
+        kInventoryStorageSlotCount +
+        1U +
+        kEquipmentSlotCount +
+        item_drop_count +
+        sizeof(std::uint64_t);
+    REQUIRE(bytes.size() >= extension_byte_count);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(extension_byte_count);
+    REQUIRE(std::equal(
+        magic.begin(),
+        magic.end(),
+        extension_begin));
+    bytes.erase(extension_begin, bytes.end());
+
+    REQUIRE(bytes.size() >= 8U + sizeof(std::uint32_t));
+    constexpr std::uint32_t version = 11U;
+    std::memcpy(bytes.data() + 8U, &version, sizeof(version));
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(output.good());
+}
+
 void downgrade_current_sea_save_to_v9(const std::filesystem::path& path,
                                       SeaVoyagePhase phase,
                                       float phase_elapsed) {
@@ -158,6 +199,25 @@ void downgrade_current_sea_save_to_v9(const std::filesystem::path& path,
             static_cast<std::ptrdiff_t>(
                 departure_payload_bytes +
                 old_guard_payload_bytes));
+    constexpr auto item_extension_byte_count =
+        4U +
+        kHotbarSlotCount +
+        kInventoryStorageSlotCount +
+        1U +
+        kEquipmentSlotCount +
+        sizeof(std::uint64_t);
+    REQUIRE(bytes.size() >= item_extension_byte_count);
+    const auto item_extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            item_extension_byte_count);
+    constexpr auto item_magic =
+        std::array<char, 4> {'I', 'T', 'E', 'M'};
+    REQUIRE(std::equal(
+        item_magic.begin(),
+        item_magic.end(),
+        item_extension_begin));
+    bytes.erase(item_extension_begin, bytes.end());
     REQUIRE(bytes.size() >= 8U + sizeof(std::uint32_t));
     constexpr std::uint32_t version = 9U;
     std::memcpy(bytes.data() + 8U, &version, sizeof(version));
@@ -178,6 +238,309 @@ void overwrite_save_generation_version(const std::filesystem::path& path,
     REQUIRE(output.good());
     output.seekp(generation_version_offset);
     output.write(reinterpret_cast<const char*>(&raw_version), sizeof(raw_version));
+    REQUIRE(output.good());
+}
+
+struct HistoricalSaveFixtureV2ToV6 {
+    std::uint32_t version = 2U;
+    std::uint64_t saved_at = 0U;
+    int seed = 0;
+    float time_of_day = 0.0F;
+    std::uint32_t modified_chunk_count = 1U;
+    bool has_starting_village = true;
+    float weather_time_seconds = 0.0F;
+    glm::vec3 spawn_position {0.0F};
+    PlayerState player_state {};
+    PlayerProgressionState progression {};
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    CreatureInstance creature {};
+    ItemDrop item_drop {};
+    ChunkCoord chunk_coord {};
+    std::vector<BlockId> dense_blocks {};
+    std::vector<WaterState> dense_water_state {};
+    std::size_t solid_index = 0U;
+    std::size_t water_index = 0U;
+};
+
+[[nodiscard]] auto make_historical_save_fixture_v2_to_v6(
+    std::uint32_t version) -> HistoricalSaveFixtureV2ToV6 {
+    REQUIRE(version >= 2U);
+    REQUIRE(version <= 6U);
+
+    HistoricalSaveFixtureV2ToV6 fixture {};
+    fixture.version = version;
+    fixture.saved_at = 1'712'185'200ULL + version;
+    fixture.seed = 24'600 + static_cast<int>(version);
+    fixture.time_of_day = 5.25F + static_cast<float>(version);
+    fixture.weather_time_seconds =
+        91.5F + static_cast<float>(version);
+    fixture.spawn_position = {
+        18.5F + static_cast<float>(version),
+        73.0F,
+        -14.5F,
+    };
+
+    fixture.player_state.position = fixture.spawn_position;
+    fixture.player_state.velocity = {0.25F, -0.5F, 0.75F};
+    fixture.player_state.yaw_degrees = 127.5F;
+    fixture.player_state.pitch_degrees = -18.25F;
+    fixture.player_state.body_yaw_degrees = 91.0F;
+    fixture.player_state.animation_time = 14.75F;
+    fixture.player_state.step_phase = 0.625F;
+    fixture.player_state.health = 17.5F;
+    fixture.player_state.air_seconds = 8.25F;
+    fixture.player_state.on_ground = true;
+    fixture.player_state.fly_mode = true;
+
+    fixture.progression = {6U, 42ULL};
+
+    fixture.hotbar.slots.fill(empty_item_stack());
+    fixture.hotbar.slots[5] =
+        make_item_stack(to_block_id(BlockType::Torch), 7U);
+    fixture.hotbar.selected_index = 5U;
+
+    fixture.inventory.storage_slots.fill(inventory_empty_slot());
+    fixture.inventory.equipment_slots.fill(inventory_empty_slot());
+    fixture.inventory.storage_slots[11] =
+        inventory_make_slot(
+            to_block_id(BlockType::DiamondOre),
+            3U);
+    fixture.inventory.carried_slot =
+        inventory_make_slot(
+            to_block_id(BlockType::Wood),
+            2U);
+    fixture.inventory.carrying_item = true;
+    fixture.inventory
+        .equipment_slots[equipment_slot_index(EquipmentSlot::Chest)] =
+        inventory_make_slot(
+            to_block_id(BlockType::Pastron),
+            1U);
+
+    fixture.creature.anchor.chunk = {2, -3};
+    fixture.creature.anchor.ground_block = {37, 64, -42};
+    fixture.creature.anchor.spawn_position = {37.5F, 65.0F, -41.5F};
+    fixture.creature.anchor.species = CreatureSpecies::Cow;
+    fixture.creature.position = {38.25F, 65.0F, -40.75F};
+    fixture.creature.yaw_radians = 1.125F;
+    fixture.creature.behavior_timer = 2.25F;
+    fixture.creature.animation_time = 3.5F;
+    fixture.creature.wander_heading = -0.75F;
+    fixture.creature.nervous_intensity = 0.375F;
+    fixture.creature.behavior_seed = 0x1020'3040U;
+    fixture.creature.appearance_seed = 0x5060'7080U;
+    fixture.creature.behavior_state = CreatureBehaviorState::Wander;
+    fixture.creature.phase = CreaturePhase::Day;
+    fixture.creature.morph_factor = 0.125F;
+    fixture.creature.motion_amount = 0.625F;
+    fixture.creature.gaze_weight = 0.25F;
+    fixture.creature.attack_cooldown = 1.75F;
+    fixture.creature.attack_amount = 0.5F;
+    fixture.creature.health = 4.5F;
+
+    fixture.item_drop.position = {21.5F, 74.25F, -12.5F};
+    fixture.item_drop.velocity = {0.5F, 1.25F, -0.75F};
+    fixture.item_drop.stack =
+        inventory_make_slot(
+            to_block_id(BlockType::IronOre),
+            3U);
+    fixture.item_drop.age_seconds = 12.5F;
+    fixture.item_drop.pickup_cooldown = 0.625F;
+    fixture.item_drop.grounded = false;
+
+    fixture.chunk_coord = {-2, 4};
+    fixture.dense_blocks.assign(
+        kChunkVolume,
+        to_block_id(BlockType::Air));
+    fixture.dense_water_state.assign(
+        kChunkVolume,
+        WaterState {0});
+    fixture.solid_index = 17U;
+    fixture.water_index = 31U;
+    fixture.dense_blocks[fixture.solid_index] =
+        to_block_id(BlockType::Stone);
+    if (version < 3U) {
+        // Je reproduis l'encodage v2 : l'eau etait encore un bloc que le
+        // lecteur migre ensuite vers un etat liquide source.
+        fixture.dense_blocks[fixture.water_index] =
+            to_block_id(BlockType::Water);
+    } else {
+        fixture.dense_water_state[fixture.water_index] =
+            make_water_state(5U, true);
+    }
+    return fixture;
+}
+
+void write_historical_save_fixture_v2_to_v6(
+    const std::filesystem::path& path,
+    const HistoricalSaveFixtureV2ToV6& fixture) {
+    REQUIRE(fixture.version >= 2U);
+    REQUIRE(fixture.version <= 6U);
+    REQUIRE(fixture.dense_blocks.size() == kChunkVolume);
+    REQUIRE(fixture.dense_water_state.size() == kChunkVolume);
+
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream output(
+        path,
+        std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+
+    const auto write_bytes =
+        [&](const void* data, std::size_t size) {
+            output.write(
+                reinterpret_cast<const char*>(data),
+                static_cast<std::streamsize>(size));
+        };
+    const auto write_value = [&](const auto& value) {
+        write_bytes(&value, sizeof(value));
+    };
+    const auto write_bool = [&](bool value) {
+        write_value(
+            static_cast<std::uint8_t>(
+                value ? 1U : 0U));
+    };
+    const auto write_enum = [&](auto value) {
+        using Enum = decltype(value);
+        using Underlying = std::underlying_type_t<Enum>;
+        write_value(static_cast<Underlying>(value));
+    };
+    const auto write_vec3 = [&](const glm::vec3& value) {
+        write_value(value.x);
+        write_value(value.y);
+        write_value(value.z);
+    };
+    const auto write_hotbar_slot = [&](const HotbarSlot& slot) {
+        write_value(slot.block_id);
+        write_value(slot.count);
+    };
+    const auto write_player_state = [&](const PlayerState& state) {
+        write_vec3(state.position);
+        write_vec3(state.velocity);
+        write_value(state.yaw_degrees);
+        write_value(state.pitch_degrees);
+        write_value(state.body_yaw_degrees);
+        write_value(state.animation_time);
+        write_value(state.step_phase);
+        write_value(state.health);
+        write_value(state.air_seconds);
+        write_value(state.hurt_timer);
+        write_value(state.damage_cooldown);
+        write_value(state.regen_delay);
+        write_value(state.regen_tick_timer);
+        write_value(state.drowning_tick_timer);
+        write_value(state.fall_start_y);
+        write_value(state.primary_action_progress);
+        write_value(state.secondary_action_progress);
+        write_value(state.landing_impact);
+        write_value(state.airborne_time);
+        write_value(state.look_sway_yaw);
+        write_value(state.look_sway_pitch);
+        write_bool(state.on_ground);
+        write_bool(state.fly_mode);
+        write_bool(state.head_underwater);
+        write_bool(state.swimming);
+        write_bool(state.primary_action_active);
+        write_bool(state.secondary_action_active);
+        write_bool(state.dead);
+        write_enum(state.death_cause);
+    };
+    const auto write_creature =
+        [&](const CreatureInstance& creature) {
+            write_value(creature.anchor.chunk.x);
+            write_value(creature.anchor.chunk.z);
+            write_value(creature.anchor.ground_block.x);
+            write_value(creature.anchor.ground_block.y);
+            write_value(creature.anchor.ground_block.z);
+            write_vec3(creature.anchor.spawn_position);
+            write_enum(creature.anchor.species);
+            write_vec3(creature.position);
+            write_value(creature.yaw_radians);
+            write_value(creature.behavior_timer);
+            write_value(creature.animation_time);
+            write_value(creature.wander_heading);
+            write_value(creature.nervous_intensity);
+            write_value(creature.behavior_seed);
+            write_value(creature.appearance_seed);
+            write_enum(creature.behavior_state);
+            write_enum(creature.phase);
+            write_value(creature.morph_factor);
+            write_value(creature.motion_amount);
+            write_value(creature.gaze_weight);
+            write_value(creature.attack_cooldown);
+            write_value(creature.attack_amount);
+            if (fixture.version >= 5U) {
+                write_value(creature.health);
+            }
+        };
+    const auto write_item_drop = [&](const ItemDrop& drop) {
+        write_vec3(drop.position);
+        write_vec3(drop.velocity);
+        write_hotbar_slot(drop.stack);
+        write_value(drop.age_seconds);
+        write_value(drop.pickup_cooldown);
+        write_bool(drop.grounded);
+    };
+
+    constexpr auto magic =
+        std::array<char, 8> {
+            'V', 'A', 'L', 'S', 'L', 'O', 'T', '1',
+        };
+    // J'ecris chaque champ dans l'ordre historique exact au lieu de modifier
+    // l'entete d'une sauvegarde moderne qui conserverait des octets futurs.
+    write_bytes(magic.data(), magic.size());
+    write_value(fixture.version);
+    write_value(fixture.saved_at);
+    write_value(fixture.seed);
+    write_value(fixture.time_of_day);
+    write_value(fixture.modified_chunk_count);
+    write_bool(fixture.has_starting_village);
+    if (fixture.version >= 4U) {
+        write_value(fixture.weather_time_seconds);
+    }
+    write_vec3(fixture.spawn_position);
+    write_player_state(fixture.player_state);
+    if (fixture.version >= 6U) {
+        write_value(fixture.progression.level);
+        write_value(fixture.progression.experience);
+    }
+
+    for (const auto& slot : fixture.hotbar.slots) {
+        write_hotbar_slot(slot);
+    }
+    write_value(
+        static_cast<std::uint32_t>(
+            fixture.hotbar.selected_index));
+    for (const auto& slot : fixture.inventory.storage_slots) {
+        write_hotbar_slot(slot);
+    }
+    write_hotbar_slot(fixture.inventory.carried_slot);
+    write_bool(fixture.inventory.carrying_item);
+    if (fixture.version >= 5U) {
+        for (const auto& slot :
+             fixture.inventory.equipment_slots) {
+            write_hotbar_slot(slot);
+        }
+    }
+
+    write_value(std::uint32_t {1U});
+    write_creature(fixture.creature);
+    write_value(std::uint32_t {1U});
+    write_item_drop(fixture.item_drop);
+
+    write_value(std::uint32_t {1U});
+    write_value(fixture.chunk_coord.x);
+    write_value(fixture.chunk_coord.z);
+    write_bytes(
+        fixture.dense_blocks.data(),
+        fixture.dense_blocks.size() * sizeof(BlockId));
+    if (fixture.version >= 3U) {
+        write_bytes(
+            fixture.dense_water_state.data(),
+            fixture.dense_water_state.size() *
+                sizeof(WaterState));
+    }
+
+    output.close();
     REQUIRE(output.good());
 }
 
@@ -555,6 +918,11 @@ TEST_CASE("gameplay action keys use physical scancodes") {
     flight_key.scancode = SDL_SCANCODE_F;
     CHECK(is_flight_action_key(flight_key));
 
+    SDL_Keysym reload_key {};
+    reload_key.sym = SDLK_r;
+    reload_key.scancode = SDL_SCANCODE_R;
+    CHECK(is_reload_action_key(reload_key));
+
     SDL_Keysym azerty_console_key {};
     azerty_console_key.sym = static_cast<SDL_Keycode>(0x00B2);
     azerty_console_key.scancode = SDL_SCANCODE_GRAVE;
@@ -569,6 +937,11 @@ TEST_CASE("gameplay action keys use physical scancodes") {
     remapped_f_key.sym = SDLK_f;
     remapped_f_key.scancode = SDL_SCANCODE_G;
     CHECK_FALSE(is_flight_action_key(remapped_f_key));
+
+    SDL_Keysym remapped_r_key {};
+    remapped_r_key.sym = SDLK_r;
+    remapped_r_key.scancode = SDL_SCANCODE_T;
+    CHECK_FALSE(is_reload_action_key(remapped_r_key));
 
     SDL_Keysym remapped_console_key {};
     remapped_console_key.sym = static_cast<SDL_Keycode>(0x00B2);
@@ -1252,6 +1625,59 @@ TEST_CASE("tool items are single stack non placeable hotbar items") {
 
     select_hotbar_index(hotbar, 0);
     CHECK(selected_hotbar_block(hotbar) == to_block_id(BlockType::Air));
+}
+
+TEST_CASE("musket is a non placeable single weapon with sanitized per-item chamber state") {
+    CHECK(
+        to_block_id(BlockType::Musket) ==
+        static_cast<BlockId>(40U));
+
+    auto musket =
+        make_item_stack(
+            to_block_id(BlockType::Musket),
+            8U);
+    CHECK(musket.count == 1U);
+    CHECK(is_inventory_only_item(musket.block_id));
+    CHECK(is_weapon_item(musket.block_id));
+    CHECK_FALSE(is_placeable_item(musket.block_id));
+    CHECK_FALSE(item_equipment_slot(musket.block_id).has_value());
+    CHECK_FALSE(weapon_stats(musket.block_id).has_value());
+    CHECK(inventory_item_label(musket.block_id) == "FUSIL");
+    CHECK(is_musket_loaded(musket));
+
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    hotbar.slots[0] = musket;
+    inventory.equipment_slots[
+        equipment_slot_index(
+            EquipmentSlot::Weapon)] =
+        make_item_stack(
+            to_block_id(BlockType::Sword),
+            1U);
+    CHECK_FALSE(
+        inventory_active_weapon_stats(
+            inventory,
+            hotbar)
+            .has_value());
+
+    set_musket_loaded(musket, false);
+    CHECK_FALSE(is_musket_loaded(musket));
+    normalize_item_stack(musket);
+    CHECK_FALSE(is_musket_loaded(musket));
+
+    musket.instance_state = 0xFFU;
+    normalize_item_stack(musket);
+    CHECK(musket.instance_state == kMusketLoadedInstanceState);
+    CHECK(is_musket_loaded(musket));
+
+    auto stone =
+        HotbarSlot {
+            to_block_id(BlockType::Stone),
+            1U,
+            0xFFU,
+        };
+    normalize_item_stack(stone);
+    CHECK(stone.instance_state == 0U);
 }
 
 TEST_CASE("hotbar layout stays centered and anchored to the bottom across resolutions") {
@@ -2056,6 +2482,158 @@ TEST_CASE("inventory pickup helper fills matching stacks before using empty slot
     CHECK(hotbar.slots[1].count == 3);
 }
 
+TEST_CASE("inventory transfers preserve the chamber state of each musket") {
+    HotbarState hotbar {};
+    InventoryMenuState inventory {};
+    inventory.storage_slots[0] =
+        inventory_make_slot(
+            to_block_id(BlockType::Musket),
+            1U);
+    set_musket_loaded(
+        inventory.storage_slots[0],
+        false);
+
+    inventory_primary_click(
+        inventory,
+        hotbar,
+        {
+            InventorySlotGroup::Storage,
+            0U,
+        });
+    REQUIRE(inventory.carrying_item);
+    CHECK_FALSE(
+        is_musket_loaded(
+            inventory.carried_slot));
+
+    inventory_primary_click(
+        inventory,
+        hotbar,
+        {
+            InventorySlotGroup::Hotbar,
+            3U,
+        });
+    CHECK_FALSE(inventory.carrying_item);
+    CHECK(
+        is_musket_item(
+            hotbar.slots[3]));
+    CHECK_FALSE(
+        is_musket_loaded(
+            hotbar.slots[3]));
+
+    const auto removed =
+        inventory_take_from_slot(
+            hotbar.slots[3],
+            1U);
+    CHECK(is_musket_item(removed));
+    CHECK_FALSE(is_musket_loaded(removed));
+    CHECK_FALSE(
+        inventory_slot_has_item(
+            hotbar.slots[3]));
+
+    inventory.storage_slots[1] =
+        inventory_make_slot(
+            to_block_id(BlockType::Musket),
+            1U);
+    inventory.storage_slots[2] =
+        inventory_make_slot(
+            to_block_id(BlockType::Musket),
+            1U);
+    set_musket_loaded(
+        inventory.storage_slots[2],
+        false);
+    inventory_primary_click(
+        inventory,
+        hotbar,
+        {
+            InventorySlotGroup::Storage,
+            1U,
+        });
+    REQUIRE(inventory.carrying_item);
+    REQUIRE(
+        is_musket_loaded(
+            inventory.carried_slot));
+    inventory_primary_click(
+        inventory,
+        hotbar,
+        {
+            InventorySlotGroup::Storage,
+            2U,
+        });
+    CHECK_FALSE(
+        is_musket_loaded(
+            inventory.carried_slot));
+    CHECK(
+        is_musket_loaded(
+            inventory.storage_slots[2]));
+}
+
+TEST_CASE("musket grant selects the first free hotbar slot and falls back transactionally") {
+    InventoryMenuState inventory {};
+    HotbarState hotbar {};
+    hotbar.slots.fill(
+        inventory_make_slot(
+            to_block_id(BlockType::Stone),
+            64U));
+    hotbar.slots[3] =
+        inventory_empty_slot();
+    hotbar.slots[6] =
+        inventory_empty_slot();
+    select_hotbar_index(hotbar, 1U);
+
+    const auto hotbar_grant =
+        inventory_try_grant_loaded_musket(
+            inventory,
+            hotbar);
+    REQUIRE(hotbar_grant.has_value());
+    CHECK(
+        *hotbar_grant ==
+        InventorySlotRef {
+            InventorySlotGroup::Hotbar,
+            3U,
+        });
+    CHECK(hotbar.selected_index == 3U);
+    CHECK(is_musket_loaded(hotbar.slots[3]));
+    CHECK_FALSE(
+        inventory_slot_has_item(
+            hotbar.slots[6]));
+
+    hotbar.slots[6] =
+        inventory_make_slot(
+            to_block_id(BlockType::Dirt),
+            64U);
+    const auto storage_grant =
+        inventory_try_grant_loaded_musket(
+            inventory,
+            hotbar);
+    REQUIRE(storage_grant.has_value());
+    CHECK(
+        *storage_grant ==
+        InventorySlotRef {
+            InventorySlotGroup::Storage,
+            0U,
+        });
+    CHECK(hotbar.selected_index == 3U);
+    CHECK(
+        is_musket_loaded(
+            inventory.storage_slots[0]));
+
+    inventory.storage_slots.fill(
+        inventory_make_slot(
+            to_block_id(BlockType::Stone),
+            64U));
+    const auto inventory_before =
+        inventory;
+    const auto hotbar_before =
+        hotbar;
+    CHECK_FALSE(
+        inventory_try_grant_loaded_musket(
+            inventory,
+            hotbar)
+            .has_value());
+    CHECK(inventory == inventory_before);
+    CHECK(hotbar == hotbar_before);
+}
+
 TEST_CASE("inventory crafts tools from wood pine wood and planks") {
     auto hotbar = make_default_hotbar_state();
     auto inventory = make_default_inventory_menu_state();
@@ -2147,6 +2725,215 @@ TEST_CASE("inventory number key swap can move a hovered stack into an empty hotb
     CHECK(hotbar.slots[8].block_id == to_block_id(BlockType::Torch));
     CHECK(hotbar.slots[8].count == 16);
     CHECK_FALSE(inventory_slot_has_item(inventory.storage_slots[13]));
+}
+
+TEST_CASE("save version 12 preserves loaded and empty muskets in every item container") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v12-musket-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.musket_shot_sequence =
+        0x1122334455667788ULL;
+    snapshot.hotbar.slots[2] =
+        make_item_stack(
+            to_block_id(BlockType::Musket),
+            1U);
+    snapshot.inventory.storage_slots[4] =
+        make_item_stack(
+            to_block_id(BlockType::Musket),
+            1U);
+    set_musket_loaded(
+        snapshot.inventory.storage_slots[4],
+        false);
+    snapshot.inventory.carried_slot =
+        make_item_stack(
+            to_block_id(BlockType::Musket),
+            1U);
+    snapshot.inventory.carrying_item = true;
+    snapshot.inventory.equipment_slots[
+        equipment_slot_index(
+            EquipmentSlot::Chest)] =
+        HotbarSlot {
+            to_block_id(BlockType::Pastron),
+            1U,
+            0xFFU,
+        };
+
+    ItemDrop drop {};
+    drop.position = {2.0F, 65.0F, 3.0F};
+    drop.stack =
+        make_item_stack(
+            to_block_id(BlockType::Musket),
+            1U);
+    set_musket_loaded(
+        drop.stack,
+        false);
+    snapshot.item_drops.push_back(drop);
+
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot);
+    {
+        std::ifstream input(
+            save_slot_file_path(
+                save_root,
+                0U),
+            std::ios::binary);
+        REQUIRE(input.good());
+        input.seekg(8);
+        auto version =
+            std::uint32_t {0U};
+        input.read(
+            reinterpret_cast<char*>(&version),
+            sizeof(version));
+        REQUIRE(input.good());
+        CHECK(version == 12U);
+    }
+
+    const auto loaded =
+        load_save_slot(
+            save_root,
+            0U);
+    REQUIRE(loaded.has_value());
+    CHECK(
+        loaded->musket_shot_sequence ==
+        snapshot.musket_shot_sequence);
+    CHECK(
+        is_musket_loaded(
+            loaded->hotbar.slots[2]));
+    CHECK_FALSE(
+        is_musket_loaded(
+            loaded->inventory.storage_slots[4]));
+    CHECK(
+        is_musket_loaded(
+            loaded->inventory.carried_slot));
+    CHECK(
+        loaded->inventory.equipment_slots[
+            equipment_slot_index(
+                EquipmentSlot::Chest)]
+            .instance_state == 0U);
+    REQUIRE(loaded->item_drops.size() == 1U);
+    CHECK_FALSE(
+        is_musket_loaded(
+            loaded->item_drops[0].stack));
+
+    const auto truncated_path =
+        save_slot_file_path(
+            save_root,
+            0U);
+    const auto byte_count =
+        std::filesystem::file_size(
+            truncated_path);
+    REQUIRE(byte_count > 0U);
+    constexpr auto extension_byte_count =
+        4U +
+        kHotbarSlotCount +
+        kInventoryStorageSlotCount +
+        1U +
+        kEquipmentSlotCount +
+        1U +
+        sizeof(std::uint64_t);
+    REQUIRE(
+        byte_count >=
+        extension_byte_count);
+
+    const auto version_11_path =
+        save_slot_file_path(
+            save_root,
+            1U);
+    std::filesystem::copy_file(
+        truncated_path,
+        version_11_path);
+    {
+        std::fstream output(
+            version_11_path,
+            std::ios::binary |
+                std::ios::in |
+                std::ios::out);
+        REQUIRE(output.good());
+        constexpr auto version_11 =
+            std::uint32_t {11U};
+        output.seekp(8);
+        output.write(
+            reinterpret_cast<const char*>(
+                &version_11),
+            sizeof(version_11));
+        REQUIRE(output.good());
+    }
+    std::filesystem::resize_file(
+        version_11_path,
+        byte_count -
+            extension_byte_count);
+    const auto legacy_loaded =
+        load_save_slot(
+            save_root,
+            1U);
+    REQUIRE(legacy_loaded.has_value());
+    CHECK(legacy_loaded->musket_shot_sequence == 0U);
+    CHECK(
+        is_musket_item(
+            legacy_loaded->hotbar.slots[2]));
+    CHECK_FALSE(
+        is_musket_loaded(
+            legacy_loaded->hotbar.slots[2]));
+
+    {
+        // Je cible le premier etat apres la signature ITEM et je prouve que
+        // les bits futurs ou corrompus sont masques a la frontiere binaire.
+        std::fstream output(
+            truncated_path,
+            std::ios::binary |
+                std::ios::in |
+                std::ios::out);
+        REQUIRE(output.good());
+        const auto hotbar_state_offset =
+            static_cast<std::streamoff>(
+                byte_count -
+                extension_byte_count +
+                4U +
+                2U);
+        output.seekp(
+            hotbar_state_offset);
+        constexpr auto corrupted_state =
+            std::uint8_t {0xFEU};
+        output.write(
+            reinterpret_cast<const char*>(
+                &corrupted_state),
+            sizeof(corrupted_state));
+        REQUIRE(output.good());
+    }
+    const auto sanitized =
+        load_save_slot(
+            save_root,
+            0U);
+    REQUIRE(sanitized.has_value());
+    CHECK(
+        sanitized->hotbar.slots[2]
+            .instance_state == 0U);
+    CHECK_FALSE(
+        is_musket_loaded(
+            sanitized->hotbar.slots[2]));
+
+    std::filesystem::resize_file(
+        truncated_path,
+        byte_count - 1U);
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            0U)
+            .has_value());
+
+    std::filesystem::remove_all(save_root);
 }
 
 TEST_CASE("save game scanning and loading preserve slot metadata and payloads") {
@@ -2410,6 +3197,8 @@ TEST_CASE("version 11 sea crew and guard payload preserves the version 9 crew co
     const auto expected_crew = sanitize_ship_crew_save_state(snapshot.sea_adventure.crew);
 
     write_save_slot(save_root, 0, snapshot);
+    downgrade_current_save_to_v11(
+        save_slot_file_path(save_root, 0));
     const auto round_trip = load_save_slot(save_root, 0);
     REQUIRE(round_trip.has_value());
     CHECK(round_trip->sea_adventure.crew == expected_crew);
@@ -2466,6 +3255,8 @@ TEST_CASE("version 11 sea crew and guard payload preserves the version 9 crew co
     CHECK(recovered_member.destination_station == ShipCrewStation::CargoSort);
 
     write_save_slot(save_root, 1, snapshot);
+    downgrade_current_save_to_v11(
+        save_slot_file_path(save_root, 1));
     truncate_inside_unique_binary_sequence(
         save_slot_file_path(save_root, 1),
         std::array<float, 3> {
@@ -2642,6 +3433,245 @@ TEST_CASE("save game loader preserves backward compatibility with version 1 file
     CHECK(loaded->chunk_snapshots.empty());
     CHECK(loaded->world_save_plan.chunks.empty());
     CHECK(loaded->world_save_plan.generation_version == WorldGenerationVersion::LegacyV1);
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save game loader reads exact historical version 2 to 6 binary fixtures") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v2-v6-" + unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    for (auto version = std::uint32_t {2U};
+         version <= 6U;
+         ++version) {
+        CAPTURE(version);
+        const auto slot_index =
+            static_cast<std::size_t>(version - 2U);
+        const auto fixture =
+            make_historical_save_fixture_v2_to_v6(
+                version);
+        write_historical_save_fixture_v2_to_v6(
+            save_slot_file_path(
+                save_root,
+                slot_index),
+            fixture);
+
+        const auto scanned = scan_save_slots(save_root);
+        REQUIRE(scanned[slot_index].exists);
+        CHECK(
+            scanned[slot_index].saved_at_unix_seconds ==
+            fixture.saved_at);
+        CHECK(scanned[slot_index].seed == fixture.seed);
+        CHECK(
+            scanned[slot_index].time_of_day ==
+            doctest::Approx(fixture.time_of_day));
+        CHECK(
+            scanned[slot_index].modified_chunk_count ==
+            fixture.modified_chunk_count);
+        CHECK(scanned[slot_index].has_starting_village);
+        CHECK(
+            scanned[slot_index].weather_time_seconds ==
+            doctest::Approx(
+                version >= 4U
+                    ? fixture.weather_time_seconds
+                    : 0.0F));
+        CHECK(
+            scanned[slot_index].game_mode ==
+            GameMode::ClassicAdventure);
+
+        const auto loaded =
+            load_save_slot(save_root, slot_index);
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->metadata.exists);
+        CHECK(loaded->metadata.seed == fixture.seed);
+        CHECK(loaded->metadata.has_starting_village);
+        CHECK(
+            loaded->metadata.weather_time_seconds ==
+            doctest::Approx(
+                version >= 4U
+                    ? fixture.weather_time_seconds
+                    : 0.0F));
+        CHECK(
+            loaded->metadata.game_mode ==
+            GameMode::ClassicAdventure);
+        CHECK_FALSE(loaded->sea_adventure.active);
+        CHECK(
+            loaded->world_save_plan.generation_profile ==
+            WorldGenerationProfile::Continental);
+        CHECK(
+            loaded->world_save_plan.generation_version ==
+            WorldGenerationVersion::LegacyV1);
+
+        CHECK(
+            loaded->spawn_position.x ==
+            doctest::Approx(fixture.spawn_position.x));
+        CHECK(
+            loaded->spawn_position.y ==
+            doctest::Approx(fixture.spawn_position.y));
+        CHECK(
+            loaded->spawn_position.z ==
+            doctest::Approx(fixture.spawn_position.z));
+        CHECK(
+            loaded->player_state.position.x ==
+            doctest::Approx(
+                fixture.player_state.position.x));
+        CHECK(
+            loaded->player_state.velocity.z ==
+            doctest::Approx(
+                fixture.player_state.velocity.z));
+        CHECK(
+            loaded->player_state.health ==
+            doctest::Approx(
+                fixture.player_state.health));
+        CHECK(loaded->player_state.fly_mode);
+        CHECK(loaded->player_state.on_ground);
+        CHECK(
+            loaded->progression ==
+            (version >= 6U
+                 ? fixture.progression
+                 : PlayerProgressionState {}));
+
+        CHECK(
+            loaded->hotbar.slots ==
+            fixture.hotbar.slots);
+        CHECK(
+            loaded->hotbar.selected_index ==
+            fixture.hotbar.selected_index);
+        CHECK(
+            loaded->inventory.storage_slots ==
+            fixture.inventory.storage_slots);
+        CHECK(
+            loaded->inventory.carried_slot ==
+            fixture.inventory.carried_slot);
+        CHECK(loaded->inventory.carrying_item);
+        const auto& loaded_chest =
+            loaded->inventory.equipment_slots[
+                equipment_slot_index(
+                    EquipmentSlot::Chest)];
+        if (version >= 5U) {
+            CHECK(
+                loaded_chest ==
+                fixture.inventory.equipment_slots[
+                    equipment_slot_index(
+                        EquipmentSlot::Chest)]);
+        } else {
+            CHECK_FALSE(
+                inventory_slot_has_item(
+                    loaded_chest));
+        }
+        for (const auto& slot : loaded->hotbar.slots) {
+            CHECK(slot.instance_state == 0U);
+        }
+        for (const auto& slot :
+             loaded->inventory.storage_slots) {
+            CHECK(slot.instance_state == 0U);
+        }
+        CHECK(
+            loaded->inventory.carried_slot.instance_state ==
+            0U);
+        CHECK(loaded->musket_shot_sequence == 0U);
+
+        REQUIRE(loaded->creatures.size() == 1U);
+        const auto& loaded_creature =
+            loaded->creatures.front();
+        CHECK(
+            loaded_creature.anchor.chunk ==
+            fixture.creature.anchor.chunk);
+        CHECK(
+            loaded_creature.anchor.ground_block ==
+            fixture.creature.anchor.ground_block);
+        CHECK(
+            loaded_creature.anchor.species ==
+            fixture.creature.anchor.species);
+        CHECK(
+            loaded_creature.position.x ==
+            doctest::Approx(
+                fixture.creature.position.x));
+        CHECK(
+            loaded_creature.behavior_seed ==
+            fixture.creature.behavior_seed);
+        CHECK(
+            loaded_creature.behavior_state ==
+            fixture.creature.behavior_state);
+        CHECK(
+            loaded_creature.health ==
+            doctest::Approx(
+                version >= 5U
+                    ? fixture.creature.health
+                    : creature_max_health(
+                          fixture.creature
+                              .anchor.species)));
+
+        REQUIRE(loaded->item_drops.size() == 1U);
+        const auto& loaded_drop =
+            loaded->item_drops.front();
+        CHECK(
+            loaded_drop.position.x ==
+            doctest::Approx(
+                fixture.item_drop.position.x));
+        CHECK(
+            loaded_drop.velocity.y ==
+            doctest::Approx(
+                fixture.item_drop.velocity.y));
+        CHECK(
+            loaded_drop.stack ==
+            fixture.item_drop.stack);
+        CHECK(
+            loaded_drop.age_seconds ==
+            doctest::Approx(
+                fixture.item_drop.age_seconds));
+        CHECK_FALSE(loaded_drop.grounded);
+
+        CHECK(loaded->chunk_snapshots.empty());
+        REQUIRE(
+            loaded->world_save_plan.chunks.size() ==
+            1U);
+        const auto& loaded_chunk =
+            loaded->world_save_plan.chunks.front();
+        CHECK(
+            loaded_chunk.coord ==
+            fixture.chunk_coord);
+        REQUIRE(
+            loaded_chunk.dense_blocks.size() ==
+            kChunkVolume);
+        REQUIRE(
+            loaded_chunk.dense_water_state.size() ==
+            kChunkVolume);
+        CHECK(
+            loaded_chunk.dense_blocks[
+                fixture.solid_index] ==
+            to_block_id(BlockType::Stone));
+        CHECK(
+            loaded_chunk.dense_blocks[
+                fixture.water_index] ==
+            to_block_id(BlockType::Air));
+        if (version < 3U) {
+            const auto migrated_water =
+                loaded_chunk.dense_water_state[
+                    fixture.water_index];
+            CHECK(
+                water_level_from_state(
+                    migrated_water) ==
+                kMaxWaterLevel);
+            CHECK(
+                water_state_is_source(
+                    migrated_water));
+        } else {
+            CHECK(
+                loaded_chunk.dense_water_state[
+                    fixture.water_index] ==
+                fixture.dense_water_state[
+                    fixture.water_index]);
+        }
+    }
 
     std::filesystem::remove_all(save_root);
 }

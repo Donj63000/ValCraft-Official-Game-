@@ -594,6 +594,7 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
 
     blit_packed_tile(pixels, 0, 2, kSnowTopTile);
     blit_packed_tile(pixels, 1, 2, kSnowSideTile);
+    blit_packed_tile(pixels, 4, 2, kMusketIconTile);
 
     overwrite_antique_theme_tiles(pixels);
 

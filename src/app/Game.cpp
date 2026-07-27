@@ -4,6 +4,7 @@
 #include "app/InputBindings.h"
 #include "app/GameLoop.h"
 #include "gameplay/StartingPort.h"
+#include "player/PlayerGeometry.h"
 #include "render/ShipMesh.h"
 #include "render/StylizedShipMesh.h"
 #include "world/OceanSimulation.h"
@@ -12,6 +13,7 @@
 #include <glm/trigonometric.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -462,6 +464,13 @@ auto Game::run() -> int {
 
             const auto render_preparation_begin = clock::now();
             item_drops_.build_render_instances(world_, item_drop_render_instances_);
+            auto render_musket =
+                player_musket_.view();
+            // Je reflete la selection des cette image, meme si aucun pas fixe
+            // n'a encore active le controleur depuis le changement de slot.
+            render_musket.active =
+                selected_musket_active() &&
+                !player_.is_dead();
             frame_stats.render_preparation_ms =
                 std::chrono::duration<double, std::milli>(clock::now() - render_preparation_begin).count();
 
@@ -469,6 +478,7 @@ auto Game::run() -> int {
             renderer_.render_frame(
                 world_,
                 render_player(),
+                render_musket,
                 hotbar_,
                 inventory_menu_,
                 death_screen_,
@@ -482,6 +492,8 @@ auto Game::run() -> int {
                 sea_adventure_.old_guard_render_instances(),
                 sea_adventure_.old_guard_flashes(),
                 sea_adventure_.old_guard_smoke(),
+                player_musket_effects_.flashes(),
+                player_musket_effects_.smoke(),
                 item_drop_render_instances_,
                 sea_adventure_.ship_render_state(),
                 progression_.state(),
@@ -921,6 +933,7 @@ void Game::process_events() {
             if (event.window.event ==
                 SDL_WINDOWEVENT_FOCUS_LOST) {
                 command_console_toggle_.cancel();
+                reset_musket_interaction();
             }
             if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 window_width_ = std::max(event.window.data1, 1);
@@ -1011,8 +1024,22 @@ void Game::process_events() {
                 break;
             }
             if (mouse_captured_) {
-                pending_look_x_ += static_cast<float>(event.motion.xrel);
-                pending_look_y_ += static_cast<float>(event.motion.yrel);
+                const auto aim_ratio =
+                    selected_musket_active()
+                        ? std::clamp(
+                              player_musket_.view().aim_ratio,
+                              0.0F,
+                              1.0F)
+                        : 0.0F;
+                const auto look_scale =
+                    player_musket_look_scale(
+                        aim_ratio);
+                pending_look_x_ +=
+                    static_cast<float>(event.motion.xrel) *
+                    look_scale;
+                pending_look_y_ +=
+                    static_cast<float>(event.motion.yrel) *
+                    look_scale;
             }
             break;
         case SDL_MOUSEBUTTONDOWN:
@@ -1125,8 +1152,16 @@ void Game::process_events() {
                 break;
             }
             if (event.button.button == SDL_BUTTON_LEFT) {
-                pending_break_block_ = true;
-                pending_primary_attack_ = true;
+                if (selected_musket_active()) {
+                    musket_fire_held_ = true;
+                    pending_musket_fire_press_ = true;
+                    pending_break_block_ = false;
+                    pending_primary_attack_ = false;
+                    player_.cancel_block_breaking();
+                } else {
+                    pending_break_block_ = true;
+                    pending_primary_attack_ = true;
+                }
                 record_audit_event(
                     AuditEventCategory::InputAction,
                     "primary_action_pressed",
@@ -1137,7 +1172,12 @@ void Game::process_events() {
                     }),
                     AuditPriority::Normal);
             } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                pending_place_block_ = true;
+                if (selected_musket_active()) {
+                    musket_aim_held_ = true;
+                    pending_place_block_ = false;
+                } else {
+                    pending_place_block_ = true;
+                }
                 record_audit_event(
                     AuditEventCategory::InputAction,
                     "secondary_action_pressed",
@@ -1151,6 +1191,7 @@ void Game::process_events() {
             break;
         case SDL_MOUSEBUTTONUP:
             if (event.button.button == SDL_BUTTON_LEFT) {
+                musket_fire_held_ = false;
                 pending_break_block_ = false;
                 pending_primary_attack_ = false;
                 player_.cancel_block_breaking();
@@ -1165,6 +1206,11 @@ void Game::process_events() {
                         }),
                         AuditPriority::Normal);
                 }
+            } else if (
+                event.button.button ==
+                SDL_BUTTON_RIGHT) {
+                musket_aim_held_ = false;
+                pending_place_block_ = false;
             }
             break;
         case SDL_MOUSEWHEEL: {
@@ -1406,6 +1452,18 @@ void Game::process_events() {
                         {"visible", audit_json_bool(inventory_visible_)},
                     }),
                     AuditPriority::Normal);
+            } else if (
+                is_reload_action_key(
+                    event.key.keysym) &&
+                event.key.repeat == 0 &&
+                selected_musket_active()) {
+                pending_musket_reload_ = true;
+                record_audit_event(
+                    AuditEventCategory::InputAction,
+                    "musket_reload_requested",
+                    AuditSeverity::Trace,
+                    audit_json_object({}),
+                    AuditPriority::Normal);
             } else if (is_drop_action_key(event.key.keysym)) {
                 drop_selected_hotbar_items((event.key.keysym.mod & KMOD_CTRL) != 0);
                 record_audit_event(
@@ -1518,6 +1576,12 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
     environment_.set_frozen(options_.freeze_time || options_.smoke_test);
     environment_.update(dt);
     const auto environment_state = environment_.current_state();
+    const auto wind_velocity =
+        current_wind_velocity(
+            environment_state);
+    player_musket_effects_.update(
+        dt,
+        wind_velocity);
     const auto creature_cycle = environment_.current_creature_cycle();
     const auto maritime_session_active =
         active_game_mode_ == GameMode::SeaAdventure &&
@@ -1595,6 +1659,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
 
         if (gameplay_input_enabled &&
             pending_place_block_ &&
+            !selected_musket_active() &&
             !player_.is_dead()) {
 
             player_.trigger_secondary_action();
@@ -1655,6 +1720,117 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             }
         } else {
             pending_fishing_ = false;
+        }
+
+        const auto musket_active =
+            gameplay_input_enabled &&
+            mouse_captured_ &&
+            !player_.is_dead() &&
+            selected_musket_active();
+        PlayerMusketInput musket_input {};
+        musket_input.active = musket_active;
+        musket_input.aim_held =
+            musket_active &&
+            musket_aim_held_;
+        musket_input.fire_held =
+            musket_active &&
+            musket_fire_held_;
+        musket_input.fire_pressed =
+            musket_active &&
+            std::exchange(
+                pending_musket_fire_press_,
+                false);
+        musket_input.reload_pressed =
+            musket_active &&
+            std::exchange(
+                pending_musket_reload_,
+                false);
+        musket_input.damage_multiplier =
+            progression_.attack_damage_multiplier();
+
+        const auto& musket_events =
+            player_musket_.update(
+                musket_input,
+                dt,
+                player_.look_direction());
+
+        if (musket_active) {
+            // Je reserve les deux boutons au fusil tant que son icone reste
+            // selectionnee, meme lorsque la chambre est vide.
+            pending_break_block_ = false;
+            pending_primary_attack_ = false;
+            pending_place_block_ = false;
+            player_.cancel_block_breaking();
+        }
+
+        if (musket_events.chamber_state_changed &&
+            selected_musket_active()) {
+            auto& selected =
+                hotbar_.slots[
+                    normalize_hotbar_index(
+                        hotbar_.selected_index)];
+            set_musket_loaded(
+                selected,
+                musket_events.loaded_after);
+            mark_session_dirty();
+        }
+
+        if (musket_events.fired) {
+            music_.play_sfx(
+                GameSfxKind::MusketShot,
+                1.0F);
+
+            const auto viewmodel =
+                build_player_viewmodel_parts(
+                    player_,
+                    to_block_id(
+                        BlockType::Musket),
+                    player_musket_.view());
+            const auto visual_forward =
+                safe_drop_direction(
+                    viewmodel.pose
+                        .muzzle_forward);
+            const auto muzzle_position =
+                finite_vec3_or(
+                    viewmodel.pose
+                        .muzzle_position,
+                    player_.eye_position() +
+                        visual_forward * 0.78F);
+            auto inherited_velocity =
+                finite_vec3_or(
+                    player_.state().velocity,
+                    glm::vec3 {0.0F});
+            if (maritime_session_active) {
+                inherited_velocity +=
+                    sea_adventure_.ship_entity()
+                        .velocity();
+            }
+            player_musket_effects_.spawn(
+                muzzle_position,
+                visual_forward,
+                inherited_velocity,
+                wind_velocity,
+                musket_events.shot_sequence);
+            resolve_player_musket_shot(
+                musket_events,
+                maritime_session_active);
+        } else if (musket_events.dry_fired) {
+            queue_gameplay_announcement(
+                "FUSIL VIDE",
+                "R POUR RECHARGER",
+                1.8F);
+        }
+
+        if (musket_events.reload_started) {
+            queue_gameplay_announcement(
+                "RECHARGEMENT",
+                "GARDE LE FUSIL EN MAIN",
+                1.8F);
+        } else if (musket_events.reload_completed) {
+            queue_gameplay_announcement(
+                "FUSIL PRET",
+                "UN COUP CHARGE",
+                1.5F);
         }
 
         if (gameplay_input_enabled &&
@@ -2142,6 +2318,10 @@ void Game::set_mouse_capture(bool captured) {
     if (!captured) {
         pending_break_block_ = false;
         pending_primary_attack_ = false;
+        musket_fire_held_ = false;
+        pending_musket_fire_press_ = false;
+        musket_aim_held_ = false;
+        pending_musket_reload_ = false;
         player_.cancel_block_breaking();
     }
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
@@ -2184,6 +2364,9 @@ void Game::set_command_console_visible(bool visible) {
     pending_look_x_ = 0.0F;
     pending_look_y_ = 0.0F;
     player_.cancel_block_breaking();
+    if (visible) {
+        reset_musket_interaction();
+    }
 
     if (visible) {
         command_console_.open();
@@ -2311,8 +2494,17 @@ void Game::submit_command_console() {
             true);
         return;
     case CommandConsoleParseStatus::InvalidUsage:
+        if (const auto usage =
+                command_console_usage(
+                    parsed.family);
+            !usage.empty()) {
+            command_console_.set_feedback(
+                std::string(usage),
+                true);
+            return;
+        }
         command_console_.set_feedback(
-            "UTILISATION : /METEO TEMPETE",
+            "UTILISATION INVALIDE",
             true);
         return;
     case CommandConsoleParseStatus::UnknownCommand:
@@ -2322,6 +2514,57 @@ void Game::submit_command_console() {
         return;
     case CommandConsoleParseStatus::Ready:
         break;
+    }
+
+    if (parsed.command ==
+        CommandConsoleCommand::GiveMusket) {
+        const auto destination =
+            inventory_try_grant_loaded_musket(
+                inventory_menu_,
+                hotbar_);
+        if (!destination.has_value()) {
+            command_console_.set_feedback(
+                "INVENTAIRE PLEIN",
+                true);
+            return;
+        }
+
+        reset_musket_interaction();
+        sync_selected_hotbar_slot();
+        const auto placed_in_hotbar =
+            destination->group ==
+            InventorySlotGroup::Hotbar;
+        command_console_.set_feedback(
+            placed_in_hotbar
+                ? "FUSIL AJOUTE ET EQUIPE"
+                : "FUSIL AJOUTE AU STOCKAGE",
+            false);
+        queue_gameplay_announcement(
+            "FUSIL A SILEX",
+            placed_in_hotbar
+                ? "CLIC DROIT VISER - R RECHARGER"
+                : "PLACE-LE DANS LA BARRE RAPIDE",
+            3.0F);
+        mark_session_dirty();
+        record_audit_event(
+            AuditEventCategory::InputAction,
+            "command_console_musket_granted",
+            AuditSeverity::Info,
+            audit_json_object({
+                {
+                    "slot_group",
+                    audit_json_number(
+                        static_cast<int>(
+                            destination->group)),
+                },
+                {
+                    "slot_index",
+                    audit_json_number(
+                        destination->index),
+                },
+            }),
+            AuditPriority::High);
+        return;
     }
 
     if (parsed.command !=
@@ -2387,6 +2630,9 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     pending_place_block_ = false;
     pending_fishing_ = false;
     player_.cancel_block_breaking();
+    if (death_screen_visible_) {
+        reset_musket_interaction();
+    }
 
     if (death_screen_visible_) {
         if (active_game_mode_ == GameMode::SeaAdventure) {
@@ -2448,6 +2694,10 @@ void Game::set_paused(bool paused) {
     pending_break_block_ = false;
     pending_primary_attack_ = false;
     pending_place_block_ = false;
+    musket_fire_held_ = false;
+    pending_musket_fire_press_ = false;
+    musket_aim_held_ = false;
+    pending_musket_reload_ = false;
     player_.cancel_block_breaking();
 
     if (paused_) {
@@ -2493,6 +2743,9 @@ void Game::set_inventory_visible(bool visible) {
     pending_primary_attack_ = false;
     pending_place_block_ = false;
     player_.cancel_block_breaking();
+    if (inventory_visible_) {
+        reset_musket_interaction();
+    }
 
     if (inventory_visible_) {
         set_mouse_capture(false);
@@ -3132,6 +3385,344 @@ auto Game::current_maritime_hud_view() const noexcept -> MaritimeHudView {
     return view;
 }
 
+auto Game::selected_musket_active() const noexcept -> bool {
+    const auto& selected =
+        hotbar_.selected_slot();
+    return inventory_slot_has_item(selected) &&
+           block_item_id(selected.block_id) ==
+               to_block_id(BlockType::Musket);
+}
+
+void Game::reset_musket_interaction(
+    bool forget_bound_slot) noexcept {
+    musket_fire_held_ = false;
+    pending_musket_fire_press_ = false;
+    musket_aim_held_ = false;
+    pending_musket_reload_ = false;
+    player_musket_.cancel_transient_actions();
+    player_musket_effects_.clear_flashes();
+    if (forget_bound_slot) {
+        bound_musket_hotbar_slot_.reset();
+    }
+}
+
+auto Game::current_wind_velocity(
+    const EnvironmentState& environment) const noexcept -> glm::vec3 {
+    const auto direction =
+        finite_vec3_or(
+            {
+                environment.wind_direction_xz.x,
+                0.0F,
+                environment.wind_direction_xz.y,
+            },
+            {0.0F, 0.0F, 1.0F});
+    const auto strength =
+        std::isfinite(environment.wind_strength)
+            ? std::clamp(
+                  environment.wind_strength,
+                  0.0F,
+                  1.0F)
+            : 0.0F;
+    return direction *
+           (0.45F + strength * 3.2F);
+}
+
+void Game::resolve_player_musket_shot(
+    const PlayerMusketEvents& shot,
+    bool maritime_session_active) {
+
+    if (!shot.fired ||
+        !std::isfinite(shot.maximum_distance) ||
+        shot.maximum_distance <= 0.0F ||
+        !std::isfinite(shot.damage) ||
+        shot.damage < 0.0F) {
+        return;
+    }
+
+    const auto origin =
+        player_.eye_position();
+    const auto direction =
+        safe_drop_direction(
+            shot.shot_direction);
+    std::array<MusketHit, 5U> candidates {};
+    auto candidate_count =
+        std::size_t {0U};
+    const auto append_candidate =
+        [&](MusketHit candidate) {
+            if (candidate_count <
+                candidates.size()) {
+                candidates[candidate_count++] =
+                    candidate;
+            }
+        };
+
+    const auto world_hit =
+        world_.raycast_collidable(
+            origin,
+            direction,
+            shot.maximum_distance);
+    if (world_hit.hit) {
+        append_candidate({
+            MusketHitKind::World,
+            origin +
+                direction *
+                    world_hit.distance,
+            world_hit.distance,
+            0U,
+        });
+    }
+
+    if (maritime_session_active) {
+        if (const auto ship_hit =
+                sea_adventure_.ship_entity()
+                    .raycast_collidable_distance(
+                        origin,
+                        direction,
+                        shot.maximum_distance);
+            ship_hit.has_value()) {
+            append_candidate({
+                MusketHitKind::Ship,
+                origin +
+                    direction * *ship_hit,
+                *ship_hit,
+                0U,
+            });
+        }
+
+        const auto guard_hit =
+            sea_adventure_.intercept_old_guard(
+                origin,
+                direction,
+                shot.maximum_distance);
+        if (guard_hit.hit) {
+            append_candidate({
+                MusketHitKind::OldGuard,
+                guard_hit.position,
+                guard_hit.distance,
+                guard_hit.guard_id,
+            });
+        }
+
+        const auto crew_hit =
+            sea_adventure_.raycast_crew(
+                origin,
+                direction,
+                shot.maximum_distance);
+        if (crew_hit.hit) {
+            append_candidate({
+                MusketHitKind::Crew,
+                crew_hit.position,
+                crew_hit.distance,
+                crew_hit.member_id,
+            });
+        }
+    }
+
+    const auto creature_hit =
+        creatures_.raycast_first_creature(
+            origin,
+            direction,
+            shot.maximum_distance);
+    if (creature_hit.hit) {
+        append_candidate({
+            MusketHitKind::Creature,
+            origin +
+                direction *
+                    creature_hit.distance,
+            creature_hit.distance,
+            creature_hit.id,
+        });
+    }
+
+    const auto hit =
+        select_nearest_musket_hit(
+            std::span<const MusketHit> {
+                candidates.data(),
+                candidate_count,
+            },
+            shot.maximum_distance);
+
+    switch (hit.kind) {
+    case MusketHitKind::Crew: {
+        const auto result =
+            sea_adventure_.apply_damage_crew(
+                static_cast<std::uint8_t>(
+                    hit.target_id),
+                shot.damage,
+                hit.distance);
+        if (result.hit) {
+            music_.play_sfx(
+                GameSfxKind::CreatureHit,
+                0.78F);
+            if (result.knocked_out) {
+                queue_gameplay_announcement(
+                    "EQUIPAGE",
+                    "MARIN ASSOMME",
+                    2.4F);
+            }
+            record_audit_event(
+                AuditEventCategory::Creatures,
+                result.knocked_out
+                    ? "ship_crew_knocked_out_by_musket"
+                    : "ship_crew_damaged_by_musket",
+                result.knocked_out
+                    ? AuditSeverity::Warning
+                    : AuditSeverity::Info,
+                audit_json_object({
+                    {
+                        "member_id",
+                        audit_json_number(
+                            result.member_id),
+                    },
+                    {
+                        "damage",
+                        audit_json_number(
+                            result.damage),
+                    },
+                    {
+                        "remaining_health",
+                        audit_json_number(
+                            result.remaining_health),
+                    },
+                }),
+                result.knocked_out
+                    ? AuditPriority::High
+                    : AuditPriority::Normal);
+        }
+        break;
+    }
+    case MusketHitKind::Creature: {
+        const auto result =
+            creatures_.apply_damage(
+                static_cast<CreatureId>(
+                    hit.target_id),
+                shot.damage,
+                CreatureDamageSource::Player,
+                direction);
+        if (result.hit) {
+            music_.play_sfx(
+                result.killed
+                    ? GameSfxKind::CreatureDeath
+                    : GameSfxKind::CreatureHit,
+                result.killed
+                    ? 0.92F
+                    : 0.78F);
+            if (result.killed) {
+                if (maritime_session_active &&
+                    sea_adventure_.record_hunt(
+                        result.species)) {
+                    queue_gameplay_announcement(
+                        "CHASSE",
+                        "VIANDE RECUPEREE",
+                        2.4F);
+                }
+                grant_player_experience(
+                    creature_kill_experience(
+                        result.species,
+                        result.position,
+                        static_cast<std::uint32_t>(
+                            world_.seed()) ^
+                            static_cast<std::uint32_t>(
+                                shot.shot_sequence)),
+                    block_coord_from_position(
+                        result.position),
+                    "creature_kill_musket");
+            }
+            record_audit_event(
+                AuditEventCategory::Creatures,
+                result.killed
+                    ? "creature_killed_by_musket"
+                    : "creature_damaged_by_musket",
+                result.killed
+                    ? AuditSeverity::Warning
+                    : AuditSeverity::Info,
+                audit_json_object({
+                    {
+                        "species",
+                        audit_json_number(
+                            static_cast<int>(
+                                result.species)),
+                    },
+                    {
+                        "damage",
+                        audit_json_number(
+                            result.damage),
+                    },
+                    {
+                        "remaining_health",
+                        audit_json_number(
+                            result.remaining_health),
+                    },
+                }),
+                result.killed
+                    ? AuditPriority::High
+                    : AuditPriority::Normal);
+        }
+        break;
+    }
+    case MusketHitKind::OldGuard:
+        // Je garde la Vieille Garde invulnerable, mais son volume arrete
+        // reellement la balle et protege tout ce qui se trouve derriere.
+        music_.play_sfx(
+            GameSfxKind::CreatureHit,
+            0.48F);
+        record_audit_event(
+            AuditEventCategory::Creatures,
+            "old_guard_intercepted_player_musket",
+            AuditSeverity::Info,
+            audit_json_object({
+                {
+                    "guard_id",
+                    audit_json_number(
+                        hit.target_id),
+                },
+                {
+                    "distance",
+                    audit_json_number(
+                        hit.distance),
+                },
+            }),
+            AuditPriority::Normal);
+        break;
+    case MusketHitKind::World:
+    case MusketHitKind::Ship:
+    case MusketHitKind::None:
+    default:
+        break;
+    }
+
+    record_audit_event(
+        AuditEventCategory::InputAction,
+        "player_musket_fired",
+        AuditSeverity::Info,
+        audit_json_object({
+            {
+                "sequence",
+                audit_json_number(
+                    shot.shot_sequence),
+            },
+            {
+                "hit_kind",
+                audit_json_number(
+                    static_cast<int>(
+                        hit.kind)),
+            },
+            {
+                "distance",
+                audit_json_number(
+                    hit.hit()
+                        ? hit.distance
+                        : shot.maximum_distance),
+            },
+            {
+                "damage",
+                audit_json_number(
+                    shot.damage),
+            },
+        }),
+        AuditPriority::High);
+}
+
 void Game::sync_selected_hotbar_slot() noexcept {
     if (!progression_.has_super_vision_power()) {
         super_vision_active_ = false;
@@ -3167,6 +3758,24 @@ void Game::sync_selected_hotbar_slot() noexcept {
 
     player_.set_block_break_speed_multiplier(
         progression_.block_break_speed_multiplier());
+
+    if (selected_musket_active()) {
+        const auto selected_index =
+            normalize_hotbar_index(
+                hotbar_.selected_index);
+        if (!bound_musket_hotbar_slot_.has_value() ||
+            *bound_musket_hotbar_slot_ !=
+                selected_index) {
+            player_musket_.cancel_transient_actions();
+            player_musket_.synchronize_chamber(
+                is_musket_loaded(
+                    hotbar_.slots[selected_index]));
+            bound_musket_hotbar_slot_ =
+                selected_index;
+        }
+    } else if (bound_musket_hotbar_slot_.has_value()) {
+        reset_musket_interaction();
+    }
 }
 
 auto Game::selected_tool_break_speed_multiplier(BlockId target_block_id) const noexcept -> float {
@@ -3178,12 +3787,28 @@ auto Game::selected_tool_break_speed_multiplier(BlockId target_block_id) const n
 }
 
 void Game::select_hotbar_slot(std::size_t index) noexcept {
+    const auto previous_index =
+        normalize_hotbar_index(
+            hotbar_.selected_index);
     valcraft::select_hotbar_index(hotbar_, index);
+    if (previous_index !=
+        normalize_hotbar_index(
+            hotbar_.selected_index)) {
+        reset_musket_interaction();
+    }
     sync_selected_hotbar_slot();
 }
 
 void Game::cycle_hotbar_selection(int delta) noexcept {
+    const auto previous_index =
+        normalize_hotbar_index(
+            hotbar_.selected_index);
     valcraft::cycle_hotbar_selection(hotbar_, delta);
+    if (previous_index !=
+        normalize_hotbar_index(
+            hotbar_.selected_index)) {
+        reset_musket_interaction();
+    }
     sync_selected_hotbar_slot();
 }
 
@@ -3258,6 +3883,7 @@ void Game::respawn_player() {
             : find_initial_spawn_position();
 
     player_.respawn(spawn_position_);
+    reset_musket_interaction();
     sync_selected_hotbar_slot();
     set_death_screen_visible(false);
 
@@ -3394,6 +4020,8 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     snapshot.sea_adventure = sea_adventure_.save_state();
     snapshot.hotbar = hotbar_;
     snapshot.inventory = inventory_menu_;
+    snapshot.musket_shot_sequence =
+        player_musket_.view().shot_sequence;
     snapshot.inventory.visible = false;
     snapshot.inventory.hovered_slot.reset();
     snapshot.creatures.assign(creatures_.active_creatures().begin(), creatures_.active_creatures().end());
@@ -4013,8 +4641,14 @@ void Game::prime_world_around(
     }
 
     WorldWorkBudget meshing_budget = lighting_budget;
+    // Je ne recumule pas les fluides avec le maillage apres leur phase de
+    // stabilisation dediee : le reliquat reprendra dans la boucle de jeu.
+    meshing_budget.fluid_cell_budget = 0U;
     meshing_budget.light_node_budget = 4096U;
-    meshing_budget.mesh_rebuild_budget = 2U;
+    // Je borne chaque tranche a une section lourde afin de garder l'ecran de
+    // chargement reactif sur les deux pipelines visuels.
+    meshing_budget.mesh_rebuild_budget = 1U;
+    meshing_budget.max_fluid_ms = 0.0;
     meshing_budget.max_lighting_ms = 1.0;
     meshing_budget.max_meshing_ms = 3.0;
     auto meshing_ratio = preload_readiness(world, focus, preload_radius);
@@ -4063,7 +4697,8 @@ void Game::prime_world_around(
     }
 }
 
-void Game::prepare_game_session() {
+void Game::prepare_game_session(
+    std::uint64_t musket_shot_sequence) {
     if (command_console_.visible()) {
         set_command_console_visible(false);
     }
@@ -4083,6 +4718,16 @@ void Game::prepare_game_session() {
     death_screen_.visible = false;
     death_screen_.cause = PlayerDeathCause::None;
     pending_fishing_ = false;
+    player_musket_.reset(
+        true,
+        musket_shot_sequence);
+    player_musket_effects_.clear();
+    bound_musket_hotbar_slot_.reset();
+    musket_fire_held_ = false;
+    pending_musket_fire_press_ = false;
+    musket_aim_held_ = false;
+    pending_musket_reload_ = false;
+    sync_selected_hotbar_slot();
     set_mouse_capture(true);
     try {
         record_audit_event(
@@ -4146,6 +4791,8 @@ void Game::initialize_preview_world() {
 
 void Game::open_main_menu(bool from_session) {
     main_menu_.visible = true;
+    reset_musket_interaction();
+    player_musket_effects_.clear();
     if (command_console_.visible()) {
         set_command_console_visible(false);
     }
@@ -4910,7 +5557,8 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         has_active_session_ = true;
         active_save_slot_ = slot_index;
         session_save_state_.reset_clean();
-        prepare_game_session();
+        prepare_game_session(
+            snapshot.musket_shot_sequence);
         record_loading_step("saved_session_commit", commit_begin);
 
         update_loading_screen(

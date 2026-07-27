@@ -1,6 +1,7 @@
 #include "creatures/OldGuardGeometry.h"
 
 #include "creatures/OldGuardAnimation.h"
+#include "render/MusketVisualRecipe.h"
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
@@ -177,6 +178,28 @@ auto moustache_tile(std::uint32_t seed) noexcept -> CreatureAtlasTile {
     return ((seed >> 12U) & 1U) != 0U
                ? CreatureAtlasTile::CrewHairBrown
                : CreatureAtlasTile::CrewHairBlack;
+}
+
+auto musket_tile(MusketVisualMaterial material) noexcept
+    -> CreatureAtlasTile {
+    switch (material) {
+    case MusketVisualMaterial::Walnut:
+        return CreatureAtlasTile::CrewWood;
+    case MusketVisualMaterial::Brass:
+        return CreatureAtlasTile::CrewGold;
+    case MusketVisualMaterial::DarkBore:
+        return CreatureAtlasTile::CrewHairBlack;
+    case MusketVisualMaterial::Flint:
+    case MusketVisualMaterial::PatinatedSteel:
+    default:
+        return CreatureAtlasTile::CrewIron;
+    }
+}
+
+auto musket_material(MusketVisualMaterial material) noexcept -> float {
+    return material == MusketVisualMaterial::Walnut
+               ? kMaterialWood
+               : kMaterialMetal;
 }
 
 } // namespace
@@ -471,65 +494,46 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
     }
 
     const auto& musket = pose.musket_transform;
-    append_box(
-        parts,
-        first_part,
-        musket,
-        glm::vec3 {-0.26F, -0.035F, 0.0F},
-        glm::vec3 {0.47F, 0.070F, 0.060F},
-        glm::vec3 {0.0F},
-        CreatureAtlasTile::CrewWood,
-        kMaterialWood,
-        0.13F);
-    append_box(
-        parts,
-        first_part,
-        musket,
-        glm::vec3 {-0.58F, -0.075F, 0.0F},
-        glm::vec3 {0.20F, 0.110F, 0.082F},
-        glm::vec3 {0.0F, 0.0F, -0.16F},
-        CreatureAtlasTile::CrewWood,
-        kMaterialWood,
-        0.15F);
-    append_box(
-        parts,
-        first_part,
-        musket,
-        glm::vec3 {0.47F, 0.018F, 0.0F},
-        glm::vec3 {0.78F, 0.026F, 0.026F},
-        glm::vec3 {0.0F},
-        CreatureAtlasTile::CrewIron,
-        kMaterialMetal,
-        0.06F);
-    append_box(
-        parts,
-        first_part,
-        musket,
-        glm::vec3 {-0.02F, 0.058F, 0.0F},
-        glm::vec3 {0.095F, 0.055F, 0.050F},
-        glm::vec3 {0.0F},
-        CreatureAtlasTile::CrewIron,
-        kMaterialMetal,
-        0.09F);
-    for (const auto band_x : {0.10F, 0.52F, 0.96F}) {
+
+    // Je parcours la recette partagee pour que la crosse profilee, les trois
+    // bandes, la platine a silex et les organes de visee gardent les memes
+    // proportions que l'arme du joueur et son icone.
+    for (const auto& recipe_part : musket_visual_parts()) {
+        auto center = recipe_part.center;
+        if (recipe_part.kind == MusketVisualPartKind::Ramrod) {
+            center.x += pose.ramrod_offset;
+        }
         append_box(
             parts,
             first_part,
             musket,
-            glm::vec3 {band_x, 0.0F, 0.0F},
-            glm::vec3 {0.018F, 0.054F, 0.052F},
-            glm::vec3 {0.0F},
-            CreatureAtlasTile::CrewGold,
-            kMaterialMetal,
-            0.04F);
+            center,
+            recipe_part.half_extent,
+            recipe_part.rotation_radians,
+            musket_tile(recipe_part.material),
+            musket_material(recipe_part.material),
+            recipe_part.kind == MusketVisualPartKind::Stock ? 0.13F : 0.05F);
     }
+
+    // Je garde une baionnette exclusivement sur la Vieille Garde. La douille
+    // et le coude sous le canon rendent sa fixation credible avant la lame.
     append_box(
         parts,
         first_part,
         musket,
-        glm::vec3 {0.56F + pose.ramrod_offset, -0.052F, 0.0F},
-        glm::vec3 {0.52F, 0.010F, 0.010F},
+        glm::vec3 {1.105F, 0.038F, 0.0F},
+        glm::vec3 {0.055F, 0.034F, 0.034F},
         glm::vec3 {0.0F},
+        CreatureAtlasTile::CrewIron,
+        kMaterialMetal,
+        0.03F);
+    append_box(
+        parts,
+        first_part,
+        musket,
+        glm::vec3 {1.155F, 0.070F, 0.0F},
+        glm::vec3 {0.045F, 0.012F, 0.018F},
+        glm::vec3 {0.0F, 0.0F, 0.32F},
         CreatureAtlasTile::CrewIron,
         kMaterialMetal,
         0.03F);

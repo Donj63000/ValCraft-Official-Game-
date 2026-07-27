@@ -169,6 +169,13 @@ struct ShipCrewDamageResult {
     float distance = 0.0F;
 };
 
+struct ShipCrewRayHit {
+    bool hit = false;
+    std::uint8_t member_id = 0U;
+    glm::vec3 position {0.0F};
+    float distance = 0.0F;
+};
+
 // Vue purement runtime du marin actuellement vise. Elle ne fait volontairement
 // pas partie de la sauvegarde : le viseur et les temporisations de blocage ne
 // doivent jamais modifier le format v9 des parties existantes.
@@ -208,6 +215,13 @@ public:
                                                const glm::vec3& direction,
                                                float max_distance,
                                                float damage) noexcept -> ShipCrewDamageResult;
+    [[nodiscard]] auto raycast_first_living(const ShipEntity& ship,
+                                            const glm::vec3& origin,
+                                            const glm::vec3& direction,
+                                            float max_distance) const noexcept -> ShipCrewRayHit;
+    [[nodiscard]] auto apply_damage(std::uint8_t member_id,
+                                    float damage,
+                                    float hit_distance = 0.0F) noexcept -> ShipCrewDamageResult;
     [[nodiscard]] auto focus_from_ray(const ShipEntity& ship,
                                       const glm::vec3& origin,
                                       const glm::vec3& direction,

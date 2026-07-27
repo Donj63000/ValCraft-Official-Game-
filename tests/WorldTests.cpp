@@ -1436,6 +1436,64 @@ TEST_CASE("block atlas expands to 128 square pixels and preserves transparent de
     CHECK(pixels[opaque_alpha_index] == 255);
 }
 
+TEST_CASE("legacy block atlas exposes a transparent wood and steel musket silhouette") {
+    const auto pixels = build_block_atlas_pixels();
+    REQUIRE(
+        pixels.size() ==
+        static_cast<std::size_t>(
+            kBlockAtlasSize *
+            kBlockAtlasSize *
+            4));
+    const auto tile =
+        block_hotbar_tile(
+            to_block_id(BlockType::Musket));
+    CHECK(tile == BlockAtlasTile {4, 2});
+
+    auto transparent = std::size_t {0U};
+    auto walnut = std::size_t {0U};
+    auto steel = std::size_t {0U};
+    for (int y = 0; y < kBlockAtlasTileSize; ++y) {
+        for (int x = 0; x < kBlockAtlasTileSize; ++x) {
+            const auto atlas_x =
+                tile.x * kBlockAtlasTileSize + x;
+            const auto atlas_y =
+                tile.y * kBlockAtlasTileSize + y;
+            const auto offset =
+                static_cast<std::size_t>(
+                    (atlas_y * kBlockAtlasSize +
+                     atlas_x) *
+                    4);
+            const auto red = pixels[offset + 0U];
+            const auto green = pixels[offset + 1U];
+            const auto blue = pixels[offset + 2U];
+            const auto alpha = pixels[offset + 3U];
+            if (alpha == 0U) {
+                ++transparent;
+                continue;
+            }
+            walnut +=
+                red > green + 8U &&
+                        green > blue + 8U
+                    ? 1U
+                    : 0U;
+            const auto maximum_channel =
+                std::max({red, green, blue});
+            const auto minimum_channel =
+                std::min({red, green, blue});
+            steel +=
+                maximum_channel -
+                        minimum_channel <
+                    34U
+                    ? 1U
+                    : 0U;
+        }
+    }
+
+    CHECK(transparent > 180U);
+    CHECK(walnut > 30U);
+    CHECK(steel > 4U);
+}
+
 TEST_CASE("block atlas includes progressively denser crack tiles for block breaking") {
     const auto pixels = build_block_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));

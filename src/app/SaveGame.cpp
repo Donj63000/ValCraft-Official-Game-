@@ -24,7 +24,9 @@ namespace valcraft {
 namespace {
 
 constexpr std::array<char, 8> kSaveMagic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
-constexpr std::uint32_t kSaveVersion = 11;
+constexpr std::array<char, 4> kItemInstanceStateMagic {{'I', 'T', 'E', 'M'}};
+constexpr std::uint32_t kSaveVersion = 12;
+constexpr std::uint32_t kSaveVersionItemInstanceState = 12;
 constexpr std::uint32_t kSaveVersionOldGuard = 11;
 constexpr std::uint32_t kSaveVersionSeaDeparture = 10;
 constexpr std::uint32_t kSaveVersionShipCrew = 9;
@@ -598,6 +600,82 @@ auto read_hotbar_slot(BinaryReader& reader, HotbarSlot& slot) -> bool {
            reader.read_value(slot.count);
 }
 
+void write_item_instance_state(BinaryWriter& writer,
+                               const HotbarSlot& slot) {
+    writer.write_value(
+        sanitized_item_instance_state(
+            slot.block_id,
+            slot.instance_state));
+}
+
+auto read_item_instance_state(BinaryReader& reader,
+                              HotbarSlot& slot) -> bool {
+    return reader.read_value(slot.instance_state);
+}
+
+void write_item_instance_state_extension(
+    BinaryWriter& writer,
+    const SaveGameSnapshot& snapshot) {
+    writer.write_bytes(
+        kItemInstanceStateMagic.data(),
+        kItemInstanceStateMagic.size());
+    for (const auto& slot : snapshot.hotbar.slots) {
+        write_item_instance_state(writer, slot);
+    }
+    for (const auto& slot : snapshot.inventory.storage_slots) {
+        write_item_instance_state(writer, slot);
+    }
+    write_item_instance_state(
+        writer,
+        snapshot.inventory.carried_slot);
+    for (const auto& slot : snapshot.inventory.equipment_slots) {
+        write_item_instance_state(writer, slot);
+    }
+    for (const auto& drop : snapshot.item_drops) {
+        write_item_instance_state(writer, drop.stack);
+    }
+    writer.write_value(
+        snapshot.musket_shot_sequence);
+}
+
+auto read_item_instance_state_extension(
+    BinaryReader& reader,
+    SaveGameSnapshot& snapshot) -> bool {
+    auto magic =
+        std::array<char, kItemInstanceStateMagic.size()> {};
+    if (!reader.read_bytes(magic.data(), magic.size()) ||
+        magic != kItemInstanceStateMagic) {
+        return false;
+    }
+    for (auto& slot : snapshot.hotbar.slots) {
+        if (!read_item_instance_state(reader, slot)) {
+            return false;
+        }
+    }
+    for (auto& slot : snapshot.inventory.storage_slots) {
+        if (!read_item_instance_state(reader, slot)) {
+            return false;
+        }
+    }
+    if (!read_item_instance_state(
+            reader,
+            snapshot.inventory.carried_slot)) {
+        return false;
+    }
+    for (auto& slot : snapshot.inventory.equipment_slots) {
+        if (!read_item_instance_state(reader, slot)) {
+            return false;
+        }
+    }
+    for (auto& drop : snapshot.item_drops) {
+        if (!read_item_instance_state(reader, drop.stack)) {
+            return false;
+        }
+    }
+    return reader.read_value(
+        snapshot.musket_shot_sequence);
+}
+
 void write_player_state(BinaryWriter& writer, const PlayerState& state) {
     write_vec3(writer, state.position);
     write_vec3(writer, state.velocity);
@@ -1100,7 +1178,16 @@ auto load_save_slot(const std::filesystem::path& root_directory,
         }
     }
 
+    if (version >= kSaveVersionItemInstanceState &&
+        !read_item_instance_state_extension(
+            reader,
+            snapshot)) {
+        return std::nullopt;
+    }
     normalize_inventory_state(snapshot.inventory, snapshot.hotbar);
+    for (auto& drop : snapshot.item_drops) {
+        normalize_item_stack(drop.stack);
+    }
     if (!report_load_progress(input, total_bytes, SaveLoadPhase::Finalizing, progress_callback, true)) {
         return std::nullopt;
     }
@@ -1288,6 +1375,12 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
             throw std::runtime_error("Unable to write sparse world save plan chunk");
         }
     }
+
+    // Je termine par une extension additive afin que le corps historique v11
+    // et toutes ses fixtures restent lisibles sans recalculer leurs offsets.
+    write_item_instance_state_extension(
+        writer,
+        snapshot);
 
     output.flush();
     if (!writer.ok() || !output.good()) {

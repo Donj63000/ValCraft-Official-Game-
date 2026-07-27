@@ -15,6 +15,7 @@
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/OldGuard.h"
 #include "gameplay/PlayerController.h"
+#include "gameplay/PlayerMusket.h"
 #include "gameplay/PlayerProgression.h"
 #include "player/PlayerGeometry.h"
 #include "render/ItemDropGeometry.h"
@@ -253,6 +254,7 @@ public:
     void shutdown();
     void render_frame(World& world,
                       const PlayerController& player,
+                      const PlayerMusketView& player_musket,
                       const HotbarState& hotbar,
                       const InventoryMenuState& inventory_menu,
                       const DeathScreenState& death_screen,
@@ -274,6 +276,7 @@ public:
                       int height);
     void render_frame(World& world,
                       const PlayerController& player,
+                      const PlayerMusketView& player_musket,
                       const HotbarState& hotbar,
                       const InventoryMenuState& inventory_menu,
                       const DeathScreenState& death_screen,
@@ -287,6 +290,8 @@ public:
                       std::span<const OldGuardRenderInstance> old_guard,
                       std::span<const OldGuardMuzzleFlashInstance> old_guard_flashes,
                       std::span<const OldGuardSmokeInstance> old_guard_smoke,
+                      std::span<const OldGuardMuzzleFlashInstance> player_musket_flashes,
+                      std::span<const OldGuardSmokeInstance> player_musket_smoke,
                       std::span<const ItemDropRenderInstance> item_drops,
                       const ShipRenderState& ship,
                       const PlayerProgressionState& progression,
@@ -869,7 +874,9 @@ private:
         std::span<const OldGuardSmokeInstance> smoke,
         const glm::mat4& view_projection,
         const glm::mat4& inverse_view,
-        const glm::vec3& camera_position);
+        const glm::vec3& camera_position,
+        bool viewmodel_overlay = false,
+        const PlayerViewModelPose* viewmodel_pose = nullptr);
     void upload_world_ship_protection(const ShipRenderState& ship);
     void upload_precipitation_ship_protection(const ShipRenderState& ship);
     void draw_creature_shadows(std::span<const CreatureRenderInstance> creatures,
@@ -894,12 +901,15 @@ private:
                                                       float crew_draw_distance,
                                                       float old_guard_draw_distance)
         -> std::span<const CreaturePartInstance>;
-    void draw_player_viewmodel(const PlayerController& player,
-                               BlockId held_item,
-                               const glm::mat4& view_projection,
-                               const glm::mat4& light_view_projection,
-                               const glm::vec3& camera_position,
-                               const EnvironmentState& environment);
+    [[nodiscard]] auto draw_player_viewmodel(
+        const PlayerController& player,
+        BlockId held_item,
+        const PlayerMusketView& player_musket,
+        const glm::mat4& view_projection,
+        const glm::mat4& light_view_projection,
+        const glm::vec3& camera_position,
+        const EnvironmentState& environment)
+        -> PlayerViewModelPose;
     void draw_block_break_overlay(
         const World& world,
         const PlayerController& player);
@@ -920,6 +930,10 @@ private:
     void draw_options_menu(const OptionsMenuState& options_menu, int width, int height);
     void draw_confirm_dialog(const ConfirmDialogState& confirm_dialog, int width, int height);
     void draw_crosshair();
+    void draw_musket_hud(
+        const PlayerMusketView& musket,
+        int width,
+        int height);
     void ensure_hud_buffer_capacity(std::size_t vertex_count);
     void upload_hud_vertices(std::span<const HudVertex> vertices);
     void create_gpu_timers();

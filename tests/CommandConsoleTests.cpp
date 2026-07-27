@@ -14,13 +14,53 @@ TEST_CASE("command console recognizes the tempest command robustly") {
         CommandConsoleParseResult {
             CommandConsoleCommand::StartTempest,
             CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Weather,
         });
     CHECK(
         parse_command_console_input("  /METEO   TEMPETE  ") ==
         CommandConsoleParseResult {
             CommandConsoleCommand::StartTempest,
             CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Weather,
         });
+}
+
+TEST_CASE("command console recognizes only the supported musket give command") {
+    CHECK(
+        parse_command_console_input("/give fusil") ==
+        CommandConsoleParseResult {
+            CommandConsoleCommand::GiveMusket,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Give,
+        });
+    CHECK(
+        parse_command_console_input("  /GIVE   FUSIL  ") ==
+        CommandConsoleParseResult {
+            CommandConsoleCommand::GiveMusket,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Give,
+        });
+
+    for (const auto input :
+         {"/give",
+          "/give canon",
+          "/give fusil maintenant"}) {
+        const auto parsed =
+            parse_command_console_input(input);
+        CAPTURE(input);
+        CHECK(
+            parsed.status ==
+            CommandConsoleParseStatus::InvalidUsage);
+        CHECK(
+            parsed.family ==
+            CommandConsoleFamily::Give);
+        CHECK(
+            command_console_usage(parsed.family) ==
+            "UTILISATION : /GIVE FUSIL");
+    }
+    CHECK(
+        parse_command_console_input("/givefusil").status ==
+        CommandConsoleParseStatus::UnknownCommand);
 }
 
 TEST_CASE("command console distinguishes empty invalid and unknown commands") {
@@ -30,6 +70,12 @@ TEST_CASE("command console distinguishes empty invalid and unknown commands") {
     CHECK(
         parse_command_console_input("/meteo pluie").status ==
         CommandConsoleParseStatus::InvalidUsage);
+    CHECK(
+        command_console_usage(
+            parse_command_console_input(
+                "/meteo pluie")
+                .family) ==
+        "UTILISATION : /METEO TEMPETE");
     CHECK(
         parse_command_console_input("/meteo tempete maintenant").status ==
         CommandConsoleParseStatus::InvalidUsage);

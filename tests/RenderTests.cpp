@@ -1,6 +1,7 @@
 #include "app/LoadingScreen.h"
 #include "render/ShadowCulling.h"
 #include "render/ItemDropGeometry.h"
+#include "render/MusketVisualRecipe.h"
 #include "render/ModernHudStyle.h"
 #include "render/SceneSamplerBindings.h"
 #include "render/RendererQuality.h"
@@ -13,6 +14,8 @@
 
 #include <doctest/doctest.h>
 
+#include <glm/common.hpp>
+#include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
@@ -338,6 +341,7 @@ static_assert(std::is_same_v<
 using RenderFrameWithCrew = void (Renderer::*)(
     World&,
     const PlayerController&,
+    const PlayerMusketView&,
     const HotbarState&,
     const InventoryMenuState&,
     const DeathScreenState&,
@@ -349,6 +353,8 @@ using RenderFrameWithCrew = void (Renderer::*)(
     std::span<const CreatureRenderInstance>,
     std::span<const CrewRenderInstance>,
     std::span<const OldGuardRenderInstance>,
+    std::span<const OldGuardMuzzleFlashInstance>,
+    std::span<const OldGuardSmokeInstance>,
     std::span<const OldGuardMuzzleFlashInstance>,
     std::span<const OldGuardSmokeInstance>,
     std::span<const ItemDropRenderInstance>,
@@ -1242,14 +1248,150 @@ TEST_CASE("item drop geometry keeps cube layers and atlas faces aligned with gpu
     const auto safe_instances = build_item_drop_gpu_instances(std::span<const ItemDropRenderInstance>(&drop, 1));
     const auto safe_vertices = build_item_drop_vertices(std::span<const ItemDropRenderInstance>(&drop, 1));
     REQUIRE(safe_instances.size() == 1);
-    CHECK(std::isfinite(safe_instances.front().center.x));
-    CHECK(std::isfinite(safe_instances.front().center.y));
-    CHECK(std::isfinite(safe_instances.front().center.z));
-    CHECK(std::isfinite(safe_instances.front().rotation));
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            CHECK(std::isfinite(
+                safe_instances.front().transform[column][row]));
+        }
+    }
     for (const auto& vertex : safe_vertices) {
         CHECK(std::isfinite(vertex.x));
         CHECK(std::isfinite(vertex.y));
         CHECK(std::isfinite(vertex.z));
+    }
+}
+
+TEST_CASE("musket ground drop preserves the canonical recipe in modern and legacy pipelines") {
+    CHECK_FALSE(item_drop_uses_rounded_template(
+        VisualPipeline::LegacyVoxel));
+    CHECK(item_drop_uses_rounded_template(
+        VisualPipeline::ModernStylized));
+
+    ItemDropRenderInstance drop {};
+    drop.position = {2.0F, 4.0F, 6.0F};
+    drop.block_id = to_block_id(BlockType::Musket);
+    drop.count = 1;
+    drop.sky_light = 0.75F;
+    drop.block_light = 0.25F;
+
+    const auto instances = build_item_drop_gpu_instances(
+        std::span<const ItemDropRenderInstance>(&drop, 1));
+    const auto vertices = build_item_drop_vertices(
+        std::span<const ItemDropRenderInstance>(&drop, 1));
+    const auto recipe = musket_visual_parts();
+    REQUIRE(recipe.size() == 30U);
+    REQUIRE(instances.size() == recipe.size());
+    REQUIRE(vertices.size() == recipe.size() * 36U);
+
+    bool found_walnut = false;
+    bool found_steel = false;
+    bool found_brass = false;
+    bool found_flint = false;
+    bool found_dark_bore = false;
+    for (std::size_t index = 0U; index < instances.size(); ++index) {
+        const auto& instance = instances[index];
+        const auto& part = recipe[index];
+        CHECK(instance.block_id ==
+              to_block_id(BlockType::Musket));
+        CHECK(instance.sky_light == doctest::Approx(drop.sky_light));
+        CHECK(instance.block_light == doctest::Approx(drop.block_light));
+
+        BlockId expected_texture = to_block_id(BlockType::IronOre);
+        switch (part.material) {
+        case MusketVisualMaterial::Walnut:
+            expected_texture = to_block_id(BlockType::Planks);
+            found_walnut = true;
+            break;
+        case MusketVisualMaterial::Brass:
+            expected_texture = to_block_id(BlockType::GoldOre);
+            found_brass = true;
+            break;
+        case MusketVisualMaterial::DarkBore:
+            expected_texture = to_block_id(BlockType::CoalOre);
+            found_dark_bore =
+                part.kind == MusketVisualPartKind::Muzzle;
+            break;
+        case MusketVisualMaterial::Flint:
+            expected_texture = to_block_id(BlockType::CoalOre);
+            found_flint = true;
+            break;
+        case MusketVisualMaterial::PatinatedSteel:
+        default:
+            found_steel = true;
+            break;
+        }
+        CHECK(instance.texture_id == expected_texture);
+        const auto expected_tile = block_atlas_tile(
+            expected_texture,
+            BlockVisualFace::PositiveX);
+        CHECK(instance.face_tiles_0_1.x ==
+              doctest::Approx(static_cast<float>(expected_tile.x)));
+        CHECK(instance.face_tiles_0_1.y ==
+              doctest::Approx(static_cast<float>(expected_tile.y)));
+
+        CHECK(glm::length(glm::vec3 {instance.transform[0]}) ==
+              doctest::Approx(
+                  part.half_extent.x * 2.0F *
+                  kMusketGroundDropScale));
+        CHECK(glm::length(glm::vec3 {instance.transform[1]}) ==
+              doctest::Approx(
+                  part.half_extent.y * 2.0F *
+                  kMusketGroundDropScale));
+        CHECK(glm::length(glm::vec3 {instance.transform[2]}) ==
+              doctest::Approx(
+                  part.half_extent.z * 2.0F *
+                  kMusketGroundDropScale));
+
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                CHECK(std::isfinite(
+                    instance.transform[column][row]));
+            }
+        }
+    }
+    CHECK(found_walnut);
+    CHECK(found_steel);
+    CHECK(found_brass);
+    CHECK(found_flint);
+    CHECK(found_dark_bore);
+
+    auto minimum = glm::vec3 {
+        (std::numeric_limits<float>::max)()};
+    auto maximum = glm::vec3 {
+        (std::numeric_limits<float>::lowest)()};
+    for (const auto& vertex : vertices) {
+        minimum = glm::min(
+            minimum,
+            glm::vec3 {vertex.x, vertex.y, vertex.z});
+        maximum = glm::max(
+            maximum,
+            glm::vec3 {vertex.x, vertex.y, vertex.z});
+    }
+    const auto extent = maximum - minimum;
+    CHECK(extent.x > 1.35F);
+    CHECK(extent.x > extent.z * 4.0F);
+    CHECK(minimum.y > drop.position.y);
+
+    // Je refuse de dupliquer visuellement une arme mono-exemplaire meme si
+    // une instance de rendu corrompue annonce une pile impossible.
+    drop.count = 32;
+    CHECK(build_item_drop_gpu_instances(
+              std::span<const ItemDropRenderInstance>(&drop, 1))
+              .size() == recipe.size());
+
+    drop.count = 1;
+    drop.age_seconds = (std::numeric_limits<float>::max)();
+    drop.spin_radians = (std::numeric_limits<float>::max)();
+    const auto sanitized_instances = build_item_drop_gpu_instances(
+        std::span<const ItemDropRenderInstance>(&drop, 1));
+    REQUIRE(sanitized_instances.size() == recipe.size());
+    for (const auto& instance : sanitized_instances) {
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                CHECK(std::isfinite(
+                    instance.transform[column][row]));
+            }
+        }
     }
 }
 

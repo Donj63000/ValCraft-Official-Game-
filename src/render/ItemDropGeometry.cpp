@@ -1,8 +1,14 @@
 #include "render/ItemDropGeometry.h"
 
+#include "render/MusketVisualRecipe.h"
 #include "world/BlockVisuals.h"
 
+#include <glm/geometric.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/mat3x3.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include <array>
 #include <cmath>
@@ -71,39 +77,132 @@ void append_item_drop_face(std::vector<ChunkVertex>& vertices,
     });
 }
 
-auto rotate_item_drop_vector(const glm::vec3& value, float cos_rotation, float sin_rotation) -> glm::vec3 {
+auto make_item_drop_transform(const glm::vec3& center,
+                              float rotation,
+                              const glm::vec3& scale) -> glm::mat4 {
+    auto transform = glm::translate(glm::mat4 {1.0F}, center);
+    transform = glm::rotate(
+        transform,
+        rotation,
+        glm::vec3 {0.0F, 1.0F, 0.0F});
+    return glm::scale(transform, scale);
+}
+
+auto musket_material_texture(
+    MusketVisualMaterial material) noexcept -> BlockId {
+    switch (material) {
+    case MusketVisualMaterial::Walnut:
+        return to_block_id(BlockType::Planks);
+    case MusketVisualMaterial::Brass:
+        return to_block_id(BlockType::GoldOre);
+    case MusketVisualMaterial::DarkBore:
+    case MusketVisualMaterial::Flint:
+        return to_block_id(BlockType::CoalOre);
+    case MusketVisualMaterial::PatinatedSteel:
+    default:
+        return to_block_id(BlockType::IronOre);
+    }
+}
+
+auto make_item_drop_gpu_instance(const glm::mat4& transform,
+                                 BlockId item_id,
+                                 BlockId texture_id,
+                                 float sky_light,
+                                 float block_light) -> ItemDropGpuInstance {
+    const auto face_tiles = pack_item_drop_face_tiles(texture_id);
     return {
-        value.x * cos_rotation - value.z * sin_rotation,
-        value.y,
-        value.x * sin_rotation + value.z * cos_rotation,
+        transform,
+        item_id,
+        texture_id,
+        sky_light,
+        block_light,
+        block_visual_material_value(texture_id),
+        face_tiles.face_tiles_0_1,
+        face_tiles.face_tiles_2_3,
+        face_tiles.face_tiles_4_5,
     };
 }
 
+void append_musket_drop_instances(
+    std::vector<ItemDropGpuInstance>& instances,
+    const ItemDropRenderInstance& drop,
+    float bob_offset,
+    float rotation) {
+    // Je couche legerement le fusil pour rendre sa silhouette lisible au sol,
+    // puis je conserve toutes les proportions de la recette partagee.
+    auto root_transform = glm::translate(
+        glm::mat4 {1.0F},
+        drop.position + glm::vec3 {0.0F, bob_offset + 0.16F, 0.0F});
+    root_transform = glm::rotate(
+        root_transform,
+        rotation,
+        glm::vec3 {0.0F, 1.0F, 0.0F});
+    root_transform = glm::rotate(
+        root_transform,
+        glm::radians(-4.0F),
+        glm::vec3 {0.0F, 0.0F, 1.0F});
+    root_transform = glm::rotate(
+        root_transform,
+        glm::radians(8.0F),
+        glm::vec3 {1.0F, 0.0F, 0.0F});
+    root_transform = glm::scale(
+        root_transform,
+        glm::vec3 {kMusketGroundDropScale});
+
+    for (const auto& part : musket_visual_parts()) {
+        auto part_transform = glm::translate(
+            root_transform,
+            part.center);
+        part_transform = glm::rotate(
+            part_transform,
+            part.rotation_radians.x,
+            glm::vec3 {1.0F, 0.0F, 0.0F});
+        part_transform = glm::rotate(
+            part_transform,
+            part.rotation_radians.y,
+            glm::vec3 {0.0F, 1.0F, 0.0F});
+        part_transform = glm::rotate(
+            part_transform,
+            part.rotation_radians.z,
+            glm::vec3 {0.0F, 0.0F, 1.0F});
+        part_transform = glm::scale(
+            part_transform,
+            part.half_extent * 2.0F);
+
+        instances.push_back(make_item_drop_gpu_instance(
+            part_transform,
+            to_block_id(BlockType::Musket),
+            musket_material_texture(part.material),
+            drop.sky_light,
+            drop.block_light));
+    }
+}
+
 void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
-                           const glm::vec3& center,
-                           float size,
-                           float rotation,
+                           const glm::mat4& transform,
                            BlockId block_id,
                            float sky_light,
                            float block_light,
                            float material_class) {
-    const auto half_extent = size * 0.5F;
-    const auto cos_rotation = std::cos(rotation);
-    const auto sin_rotation = std::sin(rotation);
     const auto make_position = [&](float x, float y, float z) {
-        return center + rotate_item_drop_vector({x, y, z}, cos_rotation, sin_rotation);
+        return glm::vec3 {
+            transform * glm::vec4 {x, y, z, 1.0F},
+        };
     };
+    const auto normal_matrix =
+        glm::transpose(glm::inverse(glm::mat3 {transform}));
     const auto rotate_normal = [&](float x, float y, float z) {
-        return rotate_item_drop_vector({x, y, z}, cos_rotation, sin_rotation);
+        return glm::normalize(
+            normal_matrix * glm::vec3 {x, y, z});
     };
 
     append_item_drop_face(
         vertices,
         {{
-            make_position(half_extent, -half_extent, -half_extent),
-            make_position(half_extent, -half_extent, half_extent),
-            make_position(half_extent, half_extent, half_extent),
-            make_position(half_extent, half_extent, -half_extent),
+            make_position(0.5F, -0.5F, -0.5F),
+            make_position(0.5F, -0.5F, 0.5F),
+            make_position(0.5F, 0.5F, 0.5F),
+            make_position(0.5F, 0.5F, -0.5F),
         }},
         rotate_normal(1.0F, 0.0F, 0.0F),
         0.85F,
@@ -115,10 +214,10 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
     append_item_drop_face(
         vertices,
         {{
-            make_position(-half_extent, -half_extent, half_extent),
-            make_position(-half_extent, -half_extent, -half_extent),
-            make_position(-half_extent, half_extent, -half_extent),
-            make_position(-half_extent, half_extent, half_extent),
+            make_position(-0.5F, -0.5F, 0.5F),
+            make_position(-0.5F, -0.5F, -0.5F),
+            make_position(-0.5F, 0.5F, -0.5F),
+            make_position(-0.5F, 0.5F, 0.5F),
         }},
         rotate_normal(-1.0F, 0.0F, 0.0F),
         0.85F,
@@ -130,10 +229,10 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
     append_item_drop_face(
         vertices,
         {{
-            make_position(-half_extent, half_extent, half_extent),
-            make_position(half_extent, half_extent, half_extent),
-            make_position(half_extent, half_extent, -half_extent),
-            make_position(-half_extent, half_extent, -half_extent),
+            make_position(-0.5F, 0.5F, 0.5F),
+            make_position(0.5F, 0.5F, 0.5F),
+            make_position(0.5F, 0.5F, -0.5F),
+            make_position(-0.5F, 0.5F, -0.5F),
         }},
         rotate_normal(0.0F, 1.0F, 0.0F),
         1.0F,
@@ -145,10 +244,10 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
     append_item_drop_face(
         vertices,
         {{
-            make_position(-half_extent, -half_extent, -half_extent),
-            make_position(half_extent, -half_extent, -half_extent),
-            make_position(half_extent, -half_extent, half_extent),
-            make_position(-half_extent, -half_extent, half_extent),
+            make_position(-0.5F, -0.5F, -0.5F),
+            make_position(0.5F, -0.5F, -0.5F),
+            make_position(0.5F, -0.5F, 0.5F),
+            make_position(-0.5F, -0.5F, 0.5F),
         }},
         rotate_normal(0.0F, -1.0F, 0.0F),
         0.65F,
@@ -160,10 +259,10 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
     append_item_drop_face(
         vertices,
         {{
-            make_position(half_extent, -half_extent, half_extent),
-            make_position(-half_extent, -half_extent, half_extent),
-            make_position(-half_extent, half_extent, half_extent),
-            make_position(half_extent, half_extent, half_extent),
+            make_position(0.5F, -0.5F, 0.5F),
+            make_position(-0.5F, -0.5F, 0.5F),
+            make_position(-0.5F, 0.5F, 0.5F),
+            make_position(0.5F, 0.5F, 0.5F),
         }},
         rotate_normal(0.0F, 0.0F, 1.0F),
         0.75F,
@@ -175,10 +274,10 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
     append_item_drop_face(
         vertices,
         {{
-            make_position(-half_extent, -half_extent, -half_extent),
-            make_position(half_extent, -half_extent, -half_extent),
-            make_position(half_extent, half_extent, -half_extent),
-            make_position(-half_extent, half_extent, -half_extent),
+            make_position(-0.5F, -0.5F, -0.5F),
+            make_position(0.5F, -0.5F, -0.5F),
+            make_position(0.5F, 0.5F, -0.5F),
+            make_position(-0.5F, 0.5F, -0.5F),
         }},
         rotate_normal(0.0F, 0.0F, -1.0F),
         0.75F,
@@ -193,7 +292,9 @@ void append_item_drop_cube(std::vector<ChunkVertex>& vertices,
 void build_item_drop_gpu_instances_into(std::span<const ItemDropRenderInstance> item_drops,
                                         std::vector<ItemDropGpuInstance>& instances) {
     instances.clear();
-    instances.reserve(item_drops.size() * 3U);
+    instances.reserve(
+        item_drops.size() * 3U +
+        item_drops.size() * musket_visual_parts().size());
 
     for (const auto& drop : item_drops) {
         const auto item_id = block_item_id(drop.block_id);
@@ -201,35 +302,42 @@ void build_item_drop_gpu_instances_into(std::span<const ItemDropRenderInstance> 
             continue;
         }
 
-        const auto material_class = block_visual_material_value(item_id);
-        const auto face_tiles = pack_item_drop_face_tiles(item_id);
         // Je garde ce dernier garde-fou dans le generateur : meme une instance
         // construite hors du systeme de gameplay ne doit produire aucun NaN GPU.
         const auto animation_age = normalized_animation_value(drop.age_seconds, kDropAnimationCycleSeconds);
         const auto rotation = normalized_animation_value(drop.spin_radians, kTwoPi);
         const auto bob_offset = std::sin(animation_age * 3.2F) * 0.06F + 0.12F;
+
+        if (item_id == to_block_id(BlockType::Musket)) {
+            append_musket_drop_instances(
+                instances,
+                drop,
+                bob_offset,
+                rotation);
+            continue;
+        }
+
         const auto size = drop.count >= 32 ? 0.42F : (drop.count >= 2 ? 0.39F : 0.35F);
         const auto layer_count = drop.count >= 32 ? 3 : (drop.count >= 2 ? 2 : 1);
 
         for (int layer = 0; layer < layer_count; ++layer) {
             const auto layer_offset = static_cast<float>(layer) * 0.03F;
             const auto lateral_offset = static_cast<float>(layer) * 0.02F;
-            instances.push_back({
+            const auto center =
                 drop.position + glm::vec3 {
                     layer == 0 ? 0.0F : lateral_offset,
                     bob_offset + layer_offset + size * 0.5F,
                     layer == 2 ? -lateral_offset : 0.0F,
-                },
-                size,
-                rotation,
+                };
+            instances.push_back(make_item_drop_gpu_instance(
+                make_item_drop_transform(
+                    center,
+                    rotation,
+                    glm::vec3 {size}),
+                item_id,
                 item_id,
                 drop.sky_light,
-                drop.block_light,
-                material_class,
-                face_tiles.face_tiles_0_1,
-                face_tiles.face_tiles_2_3,
-                face_tiles.face_tiles_4_5,
-            });
+                drop.block_light));
         }
     }
 }
@@ -250,10 +358,8 @@ void build_item_drop_vertices_into(std::span<const ItemDropRenderInstance> item_
     for (const auto& instance : instances) {
         append_item_drop_cube(
             vertices,
-            instance.center,
-            instance.size,
-            instance.rotation,
-            instance.block_id,
+            instance.transform,
+            instance.texture_id,
             instance.sky_light,
             instance.block_light,
             instance.material_class);
