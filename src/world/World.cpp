@@ -151,6 +151,60 @@ auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
 }
 
+auto player_placed_mask_test(
+    const WorldPlayerPlacedMask& mask,
+    std::size_t block_index) noexcept -> bool {
+    if (block_index >= kChunkVolume) {
+        return false;
+    }
+    const auto byte_index = block_index / 8U;
+    const auto bit_index = block_index % 8U;
+    return (
+               mask[byte_index] &
+               static_cast<std::uint8_t>(
+                   1U << bit_index)) !=
+           0U;
+}
+
+void player_placed_mask_set(
+    WorldPlayerPlacedMask& mask,
+    std::size_t block_index,
+    bool value) noexcept {
+    if (block_index >= kChunkVolume) {
+        return;
+    }
+    const auto byte_index = block_index / 8U;
+    const auto bit =
+        static_cast<std::uint8_t>(
+            1U << (block_index % 8U));
+    if (value) {
+        mask[byte_index] =
+            static_cast<std::uint8_t>(
+                mask[byte_index] | bit);
+    } else {
+        mask[byte_index] =
+            static_cast<std::uint8_t>(
+                mask[byte_index] &
+                static_cast<std::uint8_t>(~bit));
+    }
+}
+
+auto player_placed_mask_count(
+    const WorldPlayerPlacedMask& mask) noexcept -> std::size_t {
+    auto count = std::size_t {0U};
+    for (auto byte : mask) {
+        while (byte != 0U) {
+            byte =
+                static_cast<std::uint8_t>(
+                    byte &
+                    static_cast<std::uint8_t>(
+                        byte - 1U));
+            ++count;
+        }
+    }
+    return count;
+}
+
 auto lighting_boundary_mask_for_column(int local_x, int local_z) noexcept -> std::uint8_t {
     std::uint8_t mask = 0;
     if (local_x == 0) {
@@ -690,8 +744,271 @@ auto World::get_block_light(int x, int y, int z) const -> std::uint8_t {
 }
 
 void World::set_block(int x, int y, int z, BlockId block_id) {
+    (void)set_block_internal(
+        x,
+        y,
+        z,
+        block_id,
+        false);
+}
+
+auto World::set_player_block(
+    int x,
+    int y,
+    int z,
+    BlockId block_id) -> bool {
+    return set_block_internal(
+        x,
+        y,
+        z,
+        block_id,
+        true);
+}
+
+auto World::was_player_placed(
+    int x,
+    int y,
+    int z) const noexcept -> bool {
     if (!is_world_y_valid(y)) {
-        return;
+        return false;
+    }
+
+    const auto chunk_coord =
+        world_to_chunk(
+            x,
+            z);
+    const auto override_iterator =
+        chunk_overrides_.find(
+            chunk_coord);
+    if (override_iterator ==
+        chunk_overrides_.end()) {
+        return false;
+    }
+
+    const auto local =
+        world_to_local(
+            x,
+            y,
+            z);
+    return player_placed_mask_test(
+        override_iterator->second.player_placed_mask,
+        chunk_linear_index(
+            local.x,
+            local.y,
+            local.z));
+}
+
+auto World::capture_cell_snapshot(
+    int x,
+    int y,
+    int z) const noexcept
+    -> std::optional<WorldCellSnapshot> {
+    if (!is_world_y_valid(y)) {
+        return std::nullopt;
+    }
+
+    const auto chunk_coord =
+        world_to_chunk(
+            x,
+            z);
+    const auto* chunk =
+        find_chunk(
+            chunk_coord);
+    if (chunk == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto local =
+        world_to_local(
+            x,
+            y,
+            z);
+    return WorldCellSnapshot {
+        {x, y, z},
+        chunk->get_local(
+            local.x,
+            local.y,
+            local.z),
+        chunk->get_water_state_local(
+            local.x,
+            local.y,
+            local.z),
+        was_player_placed(
+            x,
+            y,
+            z),
+    };
+}
+
+auto World::restore_cell_snapshot(
+    const WorldCellSnapshot& snapshot) -> bool {
+    const auto& coordinate =
+        snapshot.coordinate;
+    if (!is_world_y_valid(
+            coordinate.y) ||
+        !is_known_block_id(
+            snapshot.block)) {
+        return false;
+    }
+
+    const auto chunk_coord =
+        world_to_chunk(
+            coordinate.x,
+            coordinate.z);
+    ensure_chunk_loaded(
+        chunk_coord);
+    auto iterator =
+        chunks_.find(
+            chunk_coord);
+    if (iterator == chunks_.end()) {
+        return false;
+    }
+
+    const auto local =
+        world_to_local(
+            coordinate.x,
+            coordinate.y,
+            coordinate.z);
+    auto& record =
+        iterator->second;
+    auto& chunk =
+        record.chunk;
+    const auto current_block =
+        chunk.get_local(
+            local.x,
+            local.y,
+            local.z);
+    const auto current_water_state =
+        chunk.get_water_state_local(
+            local.x,
+            local.y,
+            local.z);
+    const auto current_player_placed =
+        was_player_placed(
+            coordinate.x,
+            coordinate.y,
+            coordinate.z);
+    if (current_block == snapshot.block &&
+        current_water_state ==
+            snapshot.water_state &&
+        current_player_placed ==
+            snapshot.player_placed) {
+        return true;
+    }
+
+    if (current_block != snapshot.block) {
+        chunk.set_local(
+            local.x,
+            local.y,
+            local.z,
+            snapshot.block);
+    }
+    if (current_water_state !=
+        snapshot.water_state) {
+        chunk.set_water_state_local(
+            local.x,
+            local.y,
+            local.z,
+            snapshot.water_state);
+    }
+
+    const auto generated_block =
+        generator_.sample_block(
+            coordinate.x,
+            coordinate.y,
+            coordinate.z);
+    const auto generated_water_state =
+        generator_.sample_water_state(
+            coordinate.x,
+            coordinate.y,
+            coordinate.z);
+    auto override_iterator =
+        chunk_overrides_.find(
+            chunk_coord);
+    if (override_iterator ==
+        chunk_overrides_.end()) {
+        const auto mismatch =
+            snapshot.block !=
+                generated_block ||
+            snapshot.water_state !=
+                generated_water_state;
+        if (mismatch ||
+            snapshot.player_placed) {
+            ChunkOverrideEntry entry {};
+            entry.sparse_cells.reserve(
+                std::min<std::size_t>(
+                    64U,
+                    kSparseOverrideCellLimit));
+            override_iterator =
+                chunk_overrides_
+                    .emplace(
+                        chunk_coord,
+                        std::move(entry))
+                    .first;
+        }
+    }
+    if (override_iterator !=
+        chunk_overrides_.end()) {
+        auto& entry =
+            override_iterator->second;
+        set_chunk_override_cell(
+            entry,
+            chunk_linear_index(
+                local.x,
+                local.y,
+                local.z),
+            snapshot.block,
+            snapshot.water_state,
+            generated_block,
+            generated_water_state,
+            snapshot.player_placed,
+            &chunk);
+        if (entry.generator_mismatch_count ==
+                0U &&
+            entry.player_placed_count == 0U) {
+            chunk_overrides_.erase(
+                override_iterator);
+        }
+    }
+
+    const auto cell_changed =
+        current_block != snapshot.block ||
+        current_water_state !=
+            snapshot.water_state;
+    if (!cell_changed) {
+        return true;
+    }
+    if (current_block != snapshot.block) {
+        update_chunk_emissive_cache(
+            record,
+            local,
+            current_block,
+            snapshot.block);
+        mark_sky_column_dirty(
+            chunk_coord,
+            local.x,
+            local.z);
+        mark_chunk_and_neighbors_lighting_dirty(
+            chunk_coord);
+    }
+    mark_chunk_and_neighbors_dirty(
+        chunk_coord,
+        local);
+    enqueue_fluid_cell(
+        coordinate);
+    enqueue_adjacent_fluid_cells(
+        coordinate);
+    return true;
+}
+
+auto World::set_block_internal(
+    int x,
+    int y,
+    int z,
+    BlockId block_id,
+    bool mark_player_placed) -> bool {
+    if (!is_world_y_valid(y)) {
+        return false;
     }
 
     const auto chunk_coord = world_to_chunk(x, z);
@@ -707,6 +1024,11 @@ void World::set_block(int x, int y, int z, BlockId block_id) {
 
     const auto current_block = chunk.get_local(local.x, local.y, local.z);
     const auto current_water_state = chunk.get_water_state_local(local.x, local.y, local.z);
+    const auto already_player_placed =
+        was_player_placed(
+            x,
+            y,
+            z);
 
     auto next_block = current_block;
     auto next_water_state = current_water_state;
@@ -714,7 +1036,7 @@ void World::set_block(int x, int y, int z, BlockId block_id) {
         if (current_block != to_block_id(BlockType::Air) &&
             !is_block_replaceable(current_block) &&
             !is_torch_block(current_block)) {
-            return;
+            return false;
         }
         next_block = to_block_id(BlockType::Air);
         next_water_state = make_water_state(kMaxWaterLevel, true);
@@ -723,8 +1045,15 @@ void World::set_block(int x, int y, int z, BlockId block_id) {
         next_water_state = 0;
     }
 
-    if (current_block == next_block && current_water_state == next_water_state) {
-        return;
+    const auto cell_changed =
+        current_block != next_block ||
+        current_water_state != next_water_state;
+    const auto provenance_changed =
+        mark_player_placed &&
+        !already_player_placed;
+    if (!cell_changed &&
+        !provenance_changed) {
+        return false;
     }
 
     if (current_block != next_block) {
@@ -740,7 +1069,12 @@ void World::set_block(int x, int y, int z, BlockId block_id) {
         current_block,
         next_block,
         current_water_state,
-        next_water_state);
+        next_water_state,
+        mark_player_placed);
+
+    if (!cell_changed) {
+        return true;
+    }
 
     if (current_block != next_block) {
         update_chunk_emissive_cache(record, local, current_block, next_block);
@@ -752,6 +1086,7 @@ void World::set_block(int x, int y, int z, BlockId block_id) {
     mark_chunk_and_neighbors_dirty(chunk_coord, local);
     enqueue_fluid_cell({x, y, z});
     enqueue_adjacent_fluid_cells({x, y, z});
+    return true;
 }
 
 auto World::restore_generated_cell(int x, int y, int z) -> bool {
@@ -803,8 +1138,12 @@ auto World::restore_generated_cell(int x, int y, int z) -> bool {
             generated_water_state,
             generated_block,
             generated_water_state,
+            player_placed_mask_test(
+                entry.player_placed_mask,
+                block_index),
             nullptr);
-        if (entry.generator_mismatch_count == 0U) {
+        if (entry.generator_mismatch_count == 0U &&
+            entry.player_placed_count == 0U) {
             chunk_overrides_.erase(override_iterator);
         }
         return true;
@@ -1473,6 +1812,11 @@ auto World::stream_radius() const noexcept -> int {
     return stream_radius_;
 }
 
+auto World::sample_generated_surface(int world_x, int world_z) const noexcept
+    -> TerrainSurfaceSample {
+    return generator_.sample_surface(world_x, world_z);
+}
+
 auto World::surface_height(int world_x, int world_z) -> int {
     const auto coord = world_to_chunk(world_x, world_z);
     ensure_chunk_loaded(coord);
@@ -1681,12 +2025,18 @@ auto World::modified_chunk_snapshots() const -> std::vector<WorldChunkSnapshot> 
     snapshots.reserve(chunk_overrides_.size());
 
     for (const auto& [coord, override_entry] : chunk_overrides_) {
-        if (override_entry.generator_mismatch_count == 0) {
+        if (override_entry.generator_mismatch_count == 0U &&
+            override_entry.player_placed_count == 0U) {
             continue;
         }
 
         if (const auto loaded_iterator = chunks_.find(coord); loaded_iterator != chunks_.end()) {
-            snapshots.push_back({coord, loaded_iterator->second.chunk.blocks(), loaded_iterator->second.chunk.water_state()});
+            snapshots.push_back({
+                coord,
+                loaded_iterator->second.chunk.blocks(),
+                loaded_iterator->second.chunk.water_state(),
+                override_entry.player_placed_mask,
+            });
             continue;
         }
 
@@ -1704,12 +2054,15 @@ auto World::capture_save_plan() const -> WorldSavePlan {
     plan.chunks.reserve(chunk_overrides_.size());
 
     for (const auto& [coord, override_entry] : chunk_overrides_) {
-        if (override_entry.generator_mismatch_count == 0U) {
+        if (override_entry.generator_mismatch_count == 0U &&
+            override_entry.player_placed_count == 0U) {
             continue;
         }
 
         WorldSavePlanChunk chunk_plan {};
         chunk_plan.coord = coord;
+        chunk_plan.player_placed_mask =
+            override_entry.player_placed_mask;
         if (override_entry.dense != nullptr) {
             chunk_plan.dense_blocks.assign(
                 override_entry.dense->blocks.begin(),
@@ -1752,13 +2105,21 @@ void World::begin_restore_save_plan(WorldSavePlan plan) {
             total_cells += kChunkVolume * 2U;
             continue;
         }
-        if (chunk.sparse_cells.empty() || !chunk.dense_water_state.empty()) {
+        const auto player_placed_count =
+            player_placed_mask_count(
+                chunk.player_placed_mask);
+        if ((chunk.sparse_cells.empty() &&
+             player_placed_count == 0U) ||
+            !chunk.dense_water_state.empty()) {
             throw std::invalid_argument("World save plan contains an invalid sparse chunk");
         }
         // Le lecteur binaire valide deja chaque cellule au fil de l'I/O. Pour
         // un plan fourni directement, je reporte ce controle dans les tranches
         // afin que begin_restore_save_plan reste en O(nombre de chunks).
-        total_cells += chunk.sparse_cells.size();
+        total_cells +=
+            chunk.sparse_cells.empty()
+                ? 1U
+                : chunk.sparse_cells.size();
     }
 
     // Je remplace atomiquement le plan logique; ses vecteurs seront liberes
@@ -1792,7 +2153,8 @@ auto World::process_save_restore(std::size_t cell_budget, double max_ms) -> Worl
         return time_limited && clock::now() >= deadline;
     };
     const auto complete_current_chunk = [&](WorldSavePlanChunk& chunk_plan) {
-        if (state.pending_override.generator_mismatch_count > 0U) {
+        if (state.pending_override.generator_mismatch_count > 0U ||
+            state.pending_override.player_placed_count > 0U) {
             auto [override_iterator, inserted] = chunk_overrides_.insert_or_assign(
                 chunk_plan.coord,
                 std::move(state.pending_override));
@@ -1817,9 +2179,22 @@ auto World::process_save_restore(std::size_t cell_budget, double max_ms) -> Worl
     while (state.next_chunk < state.plan.chunks.size() && remaining > 0U && !time_expired()) {
         auto& chunk_plan = state.plan.chunks[state.next_chunk];
         if (!chunk_plan.dense()) {
-            if (state.next_cell == 0U && state.pending_override.sparse_cells.capacity() == 0U) {
+            if (state.next_cell == 0U &&
+                state.pending_override.sparse_cells.capacity() == 0U &&
+                state.pending_override.player_placed_count == 0U) {
                 state.pending_override.sparse_cells.reserve(
                     std::min(chunk_plan.sparse_cells.size(), kSparseOverrideCellLimit));
+                state.pending_override.player_placed_mask =
+                    chunk_plan.player_placed_mask;
+                state.pending_override.player_placed_count =
+                    player_placed_mask_count(
+                        chunk_plan.player_placed_mask);
+                if (chunk_plan.sparse_cells.empty() &&
+                    state.pending_override.player_placed_count > 0U) {
+                    --remaining;
+                    ++stats.processed_cells;
+                    ++state.processed_cells;
+                }
             }
             while (state.next_cell < chunk_plan.sparse_cells.size() && remaining > 0U && !time_expired()) {
                 const auto plan_cell_index = state.next_cell;
@@ -1895,6 +2270,11 @@ auto World::process_save_restore(std::size_t cell_budget, double max_ms) -> Worl
                       state.pending_override.dense->water_state.begin());
             state.pending_override.dense->generated_blocks = state.generated_chunk->chunk.blocks();
             state.pending_override.dense->generated_water_state = state.generated_chunk->chunk.water_state();
+            state.pending_override.player_placed_mask =
+                chunk_plan.player_placed_mask;
+            state.pending_override.player_placed_count =
+                player_placed_mask_count(
+                    chunk_plan.player_placed_mask);
         }
 
         const auto comparison_count = kChunkVolume;
@@ -1967,7 +2347,12 @@ auto World::save_restore_progress() const noexcept -> float {
 void World::replace_chunk_snapshots(const std::vector<WorldChunkSnapshot>& snapshots) {
     chunk_overrides_.clear();
     for (const auto& snapshot : snapshots) {
-        auto entry = make_chunk_override_entry(snapshot.coord, snapshot.blocks, snapshot.water_state);
+        auto entry =
+            make_chunk_override_entry(
+                snapshot.coord,
+                snapshot.blocks,
+                snapshot.water_state,
+                snapshot.player_placed_mask);
         if (!entry.has_value()) {
             continue;
         }
@@ -2927,16 +3312,119 @@ void World::process_mesh_queue(std::size_t budget, double max_ms, WorldWorkStats
     }
 
     const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
+    const auto first_publish_ready = [&](const ChunkCoord& coord) {
+        if (visual_pipeline_ != VisualPipeline::ModernStylized ||
+            !pending_mesh_set_.contains(coord) ||
+            chunk_has_pending_lighting(coord)) {
+            return false;
+        }
+
+        const auto iterator = chunks_.find(coord);
+        return iterator != chunks_.end() &&
+               iterator->second.mesh_revision == 0U &&
+               iterator->second.chunk.is_dirty();
+    };
+    const auto absolute_chunk_delta = [](int left, int right) noexcept {
+        const auto delta =
+            static_cast<std::int64_t>(left) -
+            static_cast<std::int64_t>(right);
+        return static_cast<std::uint64_t>(
+            delta < 0 ? -delta : delta);
+    };
+    const auto first_publish_precedes =
+        [&](const ChunkCoord& left, const ChunkCoord& right) {
+            const auto left_dx =
+                has_stream_center_
+                    ? absolute_chunk_delta(left.x, stream_center_.x)
+                    : 0U;
+            const auto left_dz =
+                has_stream_center_
+                    ? absolute_chunk_delta(left.z, stream_center_.z)
+                    : 0U;
+            const auto right_dx =
+                has_stream_center_
+                    ? absolute_chunk_delta(right.x, stream_center_.x)
+                    : 0U;
+            const auto right_dz =
+                has_stream_center_
+                    ? absolute_chunk_delta(right.z, stream_center_.z)
+                    : 0U;
+            const auto left_ring = std::max(left_dx, left_dz);
+            const auto right_ring = std::max(right_dx, right_dz);
+            if (left_ring != right_ring) {
+                return left_ring < right_ring;
+            }
+
+            const auto left_manhattan = left_dx + left_dz;
+            const auto right_manhattan = right_dx + right_dz;
+            if (left_manhattan != right_manhattan) {
+                return left_manhattan < right_manhattan;
+            }
+            return left.x < right.x ||
+                   (left.x == right.x && left.z < right.z);
+        };
+    const auto select_first_publish = [&]() -> std::optional<ChunkCoord> {
+        auto selected = std::optional<ChunkCoord> {};
+        for (const auto& coord : pending_mesh_set_) {
+            if (!first_publish_ready(coord)) {
+                continue;
+            }
+            if (!selected.has_value() ||
+                first_publish_precedes(coord, *selected)) {
+                selected = coord;
+            }
+        }
+        return selected;
+    };
+    const auto remove_queued_mesh_coord = [&](const ChunkCoord& coord) {
+        pending_priority_mesh_queue_.erase(
+            std::remove(
+                pending_priority_mesh_queue_.begin(),
+                pending_priority_mesh_queue_.end(),
+                coord),
+            pending_priority_mesh_queue_.end());
+        pending_mesh_queue_.erase(
+            std::remove(
+                pending_mesh_queue_.begin(),
+                pending_mesh_queue_.end(),
+                coord),
+            pending_mesh_queue_.end());
+        pending_priority_mesh_set_.erase(coord);
+        pending_mesh_set_.erase(coord);
+    };
+
     auto remaining = budget;
     while (remaining > 0 &&
            (!pending_priority_mesh_queue_.empty() || !pending_mesh_queue_.empty())) {
-        const auto prioritize = !pending_priority_mesh_queue_.empty();
         if (time_limited && clock::now() >= deadline) {
             break;
         }
 
-        const auto coord = prioritize ? pending_priority_mesh_queue_.front() : pending_mesh_queue_.front();
-        if (prioritize) {
+        if (first_publish_mesh_in_progress_.has_value() &&
+            !first_publish_ready(*first_publish_mesh_in_progress_)) {
+            first_publish_mesh_in_progress_.reset();
+        }
+        if (!first_publish_mesh_in_progress_.has_value()) {
+            first_publish_mesh_in_progress_ =
+                select_first_publish();
+        }
+
+        const auto first_publish =
+            first_publish_mesh_in_progress_.has_value();
+        const auto prioritize =
+            first_publish ||
+            !pending_priority_mesh_queue_.empty();
+        const auto coord =
+            first_publish
+                ? *first_publish_mesh_in_progress_
+                : (prioritize
+                       ? pending_priority_mesh_queue_.front()
+                       : pending_mesh_queue_.front());
+        if (first_publish) {
+            // Je retire l'entrée de sa file historique, puis je la réinsère en
+            // tête logique tant que sa première révision n'est pas publiée.
+            remove_queued_mesh_coord(coord);
+        } else if (prioritize) {
             pending_priority_mesh_queue_.pop_front();
             pending_priority_mesh_set_.erase(coord);
             if (!pending_mesh_set_.contains(coord)) {
@@ -2967,6 +3455,9 @@ void World::process_mesh_queue(std::size_t budget, double max_ms, WorldWorkStats
             continue;
         }
 
+        if (first_publish) {
+            first_publish_mesh_in_progress_.reset();
+        }
         ++stats.meshed_chunks;
         if (prioritize) {
             ++stats.prioritized_meshed_chunks;
@@ -3991,7 +4482,12 @@ void World::sync_chunk_override_snapshot(const ChunkCoord& coord, const Chunk& c
         return;
     }
 
-    auto refreshed_entry = make_chunk_override_entry(coord, chunk.blocks(), chunk.water_state());
+    auto refreshed_entry =
+        make_chunk_override_entry(
+            coord,
+            chunk.blocks(),
+            chunk.water_state(),
+            iterator->second.player_placed_mask);
     if (!refreshed_entry.has_value()) {
         chunk_overrides_.erase(iterator);
         return;
@@ -4011,7 +4507,9 @@ void World::apply_chunk_override_to_record(ChunkRecord& record, const ChunkOverr
 auto World::make_chunk_override_entry(
     const ChunkCoord& coord,
     const std::array<BlockId, kChunkVolume>& blocks,
-    const std::array<WaterState, kChunkVolume>& water_state) const -> std::optional<ChunkOverrideEntry> {
+    const std::array<WaterState, kChunkVolume>& water_state,
+    const WorldPlayerPlacedMask& player_placed_mask) const
+    -> std::optional<ChunkOverrideEntry> {
     auto generated_state = generator_.begin_chunk_generation(coord);
     generator_.advance_chunk_generation(
         generated_state,
@@ -4021,6 +4519,11 @@ auto World::make_chunk_override_entry(
     const auto& generated_water = generated_chunk.water_state();
 
     ChunkOverrideEntry entry {};
+    entry.player_placed_mask =
+        player_placed_mask;
+    entry.player_placed_count =
+        player_placed_mask_count(
+            player_placed_mask);
     entry.sparse_cells.reserve(std::min<std::size_t>(64U, kSparseOverrideCellLimit));
     auto normalized_water = water_state;
     for (std::size_t block_index = 0; block_index < kChunkVolume; ++block_index) {
@@ -4048,7 +4551,8 @@ auto World::make_chunk_override_entry(
         }
     }
 
-    if (entry.generator_mismatch_count == 0U) {
+    if (entry.generator_mismatch_count == 0U &&
+        entry.player_placed_count == 0U) {
         return std::nullopt;
     }
     if (entry.generator_mismatch_count > kSparseOverrideCellLimit) {
@@ -4067,6 +4571,8 @@ auto World::materialize_chunk_override(const ChunkCoord& coord, const ChunkOverr
     -> WorldChunkSnapshot {
     WorldChunkSnapshot snapshot {};
     snapshot.coord = coord;
+    snapshot.player_placed_mask =
+        entry.player_placed_mask;
     if (entry.dense != nullptr) {
         snapshot.blocks = entry.dense->blocks;
         snapshot.water_state = entry.dense->water_state;
@@ -4115,24 +4621,42 @@ void World::set_chunk_override_cell(ChunkOverrideEntry& entry,
                                     WaterState water_state,
                                     BlockId fallback_generated_block,
                                     WaterState fallback_generated_water_state,
+                                    bool player_placed,
                                     const Chunk* loaded_chunk) {
+    if (block_index >= kChunkVolume) {
+        return;
+    }
     auto generated_block = fallback_generated_block;
     auto generated_water_state = fallback_generated_water_state;
     auto sparse_cell = entry.sparse_cells.end();
+    auto previously_mismatched = false;
     if (entry.dense != nullptr) {
         generated_block = entry.dense->generated_blocks[block_index];
         generated_water_state = entry.dense->generated_water_state[block_index];
+        previously_mismatched =
+            entry.dense->blocks[block_index] !=
+                generated_block ||
+            entry.dense->water_state[block_index] !=
+                generated_water_state;
     } else {
         sparse_cell = find_sparse_override_cell(entry, block_index);
         if (sparse_cell != entry.sparse_cells.end() &&
             static_cast<std::size_t>(sparse_cell->index) == block_index) {
             generated_block = sparse_cell->generated_block;
             generated_water_state = sparse_cell->generated_water_state;
+            previously_mismatched =
+                sparse_cell->block !=
+                    generated_block ||
+                sparse_cell->water_state !=
+                    generated_water_state;
         }
     }
 
     const auto mismatch = block != generated_block || water_state != generated_water_state;
-    const auto previously_mismatched = entry.changed_cells.test(block_index);
+    const auto was_player_placed =
+        player_placed_mask_test(
+            entry.player_placed_mask,
+            block_index);
 
     if (entry.dense != nullptr) {
         entry.dense->blocks[block_index] = block;
@@ -4164,6 +4688,18 @@ void World::set_chunk_override_cell(ChunkOverrideEntry& entry,
     } else if (!previously_mismatched && mismatch) {
         entry.changed_cells.set(block_index);
         ++entry.generator_mismatch_count;
+    }
+
+    if (was_player_placed != player_placed) {
+        player_placed_mask_set(
+            entry.player_placed_mask,
+            block_index,
+            player_placed);
+        if (player_placed) {
+            ++entry.player_placed_count;
+        } else if (entry.player_placed_count > 0U) {
+            --entry.player_placed_count;
+        }
     }
 
     if (entry.dense == nullptr && entry.sparse_cells.size() > kSparseOverrideCellLimit && loaded_chunk != nullptr) {
@@ -4372,27 +4908,46 @@ void World::update_chunk_override_after_cell_change(const ChunkCoord& coord,
                                                     BlockId previous_block,
                                                     BlockId next_block,
                                                     WaterState previous_water_state,
-                                                    WaterState next_water_state) {
+                                                    WaterState next_water_state,
+                                                    bool mark_player_placed) {
     const auto block_index = chunk_linear_index(local_coord.x, local_coord.y, local_coord.z);
 
     if (auto override_iterator = chunk_overrides_.find(coord); override_iterator == chunk_overrides_.end()) {
-        if (previous_block == next_block && previous_water_state == next_water_state) {
+        const auto mismatch =
+            previous_block != next_block ||
+            previous_water_state != next_water_state;
+        if (!mismatch &&
+            !mark_player_placed) {
             return;
         }
         ChunkOverrideEntry entry {};
         entry.sparse_cells.reserve(std::min<std::size_t>(64U, kSparseOverrideCellLimit));
-        entry.changed_cells.set(block_index);
-        entry.generator_mismatch_count = 1U;
-        entry.sparse_cells.push_back({
-            static_cast<std::uint16_t>(block_index),
-            next_block,
-            next_water_state,
-            previous_block,
-            previous_water_state,
-        });
+        if (mismatch) {
+            entry.changed_cells.set(block_index);
+            entry.generator_mismatch_count = 1U;
+            entry.sparse_cells.push_back({
+                static_cast<std::uint16_t>(block_index),
+                next_block,
+                next_water_state,
+                previous_block,
+                previous_water_state,
+            });
+        }
+        if (mark_player_placed) {
+            player_placed_mask_set(
+                entry.player_placed_mask,
+                block_index,
+                true);
+            entry.player_placed_count = 1U;
+        }
         chunk_overrides_.emplace(coord, std::move(entry));
     } else {
         auto& entry = override_iterator->second;
+        const auto player_placed =
+            mark_player_placed ||
+            player_placed_mask_test(
+                entry.player_placed_mask,
+                block_index);
         set_chunk_override_cell(
             entry,
             block_index,
@@ -4400,8 +4955,10 @@ void World::update_chunk_override_after_cell_change(const ChunkCoord& coord,
             next_water_state,
             previous_block,
             previous_water_state,
+            player_placed,
             find_chunk(coord));
-        if (entry.generator_mismatch_count == 0) {
+        if (entry.generator_mismatch_count == 0U &&
+            entry.player_placed_count == 0U) {
             chunk_overrides_.erase(override_iterator);
         }
     }

@@ -376,7 +376,7 @@ void fill_ship_atlas_tiles(std::vector<std::uint8_t>& pixels) {
     });
 
     fill_ship_tile(pixels, ShipAtlasMaterial::BlackCanvas, [](int x, int y) {
-        // Le noir reste volontairement anthracite. Un noir mathématique pur
+        // Je garde le noir historique volontairement anthracite : un noir pur
         // ferait disparaître les plis, le tissage et le volume pendant la nuit.
         const auto weave = ((x + y) & 1) == 0 ? 3.0F : -2.5F;
         const auto warp = x % 4 == 0 ? -3.5F : 0.0F;

@@ -1,5 +1,9 @@
 #pragma once
 
+#include "render/OceanVisualShaderSource.h"
+
+#include <string>
+
 namespace valcraft {
 
 inline constexpr auto* kSkyVertexShaderSource = R"(#version 330 core
@@ -14,7 +18,7 @@ void main() {
 }
 )";
 
-inline constexpr auto* kSkyFragmentShaderSource = R"(#version 330 core
+inline constexpr auto* kSkyFragmentShaderSourcePart1 = R"(#version 330 core
 in vec2 v_uv;
 
 uniform mat4 u_inverse_view_projection;
@@ -40,6 +44,18 @@ uniform float u_weather_time;
 uniform int u_cloud_steps;
 uniform float u_cloud_detail;
 uniform sampler2D u_accent_atlas;
+uniform int u_maritime_horizon_enabled;
+uniform vec3 u_maritime_camera_position;
+uniform float u_maritime_sea_level;
+uniform int u_maritime_submersion_active;
+uniform vec4 u_ocean_horizon_waves[2];
+uniform vec2 u_ocean_horizon_wave_phases[2];
+uniform float u_ocean_horizon_severity;
+uniform float u_ocean_horizon_tempest_factor;
+uniform vec3 u_ocean_horizon_sun_color;
+uniform vec2 u_maritime_far_fog_range;
+uniform vec3 u_fog_color;
+uniform vec3 u_distant_fog_color;
 
 out vec4 frag_color;
 
@@ -217,26 +233,37 @@ float lightning_bolt_mask(vec3 view_direction) {
 
 float cloud_density(vec3 sample_position, float cloud_intensity, float overcast_intensity, float storm_intensity) {
     float layer = smoothstep(0.22, 0.34, sample_position.y) * (1.0 - smoothstep(0.64, 0.82, sample_position.y));
+    if (layer <= 0.0) {
+        return 0.0;
+    }
     float base = fbm(sample_position * 0.82);
     float detail = base;
-    float erosion = base;
     // Je garde les branches uniformes pour supprimer deux FBM complets sur les profils plus légers.
     if (u_cloud_detail > 0.01) {
         detail = fbm(sample_position * 1.56 + vec3(2.7, 5.1, 1.9));
-    }
-    if (u_cloud_detail > 0.75) {
-        erosion = fbm(sample_position * 2.60 + vec3(8.3, 1.4, 6.2));
     }
     float weather_cover = clamp(max(cloud_intensity, overcast_intensity * 0.92), 0.0, 1.0);
     float coverage = mix(0.80, 0.50, weather_cover);
     float detail_weight = 0.24 * clamp(u_cloud_detail, 0.0, 1.0);
     float base_weight = 0.98 - detail_weight;
     float erosion_weight = u_cloud_detail > 0.75 ? mix(0.18, 0.08, overcast_intensity) : 0.0;
-    float shape = base * base_weight + detail * detail_weight - erosion * erosion_weight;
-    shape += overcast_intensity * 0.07 - storm_intensity * 0.02;
+    float weather_bias = overcast_intensity * 0.07 - storm_intensity * 0.02;
+    float shape = base * base_weight + detail * detail_weight;
+    // Je peux rejeter exactement cette densité avant le troisième FBM :
+    // l'érosion suivante est toujours positive et uniquement soustractive.
+    if (shape + weather_bias <= coverage) {
+        return 0.0;
+    }
+    if (u_cloud_detail > 0.75) {
+        float erosion = fbm(sample_position * 2.60 + vec3(8.3, 1.4, 6.2));
+        shape -= erosion * erosion_weight;
+    }
+    shape += weather_bias;
     return smoothstep(coverage, coverage + mix(0.16, 0.09, overcast_intensity), shape) * layer;
 }
+)";
 
+inline constexpr auto* kSkyFragmentShaderSourcePart2 = R"(
 void main() {
     vec4 far_point = u_inverse_view_projection * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
     vec3 direction = normalize(far_point.xyz / max(far_point.w, 0.0001));
@@ -330,6 +357,14 @@ void main() {
         int cloud_steps = clamp(u_cloud_steps, 1, 7);
         float cloud_step_stride = cloud_steps > 1 ? 2.04 / float(cloud_steps - 1) : 1.02;
         float cloud_alpha_scale = 7.0 / float(cloud_steps);
+        // Je fonds continûment l'éclairage directionnel avant de supprimer son
+        // second échantillonnage volumétrique sous une couverture opaque : les
+        // transitions météo restent continues et la tempête évite ce coût.
+        float directional_cloud_light =
+            smoothstep(0.12, 0.24, disk_visibility);
+        bool sample_directional_cloud_light =
+            u_cloud_detail > 0.01 &&
+            directional_cloud_light > 0.001;
         for (int step = 0; step < 7; ++step) {
             if (step >= cloud_steps) {
                 break;
@@ -339,14 +374,21 @@ void main() {
             float density = cloud_density(sample_position, cloud_factor, overcast_factor, storm_factor) * cloud_view_band;
             if (density > 0.001) {
                 float light_density = density;
-                if (u_cloud_detail > 0.01) {
+                if (sample_directional_cloud_light) {
                     light_density = cloud_density(
                         sample_position + sun_direction * 0.28 + vec3(0.0, 0.05, 0.0),
                         cloud_factor,
                         overcast_factor,
                         storm_factor);
                 }
-                float self_light = clamp(0.42 + (light_density - density) * 2.6 + 0.22 * day_factor, 0.0, 1.0);
+                float self_light = clamp(
+                    0.42 +
+                    (light_density - density) *
+                        2.6 *
+                        directional_cloud_light +
+                    0.22 * day_factor,
+                    0.0,
+                    1.0);
                 float top_light = clamp(sample_position.y * 1.25 - 0.16, 0.0, 1.0);
                 vec3 sample_color = mix(cloud_shadow_color, cloud_light_color, clamp(self_light * 0.72 + top_light * 0.28, 0.0, 1.0));
                 float sample_alpha = density * (0.20 + 0.18 * day_factor + overcast_factor * 0.12) *
@@ -374,8 +416,216 @@ void main() {
         bolt *
         (0.78 + violent_storm_factor * 0.72);
 
+    if (u_maritime_horizon_enabled != 0) {
+        bool maritime_underwater_camera =
+            u_maritime_submersion_active != 0;
+        if (maritime_underwater_camera) {
+            // Je remplace le ciel par un volume sous-marin continu. L'ancien
+            // plan océanique analytique passait devant le fond et créait une
+            // immense plaque cyan dès que la caméra descendait sous l'eau.
+            float water_depth =
+                max(
+                    u_maritime_sea_level -
+                        u_maritime_camera_position.y,
+                    0.0);
+            float upward_scatter =
+                smoothstep(
+                    -0.72,
+                    0.78,
+                    direction.y);
+            vec3 deep_water =
+                ocean_visual_atlantic_body_color(
+                    0.0,
+                    overcast_factor,
+                    storm_factor,
+                    violent_storm_factor) *
+                0.78;
+            vec3 shallow_water =
+                mix(
+                    deep_water,
+                    ocean_visual_atlantic_body_color(
+                        day_factor,
+                        overcast_factor,
+                        storm_factor,
+                        violent_storm_factor),
+                    0.72);
+            vec3 underwater_color =
+                mix(
+                    deep_water,
+                    shallow_water,
+                    upward_scatter *
+                        exp(-water_depth * 0.045));
+            underwater_color =
+                mix(
+                    underwater_color,
+                    deep_water,
+                    storm_factor * 0.30);
+            color =
+                mix(
+                    color,
+                    underwater_color,
+                    0.985);
+        } else {
+        // Je prolonge l'océan dans le ciel lui-même : les chunks d'eau réels
+        // le recouvrent par la profondeur, tandis qu'aucune géométrie lointaine
+        // ne consomme de sommets, de draw call ou de fill-rate supplémentaire.
+        float ocean_visibility =
+            1.0 -
+            smoothstep(
+                -0.002,
+                0.003,
+                direction.y);
+        if (ocean_visibility > 0.0001) {
+            float eye_height =
+                max(
+                    u_maritime_camera_position.y -
+                        u_maritime_sea_level,
+                    0.35);
+            float plane_distance =
+                min(
+                    eye_height /
+                        max(
+                            -direction.y,
+                            0.001),
+                    4096.0);
+            vec2 ocean_position =
+                u_maritime_camera_position.xz +
+                direction.xz *
+                    plane_distance;
+            vec3 ocean_normal =
+                ocean_visual_far_wave_normal(
+                    ocean_position,
+                    u_ocean_horizon_waves[0],
+                    u_ocean_horizon_wave_phases[0],
+                    u_ocean_horizon_waves[1],
+                    u_ocean_horizon_wave_phases[1]);
+            vec3 view_direction =
+                normalize(
+                    -direction);
+            vec3 reflection_direction =
+                reflect(
+                    direction,
+                    ocean_normal);
+            float horizon_overcast =
+                clamp(
+                    max(
+                        cloud_factor * 0.82,
+                        overcast_factor),
+                    0.0,
+                    1.0);
+            float horizon_storm =
+                clamp(
+                    max(
+                        storm_factor,
+                        u_ocean_horizon_severity),
+                    0.0,
+                    1.0);
+            float horizon_tempest =
+                clamp(
+                    u_ocean_horizon_tempest_factor,
+                    0.0,
+                    1.0);
+            vec3 ocean_body =
+                ocean_visual_atlantic_body_color(
+                    day_factor,
+                    horizon_overcast,
+                    horizon_storm,
+                    horizon_tempest);
+            vec3 reflected_ocean_sky =
+                ocean_visual_reflected_sky(
+                    reflection_direction,
+                    sun_direction,
+                    u_sky_zenith_color,
+                    u_sky_horizon_color,
+                    u_ocean_horizon_sun_color,
+                    u_moon_disk_color,
+                    day_factor,
+                    1.0 - day_factor,
+                    horizon_overcast,
+                    horizon_storm,
+                    horizon_tempest,
+                    u_lightning_intensity);
+            vec3 ocean_color =
+                ocean_visual_surface_radiance(
+                    ocean_body,
+                    reflected_ocean_sky,
+                    ocean_normal,
+                    view_direction);
+
+            float weather_fog =
+                1.0 +
+                precipitation_factor *
+                    0.42 +
+                storm_factor *
+                    0.38;
+            float atmospheric_fog =
+                1.0 -
+                exp(
+                    -plane_distance *
+                    plane_distance *
+                    0.000008 *
+                    weather_fog);
+            float terminal_fog =
+                smoothstep(
+                    u_maritime_far_fog_range.x,
+                    max(
+                        u_maritime_far_fog_range.y,
+                        u_maritime_far_fog_range.x +
+                            0.001),
+                    plane_distance);
+            float ocean_fog =
+                clamp(
+                    max(
+                        atmospheric_fog,
+                        terminal_fog),
+                    0.0,
+                    1.0);
+            vec3 maritime_haze =
+                mix(
+                    u_fog_color,
+                    u_distant_fog_color,
+                    sqrt(
+                        ocean_fog));
+            ocean_color =
+                mix(
+                    ocean_color,
+                    maritime_haze,
+                    ocean_fog);
+
+            // Je termine exactement sur la couleur du brouillard lointain :
+            // un chunk qui arrive entre deux images reste imperceptible.
+            ocean_color =
+                mix(
+                    ocean_color,
+                    u_distant_fog_color,
+                terminal_fog);
+            color =
+                mix(
+                    color,
+                    ocean_color,
+                    ocean_visibility);
+        }
+        }
+    }
+
     frag_color = vec4(clamp(color, 0.0, 1.0), 1.0);
 }
 )";
+
+inline const std::string kSkyFragmentShaderSource = [] {
+    std::string source;
+    source.reserve(
+        std::char_traits<char>::length(
+            kSkyFragmentShaderSourcePart1) +
+        kOceanVisualShaderSource.size() +
+        std::char_traits<char>::length(
+            kSkyFragmentShaderSourcePart2));
+    source += kSkyFragmentShaderSourcePart1;
+    source.append(
+        kOceanVisualShaderSource.data(),
+        kOceanVisualShaderSource.size());
+    source += kSkyFragmentShaderSourcePart2;
+    return source;
+}();
 
 } // namespace valcraft

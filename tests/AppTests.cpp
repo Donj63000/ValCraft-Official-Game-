@@ -14,6 +14,7 @@
 #include "app/SaveGame.h"
 #include "app/SaveSlotMenu.h"
 #include "app/SessionSaveState.h"
+#include "app/StreamingFocus.h"
 #include "gameplay/SeaAdventure.h"
 #include "render/HotbarLayout.h"
 #include "world/Environment.h"
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -95,6 +97,266 @@ void truncate_inside_unique_binary_sequence(const std::filesystem::path& path,
     std::filesystem::resize_file(path, sequence_offset + byte_count / 2U);
 }
 
+constexpr auto kSerializedV13BuildByteCount =
+    kPlayerAttributeCount * sizeof(std::uint8_t) +
+    2U * kAbilityCount * sizeof(std::uint8_t) +
+    kEquippedAbilitySlotCount * sizeof(std::uint8_t) +
+    3U * sizeof(float) +
+    kAbilityCount * sizeof(float) +
+    kAbilityCount * sizeof(std::uint8_t) +
+    kConstructionPlanCount *
+        (3U * sizeof(std::uint8_t) +
+         kConstructionPlanMaximumCellCount *
+             (3U * sizeof(std::int8_t) +
+              sizeof(std::uint16_t))) +
+    sizeof(std::uint8_t) +
+    sizeof(std::uint64_t) +
+    sizeof(std::uint8_t) +
+    sizeof(std::uint64_t);
+constexpr auto kSerializedV14BuildByteCount =
+    kSerializedV13BuildByteCount +
+    (7U + kConstructionPlanCount) *
+        sizeof(std::uint32_t);
+constexpr auto kSerializedSeaV11ByteCount =
+    79U +
+    (sizeof(std::uint8_t) +
+     sizeof(std::uint64_t) +
+     kShipCrewMemberCount * 48U) +
+    sizeof(std::uint8_t) +
+    sizeof(float) +
+    (sizeof(std::uint8_t) +
+     sizeof(std::uint64_t) +
+     kOldGuardMemberCount * 37U);
+constexpr auto kSerializedStatusEntryByteCount =
+    4U * sizeof(std::uint64_t) +
+    sizeof(std::uint8_t) +
+    sizeof(float) +
+    sizeof(std::uint8_t);
+constexpr auto kSerializedSummonedStatsByteCount =
+    10U * sizeof(float) +
+    2U * sizeof(std::uint8_t);
+constexpr auto kSerializedSummonedSnapshotByteCount =
+    sizeof(std::uint8_t) +
+    3U * sizeof(std::uint64_t) +
+    3U * sizeof(float) +
+    sizeof(std::uint8_t) +
+    kSerializedSummonedStatsByteCount +
+    3U * sizeof(double) +
+    5U * sizeof(float) +
+    2U * sizeof(double) +
+    3U * sizeof(std::uint8_t);
+constexpr auto kSerializedDefaultRuntimeByteCount =
+    sizeof(std::uint32_t) +
+    kMaximumStatusEffects *
+        kSerializedStatusEntryByteCount +
+    sizeof(double) +
+    sizeof(std::uint64_t) +
+    sizeof(std::uint64_t) +
+    3U * sizeof(float) +
+    4U * sizeof(float) +
+    sizeof(std::uint8_t) +
+    sizeof(std::uint64_t) +
+    sizeof(std::uint32_t) +
+    kMaximumSavedPlayerSummons *
+        (kSerializedSummonedSnapshotByteCount +
+         sizeof(std::uint8_t) +
+         sizeof(float) +
+         sizeof(std::uint64_t)) +
+    2U * sizeof(std::uint64_t);
+constexpr auto kSerializedMaritimeExperienceByteCount =
+    2U * sizeof(std::uint64_t) +
+    2U * sizeof(std::uint8_t);
+constexpr auto kSerializedPlayerStateByteCount =
+    2U * 3U * sizeof(float) +
+    19U * sizeof(float) +
+    8U * sizeof(std::uint8_t);
+constexpr auto kSerializedBuildOffset =
+    8U +
+    sizeof(std::uint32_t) +
+    sizeof(std::uint64_t) +
+    sizeof(int) +
+    2U * sizeof(float) +
+    2U * sizeof(std::uint32_t) +
+    3U * sizeof(std::uint8_t) +
+    3U * sizeof(float) +
+    kSerializedPlayerStateByteCount +
+    sizeof(std::uint32_t) +
+    sizeof(std::uint64_t);
+
+void downgrade_current_save_to_v13(
+    const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input.good());
+    const auto raw_size =
+        std::filesystem::file_size(path);
+    REQUIRE(
+        raw_size <=
+        (std::numeric_limits<
+             std::size_t>::max)());
+    auto bytes =
+        std::vector<char>(
+            static_cast<std::size_t>(
+                raw_size));
+    input.read(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(
+        input.gcount() ==
+        static_cast<std::streamsize>(
+            bytes.size()));
+    input.close();
+
+    auto cursor =
+        static_cast<std::size_t>(
+            kSerializedBuildOffset);
+    auto v13_build = std::vector<char> {};
+    v13_build.reserve(
+        kSerializedV13BuildByteCount);
+    const auto read_expected_count =
+        [&](std::size_t expected) {
+            REQUIRE(
+                cursor +
+                    sizeof(std::uint32_t) <=
+                bytes.size());
+            auto count =
+                std::uint32_t {0U};
+            std::memcpy(
+                &count,
+                bytes.data() + cursor,
+                sizeof(count));
+            REQUIRE(
+                count ==
+                static_cast<std::uint32_t>(
+                    expected));
+            cursor += sizeof(count);
+        };
+    const auto append_payload =
+        [&](std::size_t byte_count) {
+            REQUIRE(
+                cursor + byte_count <=
+                bytes.size());
+            v13_build.insert(
+                v13_build.end(),
+                bytes.begin() +
+                    static_cast<
+                        std::ptrdiff_t>(
+                        cursor),
+                bytes.begin() +
+                    static_cast<
+                        std::ptrdiff_t>(
+                        cursor +
+                        byte_count));
+            cursor += byte_count;
+        };
+
+    read_expected_count(
+        kPlayerAttributeCount);
+    append_payload(
+        kPlayerAttributeCount *
+        sizeof(std::uint8_t));
+    read_expected_count(kAbilityCount);
+    append_payload(
+        kAbilityCount *
+        sizeof(std::uint8_t));
+    read_expected_count(kAbilityCount);
+    append_payload(
+        kAbilityCount *
+        sizeof(std::uint8_t));
+    read_expected_count(
+        kEquippedAbilitySlotCount);
+    append_payload(
+        kEquippedAbilitySlotCount *
+        sizeof(std::uint8_t));
+    append_payload(3U * sizeof(float));
+    read_expected_count(kAbilityCount);
+    append_payload(
+        kAbilityCount * sizeof(float));
+    read_expected_count(kAbilityCount);
+    append_payload(
+        kAbilityCount *
+        sizeof(std::uint8_t));
+    read_expected_count(
+        kConstructionPlanCount);
+    for (std::size_t plan = 0U;
+         plan < kConstructionPlanCount;
+         ++plan) {
+        append_payload(
+            3U * sizeof(std::uint8_t));
+        read_expected_count(
+            kConstructionPlanMaximumCellCount);
+        append_payload(
+            kConstructionPlanMaximumCellCount *
+            (3U * sizeof(std::int8_t) +
+             sizeof(std::uint16_t)));
+    }
+    append_payload(
+        sizeof(std::uint8_t) +
+        sizeof(std::uint64_t) +
+        sizeof(std::uint8_t) +
+        sizeof(std::uint64_t));
+    REQUIRE(
+        v13_build.size() ==
+        kSerializedV13BuildByteCount);
+    REQUIRE(
+        cursor ==
+        kSerializedBuildOffset +
+            kSerializedV14BuildByteCount);
+
+    bytes.erase(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                kSerializedBuildOffset),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                cursor));
+    bytes.insert(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                kSerializedBuildOffset),
+        v13_build.begin(),
+        v13_build.end());
+
+    // Je ne destine ce convertisseur qu'aux fixtures sans runtime actif :
+    // leur extension v14 a donc une taille fixe et reproductible.
+    constexpr auto runtime_extension_byte_count =
+        kSerializedMaritimeExperienceByteCount +
+        kSerializedDefaultRuntimeByteCount;
+    const auto runtime_offset =
+        kSerializedBuildOffset +
+        kSerializedV13BuildByteCount +
+        kSerializedSeaV11ByteCount;
+    REQUIRE(
+        bytes.size() >=
+        runtime_offset +
+            runtime_extension_byte_count);
+    bytes.erase(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                runtime_offset),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                runtime_offset +
+                runtime_extension_byte_count));
+
+    constexpr auto version =
+        std::uint32_t {13U};
+    std::memcpy(
+        bytes.data() + 8U,
+        &version,
+        sizeof(version));
+    std::ofstream output(
+        path,
+        std::ios::binary |
+            std::ios::trunc);
+    REQUIRE(output.good());
+    output.write(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(output.good());
+}
+
 void downgrade_current_save_to_v11(
     const std::filesystem::path& path,
     std::size_t item_drop_count = 0U) {
@@ -106,6 +368,56 @@ void downgrade_current_save_to_v11(
     input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     REQUIRE(input.gcount() == static_cast<std::streamsize>(bytes.size()));
     input.close();
+
+    constexpr auto player_state_byte_count =
+        2U * 3U * sizeof(float) +
+        19U * sizeof(float) +
+        8U * sizeof(std::uint8_t);
+    constexpr auto build_offset =
+        8U +
+        sizeof(std::uint32_t) +
+        sizeof(std::uint64_t) +
+        sizeof(int) +
+        2U * sizeof(float) +
+        2U * sizeof(std::uint32_t) +
+        3U * sizeof(std::uint8_t) +
+        3U * sizeof(float) +
+        player_state_byte_count +
+        sizeof(std::uint32_t) +
+        sizeof(std::uint64_t);
+    REQUIRE(
+        bytes.size() >=
+        build_offset +
+            kSerializedV14BuildByteCount);
+    // Je retire le bloc append-only v14 avant de changer la version ; sinon
+    // un lecteur v11 prendrait ces octets pour l'état maritime.
+    bytes.erase(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                build_offset),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                build_offset +
+                kSerializedV14BuildByteCount));
+
+    constexpr auto runtime_extension_byte_count =
+        kSerializedMaritimeExperienceByteCount +
+        kSerializedDefaultRuntimeByteCount;
+    const auto runtime_offset =
+        build_offset +
+        kSerializedSeaV11ByteCount;
+    REQUIRE(
+        bytes.size() >=
+        runtime_offset +
+            runtime_extension_byte_count);
+    bytes.erase(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                runtime_offset),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                runtime_offset +
+                runtime_extension_byte_count));
 
     constexpr auto magic = std::array<char, 4> {'I', 'T', 'E', 'M'};
     const auto extension_byte_count =
@@ -147,6 +459,35 @@ void downgrade_current_sea_save_to_v9(const std::filesystem::path& path,
     input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     REQUIRE(input.gcount() == static_cast<std::streamsize>(bytes.size()));
     input.close();
+
+    constexpr auto player_state_byte_count =
+        2U * 3U * sizeof(float) +
+        19U * sizeof(float) +
+        8U * sizeof(std::uint8_t);
+    constexpr auto build_offset =
+        8U +
+        sizeof(std::uint32_t) +
+        sizeof(std::uint64_t) +
+        sizeof(int) +
+        2U * sizeof(float) +
+        2U * sizeof(std::uint32_t) +
+        3U * sizeof(std::uint8_t) +
+        3U * sizeof(float) +
+        player_state_byte_count +
+        sizeof(std::uint32_t) +
+        sizeof(std::uint64_t);
+    REQUIRE(
+        bytes.size() >=
+        build_offset +
+            kSerializedV14BuildByteCount);
+    bytes.erase(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                build_offset),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                build_offset +
+                kSerializedV14BuildByteCount));
 
     auto extension_prefix = std::array<
         char,
@@ -191,14 +532,16 @@ void downgrade_current_sea_save_to_v9(const std::filesystem::path& path,
         sizeof(std::uint8_t) +
         sizeof(std::uint64_t) +
         kOldGuardMemberCount * old_guard_member_bytes;
-    // Je retire les extensions v10 puis v11 placees apres le roster historique,
-    // avant de retablir l'entete v9. Le reste demeure un vrai payload v9.
+    // Je retire les extensions v10, v11 et v14 placées après le roster
+    // historique avant de rétablir l'entête v9.
     bytes.erase(
         match,
         match +
             static_cast<std::ptrdiff_t>(
                 departure_payload_bytes +
-                old_guard_payload_bytes));
+                old_guard_payload_bytes +
+                kSerializedMaritimeExperienceByteCount +
+                kSerializedDefaultRuntimeByteCount));
     constexpr auto item_extension_byte_count =
         4U +
         kHotbarSlotCount +
@@ -681,12 +1024,12 @@ TEST_CASE("game option parser accepts smoke perf flags and values") {
     CHECK(parsed.options.performance.stream_radius == 14);
 }
 
-TEST_CASE("game option parser selects an explicit visual pipeline without changing the safe default") {
+TEST_CASE("game option parser starts modern and keeps the explicit legacy fallback") {
     const auto default_parse =
         parse_game_options(std::vector<std::string_view> {});
     REQUIRE(default_parse.ok);
     CHECK(default_parse.options.visual_pipeline ==
-          VisualPipeline::LegacyVoxel);
+          VisualPipeline::ModernStylized);
 
     const auto legacy_parse =
         parse_game_options(
@@ -740,6 +1083,16 @@ TEST_CASE("game option parser accepts explicit smoke session modes") {
     REQUIRE(sea_legacy_parse.ok);
     CHECK(sea_legacy_parse.options.smoke_session == SmokeSessionMode::SeaLegacy);
 
+    const auto sea_open_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--smoke-session=sea-open",
+            });
+    REQUIRE(sea_open_parse.ok);
+    CHECK(
+        sea_open_parse.options.smoke_session ==
+        SmokeSessionMode::SeaOpen);
+
     const auto empty_parse = parse_game_options(std::vector<std::string_view> {"--smoke-session="});
     CHECK_FALSE(empty_parse.ok);
     CHECK(empty_parse.error_message == "Invalid value for --smoke-session");
@@ -754,7 +1107,7 @@ TEST_CASE("game option parser accepts deterministic maritime smoke views") {
     REQUIRE(default_parse.ok);
     CHECK(default_parse.options.smoke_ship_view == SmokeShipView::None);
 
-    const std::array<std::pair<std::string_view, SmokeShipView>, 9> valid_views {{
+    const std::array<std::pair<std::string_view, SmokeShipView>, 14> valid_views {{
         {"deck", SmokeShipView::Deck},
         {"bow", SmokeShipView::Bow},
         {"stern", SmokeShipView::Stern},
@@ -764,6 +1117,11 @@ TEST_CASE("game option parser accepts deterministic maritime smoke views") {
         {"cabin", SmokeShipView::CaptainCabin},
         {"cargo", SmokeShipView::CargoHold},
         {"crew", SmokeShipView::CrewDeck},
+        {"infirmary", SmokeShipView::Infirmary},
+        {"mess", SmokeShipView::Mess},
+        {"battery", SmokeShipView::GunDeck},
+        {"underwater", SmokeShipView::Underwater},
+        {"wake", SmokeShipView::Wake},
     }};
     for (const auto& [label, expected] : valid_views) {
         const auto argument = std::string("--smoke-ship-view=") + std::string(label);
@@ -791,6 +1149,30 @@ TEST_CASE("game option parser accepts startup ui preview overlays") {
     const auto parsed_pause = parse_game_options(pause_arguments);
     REQUIRE(parsed_pause.ok);
     CHECK(parsed_pause.options.startup_ui_overlay == StartupUiOverlay::Pause);
+
+    const std::vector<std::string_view> progression_arguments {
+        "--ui-preview=progression"};
+    const auto parsed_progression =
+        parse_game_options(
+            progression_arguments);
+    REQUIRE(parsed_progression.ok);
+    CHECK(
+        parsed_progression.options
+                .startup_ui_overlay ==
+            StartupUiOverlay::
+                Progression);
+
+    const std::vector<std::string_view> construction_arguments {
+        "--ui-preview=construction-plan"};
+    const auto parsed_construction =
+        parse_game_options(
+            construction_arguments);
+    REQUIRE(parsed_construction.ok);
+    CHECK(
+        parsed_construction.options
+                .startup_ui_overlay ==
+            StartupUiOverlay::
+                ConstructionPlan);
 
     const std::vector<std::string_view> invalid_arguments {"--ui-preview=main"};
     CHECK_FALSE(parse_game_options(invalid_arguments).ok);
@@ -829,6 +1211,65 @@ TEST_CASE("game option parser accepts deterministic non negative weather time") 
     REQUIRE(maximum_parse.ok);
     CHECK(maximum_parse.options.initial_weather_time_seconds ==
           doctest::Approx(kMaximumWeatherTimeSeconds));
+}
+
+TEST_CASE("sea new smoke applies only an explicitly requested initial time") {
+    const auto default_parse =
+        parse_game_options(std::vector<std::string_view> {});
+    REQUIRE(default_parse.ok);
+    CHECK_FALSE(default_parse.options.initial_time_explicitly_set);
+    CHECK(resolve_new_session_time_of_day(default_parse.options) ==
+          doctest::Approx(8.25F));
+
+    const auto sea_default_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--smoke-test",
+                "--smoke-session=sea-new",
+            });
+    REQUIRE(sea_default_parse.ok);
+    CHECK_FALSE(
+        sea_default_parse.options.initial_time_explicitly_set);
+    CHECK(resolve_new_session_time_of_day(
+              sea_default_parse.options) ==
+          doctest::Approx(8.25F));
+
+    const auto night_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--smoke-test",
+                "--smoke-session=sea-new",
+                "--initial-time=0",
+            });
+    REQUIRE(night_parse.ok);
+    CHECK(night_parse.options.initial_time_explicitly_set);
+    CHECK(night_parse.options.initial_time_of_day ==
+          doctest::Approx(0.0F));
+    CHECK(resolve_new_session_time_of_day(night_parse.options) ==
+          doctest::Approx(0.0F));
+
+    const auto dense_port_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--smoke-test",
+                "--smoke-session=sea-new",
+                "--initial-time=16.5",
+            });
+    REQUIRE(dense_port_parse.ok);
+    CHECK(resolve_new_session_time_of_day(
+              dense_port_parse.options) ==
+          doctest::Approx(16.5F));
+
+    const auto interactive_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--initial-time=0",
+            });
+    REQUIRE(interactive_parse.ok);
+    CHECK(interactive_parse.options.initial_time_explicitly_set);
+    CHECK(resolve_new_session_time_of_day(
+              interactive_parse.options) ==
+          doctest::Approx(8.25F));
 }
 
 TEST_CASE("game option parser rejects invalid deterministic weather time") {
@@ -947,6 +1388,50 @@ TEST_CASE("gameplay action keys use physical scancodes") {
     remapped_console_key.sym = static_cast<SDL_Keycode>(0x00B2);
     remapped_console_key.scancode = SDL_SCANCODE_1;
     CHECK_FALSE(is_command_console_key(remapped_console_key));
+}
+
+TEST_CASE("progression input bindings use the physical P and F1 through F5 keys") {
+    SDL_Keysym progression_key {};
+    progression_key.sym = SDLK_o;
+    progression_key.scancode = SDL_SCANCODE_P;
+    CHECK(is_progression_menu_key(progression_key));
+
+    SDL_Keysym remapped_progression_key {};
+    remapped_progression_key.sym = SDLK_p;
+    remapped_progression_key.scancode = SDL_SCANCODE_O;
+    CHECK_FALSE(is_progression_menu_key(remapped_progression_key));
+
+    constexpr std::array ability_scancodes {
+        SDL_SCANCODE_F1,
+        SDL_SCANCODE_F2,
+        SDL_SCANCODE_F3,
+        SDL_SCANCODE_F4,
+        SDL_SCANCODE_F5,
+    };
+    for (std::size_t slot = 0U; slot < ability_scancodes.size(); ++slot) {
+        SDL_Keysym ability_key {};
+        ability_key.sym = SDLK_UNKNOWN;
+        ability_key.scancode = ability_scancodes[slot];
+
+        const auto mapped_slot = ability_slot_from_key(ability_key);
+        REQUIRE(mapped_slot.has_value());
+        CHECK(*mapped_slot == slot);
+    }
+}
+
+TEST_CASE("progression ability bindings reject keys outside F1 through F5") {
+    constexpr std::array invalid_scancodes {
+        SDL_SCANCODE_UNKNOWN,
+        SDL_SCANCODE_P,
+        SDL_SCANCODE_1,
+        SDL_SCANCODE_F6,
+        SDL_SCANCODE_ESCAPE,
+    };
+    for (const auto scancode : invalid_scancodes) {
+        SDL_Keysym invalid_key {};
+        invalid_key.scancode = scancode;
+        CHECK_FALSE(ability_slot_from_key(invalid_key).has_value());
+    }
 }
 
 TEST_CASE("game option parser enables audit only when audit or perf capture flags are present") {
@@ -1482,6 +1967,64 @@ TEST_CASE("normal mode clamps very large frame times without forcing the fixed s
 
     CHECK(resolved.count() == doctest::Approx(0.25));
     CHECK(resolved != fixed_step);
+}
+
+TEST_CASE("sea streaming follows a disembarked player instead of the moving ship") {
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(8126);
+    const auto ship_position =
+        sea_adventure.ship_position();
+    const glm::vec3 ship_velocity {
+        0.0F,
+        0.0F,
+        2.0F,
+    };
+
+    PlayerController deck_player(
+        sea_adventure.deck_spawn_position());
+    const auto deck_hud =
+        sea_adventure.hud_state(
+            deck_player);
+    REQUIRE(deck_hud.on_ship);
+    const auto deck_focus =
+        resolve_sea_adventure_streaming_focus(
+            deck_player.position(),
+            deck_hud.on_ship,
+            ship_position,
+            ship_velocity);
+    CHECK(deck_focus.z >
+          deck_player.position().z);
+
+    PlayerController disembarked_player(
+        ship_position +
+        glm::vec3 {
+            28.0F,
+            4.10F,
+            0.0F,
+        });
+    const auto disembarked_hud =
+        sea_adventure.hud_state(
+            disembarked_player);
+    REQUIRE_FALSE(disembarked_hud.on_ship);
+
+    const auto unguarded_focus =
+        sea_horizon_predictive_streaming_focus(
+            disembarked_player.position(),
+            ship_position,
+            ship_velocity);
+    REQUIRE(
+        unguarded_focus !=
+        disembarked_player.position());
+
+    const auto guarded_focus =
+        resolve_sea_adventure_streaming_focus(
+            disembarked_player.position(),
+            disembarked_hud.on_ship,
+            ship_position,
+            ship_velocity);
+    CHECK(
+        guarded_focus ==
+        disembarked_player.position());
 }
 
 TEST_CASE("movement input helper reads the physical strafe cluster consistently") {
@@ -2727,7 +3270,7 @@ TEST_CASE("inventory number key swap can move a hovered stack into an empty hotb
     CHECK_FALSE(inventory_slot_has_item(inventory.storage_slots[13]));
 }
 
-TEST_CASE("save version 12 preserves loaded and empty muskets in every item container") {
+TEST_CASE("save version 14 preserves loaded and empty muskets in every item container") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -2736,7 +3279,7 @@ TEST_CASE("save version 12 preserves loaded and empty muskets in every item cont
                     .count()));
     const auto save_root =
         std::filesystem::temp_directory_path() /
-        ("valcraft-save-v12-musket-" +
+        ("valcraft-save-v14-musket-" +
          unique_suffix);
     std::filesystem::remove_all(save_root);
 
@@ -2797,7 +3340,7 @@ TEST_CASE("save version 12 preserves loaded and empty muskets in every item cont
             reinterpret_cast<char*>(&version),
             sizeof(version));
         REQUIRE(input.good());
-        CHECK(version == 12U);
+        CHECK(version == 14U);
     }
 
     const auto loaded =
@@ -2854,26 +3397,9 @@ TEST_CASE("save version 12 preserves loaded and empty muskets in every item cont
     std::filesystem::copy_file(
         truncated_path,
         version_11_path);
-    {
-        std::fstream output(
-            version_11_path,
-            std::ios::binary |
-                std::ios::in |
-                std::ios::out);
-        REQUIRE(output.good());
-        constexpr auto version_11 =
-            std::uint32_t {11U};
-        output.seekp(8);
-        output.write(
-            reinterpret_cast<const char*>(
-                &version_11),
-            sizeof(version_11));
-        REQUIRE(output.good());
-    }
-    std::filesystem::resize_file(
+    downgrade_current_save_to_v11(
         version_11_path,
-        byte_count -
-            extension_byte_count);
+        1U);
     const auto legacy_loaded =
         load_save_slot(
             save_root,
@@ -2955,7 +3481,55 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     snapshot.player_state.fly_mode = true;
     snapshot.player_state.health = 13.5F;
     snapshot.player_state.death_cause = PlayerDeathCause::Zombie;
-    snapshot.progression = {12U, 3456ULL};
+    snapshot.progression = {12U, 345ULL};
+    snapshot.player_build.attributes.values[
+        player_attribute_index(
+            PlayerAttribute::Strength)] = 2U;
+    const auto vanguard_index =
+        ability_index(
+            AbilityId::KnightVanguardStrike);
+    snapshot.player_build.ability_ranks[
+        vanguard_index] = 3U;
+    snapshot.player_build.equipped_abilities[0U] =
+        AbilityId::KnightVanguardStrike;
+    snapshot.player_build.val_energy = 73.5F;
+    snapshot.player_build
+        .global_cooldown_remaining = 0.125F;
+    snapshot.player_build
+        .energy_regeneration_delay_remaining =
+        0.75F;
+    snapshot.player_build.cooldowns_remaining[
+        vanguard_index] = 1.2F;
+    snapshot.player_build.charges[
+        vanguard_index] = 0U;
+    snapshot.player_build
+        .successful_cast_sequence =
+        77ULL;
+    snapshot.player_build
+        .last_dominant_path =
+        AbilityPath::Commander;
+    snapshot.player_build.revision =
+        0x1020'3040'5060'7080ULL;
+    auto& saved_plan =
+        snapshot.player_build
+            .construction_plans[1U];
+    saved_plan.cell_count = 2U;
+    saved_plan.cells[0U] = {
+        0,
+        0,
+        0,
+        to_block_id(
+            BlockType::Planks),
+    };
+    saved_plan.cells[1U] = {
+        1,
+        0,
+        0,
+        to_block_id(
+            BlockType::Planks),
+    };
+    snapshot.player_build
+        .selected_construction_plan = 1U;
     snapshot.sea_adventure.active = true;
     snapshot.sea_adventure.ship_position = {0.5F, 49.0F, 118.25F};
     snapshot.sea_adventure.route_distance = 512.75F;
@@ -3088,7 +3662,62 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     CHECK(loaded->player_state.health == doctest::Approx(snapshot.player_state.health));
     CHECK(loaded->player_state.death_cause == snapshot.player_state.death_cause);
     CHECK(loaded->progression.level == 12U);
-    CHECK(loaded->progression.experience == 3456ULL);
+    CHECK(loaded->progression.experience == 345ULL);
+    CHECK(
+        loaded->player_build.attributes.values[
+            player_attribute_index(
+                PlayerAttribute::Strength)] ==
+        2U);
+    CHECK(
+        loaded->player_build.ability_ranks[
+            vanguard_index] == 3U);
+    CHECK(
+        loaded->player_build.equipped_abilities[0U] ==
+        AbilityId::KnightVanguardStrike);
+    CHECK(
+        loaded->player_build.val_energy ==
+        doctest::Approx(73.5F));
+    CHECK(
+        loaded->player_build
+            .global_cooldown_remaining ==
+        doctest::Approx(0.125F));
+    CHECK(
+        loaded->player_build
+            .energy_regeneration_delay_remaining ==
+        doctest::Approx(0.75F));
+    CHECK(
+        loaded->player_build.cooldowns_remaining[
+            vanguard_index] ==
+        doctest::Approx(1.2F));
+    CHECK(
+        loaded->player_build.charges[
+            vanguard_index] == 0U);
+    CHECK(
+        loaded->player_build
+            .successful_cast_sequence ==
+        77ULL);
+    CHECK(
+        loaded->player_build
+            .last_dominant_path ==
+        AbilityPath::Commander);
+    CHECK(
+        loaded->player_build.revision ==
+        0x1020'3040'5060'7080ULL);
+    CHECK(
+        loaded->player_build
+            .selected_construction_plan ==
+        1U);
+    REQUIRE(
+        loaded->player_build
+            .construction_plans[1U]
+            .cell_count == 2U);
+    CHECK(
+        loaded->player_build
+            .construction_plans[1U]
+            .cells[1U]
+            .material_id ==
+        to_block_id(
+            BlockType::Planks));
     CHECK(loaded->hotbar.selected_index == 4);
     CHECK(loaded->hotbar.slots[4].block_id == to_block_id(BlockType::Torch));
     CHECK(loaded->hotbar.slots[8].block_id == to_block_id(BlockType::Pickaxe));
@@ -3114,7 +3743,7 @@ TEST_CASE("save game scanning and loading preserve slot metadata and payloads") 
     CHECK(loaded->item_drops[1].stack.count == 1);
     CHECK(loaded->chunk_snapshots.empty());
     REQUIRE(loaded->world_save_plan.chunks.size() == 1);
-    CHECK(loaded->world_save_plan.generation_version == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(loaded->world_save_plan.generation_version == WorldGenerationVersion::LivingOceanV3);
     CHECK(loaded->world_save_plan.chunks[0].coord == chunk_snapshot.coord);
     CHECK(loaded->world_save_plan.chunks[0].dense_blocks[1] == to_block_id(BlockType::Torch));
     CHECK(loaded->world_save_plan.chunks[0].dense_blocks[2] == to_block_id(BlockType::GoldOre));
@@ -3425,6 +4054,9 @@ TEST_CASE("save game loader preserves backward compatibility with version 1 file
     CHECK(loaded->player_state.health == doctest::Approx(player_state.health));
     CHECK(loaded->progression.level == 1U);
     CHECK(loaded->progression.experience == 0ULL);
+    CHECK(
+        loaded->player_build ==
+        PlayerBuildState {});
     CHECK(std::all_of(loaded->inventory.equipment_slots.begin(), loaded->inventory.equipment_slots.end(), [](const HotbarSlot& slot) {
         return !inventory_slot_has_item(slot);
     }));
@@ -3536,7 +4168,8 @@ TEST_CASE("save game loader reads exact historical version 2 to 6 binary fixture
         CHECK(
             loaded->progression ==
             (version >= 6U
-                 ? fixture.progression
+                 ? migrate_legacy_player_progression_state(
+                       fixture.progression)
                  : PlayerProgressionState {}));
 
         CHECK(
@@ -3829,7 +4462,10 @@ TEST_CASE("save game loader preserves the historical version 8 sea payload") {
     const auto loaded = load_save_slot(save_root, 0);
     REQUIRE(loaded.has_value());
     CHECK(loaded->metadata.seed == seed);
-    CHECK(loaded->progression == progression);
+    CHECK(
+        loaded->progression ==
+        migrate_legacy_player_progression_state(
+            progression));
     CHECK(loaded->sea_adventure.active);
     CHECK(loaded->sea_adventure.ship_position.z == doctest::Approx(sea_state.ship_position.z));
     CHECK(loaded->sea_adventure.route_distance == doctest::Approx(sea_state.route_distance));
@@ -4398,7 +5034,12 @@ TEST_CASE("compact world save plan stays compact until its incremental world res
     const auto replacement = generated_block == to_block_id(BlockType::Stone)
                                  ? to_block_id(BlockType::Air)
                                  : to_block_id(BlockType::Stone);
-    world.set_block(block_x, block_y, block_z, replacement);
+    REQUIRE(
+        world.set_player_block(
+            block_x,
+            block_y,
+            block_z,
+            replacement));
 
     auto save_plan = world.capture_save_plan();
     REQUIRE(save_plan.chunks.size() == 1U);
@@ -4424,6 +5065,15 @@ TEST_CASE("compact world save plan stays compact until its incremental world res
     REQUIRE(loaded->world_save_plan.chunks.front().sparse_cells.size() == 1U);
     CHECK(loaded->world_save_plan.chunks.front().sparse_cells.front().index == block_index);
     CHECK(loaded->world_save_plan.chunks.front().sparse_cells.front().block == replacement);
+    const auto player_mask_byte =
+        block_index / 8U;
+    const auto player_mask_bit =
+        static_cast<std::uint8_t>(
+            1U << (block_index % 8U));
+    CHECK(
+        (loaded->world_save_plan.chunks.front()
+             .player_placed_mask[player_mask_byte] &
+         player_mask_bit) != 0U);
 
     World restored(seed, 0);
     restored.begin_restore_save_plan(loaded->world_save_plan);
@@ -4432,6 +5082,11 @@ TEST_CASE("compact world save plan stays compact until its incremental world res
     }
     restored.ensure_chunk_loaded({0, 0});
     CHECK(restored.get_block(block_x, block_y, block_z) == replacement);
+    CHECK(
+        restored.was_player_placed(
+            block_x,
+            block_y,
+            block_z));
 
     World ocean_world(seed + 1, 0, WorldGenerationProfile::OceanAdventure);
     ocean_world.set_block(block_x, block_y, block_z, to_block_id(BlockType::Stone));
@@ -4444,7 +5099,7 @@ TEST_CASE("compact world save plan stays compact until its incremental world res
     write_save_slot(save_root, 1, ocean_snapshot, ocean_plan);
     const auto loaded_ocean = load_save_slot(save_root, 1);
     REQUIRE(loaded_ocean.has_value());
-    CHECK(loaded_ocean->world_save_plan.generation_version == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(loaded_ocean->world_save_plan.generation_version == WorldGenerationVersion::LivingOceanV3);
     REQUIRE(loaded_ocean->world_save_plan.chunks.size() == 1U);
     REQUIRE(loaded_ocean->world_save_plan.chunks.front().sparse_cells.size() == 1U);
     CHECK(loaded_ocean->world_save_plan.chunks.front().sparse_cells.front().block == to_block_id(BlockType::Stone));
@@ -4466,6 +5121,103 @@ TEST_CASE("compact world save plan stays compact until its incremental world res
     REQUIRE(loaded_dense->world_save_plan.chunks.size() == 1U);
     CHECK(loaded_dense->world_save_plan.chunks.front().dense());
     CHECK(loaded_dense->world_save_plan.chunks.front().dense_blocks[block_index] == to_block_id(BlockType::DiamondOre));
+
+    World marker_only_world(
+        seed + 3,
+        0,
+        WorldGenerationProfile::OceanAdventure);
+    const auto marker_generated =
+        marker_only_world.peek_block_or_generated(
+            block_x,
+            block_y,
+            block_z);
+    const auto marker_replacement =
+        marker_generated ==
+                to_block_id(
+                    BlockType::Stone)
+            ? to_block_id(
+                  BlockType::Air)
+            : to_block_id(
+                  BlockType::Stone);
+    REQUIRE(
+        marker_only_world.set_player_block(
+            block_x,
+            block_y,
+            block_z,
+            marker_replacement));
+    REQUIRE(
+        marker_only_world.restore_generated_cell(
+            block_x,
+            block_y,
+            block_z));
+    const auto marker_only_plan =
+        marker_only_world.capture_save_plan();
+    REQUIRE(
+        marker_only_plan.chunks.size() ==
+        1U);
+    CHECK(
+        marker_only_plan.chunks.front()
+            .sparse_cells.empty());
+
+    SaveGameSnapshot marker_only_snapshot {};
+    marker_only_snapshot.metadata.seed =
+        seed + 3;
+    marker_only_snapshot.metadata.game_mode =
+        GameMode::SeaAdventure;
+    marker_only_snapshot.metadata
+        .modified_chunk_count = 1U;
+    write_save_slot(
+        save_root,
+        3,
+        marker_only_snapshot,
+        marker_only_plan);
+    const auto loaded_marker_only =
+        load_save_slot(
+            save_root,
+            3);
+    REQUIRE(
+        loaded_marker_only.has_value());
+    REQUIRE(
+        loaded_marker_only->world_save_plan
+            .chunks.size() == 1U);
+    CHECK(
+        loaded_marker_only->world_save_plan
+            .chunks.front()
+            .sparse_cells.empty());
+    CHECK(
+        (loaded_marker_only->world_save_plan
+             .chunks.front()
+             .player_placed_mask[player_mask_byte] &
+         player_mask_bit) != 0U);
+
+    World marker_only_restored(
+        seed + 3,
+        0,
+        WorldGenerationProfile::OceanAdventure);
+    marker_only_restored
+        .begin_restore_save_plan(
+            loaded_marker_only->world_save_plan);
+    while (
+        marker_only_restored
+            .has_pending_save_restore()) {
+        (void)marker_only_restored
+            .process_save_restore(
+                kChunkVolume,
+                std::numeric_limits<
+                    double>::infinity());
+    }
+    CHECK(
+        marker_only_restored
+            .was_player_placed(
+                block_x,
+                block_y,
+                block_z));
+    CHECK(
+        marker_only_restored.get_block(
+            block_x,
+            block_y,
+            block_z) ==
+        marker_generated);
 
     std::filesystem::remove_all(save_root);
 }
@@ -4591,6 +5343,397 @@ TEST_CASE("save game deletion removes slot metadata and payloads") {
     const auto after_delete = scan_save_slots(save_root);
     CHECK_FALSE(after_delete[1].exists);
     CHECK_FALSE(load_save_slot(save_root, 1).has_value());
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save version 14 round trips maritime milestones and active ability runtimes exactly") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v14-runtime-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.metadata.game_mode =
+        GameMode::SeaAdventure;
+    snapshot.sea_adventure.active = true;
+    snapshot.sea_adventure.voyage_phase =
+        SeaVoyagePhase::Underway;
+    snapshot.sea_adventure.route_distance =
+        3'125.0F;
+    snapshot.maritime_experience = {
+        12ULL,
+        3ULL,
+        1U,
+        1U,
+    };
+
+    const auto* guard_rank =
+        ability_rank_definition(
+            AbilityId::KnightIronGuard,
+            3U);
+    REQUIRE(guard_rank != nullptr);
+    AbilityCastResolution guard {};
+    guard.id =
+        AbilityId::KnightIronGuard;
+    guard.rank = 3U;
+    guard.duration_seconds =
+        guard_rank->duration_seconds;
+    guard.values =
+        guard_rank->values;
+    guard.mastery_active = true;
+    guard.cast_sequence = 701U;
+    PlayerAbilityEffects effects {};
+    REQUIRE(
+        effects.activate_iron_guard(
+                    guard,
+                    true)
+            .applied);
+    static_cast<void>(
+        effects.update(0.5F));
+    snapshot.player_ability_runtime
+        .player_effects =
+        effects.snapshot();
+    snapshot.player_ability_runtime.wind = {
+        4.25F,
+        0.30F,
+        0.25F,
+        0.20F,
+        true,
+        702U,
+    };
+
+    for (std::size_t index = 0U;
+         index < 2U;
+         ++index) {
+        SummonedUnitSystem footman {};
+        SummonedUnitSpawnRequest request {};
+        request.owner_id = 1U;
+        request.position = {
+            3.0F +
+                static_cast<float>(index),
+            51.0F,
+            -2.0F,
+        };
+        request.rank =
+            index == 0U
+                ? SummonedUnitRank::RankTwo
+                : SummonedUnitRank::RankThree;
+        request.mastered =
+            index == 1U;
+        request.unit_id =
+            8'001U + index;
+        request.cast_sequence =
+            703U + index;
+        REQUIRE(
+            footman.summon(request)
+                .spawned);
+        static_cast<void>(
+            footman.update(
+                0.25F,
+                {}));
+
+        auto& saved =
+            snapshot.player_ability_runtime
+                .summoned_footmen[index];
+        saved.runtime =
+            footman.snapshot();
+        saved.far_seconds =
+            0.75F +
+            static_cast<float>(index);
+        saved.cast_sequence =
+            request.cast_sequence;
+        if (index == 1U) {
+            saved.ship_local_position =
+                glm::vec3 {
+                    1.25F,
+                    2.5F,
+                    -3.75F,
+                };
+        }
+    }
+    snapshot.player_ability_runtime
+        .next_summoned_unit_id =
+        9'000U;
+    snapshot.player_ability_runtime
+        .next_cast_sequence =
+        8'000U;
+    const auto expected_runtime =
+        sanitize_player_ability_runtime_save_state(
+            snapshot.player_ability_runtime);
+
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot);
+    {
+        std::ifstream input(
+            save_slot_file_path(
+                save_root,
+                0U),
+            std::ios::binary);
+        REQUIRE(input.good());
+        input.seekg(8);
+        auto version =
+            std::uint32_t {0U};
+        input.read(
+            reinterpret_cast<char*>(
+                &version),
+            sizeof(version));
+        REQUIRE(input.good());
+        CHECK(version == 14U);
+    }
+
+    const auto loaded =
+        load_save_slot(
+            save_root,
+            0U);
+    REQUIRE(loaded.has_value());
+    CHECK(
+        loaded->maritime_experience ==
+        snapshot.maritime_experience);
+    CHECK(
+        loaded->player_ability_runtime ==
+        expected_runtime);
+    CHECK(
+        loaded->player_ability_runtime
+            .summoned_footmen[1U]
+            .ship_local_position ==
+        snapshot.player_ability_runtime
+            .summoned_footmen[1U]
+            .ship_local_position);
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio to version 14") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v13-migration-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    constexpr auto level =
+        std::uint32_t {42U};
+    const auto old_threshold =
+        player_experience_for_next_level_v13(
+            level);
+    const auto old_experience =
+        old_threshold / 2ULL;
+    REQUIRE(
+        old_experience <
+        player_experience_for_next_level(
+            level));
+
+    SaveGameSnapshot snapshot {};
+    snapshot.metadata.game_mode =
+        GameMode::SeaAdventure;
+    snapshot.progression = {
+        level,
+        old_experience,
+    };
+    snapshot.sea_adventure.active = true;
+    snapshot.sea_adventure.voyage_phase =
+        SeaVoyagePhase::Underway;
+    snapshot.sea_adventure.route_distance =
+        625.0F;
+    snapshot.sea_adventure.fish = 2U;
+    snapshot.sea_adventure.water_flasks = 6U;
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot);
+    downgrade_current_save_to_v13(
+        save_slot_file_path(
+            save_root,
+            0U));
+
+    const auto loaded =
+        load_save_slot(
+            save_root,
+            0U);
+    REQUIRE(loaded.has_value());
+    CHECK(
+        loaded->progression.level ==
+        level);
+    const auto new_threshold =
+        player_experience_for_next_level(
+            level);
+    const auto expected_experience =
+        static_cast<std::uint64_t>(
+            std::floor(
+                (static_cast<long double>(
+                     old_experience) /
+                 static_cast<long double>(
+                     old_threshold)) *
+                    static_cast<long double>(
+                        new_threshold) +
+                0.5L));
+    CHECK(
+        loaded->progression.experience ==
+        expected_experience);
+    CHECK(
+        loaded->maritime_experience
+            .navigation_milestones_awarded ==
+        2ULL);
+    CHECK(
+        loaded->maritime_experience
+            .departure_awarded ==
+        1U);
+    CHECK(
+        loaded->maritime_experience
+            .open_sea_awarded ==
+        1U);
+    CHECK(
+        loaded->maritime_experience
+            .first_delivery_milestones_mask ==
+        3ULL);
+    CHECK(
+        loaded->player_ability_runtime ==
+        PlayerAbilityRuntimeSaveState {});
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save version 14 rejects invalid positional build array counts") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v14-counts-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot);
+    const auto source =
+        save_slot_file_path(
+            save_root,
+            0U);
+
+    const auto overwrite_count =
+        [](const std::filesystem::path& path,
+           std::size_t offset,
+           std::uint32_t value) {
+            std::fstream output(
+                path,
+                std::ios::binary |
+                    std::ios::in |
+                    std::ios::out);
+            REQUIRE(output.good());
+            output.seekp(
+                static_cast<std::streamoff>(
+                    offset));
+            output.write(
+                reinterpret_cast<const char*>(
+                    &value),
+                sizeof(value));
+            REQUIRE(output.good());
+        };
+
+    const auto ability_count_path =
+        save_slot_file_path(
+            save_root,
+            1U);
+    std::filesystem::copy_file(
+        source,
+        ability_count_path);
+    constexpr auto ability_rank_count_offset =
+        kSerializedBuildOffset +
+        sizeof(std::uint32_t) +
+        kPlayerAttributeCount *
+            sizeof(std::uint8_t);
+    overwrite_count(
+        ability_count_path,
+        ability_rank_count_offset,
+        static_cast<std::uint32_t>(
+            kAbilityCount + 1U));
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            1U)
+            .has_value());
+
+    const auto plan_count_path =
+        save_slot_file_path(
+            save_root,
+            2U);
+    std::filesystem::copy_file(
+        source,
+        plan_count_path);
+    constexpr auto plan_count_offset =
+        kSerializedBuildOffset +
+        sizeof(std::uint32_t) +
+        kPlayerAttributeCount *
+            sizeof(std::uint8_t) +
+        sizeof(std::uint32_t) +
+        kAbilityCount *
+            sizeof(std::uint8_t) +
+        sizeof(std::uint32_t) +
+        kAbilityCount *
+            sizeof(std::uint8_t) +
+        sizeof(std::uint32_t) +
+        kEquippedAbilitySlotCount *
+            sizeof(std::uint8_t) +
+        3U * sizeof(float) +
+        sizeof(std::uint32_t) +
+        kAbilityCount * sizeof(float) +
+        sizeof(std::uint32_t) +
+        kAbilityCount *
+            sizeof(std::uint8_t);
+    overwrite_count(
+        plan_count_path,
+        plan_count_offset,
+        static_cast<std::uint32_t>(
+            kConstructionPlanCount + 1U));
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            2U)
+            .has_value());
+
+    const auto cell_count_path =
+        save_slot_file_path(
+            save_root,
+            3U);
+    std::filesystem::copy_file(
+        source,
+        cell_count_path);
+    constexpr auto first_plan_storage_count_offset =
+        plan_count_offset +
+        sizeof(std::uint32_t) +
+        3U * sizeof(std::uint8_t);
+    overwrite_count(
+        cell_count_path,
+        first_plan_storage_count_offset,
+        static_cast<std::uint32_t>(
+            kConstructionPlanMaximumCellCount -
+            1U));
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            3U)
+            .has_value());
 
     std::filesystem::remove_all(save_root);
 }

@@ -1,12 +1,18 @@
 #include "creatures/OldGuardAnimation.h"
+#include "creatures/CreatureSystem.h"
 #include "creatures/OldGuardGeometry.h"
 #include "gameplay/OldGuard.h"
+#include "gameplay/PlayerController.h"
+#include "gameplay/SeaAdventure.h"
 #include "render/MusketVisualRecipe.h"
+#include "render/VisualEntityPrimitives.h"
 
 #include <doctest/doctest.h>
 
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/vec4.hpp>
 
 #include <algorithm>
 #include <array>
@@ -14,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -113,6 +120,32 @@ auto same_vector(const glm::vec3& first,
                  const glm::vec3& second,
                  float epsilon = 1.0e-4F) -> bool {
     return glm::length(first - second) <= epsilon;
+}
+
+auto part_contains_point(
+    const CreaturePartInstance& part,
+    const glm::vec3& point,
+    float tolerance = 1.0e-3F) -> bool {
+    const auto local = glm::inverse(part.transform) *
+                       glm::vec4 {point, 1.0F};
+    return std::isfinite(local.x) &&
+           std::isfinite(local.y) &&
+           std::isfinite(local.z) &&
+           std::abs(local.x) <= 0.5F + tolerance &&
+           std::abs(local.y) <= 0.5F + tolerance &&
+           std::abs(local.z) <= 0.5F + tolerance;
+}
+
+auto parts_containing_point(
+    std::span<const CreaturePartInstance> parts,
+    const glm::vec3& point) -> std::size_t {
+    return static_cast<std::size_t>(
+        std::count_if(
+            parts.begin(),
+            parts.end(),
+            [&](const CreaturePartInstance& part) {
+                return part_contains_point(part, point);
+            }));
 }
 
 auto shot_from(const OldGuardFrameEvents& events,
@@ -221,6 +254,214 @@ TEST_CASE("les soldats suivent exactement la translation le roulis et le tangage
             guards.render_instances()[index].platform_orientation ==
             context.platform.orientation);
     }
+}
+
+TEST_CASE("chaque garde echantillonne sa lumiere locale avec un repli sur le scalaire") {
+    GuardFixture fixture {};
+    auto context = fixture.context();
+    context.platform.world_origin =
+        {120.0F, 34.0F, -75.0F};
+    context.sky_light = 0.37F;
+    context.local_light = 0.19F;
+    const auto source =
+        fixture.guards.members()[0].local_position;
+    context.local_light_at =
+        [source](const glm::vec3& local_position) {
+            return std::clamp(
+                1.0F -
+                    glm::length(
+                        local_position -
+                        source) /
+                        14.0F,
+                0.0F,
+                1.0F);
+        };
+
+    (void)fixture.guards.update(context, 0.0F);
+    const auto lit_guard =
+        fixture.guards.render_instances()[0];
+    const auto distant_guard =
+        fixture.guards.render_instances()[1];
+    CHECK(
+        lit_guard.local_light >
+        distant_guard.local_light);
+    CHECK(
+        lit_guard.sky_light ==
+        doctest::Approx(0.37F));
+    CHECK(
+        distant_guard.sky_light ==
+        doctest::Approx(0.37F));
+
+    context.local_light_at =
+        [](const glm::vec3&) {
+            return std::numeric_limits<float>::quiet_NaN();
+        };
+    (void)fixture.guards.update(context, 0.0F);
+    for (const auto& render :
+         fixture.guards.render_instances()) {
+        CHECK(
+            render.local_light ==
+            doctest::Approx(0.19F));
+    }
+
+    context.local_light_at = {};
+    context.local_light = 0.41F;
+    (void)fixture.guards.update(context, 0.0F);
+    for (const auto& render :
+         fixture.guards.render_instances()) {
+        CHECK(
+            render.local_light ==
+            doctest::Approx(0.41F));
+    }
+}
+
+TEST_CASE("la Vieille Garde partage les dix vrais fanaux pendant une nuit reelle") {
+    constexpr auto world_seed =
+        74'119;
+    const auto exterior_lights =
+        amelie_exterior_lights();
+    REQUIRE(
+        exterior_lights.size() ==
+        10U);
+
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(
+        world_seed);
+    auto state =
+        sea_adventure.save_state();
+
+    // Je place un soldat sous le premier fanal et un autre au centre de
+    // l'intervalle suivant : l'intégration complète doit conserver ce contraste.
+    auto near_fanal =
+        exterior_lights.front()
+            .local_position;
+    near_fanal.x =
+        std::clamp(
+            near_fanal.x,
+            -7.90F,
+            7.90F);
+    near_fanal.y =
+        4.01F;
+    const glm::vec3 between_fanals {
+        0.0F,
+        4.01F,
+        -13.0F,
+    };
+    state.old_guard.members[0].local_position =
+        near_fanal;
+    state.old_guard.members[1].local_position =
+        between_fanals;
+    state.old_guard.members[0].action =
+        OldGuardAction::Watch;
+    state.old_guard.members[1].action =
+        OldGuardAction::Watch;
+    sea_adventure.load_state(
+        state,
+        world_seed);
+
+    const auto members =
+        sea_adventure.old_guard_members();
+    REQUIRE(
+        members.size() ==
+        kOldGuardMemberCount);
+    const auto actual_near =
+        members[0].local_position;
+    const auto actual_distant =
+        members[1].local_position;
+    const auto nearest_distance =
+        [exterior_lights](
+            const glm::vec3& position) {
+            auto distance =
+                std::numeric_limits<float>::infinity();
+            for (const auto& light :
+                 exterior_lights) {
+                distance =
+                    std::min(
+                        distance,
+                        glm::length(
+                            position -
+                            light.local_position));
+            }
+            return distance;
+        };
+    CHECK(
+        nearest_distance(
+            actual_near) <
+        nearest_distance(
+            actual_distant));
+
+    const auto night =
+        EnvironmentClock::compute_state(
+            23.0F);
+    REQUIRE(
+        night.daylight_factor <
+        0.25F);
+    const auto activation =
+        ship_exterior_light_activation(
+            night.daylight_factor,
+            night.storm_intensity,
+            night.cloud_intensity,
+            night.overcast_intensity);
+    REQUIRE(
+        activation >
+        0.75F);
+    const auto expected_near =
+        ship_exterior_light_level(
+            exterior_lights,
+            actual_near) *
+        activation;
+    const auto expected_distant =
+        ship_exterior_light_level(
+            exterior_lights,
+            actual_distant) *
+        activation;
+    REQUIRE(
+        expected_near >
+        expected_distant);
+    REQUIRE(
+        expected_distant >
+        0.0F);
+
+    World world(
+        world_seed,
+        1);
+    CreatureSystem creatures {};
+    PlayerController player {
+        sea_adventure.ship_position() +
+        glm::vec3 {
+            80.0F,
+            4.0F,
+            0.0F,
+        }};
+    (void)sea_adventure.update_old_guard_combat(
+        world,
+        creatures,
+        player,
+        night,
+        0.0F);
+
+    const auto renders =
+        sea_adventure.old_guard_render_instances();
+    REQUIRE(
+        renders.size() ==
+        kOldGuardMemberCount);
+    CHECK(
+        renders[0].sky_light ==
+        doctest::Approx(1.0F));
+    CHECK(
+        renders[1].sky_light ==
+        doctest::Approx(1.0F));
+    CHECK(
+        renders[0].local_light ==
+        doctest::Approx(
+            expected_near));
+    CHECK(
+        renders[1].local_light ==
+        doctest::Approx(
+            expected_distant));
+    CHECK(
+        renders[0].local_light >
+        renders[1].local_light);
 }
 
 TEST_CASE("la portee de perception est inclusive a cinquante metres") {
@@ -504,14 +745,118 @@ TEST_CASE("le sampler partage les sockets de feu et une geometrie bornee") {
     const auto second_parts = build_old_guard_parts(render);
     REQUIRE(first_parts.size() <= kOldGuardVisualPartBudget);
     REQUIRE(first_parts.size() == second_parts.size());
-    CHECK(first_parts.size() >= 48U);
+    REQUIRE(first_parts.size() == 96U);
     for (std::size_t index = 0; index < first_parts.size(); ++index) {
         CHECK(matrix_is_finite(first_parts[index].transform));
         CHECK(first_parts[index].transform == second_parts[index].transform);
     }
+    const auto modern_parts =
+        build_visual_entity_primitive_instances(
+            first_parts,
+            VisualEntityContext::Crew);
+    REQUIRE(modern_parts.size() == first_parts.size());
+    CHECK(
+        std::count_if(
+            modern_parts.begin(),
+            modern_parts.end(),
+            [](const auto& part) {
+                return part.primitive ==
+                       StylizedPrimitiveType::Capsule;
+            }) >=
+        12U);
+    CHECK(
+        std::count_if(
+            modern_parts.begin(),
+            modern_parts.end(),
+            [](const auto& part) {
+                return part.primitive ==
+                       StylizedPrimitiveType::Ellipsoid;
+            }) >=
+        18U);
+    CHECK(
+        std::all_of(
+            modern_parts.begin(),
+            modern_parts.end(),
+            [](const auto& part) {
+                return matrix_is_finite(
+                    part.render_transform());
+            }));
     const auto mesh = build_old_guard_mesh(render);
     CHECK(mesh.part_count == first_parts.size());
     CHECK_FALSE(mesh.empty());
+}
+
+TEST_CASE("toutes les articulations de la Vieille Garde restent recouvertes") {
+    constexpr std::array<OldGuardAction, 3> actions {{
+        OldGuardAction::Watch,
+        OldGuardAction::Reload,
+        OldGuardAction::Bayonet,
+    }};
+    for (const auto action : actions) {
+        OldGuardRenderInstance render {};
+        render.action = action;
+        render.action_progress =
+            action == OldGuardAction::Bayonet
+                ? kOldGuardBayonetHitTime /
+                      kOldGuardBayonetSeconds
+                : 0.46F;
+        render.reload_remaining =
+            kOldGuardReloadSeconds * 0.54F;
+        render.motion_amount = 0.82F;
+        render.locomotion_phase = 0.37F;
+        render.appearance_seed = 0xA17C9U;
+        render.platform_orientation = glm::normalize(
+            glm::angleAxis(
+                0.08F,
+                glm::vec3 {1.0F, 0.0F, 0.0F}) *
+            glm::angleAxis(
+                -0.06F,
+                glm::vec3 {0.0F, 0.0F, 1.0F}));
+
+        const auto pose = sample_old_guard_pose(render);
+        const auto parts = build_old_guard_parts(render);
+        CAPTURE(static_cast<int>(action));
+        REQUIRE(parts.size() == 96U);
+        for (std::size_t index = 0U;
+             index < pose.hips.size();
+             ++index) {
+            CHECK(parts_containing_point(parts, pose.shoulders[index]) >= 3U);
+            CHECK(parts_containing_point(parts, pose.elbows[index]) >= 3U);
+            CHECK(parts_containing_point(parts, pose.hands[index]) >= 2U);
+            CHECK(parts_containing_point(parts, pose.hips[index]) >= 3U);
+            CHECK(parts_containing_point(parts, pose.knees[index]) >= 3U);
+            CHECK(parts_containing_point(parts, pose.ankles[index]) >= 3U);
+        }
+        CHECK(parts_containing_point(parts, pose.neck) >= 2U);
+        CHECK(parts_containing_point(parts, pose.head) >= 1U);
+    }
+}
+
+TEST_CASE("l'habit suit exactement l'avance de la baionnette") {
+    OldGuardRenderInstance watch {};
+    watch.action = OldGuardAction::Watch;
+    watch.appearance_seed = 71U;
+    auto lunge = watch;
+    lunge.action = OldGuardAction::Bayonet;
+    lunge.action_progress =
+        kOldGuardBayonetHitTime /
+        kOldGuardBayonetSeconds;
+
+    const auto watch_pose = sample_old_guard_pose(watch);
+    const auto lunge_pose = sample_old_guard_pose(lunge);
+    const auto watch_parts = build_old_guard_parts(watch);
+    const auto lunge_parts = build_old_guard_parts(lunge);
+    REQUIRE(watch_parts.size() == 96U);
+    REQUIRE(lunge_parts.size() == 96U);
+    const glm::vec3 torso_shift {
+        lunge_parts.front().transform[3] -
+        watch_parts.front().transform[3],
+    };
+    const glm::vec3 socket_shift =
+        lunge_pose.chest -
+        watch_pose.chest;
+    CHECK(glm::length(torso_shift) > 0.20F);
+    CHECK(same_vector(torso_shift, socket_shift, 2.0e-4F));
 }
 
 TEST_CASE("les six gardes respectent le budget et les sept poses partagees") {

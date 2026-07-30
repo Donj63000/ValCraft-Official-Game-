@@ -55,7 +55,29 @@ enum class VisualMaterialId : std::uint16_t {
     DiamondOre = 29,
     AlloyOre = 30,
     ToolWoodSteel = 31,
-    Count = 32,
+    ShipDarkHull = 32,
+    ShipDeckOak = 33,
+    ShipOiledOak = 34,
+    ShipLinen = 35,
+    ShipRope = 36,
+    ShipIron = 37,
+    ShipPatinatedBrass = 38,
+    ShipLantern = 39,
+    ShipGlass = 40,
+    ShipNavyTextile = 41,
+    ShipGold = 42,
+    ShipBurgundyTextile = 43,
+    ShipLeather = 44,
+    ShipPaper = 45,
+    ShipCeramic = 46,
+    MarineSeagrass = 47,
+    MarineKelp = 48,
+    CoralWarm = 49,
+    CoralLagoon = 50,
+    CoralFan = 51,
+    ReefFish = 52,
+    MarineShell = 53,
+    Count = 54,
 };
 
 inline constexpr std::uint16_t kInvalidVisualMaterialLayer = 0xFFFFU;
@@ -111,7 +133,42 @@ inline constexpr std::array<VisualMaterialDefinition, kVisualMaterialCount>
         {VisualMaterialId::DiamondOre, VisualSurfaceClass::Organic, 28U, "diamond_ore", 0.48F, 0.70F, 0.20F, false, false, false},
         {VisualMaterialId::AlloyOre, VisualSurfaceClass::Organic, 29U, "alloy_ore", 0.48F, 0.72F, 0.18F, false, false, false},
         {VisualMaterialId::ToolWoodSteel, VisualSurfaceClass::Proxy, 30U, "tool_wood_steel", 0.84F, 0.66F, 0.10F, false, false, false},
+        // Je réserve ces couches append-only au navire moderne afin de garder
+        // intact le catalogue historique utilisé par le monde et le mode Legacy.
+        {VisualMaterialId::ShipDarkHull, VisualSurfaceClass::Architectural, 31U, "ship_dark_hull", 0.54F, 1.00F, 0.16F, false, false, false},
+        {VisualMaterialId::ShipDeckOak, VisualSurfaceClass::Architectural, 32U, "ship_deck_oak", 0.62F, 0.92F, 0.18F, false, false, false},
+        {VisualMaterialId::ShipOiledOak, VisualSurfaceClass::Architectural, 33U, "ship_oiled_oak", 0.72F, 0.86F, 0.14F, false, false, false},
+        {VisualMaterialId::ShipLinen, VisualSurfaceClass::Proxy, 34U, "ship_linen", 0.96F, 0.48F, 0.10F, false, true, false},
+        {VisualMaterialId::ShipRope, VisualSurfaceClass::Proxy, 35U, "ship_rope", 0.70F, 0.96F, 0.12F, false, false, false},
+        {VisualMaterialId::ShipIron, VisualSurfaceClass::Proxy, 36U, "ship_iron", 0.88F, 0.62F, 0.06F, false, false, false},
+        {VisualMaterialId::ShipPatinatedBrass, VisualSurfaceClass::Proxy, 37U, "ship_patinated_brass", 0.82F, 0.70F, 0.12F, false, false, false},
+        {VisualMaterialId::ShipLantern, VisualSurfaceClass::Proxy, 38U, "ship_lantern", 1.00F, 0.24F, 0.04F, false, false, true},
+        {VisualMaterialId::ShipGlass, VisualSurfaceClass::Architectural, 39U, "ship_glass", 0.94F, 0.10F, 0.04F, false, true, false},
+        {VisualMaterialId::ShipNavyTextile, VisualSurfaceClass::Proxy, 40U, "ship_navy_textile", 0.94F, 0.58F, 0.14F, false, true, false},
+        {VisualMaterialId::ShipGold, VisualSurfaceClass::Proxy, 41U, "ship_gold", 0.82F, 0.56F, 0.08F, false, false, false},
+        {VisualMaterialId::ShipBurgundyTextile, VisualSurfaceClass::Proxy, 42U, "ship_burgundy_textile", 0.94F, 0.58F, 0.14F, false, true, false},
+        {VisualMaterialId::ShipLeather, VisualSurfaceClass::Proxy, 43U, "ship_leather", 0.86F, 0.68F, 0.14F, false, false, false},
+        {VisualMaterialId::ShipPaper, VisualSurfaceClass::Proxy, 44U, "ship_paper", 1.08F, 0.22F, 0.10F, false, true, false},
+        {VisualMaterialId::ShipCeramic, VisualSurfaceClass::Proxy, 45U, "ship_ceramic", 0.92F, 0.26F, 0.06F, false, false, false},
+        // Je réserve ces couches au décor marin moderne. Elles ne deviennent
+        // jamais des BlockId du monde et ne peuvent donc modifier une save.
+        {VisualMaterialId::MarineSeagrass, VisualSurfaceClass::Cutout, 46U, "marine_seagrass", 1.00F, 0.46F, 0.22F, true, true, false},
+        {VisualMaterialId::MarineKelp, VisualSurfaceClass::Cutout, 47U, "marine_kelp", 1.00F, 0.52F, 0.25F, true, true, false},
+        {VisualMaterialId::CoralWarm, VisualSurfaceClass::Proxy, 48U, "coral_warm", 0.86F, 0.62F, 0.20F, false, false, false},
+        {VisualMaterialId::CoralLagoon, VisualSurfaceClass::Proxy, 49U, "coral_lagoon", 0.86F, 0.58F, 0.20F, false, false, false},
+        {VisualMaterialId::CoralFan, VisualSurfaceClass::Cutout, 50U, "coral_fan", 1.00F, 0.44F, 0.20F, true, true, false},
+        {VisualMaterialId::ReefFish, VisualSurfaceClass::Cutout, 51U, "reef_fish", 1.00F, 0.38F, 0.18F, true, true, false},
+        {VisualMaterialId::MarineShell, VisualSurfaceClass::Proxy, 52U, "marine_shell", 0.94F, 0.34F, 0.18F, false, false, false},
     }};
+
+static_assert(
+    static_cast<std::uint16_t>(VisualMaterialId::Count) <= 256U,
+    "Je compacte l'identifiant visuel direct dans un octet de TerrainVertex");
+
+[[nodiscard]] constexpr auto direct_visual_material_token(
+    VisualMaterialId id) noexcept -> BlockId {
+    return static_cast<BlockId>(static_cast<std::uint16_t>(id));
+}
 
 [[nodiscard]] constexpr auto is_known_visual_material_id(VisualMaterialId id) noexcept -> bool {
     return static_cast<std::uint16_t>(id) < static_cast<std::uint16_t>(VisualMaterialId::Count);

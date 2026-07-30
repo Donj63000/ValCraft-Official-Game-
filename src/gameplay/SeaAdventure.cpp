@@ -169,18 +169,29 @@ auto ShipProtectionProfile::shelters_from_weather_local(
 
     const auto hull_half_width =
         half_width_at(local_point.z);
-    const auto sheltered_half_width =
-        std::max(
-            middle_minimum_half_width,
-            hull_half_width -
-                middle_width_inset) -
-        boundary_margin;
+    if (hull_half_width <= 0.0F) {
+        return false;
+    }
 
-    // Je garde la pluie hors du volume habitable, sans rendre la coque
-    // exterieure artificiellement seche.
+    auto sheltered_half_width = hull_half_width;
+    if (local_point.y < middle_hull_min_y) {
+        sheltered_half_width =
+            std::max(
+                lower_minimum_half_width,
+                hull_half_width - lower_width_inset);
+    } else if (local_point.y < upper_hull_min_y) {
+        sheltered_half_width =
+            std::max(
+                middle_minimum_half_width,
+                hull_half_width - middle_width_inset);
+    }
+    sheltered_half_width -= boundary_margin;
+
+    // Je fais suivre au volume abrite la carene exacte de chaque niveau. Je ne
+    // considere donc pas la cale profonde comme mouillee et je ne l'elargis pas
+    // artificiellement jusqu'au flanc du pont des canons.
     return sheltered_half_width >= 0.0F &&
-           std::abs(local_point.x) <=
-               sheltered_half_width;
+           std::abs(local_point.x) <= sheltered_half_width;
 }
 
 namespace {
@@ -702,6 +713,64 @@ void add_panel(std::vector<ShipPart>& parts,
     });
 }
 
+void add_chamfered_box(
+    std::vector<ShipPart>& parts,
+    ShipMaterial material,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner) {
+
+    // Je reserve les volumes adoucis aux details visuels. Le noyau physique
+    // reste toujours une boite distincte, simple et parfaitement previsible.
+    add_box(
+        parts,
+        material,
+        min_corner,
+        max_corner,
+        false,
+        false,
+        ShipPartShape::ChamferedBox);
+}
+
+void add_draped_panel(
+    std::vector<ShipPart>& parts,
+    ShipMaterial material,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner,
+    const glm::vec3& normal,
+    float thickness = 0.06F) {
+
+    parts.push_back({
+        ShipPartShape::DrapedPanel,
+        material,
+        min_corner,
+        max_corner,
+        normal,
+        thickness,
+        false,
+        false,
+        U'\0',
+    });
+}
+
+void add_opening(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner,
+    const glm::vec3& outward_normal) {
+
+    parts.push_back({
+        ShipPartShape::Opening,
+        ShipMaterial::DarkHull,
+        min_corner,
+        max_corner,
+        outward_normal,
+        0.04F,
+        false,
+        false,
+        U'\0',
+    });
+}
+
 void add_glyph(
     std::vector<ShipPart>& parts,
     char32_t glyph,
@@ -724,50 +793,105 @@ void add_glyph(
 }
 
 constexpr ShipProtectionProfile kAmelieProtectionProfile {
-    -35.0F,
-    36.0F,
-    8.60F,
-    2.25F,
-    7.50F,
+    -35.50F,
+    36.50F,
+    8.75F,
+    2.00F,
+    7.35F,
     1.35F,
-    1.55F,
-    -1.42F,
-    -0.62F,
-    0.82F,
-    4.0F,
+    1.65F,
+    -5.85F,
+    -4.05F,
+    -1.05F,
+    4.00F,
+    2.25F,
+    1.05F,
+    1.00F,
     1.25F,
-    0.62F,
-    0.70F,
-    0.80F,
     0.04F,
-    1.0F,
+    -5.10F,
 };
+
 constexpr float kAmelieSternZ =
     kAmelieProtectionProfile.stern_z;
 constexpr float kAmelieBowZ =
     kAmelieProtectionProfile.bow_z;
-constexpr float kAmelieMainDeckUnderside = 3.65F;
+
+// Je centralise volontairement ici les quatre surfaces praticables. Toute
+// retouche d'un niveau met ainsi à jour la coque, les escaliers, les ancres,
+// les luminaires et la navigation sans introduire de valeur magique.
+constexpr float kAmelieHoldFloor = -5.00F;
+constexpr float kAmelieCrewDeck = -2.00F;
+constexpr float kAmelieGunDeck = 1.00F;
 constexpr float kAmelieMainDeckTop =
     kAmelieProtectionProfile.main_deck_top_y;
+constexpr float kAmelieMainDeckUnderside = 3.65F;
+constexpr float kAmelieGunDeckUnderside = 0.72F;
+constexpr float kAmelieCrewDeckUnderside = -2.28F;
+constexpr float kAmelieHoldDeckUnderside = -5.28F;
+constexpr float kAmelieHullWallThickness = 0.44F;
+
 constexpr int kAmelieBoardingMinRowZ = -9;
 constexpr int kAmelieBoardingMaxRowZ = -7;
-constexpr float kAmelieBoardingOuterX = 9.0F;
-constexpr float kAmelieBoardingNetX = 8.92F;
+constexpr float kAmelieBoardingOuterX = 9.10F;
+constexpr float kAmelieBoardingSupportOuterX = 10.00F;
+constexpr float kAmelieBoardingNetX = 9.02F;
 constexpr float kAmelieBoardingNetMinY = -1.30F;
 constexpr float kAmelieBoardingNetMaxY = 4.48F;
 constexpr float kAmelieBoardingNetMinZ = -9.0F;
 constexpr float kAmelieBoardingNetMaxZ = -6.0F;
 constexpr float kAmelieBoardingNetThickness = 0.06F;
 constexpr float kAmelieBoardingNetGrabHalfDepth = 0.18F;
-constexpr float kAmelieBoardingDeckExitX = 7.45F;
-constexpr std::array<glm::vec3, 4> kAmelieInteriorLanterns {{
-    {1.25F, 3.025F, -30.5F},
-    {-1.55F, 3.025F, -6.0F},
-    {1.45F, 3.025F, 5.0F},
-    {-2.40F, 3.025F, 24.0F},
-}};
+constexpr float kAmelieBoardingDeckExitX = 7.58F;
 
-void add_climbable_net(std::vector<ShipPart>& parts, float x, const glm::vec3& outward_normal) {
+struct AmelieDeckOpening {
+    float min_x = 0.0F;
+    float max_x = 0.0F;
+    float min_z = 0.0F;
+    float max_z = 0.0F;
+};
+
+constexpr AmelieDeckOpening kAftMainDeckOpening {
+    -1.22F,
+    1.22F,
+    -15.0F,
+    -9.0F,
+};
+constexpr AmelieDeckOpening kForeMainDeckOpening {
+    -1.22F,
+    1.22F,
+    8.0F,
+    14.0F,
+};
+constexpr AmelieDeckOpening kCrewStairOpening {
+    -3.45F,
+    -1.05F,
+    -4.0F,
+    2.0F,
+};
+constexpr AmelieDeckOpening kHoldStairOpening {
+    1.05F,
+    3.45F,
+    8.0F,
+    14.0F,
+};
+constexpr std::array<AmelieDeckOpening, 2> kAmelieMainDeckOpenings {{
+    kAftMainDeckOpening,
+    kForeMainDeckOpening,
+}};
+constexpr std::array<AmelieDeckOpening, 1> kAmelieGunDeckOpenings {{
+    kCrewStairOpening,
+}};
+constexpr std::array<AmelieDeckOpening, 1> kAmelieCrewDeckOpenings {{
+    kHoldStairOpening,
+}};
+constexpr std::array<AmelieDeckOpening, 0> kAmelieNoDeckOpenings {};
+
+void add_climbable_net(
+    std::vector<ShipPart>& parts,
+    float x,
+    const glm::vec3& outward_normal) {
+
     parts.push_back({
         ShipPartShape::ClimbableNet,
         ShipMaterial::Rope,
@@ -781,21 +905,24 @@ void add_climbable_net(std::vector<ShipPart>& parts, float x, const glm::vec3& o
     });
 }
 
-auto amelie_crew_navigation_nodes() -> const std::array<ShipCrewNavigationNode, 42>& {
-    // Je place les stations dans les axes réellement dégagés du blueprint :
-    // aucune route d'équipage ne dépend d'une coordonnée monde ou d'un chunk.
-    static const std::array<ShipCrewNavigationNode, 42> nodes {{
+auto amelie_crew_navigation_nodes()
+    -> const std::array<ShipCrewNavigationNode, 53>& {
+
+    // Je conserve les identifiants historiques et j'ajoute les nouvelles
+    // stations a la fin de l'enum afin que les sauvegardes precedentes
+    // retrouvent exactement leurs anciens postes.
+    static const std::array<ShipCrewNavigationNode, 53> nodes {{
         {ShipCrewStation::Helm, {0.0F, 4.51F, -30.55F}, true},
-        {ShipCrewStation::ChartTable, {0.75F, 1.01F, -28.10F}, false},
-        {ShipCrewStation::CaptainCabin, {0.0F, 1.01F, -22.0F}, false},
+        {ShipCrewStation::ChartTable, {0.65F, 1.01F, -27.30F}, false},
+        {ShipCrewStation::CaptainCabin, {0.0F, 1.01F, -25.0F}, false},
         {ShipCrewStation::AftWatch, {-3.50F, 4.51F, -32.25F}, true},
         {ShipCrewStation::PortFishing, {-7.55F, 4.01F, -6.0F}, true},
         {ShipCrewStation::StarboardFishing, {7.55F, 4.01F, -8.0F}, true},
         {ShipCrewStation::MainMast, {-1.35F, 4.01F, 0.0F}, true},
         {ShipCrewStation::ForeMast, {-1.35F, 4.01F, 18.0F}, true},
         {ShipCrewStation::MizzenMast, {-1.35F, 4.01F, -17.5F}, true},
-        {ShipCrewStation::WaterStill, {3.35F, 1.01F, 5.55F}, false},
-        {ShipCrewStation::Galley, {0.0F, 1.01F, 5.25F}, false},
+        {ShipCrewStation::WaterStill, {2.95F, -1.99F, -2.0F}, false},
+        {ShipCrewStation::Galley, {2.80F, -4.99F, -16.0F}, false},
         {ShipCrewStation::Capstan, {-2.70F, 4.01F, 15.60F}, true},
         {ShipCrewStation::AftDeck, {0.0F, 4.01F, -23.5F}, true},
         {ShipCrewStation::MidDeckPort, {-4.50F, 4.01F, 2.0F}, true},
@@ -807,11 +934,11 @@ auto amelie_crew_navigation_nodes() -> const std::array<ShipCrewNavigationNode, 
         {ShipCrewStation::ForeStairsTop, {0.0F, 4.01F, 13.50F}, true},
         {ShipCrewStation::ForeStairsMid, {0.0F, 2.51F, 10.50F}, false},
         {ShipCrewStation::ForeStairsBottom, {0.0F, 1.01F, 7.50F}, false},
-        {ShipCrewStation::CargoFish, {-1.30F, 1.01F, 20.0F}, false},
-        {ShipCrewStation::CargoWater, {1.30F, 1.01F, 20.0F}, false},
-        {ShipCrewStation::CargoSort, {0.0F, 1.01F, 27.0F}, false},
-        {ShipCrewStation::CrewBunks, {0.0F, 1.01F, -5.50F}, false},
-        {ShipCrewStation::MessTable, {0.0F, 1.01F, -1.50F}, false},
+        {ShipCrewStation::CargoFish, {-1.15F, -4.99F, 18.50F}, false},
+        {ShipCrewStation::CargoWater, {1.15F, -4.99F, 18.50F}, false},
+        {ShipCrewStation::CargoSort, {0.0F, -4.99F, 22.0F}, false},
+        {ShipCrewStation::CrewBunks, {-0.90F, -1.99F, -12.0F}, false},
+        {ShipCrewStation::MessTable, {3.05F, -4.99F, -3.0F}, false},
         {ShipCrewStation::ForeHatchPortA, {-2.05F, 4.01F, 6.50F}, true},
         {ShipCrewStation::ForeHatchPortB, {-2.05F, 4.01F, 14.50F}, true},
         {ShipCrewStation::HelmBypassPort, {-1.55F, 4.51F, -30.55F}, true},
@@ -821,21 +948,34 @@ auto amelie_crew_navigation_nodes() -> const std::array<ShipCrewNavigationNode, 
         {ShipCrewStation::ForecastleStepTop, {-1.35F, 4.51F, 25.50F}, true},
         {ShipCrewStation::ForeStairsExitCenter, {0.0F, 4.01F, 14.55F}, true},
         {ShipCrewStation::ForeStairsExitPort, {-2.70F, 4.01F, 14.55F}, true},
-        {ShipCrewStation::AftCabinDoor, {0.0F, 1.01F, -17.50F}, false},
+        {ShipCrewStation::AftCabinDoor, {-1.0F, 1.01F, -19.50F}, false},
         {ShipCrewStation::AftLowerPortA, {-1.65F, 1.01F, -15.50F}, false},
         {ShipCrewStation::AftLowerPortB, {-1.65F, 1.01F, -8.50F}, false},
-        {ShipCrewStation::ForeLowerPortA, {-1.65F, 1.01F, 7.50F}, false},
-        {ShipCrewStation::ForeLowerPortB, {-1.65F, 1.01F, 14.75F}, false},
-        {ShipCrewStation::WaterStillApproach, {2.20F, 1.01F, 5.65F}, false},
+        {ShipCrewStation::ForeLowerPortA, {1.0F, 1.01F, 2.80F}, false},
+        {ShipCrewStation::ForeLowerPortB, {-2.25F, 1.01F, 2.50F}, false},
+        {ShipCrewStation::WaterStillApproach, {2.15F, -1.99F, -2.0F}, false},
+        {ShipCrewStation::CrewStairsTop, {-2.25F, 1.01F, 1.50F}, false},
+        {ShipCrewStation::CrewStairsMid, {-2.25F, -0.49F, -1.50F}, false},
+        {ShipCrewStation::CrewStairsBottom, {-2.25F, -1.99F, -4.50F}, false},
+        {ShipCrewStation::HoldStairsTop, {2.25F, -1.99F, 14.50F}, false},
+        {ShipCrewStation::HoldStairsMid, {2.25F, -3.49F, 10.50F}, false},
+        {ShipCrewStation::HoldStairsBottom, {2.25F, -4.99F, 7.50F}, false},
+        {ShipCrewStation::CrewHoldApproach, {0.0F, -1.99F, 7.50F}, false},
+        {ShipCrewStation::HoldBypassA, {0.0F, -4.99F, 7.50F}, false},
+        {ShipCrewStation::HoldBypassB, {0.0F, -4.99F, 15.50F}, false},
+        {ShipCrewStation::CrewHoldExit, {0.0F, -1.99F, 14.50F}, false},
+        {ShipCrewStation::HoldMessApproach, {3.05F, -4.99F, 3.0F}, false},
     }};
     return nodes;
 }
 
-auto amelie_crew_navigation_edges() -> const std::array<ShipCrewNavigationEdge, 47>& {
-    // Je décompose les changements de niveau et les contournements de trappe
-    // en segments courts : aucun marin ne coupe une hiloire, une marche ou un
-    // meuble pour rejoindre son poste.
-    static const std::array<ShipCrewNavigationEdge, 47> edges {{
+auto amelie_crew_navigation_edges()
+    -> const std::array<ShipCrewNavigationEdge, 56>& {
+
+    // Je fais suivre au graphe les couloirs réellement praticables et je ne
+    // fais traverser à aucun segment une trémie, un mât, une banquette ou la
+    // quille intérieure.
+    static const std::array<ShipCrewNavigationEdge, 56> edges {{
         {ShipCrewStation::Helm, ShipCrewStation::AftWatch},
         {ShipCrewStation::Helm, ShipCrewStation::HelmBypassPort},
         {ShipCrewStation::HelmBypassPort, ShipCrewStation::QuarterdeckStepTop},
@@ -860,742 +1000,4763 @@ auto amelie_crew_navigation_edges() -> const std::array<ShipCrewNavigationEdge, 
         {ShipCrewStation::ForeMast, ShipCrewStation::ForecastleStepBottom},
         {ShipCrewStation::ForecastleStepBottom, ShipCrewStation::ForecastleStepTop},
         {ShipCrewStation::ForecastleStepTop, ShipCrewStation::ForeDeck},
+
         {ShipCrewStation::AftStairsTop, ShipCrewStation::AftStairsMid},
         {ShipCrewStation::AftStairsMid, ShipCrewStation::AftStairsBottom},
-        {ShipCrewStation::AftStairsBottom, ShipCrewStation::CrewBunks},
-        {ShipCrewStation::CrewBunks, ShipCrewStation::MessTable},
-        {ShipCrewStation::MessTable, ShipCrewStation::Galley},
+        {ShipCrewStation::ForeStairsTop, ShipCrewStation::ForeStairsMid},
+        {ShipCrewStation::ForeStairsMid, ShipCrewStation::ForeStairsBottom},
+
+        {ShipCrewStation::AftStairsBottom, ShipCrewStation::AftLowerPortB},
+        {ShipCrewStation::AftLowerPortB, ShipCrewStation::AftLowerPortA},
+        {ShipCrewStation::AftLowerPortA, ShipCrewStation::AftCabinDoor},
+        {ShipCrewStation::AftCabinDoor, ShipCrewStation::CaptainCabin},
         {ShipCrewStation::CaptainCabin, ShipCrewStation::ChartTable},
-        {ShipCrewStation::CaptainCabin, ShipCrewStation::AftCabinDoor},
-        {ShipCrewStation::AftCabinDoor, ShipCrewStation::AftLowerPortA},
-        {ShipCrewStation::AftLowerPortA, ShipCrewStation::AftLowerPortB},
-        {ShipCrewStation::AftLowerPortB, ShipCrewStation::CrewBunks},
-        {ShipCrewStation::Galley, ShipCrewStation::WaterStillApproach},
-        {ShipCrewStation::WaterStillApproach, ShipCrewStation::WaterStill},
-        {ShipCrewStation::Galley, ShipCrewStation::ForeStairsBottom},
-        {ShipCrewStation::ForeStairsBottom, ShipCrewStation::ForeStairsMid},
-        {ShipCrewStation::ForeStairsMid, ShipCrewStation::ForeStairsTop},
-        {ShipCrewStation::Galley, ShipCrewStation::ForeLowerPortA},
+        {ShipCrewStation::AftStairsBottom, ShipCrewStation::ForeLowerPortA},
+        {ShipCrewStation::ForeLowerPortA, ShipCrewStation::ForeStairsBottom},
         {ShipCrewStation::ForeLowerPortA, ShipCrewStation::ForeLowerPortB},
-        {ShipCrewStation::ForeLowerPortB, ShipCrewStation::CargoFish},
-        {ShipCrewStation::ForeLowerPortB, ShipCrewStation::CargoWater},
-        {ShipCrewStation::ForeLowerPortB, ShipCrewStation::CargoSort},
+        {ShipCrewStation::ForeLowerPortB, ShipCrewStation::CrewStairsTop},
+
+        {ShipCrewStation::CrewStairsTop, ShipCrewStation::CrewStairsMid},
+        {ShipCrewStation::CrewStairsMid, ShipCrewStation::CrewStairsBottom},
+        {ShipCrewStation::CrewStairsBottom, ShipCrewStation::CrewBunks},
+        {ShipCrewStation::CrewBunks, ShipCrewStation::WaterStillApproach},
+        {ShipCrewStation::WaterStillApproach, ShipCrewStation::WaterStill},
+        {ShipCrewStation::WaterStillApproach, ShipCrewStation::CrewHoldApproach},
+        {ShipCrewStation::CrewHoldApproach, ShipCrewStation::CrewHoldExit},
+        {ShipCrewStation::CrewHoldExit, ShipCrewStation::HoldStairsTop},
+
+        {ShipCrewStation::HoldStairsTop, ShipCrewStation::HoldStairsMid},
+        {ShipCrewStation::HoldStairsMid, ShipCrewStation::HoldStairsBottom},
+        {ShipCrewStation::HoldStairsBottom, ShipCrewStation::HoldBypassA},
+        {ShipCrewStation::HoldBypassA, ShipCrewStation::HoldMessApproach},
+        {ShipCrewStation::HoldMessApproach, ShipCrewStation::MessTable},
+        {ShipCrewStation::MessTable, ShipCrewStation::Galley},
+        {ShipCrewStation::HoldBypassA, ShipCrewStation::HoldBypassB},
+        {ShipCrewStation::HoldBypassB, ShipCrewStation::CargoFish},
+        {ShipCrewStation::HoldBypassB, ShipCrewStation::CargoWater},
         {ShipCrewStation::CargoFish, ShipCrewStation::CargoSort},
         {ShipCrewStation::CargoWater, ShipCrewStation::CargoSort},
-        {ShipCrewStation::CargoFish, ShipCrewStation::CargoWater},
     }};
     return edges;
 }
 
 auto amelie_half_width(float z) noexcept -> float {
-    // Je fais du profil partage l'unique source de verite de la coque afin
-    // qu'une retouche de silhouette mette aussi a jour ses volumes proteges.
     return kAmelieProtectionProfile.half_width_at(z);
 }
 
-auto is_cabin_window_row(int z) noexcept -> bool {
-    return z == -32 || z == -29 || z == -26 || z == -23 || z == -20;
-}
+struct AmelieExteriorLanternDefinition {
+    glm::vec3 fixture_min {0.0F};
+    glm::vec3 fixture_max {0.0F};
+    glm::vec3 color {1.0F, 0.62F, 0.30F};
+    float radius = 14.0F;
+    float intensity = 0.95F;
+    float minimum_y = kAmelieMainDeckUnderside;
+    float maximum_y = 7.50F;
+};
 
-auto is_main_deck_hatch_row(int z) noexcept -> bool {
-    // Je prolonge chaque ouverture d'une rangee cote pont inferieur : le joueur
-    // conserve ainsi ses 1,80 m de hauteur pendant l'approche de la demi-marche.
-    return (z >= -15 && z <= -9) || (z >= 7 && z <= 13);
-}
+auto amelie_exterior_lantern_definitions() noexcept
+    -> const std::array<AmelieExteriorLanternDefinition, 10>& {
 
-void add_hull_and_decks(std::vector<ShipPart>& parts) {
-    // Je donne une vraie quille a la coque agrandie, sans modifier l'echelle des
-    // portes, du mobilier ou des marches qui restent dimensionnes pour le joueur.
-    add_box(parts,
-            ShipMaterial::DarkHull,
-            {-0.32F, -1.72F, kAmelieSternZ - 0.50F},
-            {0.32F, 0.18F, kAmelieBowZ + 0.50F},
-            true);
+    static const auto definitions = [] {
+        auto output =
+            std::array<AmelieExteriorLanternDefinition, 10> {};
+        constexpr std::array<float, 4> deck_rows {{
+            -22.0F,
+            -4.0F,
+            13.5F,
+            34.0F,
+        }};
 
-    for (int z = -35; z <= 35; ++z) {
-        const auto row_min_z = static_cast<float>(z);
-        const auto row_max_z = row_min_z + 1.0F;
-        const auto half_width = amelie_half_width(row_min_z + 0.5F);
-        const auto wall_thickness = std::min(0.48F, half_width * 0.24F);
-        const auto inner_half_width = std::max(0.55F, half_width - wall_thickness);
+        auto index = std::size_t {0U};
+        for (const auto z :
+             deck_rows) {
+            const auto deck_half_width =
+                std::max(
+                    0.70F,
+                    amelie_half_width(z + 0.5F) -
+                        0.12F);
+            const auto outer_x =
+                std::max(
+                    0.45F,
+                    deck_half_width - 0.08F);
+            const auto inner_x =
+                std::max(
+                    0.15F,
+                    outer_x - 0.30F);
 
-        // Je construis trois bandes de coque : quille et bouchains etroits,
-        // flanc intermediaire, puis muraille haute. La silhouette se referme
-        // sous la flottaison au lieu de descendre verticalement jusqu'a la quille.
-        const auto lower_half_width = std::max(0.70F, half_width - 1.25F);
-        const auto middle_half_width = std::max(0.80F, half_width - 0.62F);
-        add_box(parts,
-                ShipMaterial::DarkHull,
-                {-lower_half_width, -1.42F, row_min_z},
-                {-lower_half_width + wall_thickness, -0.62F, row_max_z},
-                true);
-        add_box(parts,
-                ShipMaterial::DarkHull,
-                {lower_half_width - wall_thickness, -1.42F, row_min_z},
-                {lower_half_width, -0.62F, row_max_z},
-                true);
-        add_box(parts,
-                ShipMaterial::DarkHull,
-                {-middle_half_width, -0.62F, row_min_z},
-                {-middle_half_width + wall_thickness, 1.18F, row_max_z},
-                true);
-        add_box(parts,
-                ShipMaterial::DarkHull,
-                {middle_half_width - wall_thickness, -0.62F, row_min_z},
-                {middle_half_width, 1.18F, row_max_z},
-                true);
-
-        // Je prolonge le pont inferieur jusque dans la derniere rangee de la
-        // cabine. Il rejoint maintenant directement le tableau arriere : le
-        // trou de trois metres de l'ancienne poupe ne peut plus exister.
-        if (z >= -35 && z <= 33) {
-            add_box(parts,
-                    ShipMaterial::LightDeck,
-                    {-inner_half_width, 0.0F, row_min_z},
-                    {inner_half_width, 1.0F, row_max_z},
-                    true,
-                    true);
+            output[index] = {
+                {-outer_x, 4.35F, z - 0.14F},
+                {-inner_x, 4.90F, z + 0.14F},
+                {1.00F, 0.62F, 0.30F},
+                14.0F,
+                0.95F,
+                kAmelieMainDeckUnderside,
+                7.50F,
+            };
+            ++index;
+            output[index] = {
+                {inner_x, 4.35F, z - 0.14F},
+                {outer_x, 4.90F, z + 0.14F},
+                {1.00F, 0.62F, 0.30F},
+                14.0F,
+                0.95F,
+                kAmelieMainDeckUnderside,
+                7.50F,
+            };
+            ++index;
         }
 
-        const auto add_shell_side = [&](float min_x, float max_x) {
-            if (is_cabin_window_row(z)) {
-                add_box(parts,
-                        ShipMaterial::DarkHull,
-                        {min_x, 0.82F, row_min_z},
-                        {max_x, 1.52F, row_max_z},
-                        true);
-                add_box(parts,
-                        ShipMaterial::DarkHull,
-                        {min_x, 2.62F, row_min_z},
-                        {max_x, 3.82F, row_max_z},
-                        true);
-                add_panel(parts,
-                          ShipMaterial::Glass,
-                          {min_x, 1.52F, row_min_z + 0.12F},
-                          {max_x, 2.62F, row_max_z - 0.12F},
-                          min_x < 0.0F ? glm::vec3 {-1.0F, 0.0F, 0.0F}
-                                       : glm::vec3 {1.0F, 0.0F, 0.0F},
-                          0.05F,
-                          true);
-                add_box(parts,
-                        ShipMaterial::CleanBeam,
-                        {min_x, 1.52F, row_min_z},
-                        {max_x, 2.62F, row_min_z + 0.14F},
-                        true);
-                add_box(parts,
-                        ShipMaterial::CleanBeam,
-                        {min_x, 1.52F, row_max_z - 0.14F},
-                        {max_x, 2.62F, row_max_z},
-                        true);
+        output[index] = {
+            {-5.35F, 4.50F, kAmelieSternZ - 0.94F},
+            {-4.85F, 5.35F, kAmelieSternZ - 0.54F},
+            {1.00F, 0.62F, 0.30F},
+            8.0F,
+            0.85F,
+            kAmelieMainDeckUnderside,
+            7.50F,
+        };
+        ++index;
+        output[index] = {
+            {4.85F, 4.50F, kAmelieSternZ - 0.94F},
+            {5.35F, 5.35F, kAmelieSternZ - 0.54F},
+            {1.00F, 0.62F, 0.30F},
+            8.0F,
+            0.85F,
+            kAmelieMainDeckUnderside,
+            7.50F,
+        };
+        return output;
+    }();
+    return definitions;
+}
+
+auto amelie_exterior_light_table() noexcept
+    -> const std::array<ShipExteriorLight, 10>& {
+
+    static const auto lights = [] {
+        auto output =
+            std::array<ShipExteriorLight, 10> {};
+        const auto& definitions =
+            amelie_exterior_lantern_definitions();
+        for (auto index = std::size_t {0U};
+             index < definitions.size();
+             ++index) {
+            const auto& definition =
+                definitions[index];
+            output[index] = {
+                (definition.fixture_min +
+                 definition.fixture_max) *
+                    0.5F,
+                definition.color,
+                definition.radius,
+                definition.intensity,
+                definition.minimum_y,
+                definition.maximum_y,
+                (definition.fixture_max -
+                 definition.fixture_min) *
+                    0.5F,
+            };
+        }
+        return output;
+    }();
+    static_assert(
+        std::array<ShipExteriorLight, 10> {}.size() <=
+        kMaximumShipExteriorLights);
+    return lights;
+}
+
+auto amelie_band_half_width(float local_y, float local_z) noexcept -> float {
+    const auto outer_half_width =
+        amelie_half_width(local_z);
+
+    if (local_y <
+        kAmelieProtectionProfile.middle_hull_min_y) {
+        return std::max(
+            kAmelieProtectionProfile.lower_minimum_half_width,
+            outer_half_width -
+                kAmelieProtectionProfile.lower_width_inset);
+    }
+
+    if (local_y <
+        kAmelieProtectionProfile.upper_hull_min_y) {
+        return std::max(
+            kAmelieProtectionProfile.middle_minimum_half_width,
+            outer_half_width -
+                kAmelieProtectionProfile.middle_width_inset);
+    }
+
+    return outer_half_width;
+}
+
+auto amelie_wall_thickness(
+    float half_width) noexcept -> float {
+
+    return std::min(
+        kAmelieHullWallThickness,
+        std::max(
+            0.22F,
+            half_width * 0.36F));
+}
+
+auto amelie_interior_half_width(
+    float local_y,
+    float local_z) noexcept -> float {
+
+    const auto half_width =
+        amelie_band_half_width(
+            local_y,
+            local_z);
+    return std::max(
+        0.48F,
+        half_width -
+            amelie_wall_thickness(
+                half_width));
+}
+
+auto row_intersects_opening(
+    float row_min_z,
+    float row_max_z,
+    const AmelieDeckOpening& opening) noexcept -> bool {
+
+    return row_min_z <
+               opening.max_z -
+                   kCollisionEpsilon &&
+           row_max_z >
+               opening.min_z +
+                   kCollisionEpsilon;
+}
+
+void add_deck_row(
+    std::vector<ShipPart>& parts,
+    float row_min_z,
+    float row_max_z,
+    float half_width,
+    float underside_y,
+    float top_y,
+    std::span<const AmelieDeckOpening> openings,
+    ShipPartShape shape = ShipPartShape::Slab) {
+
+    if (half_width <= 0.50F ||
+        row_max_z <= row_min_z ||
+        top_y <= underside_y) {
+        return;
+    }
+
+    const AmelieDeckOpening* active_opening = nullptr;
+    for (const auto& opening : openings) {
+        if (row_intersects_opening(
+                row_min_z,
+                row_max_z,
+                opening)) {
+            active_opening = &opening;
+            break;
+        }
+    }
+
+    if (active_opening == nullptr) {
+        add_box(
+            parts,
+            ShipMaterial::LightDeck,
+            {-half_width, underside_y, row_min_z},
+            {half_width, top_y, row_max_z},
+            true,
+            true,
+            shape);
+        return;
+    }
+
+    const auto opening_min_x =
+        std::clamp(
+            active_opening->min_x,
+            -half_width,
+            half_width);
+    const auto opening_max_x =
+        std::clamp(
+            active_opening->max_x,
+            -half_width,
+            half_width);
+
+    if (opening_min_x >
+        -half_width + 0.05F) {
+        add_box(
+            parts,
+            ShipMaterial::LightDeck,
+            {-half_width, underside_y, row_min_z},
+            {opening_min_x, top_y, row_max_z},
+            true,
+            true,
+            shape);
+    }
+
+    if (opening_max_x <
+        half_width - 0.05F) {
+        add_box(
+            parts,
+            ShipMaterial::LightDeck,
+            {opening_max_x, underside_y, row_min_z},
+            {half_width, top_y, row_max_z},
+            true,
+            true,
+            shape);
+    }
+}
+
+void add_transverse_ceiling_beam(
+    std::vector<ShipPart>& parts,
+    float half_width,
+    float min_y,
+    float max_y,
+    float min_z,
+    float max_z,
+    std::span<const AmelieDeckOpening> openings) {
+
+    if (half_width <= 0.05F ||
+        max_y <= min_y ||
+        max_z <= min_z) {
+        return;
+    }
+
+    std::vector<std::pair<float, float>> cuts;
+    cuts.reserve(openings.size());
+    for (const auto& opening : openings) {
+        if (!row_intersects_opening(
+                min_z,
+                max_z,
+                opening)) {
+            continue;
+        }
+
+        const auto cut_min_x =
+            std::clamp(
+                opening.min_x,
+                -half_width,
+                half_width);
+        const auto cut_max_x =
+            std::clamp(
+                opening.max_x,
+                -half_width,
+                half_width);
+        if (cut_max_x >
+            cut_min_x +
+                kCollisionEpsilon) {
+            cuts.emplace_back(
+                cut_min_x,
+                cut_max_x);
+        }
+    }
+
+    std::sort(
+        cuts.begin(),
+        cuts.end());
+
+    const auto add_piece =
+        [&](float min_x,
+            float max_x) {
+            if (max_x <=
+                min_x + 0.05F) {
                 return;
             }
-            add_box(parts,
-                    ShipMaterial::DarkHull,
-                    {min_x, 0.82F, row_min_z},
-                    {max_x, 3.82F, row_max_z},
-                    true);
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {min_x, min_y, min_z},
+                {max_x, max_y, max_z},
+                false);
         };
-        add_shell_side(-half_width, -half_width + wall_thickness);
-        add_shell_side(half_width - wall_thickness, half_width);
 
-        if (z >= -35 && z <= 35) {
-            const auto deck_half_width = std::max(0.55F, half_width - 0.12F);
-            if (is_main_deck_hatch_row(z)) {
-                add_box(parts,
-                        ShipMaterial::LightDeck,
-                        {-deck_half_width, kAmelieMainDeckUnderside, row_min_z},
-                        {-1.22F, 4.0F, row_max_z},
-                        true,
-                        true);
-                add_box(parts,
-                        ShipMaterial::LightDeck,
-                        {1.22F, kAmelieMainDeckUnderside, row_min_z},
-                        {deck_half_width, 4.0F, row_max_z},
-                        true,
-                        true);
-            } else {
-                add_box(parts,
-                        ShipMaterial::LightDeck,
-                        {-deck_half_width, kAmelieMainDeckUnderside, row_min_z},
-                        {deck_half_width, kAmelieMainDeckTop, row_max_z},
-                        true,
-                        true);
-            }
-        }
-
-        const auto raised_deck = z <= -25 || z >= 25;
-        if (!raised_deck) {
-            const auto rail_x = std::max(0.6F, half_width - 0.10F);
-            const auto boarding_row =
-                z >= kAmelieBoardingMinRowZ && z <= kAmelieBoardingMaxRowZ;
-            if (!boarding_row) {
-                add_box(parts,
-                        ShipMaterial::CleanBeam,
-                        {-rail_x, 4.46F, row_min_z},
-                        {-rail_x + 0.14F, 4.66F, row_max_z},
-                        true);
-                add_box(parts,
-                        ShipMaterial::CleanBeam,
-                        {rail_x - 0.14F, 4.46F, row_min_z},
-                        {rail_x, 4.66F, row_max_z},
-                        true);
-            }
-            if ((z + 35) % 3 == 0) {
-                if (!boarding_row) {
-                    add_box(parts,
-                            ShipMaterial::CleanBeam,
-                            {-rail_x, 4.0F, row_min_z},
-                            {-rail_x + 0.16F, 5.02F, row_min_z + 0.16F},
-                            true);
-                    add_box(parts,
-                            ShipMaterial::CleanBeam,
-                            {rail_x - 0.16F, 4.0F, row_min_z},
-                            {rail_x, 5.02F, row_min_z + 0.16F},
-                            true);
-                }
-            }
-        }
+    // Je conserve les barrots de part et d'autre de chaque trémie, mais je
+    // libère entièrement la largeur utile des marches et leur échappée.
+    auto piece_min_x =
+        -half_width;
+    for (const auto& [cut_min_x, cut_max_x] :
+         cuts) {
+        add_piece(
+            piece_min_x,
+            std::max(
+                piece_min_x,
+                cut_min_x));
+        piece_min_x =
+            std::max(
+                piece_min_x,
+                cut_max_x);
     }
+    add_piece(
+        piece_min_x,
+        half_width);
+}
 
-    // Je prolonge le pont jusqu'aux deux filets. La levre babord conserve sa
-    // jonction avec la passerelle et sa jumelle tribord securise la remontee.
-    add_box(parts,
-            ShipMaterial::LightDeck,
-            {-kAmelieBoardingOuterX,
-             kAmelieMainDeckUnderside,
-             static_cast<float>(kAmelieBoardingMinRowZ)},
-            {-7.75F,
-             kAmelieMainDeckTop,
-             static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
-            true,
-            true,
-            ShipPartShape::Slab);
-    add_box(parts,
-            ShipMaterial::LightDeck,
-            {7.75F,
-             kAmelieMainDeckUnderside,
-             static_cast<float>(kAmelieBoardingMinRowZ)},
-            {kAmelieBoardingOuterX,
-             kAmelieMainDeckTop,
-             static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
-            true,
-            true,
-            ShipPartShape::Slab);
-
-    // Je garde une seule piece logique par cote : le rendu la decompose en
-    // mailles, tandis que la physique conserve une surface de prise continue.
-    add_climbable_net(parts, -kAmelieBoardingNetX, {-1.0F, 0.0F, 0.0F});
-    add_climbable_net(parts, kAmelieBoardingNetX, {1.0F, 0.0F, 0.0F});
-
-    // Je ferme l'etrave avec un taille-mer et je compose le tableau arriere en
-    // plusieurs bandes. Les vitrages ferment reellement la cabine et remplacent
-    // l'ancien grand cube sombre pose sur toute la poupe.
-    add_box(parts,
-            ShipMaterial::DarkHull,
-            {-0.95F, -0.62F, kAmelieBowZ - 0.05F},
-            {0.95F, 3.82F, kAmelieBowZ + 0.45F},
-            true);
-    constexpr float stern_inner_half_width = 6.30F;
-    add_box(parts,
-            ShipMaterial::DarkHull,
-            {-stern_inner_half_width, -0.62F, kAmelieSternZ - 0.45F},
-            {stern_inner_half_width, 1.30F, kAmelieSternZ},
-            true);
-    add_box(parts,
-            ShipMaterial::DarkHull,
-            {-stern_inner_half_width, 2.78F, kAmelieSternZ - 0.45F},
-            {stern_inner_half_width, 3.82F, kAmelieSternZ},
-            true);
-    constexpr std::array<glm::vec2, 4> transom_windows {{
-        {-4.90F, -2.75F},
-        {-2.35F, -0.20F},
-        {0.20F, 2.35F},
-        {2.75F, 4.90F},
+auto is_cabin_window_row(int row_z) noexcept -> bool {
+    constexpr std::array<int, 4> rows {{
+        -33,
+        -30,
+        -27,
+        -24,
     }};
-    add_box(parts,
-            ShipMaterial::DarkHull,
-            {-stern_inner_half_width, 1.30F, kAmelieSternZ - 0.45F},
-            {-5.15F, 2.78F, kAmelieSternZ},
-            true);
-    add_box(parts,
-            ShipMaterial::DarkHull,
-            {5.15F, 1.30F, kAmelieSternZ - 0.45F},
-            {stern_inner_half_width, 2.78F, kAmelieSternZ},
-            true);
-    for (const auto& window : transom_windows) {
-        add_panel(parts,
-                  ShipMaterial::Glass,
-                  {window.x, 1.48F, kAmelieSternZ - 0.49F},
-                  {window.y, 2.60F, kAmelieSternZ - 0.47F},
-                  {0.0F, 0.0F, -1.0F},
-                  0.06F,
-                  true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {window.x - 0.12F, 1.30F, kAmelieSternZ - 0.50F},
-                {window.x + 0.05F, 2.78F, kAmelieSternZ - 0.42F},
-                true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {window.y - 0.05F, 1.30F, kAmelieSternZ - 0.50F},
-                {window.y + 0.12F, 2.78F, kAmelieSternZ - 0.42F},
-                true);
-    }
-    for (const auto& mullion : std::array<glm::vec2, 3> {{
-             {-2.75F, -2.35F},
-             {-0.20F, 0.20F},
-             {2.35F, 2.75F},
-         }}) {
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {mullion.x, 1.30F, kAmelieSternZ - 0.50F},
-                {mullion.y, 2.78F, kAmelieSternZ - 0.42F},
-                true);
-    }
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {-5.15F, 1.30F, kAmelieSternZ - 0.50F},
-            {5.15F, 1.48F, kAmelieSternZ - 0.42F},
-            true);
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {-5.15F, 2.60F, kAmelieSternZ - 0.50F},
-            {5.15F, 2.78F, kAmelieSternZ - 0.42F},
-            true);
-
-    // Je pose la dunette et le gaillard sur un vrai demi-niveau solidaire du
-    // pont principal, puis j'adapte leur largeur a chaque tranche de coque.
-    add_box(parts, ShipMaterial::LightDeck, {-1.10F, 4.0F, -25.0F}, {1.10F, 4.50F, -24.0F}, true, true, ShipPartShape::Stair,
-            {0.0F, 0.0F, -1.0F});
-    add_box(parts, ShipMaterial::LightDeck, {-1.10F, 4.0F, 24.0F}, {1.10F, 4.50F, 25.0F}, true, true, ShipPartShape::Stair,
-            {0.0F, 0.0F, 1.0F});
-
-    for (int z = 25; z <= 34; ++z) {
-        const auto row_min_z = static_cast<float>(z);
-        const auto deck_half_width = std::max(0.70F, amelie_half_width(row_min_z + 0.5F) - 0.12F);
-        add_box(parts,
-                ShipMaterial::LightDeck,
-                {-deck_half_width, 4.0F, row_min_z},
-                {deck_half_width, 4.50F, row_min_z + 1.0F},
-                true,
-                true,
-                ShipPartShape::Slab);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-deck_half_width, 4.98F, row_min_z},
-                {-deck_half_width + 0.15F, 5.18F, row_min_z + 1.0F},
-                true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {deck_half_width - 0.15F, 4.98F, row_min_z},
-                {deck_half_width, 5.18F, row_min_z + 1.0F},
-                true);
-        if ((z - 25) % 2 == 0) {
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {-deck_half_width, 4.50F, row_min_z},
-                    {-deck_half_width + 0.15F, 5.50F, row_min_z + 0.16F},
-                    true);
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {deck_half_width - 0.15F, 4.50F, row_min_z},
-                    {deck_half_width, 5.50F, row_min_z + 0.16F},
-                    true);
-        }
-    }
-
-    for (int z = -35; z <= -25; ++z) {
-        const auto row_min_z = static_cast<float>(z);
-        const auto deck_half_width = amelie_half_width(row_min_z + 0.5F) - 0.12F;
-        add_box(parts,
-                ShipMaterial::LightDeck,
-                {-deck_half_width, 4.0F, row_min_z},
-                {deck_half_width, 4.50F, row_min_z + 1.0F},
-                true,
-                true,
-                ShipPartShape::Slab);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-deck_half_width, 4.98F, row_min_z},
-                {-deck_half_width + 0.15F, 5.18F, row_min_z + 1.0F},
-                true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {deck_half_width - 0.15F, 4.98F, row_min_z},
-                {deck_half_width, 5.18F, row_min_z + 1.0F},
-                true);
-        if ((z + 35) % 2 == 0) {
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {-deck_half_width, 4.50F, row_min_z},
-                    {-deck_half_width + 0.15F, 5.50F, row_min_z + 0.16F},
-                    true);
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {deck_half_width - 0.15F, 4.50F, row_min_z},
-                    {deck_half_width, 5.50F, row_min_z + 0.16F},
-                    true);
-        }
-    }
-
-    // Je ferme réellement le couronnement de poupe : ce bastingage transversal
-    // prolonge les deux rambardes latérales et empêche une chute au centre du
-    // tableau, sans masquer la plaque nominative placée juste en dessous.
-    const auto stern_rail_half_width = amelie_half_width(kAmelieSternZ + 0.5F) - 0.12F;
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {-stern_rail_half_width, 4.98F, kAmelieSternZ},
-            {stern_rail_half_width, 5.18F, kAmelieSternZ + 0.16F},
-            true);
-    for (float x = -stern_rail_half_width; x <= stern_rail_half_width + 0.01F; x += 2.05F) {
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {x, 4.50F, kAmelieSternZ},
-                {std::min(x + 0.15F, stern_rail_half_width), 5.50F, kAmelieSternZ + 0.16F},
-                true);
-    }
-
-    // Je termine la poupe par une galerie et deux courbes decoratives. Ces
-    // pieces donnent de la profondeur au tableau sans creer de sol accessible
-    // hors de la coque ni de collision invisible pour le joueur.
-    add_box(parts,
-            ShipMaterial::LightDeck,
-            {-5.55F, 3.84F, kAmelieSternZ - 0.78F},
-            {5.55F, 4.08F, kAmelieSternZ - 0.42F},
-            false,
-            false,
-            ShipPartShape::Slab);
-    add_segment(parts,
-                ShipMaterial::Brass,
-                {-5.70F, 3.92F, kAmelieSternZ - 0.84F},
-                {5.70F, 3.92F, kAmelieSternZ - 0.84F},
-                0.10F);
-    add_segment(parts,
-                ShipMaterial::CleanBeam,
-                {-6.12F, 1.10F, kAmelieSternZ - 0.52F},
-                {-5.55F, 4.95F, kAmelieSternZ - 0.68F},
-                0.18F);
-    add_segment(parts,
-                ShipMaterial::CleanBeam,
-                {6.12F, 1.10F, kAmelieSternZ - 0.52F},
-                {5.55F, 4.95F, kAmelieSternZ - 0.68F},
-                0.18F);
+    return std::find(
+               rows.begin(),
+               rows.end(),
+               row_z) !=
+           rows.end();
 }
 
-void add_accesses_and_interior(std::vector<ShipPart>& parts) {
-    const auto add_six_step_stair = [&](float first_z, bool ascends_positive_z) {
-        for (int step = 0; step < 6; ++step) {
-            const auto progression = ascends_positive_z ? step : 5 - step;
-            const auto min_y = 1.0F;
-            const auto max_y = 1.5F + static_cast<float>(progression) * 0.5F;
-            const auto z = first_z + static_cast<float>(step);
-            add_box(parts,
-                    ShipMaterial::LightDeck,
-                    {-1.05F, min_y, z},
-                    {1.05F, max_y, z + 1.0F},
-                    true,
-                    true,
-                    ShipPartShape::Stair,
-                    {0.0F, 0.0F, ascends_positive_z ? 1.0F : -1.0F});
-        }
+auto is_gunport_row(int row_z) noexcept -> bool {
+    constexpr std::array<int, 6> rows {{
+        -16,
+        -10,
+        -4,
+        4,
+        10,
+        16,
+    }};
+    return std::find(
+               rows.begin(),
+               rows.end(),
+               row_z) !=
+           rows.end();
+}
+
+void add_shell_side_band(
+    std::vector<ShipPart>& parts,
+    float half_width,
+    float min_y,
+    float max_y,
+    float min_z,
+    float max_z) {
+
+    const auto wall_thickness =
+        amelie_wall_thickness(
+            half_width);
+
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-half_width, min_y, min_z},
+        {-half_width + wall_thickness, max_y, max_z},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {half_width - wall_thickness, min_y, min_z},
+        {half_width, max_y, max_z},
+        true);
+}
+
+void add_shell_chine_transition(
+    std::vector<ShipPart>& parts,
+    float narrower_half_width,
+    float wider_half_width,
+    float transition_y,
+    float min_z,
+    float max_z) {
+
+    const auto narrower_inner_x =
+        narrower_half_width -
+        amelie_wall_thickness(
+            narrower_half_width);
+    const auto wider_inner_x =
+        wider_half_width -
+        amelie_wall_thickness(
+            wider_half_width);
+    const auto inner_x =
+        std::min(
+            narrower_inner_x,
+            wider_inner_x);
+    const auto outer_x =
+        std::max(
+            narrower_half_width,
+            wider_half_width);
+    constexpr auto half_thickness_y =
+        0.08F;
+
+    // Je ferme ici le décroché entre deux bandes de carène. Sans cette
+    // tablette, les deux murs verticaux sont décalés latéralement et laissent
+    // une fente longitudinale par laquelle la mer reste visible depuis dedans.
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-outer_x,
+         transition_y - half_thickness_y,
+         min_z},
+        {-inner_x,
+         transition_y + half_thickness_y,
+         max_z},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {inner_x,
+         transition_y - half_thickness_y,
+         min_z},
+        {outer_x,
+         transition_y + half_thickness_y,
+         max_z},
+        true);
+}
+
+void add_side_opening_finish(
+    std::vector<ShipPart>& parts,
+    float side_sign,
+    float half_width,
+    float min_y,
+    float max_y,
+    float row_min_z,
+    float row_max_z,
+    bool add_glass,
+    bool add_shutter) {
+
+    const auto x =
+        side_sign *
+        (half_width + 0.035F);
+    const auto inner_x =
+        side_sign *
+        (half_width -
+         amelie_wall_thickness(half_width) +
+         0.025F);
+    const auto reveal_min_x =
+        std::min(inner_x, x);
+    const auto reveal_max_x =
+        std::max(inner_x, x);
+    const auto z_margin = 0.10F;
+    const auto bottom_left = glm::vec3 {
+        x,
+        min_y,
+        row_min_z + z_margin,
     };
-    add_six_step_stair(-15.0F, false);
-    add_six_step_stair(8.0F, true);
-
-    const auto add_partition_with_door = [&](float z, float half_width, float door_half_width = 1.15F) {
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-half_width, 1.0F, z},
-                {-door_half_width, kAmelieMainDeckUnderside, z + 0.22F},
-                true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {door_half_width, 1.0F, z},
-                {half_width, kAmelieMainDeckUnderside, z + 0.22F},
-                true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-door_half_width, 3.35F, z},
-                {door_half_width, kAmelieMainDeckUnderside, z + 0.22F},
-                true);
-        add_box(parts,
-                ShipMaterial::Brass,
-                {-door_half_width - 0.08F, 1.0F, z - 0.04F},
-                {-door_half_width + 0.08F, 3.35F, z + 0.26F},
-                false);
-        add_box(parts,
-                ShipMaterial::Brass,
-                {door_half_width - 0.08F, 1.0F, z - 0.04F},
-                {door_half_width + 0.08F, 3.35F, z + 0.26F},
-                false);
+    const auto bottom_right = glm::vec3 {
+        x,
+        min_y,
+        row_max_z - z_margin,
     };
-    add_partition_with_door(-18.0F, amelie_half_width(-18.0F) - 0.52F);
-    add_partition_with_door(2.0F, amelie_half_width(2.0F) - 0.52F);
-    // Je place la cloison après la dernière marche : son linteau ne peut ainsi
-    // plus couper le volume de tête du joueur pendant la montée avant.
-    add_partition_with_door(14.35F, amelie_half_width(14.35F) - 0.52F, 2.10F);
+    const auto top_left = glm::vec3 {
+        x,
+        max_y,
+        row_min_z + z_margin,
+    };
+    const auto top_right = glm::vec3 {
+        x,
+        max_y,
+        row_max_z - z_margin,
+    };
 
-    // Je meuble la cabine agrandie comme une vraie piece de commandement. Le
-    // centre reste libre depuis la porte jusqu'aux fenetres du tableau arriere.
-    add_box(parts,
-            ShipMaterial::LightDeck,
-            {-5.35F, 1.0F, -31.7F},
-            {-2.05F, 1.58F, -26.4F},
-            true,
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        bottom_left,
+        bottom_right,
+        0.13F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        top_left,
+        top_right,
+        0.13F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        bottom_left,
+        top_left,
+        0.13F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        bottom_right,
+        top_right,
+        0.13F);
+
+    // Je ferme visuellement l'epaisseur de la muraille sur ses quatre chants.
+    // Depuis l'interieur, une baie lit ainsi comme une vraie embrasure et non
+    // comme une bande de coque disparue par back-face culling.
+    constexpr float reveal_depth = 0.12F;
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {reveal_min_x,
+         min_y,
+         row_min_z + z_margin},
+        {reveal_max_x,
+         min_y + reveal_depth,
+         row_max_z - z_margin},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {reveal_min_x,
+         max_y - reveal_depth,
+         row_min_z + z_margin},
+        {reveal_max_x,
+         max_y,
+         row_max_z - z_margin},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {reveal_min_x,
+         min_y + reveal_depth,
+         row_min_z + z_margin},
+        {reveal_max_x,
+         max_y - reveal_depth,
+         row_min_z + z_margin + reveal_depth},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {reveal_min_x,
+         min_y + reveal_depth,
+         row_max_z - z_margin - reveal_depth},
+        {reveal_max_x,
+         max_y - reveal_depth,
+         row_max_z - z_margin},
+        false);
+
+    if (add_glass) {
+        add_panel(
+            parts,
+            ShipMaterial::Glass,
+            {x, min_y + 0.08F, row_min_z + 0.16F},
+            {x, max_y - 0.08F, row_max_z - 0.16F},
+            {side_sign, 0.0F, 0.0F},
+            0.055F,
             true);
-    add_panel(parts,
-              ShipMaterial::CreamCanvas,
-              {-5.10F, 1.59F, -31.35F},
-              {-2.30F, 1.63F, -26.75F},
-              {0.0F, 1.0F, 0.0F},
-              0.04F);
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {1.65F, 1.0F, -29.6F},
-            {4.75F, 1.78F, -26.8F},
-            true,
-            true);
-    add_panel(parts,
-              ShipMaterial::LightDeck,
-              {1.90F, 1.79F, -29.35F},
-              {4.50F, 1.83F, -27.05F},
-              {0.0F, 1.0F, 0.0F},
-              0.04F);
-    add_panel(parts,
-              ShipMaterial::CreamCanvas,
-              {2.10F, 1.84F, -29.10F},
-              {4.30F, 1.88F, -27.30F},
-              {0.0F, 1.0F, 0.0F},
-              0.04F);
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {5.10F, 1.0F, -24.8F},
-            {5.58F, 3.08F, -18.4F},
-            true);
-    for (int shelf = 0; shelf < 3; ++shelf) {
-        const auto y = 1.34F + static_cast<float>(shelf) * 0.62F;
-        add_box(parts,
-                ShipMaterial::LightDeck,
-                {4.88F, y, -24.65F},
-                {5.62F, y + 0.12F, -18.55F},
-                false);
-    }
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {-5.20F, 1.0F, -24.4F},
-            {-3.25F, 1.82F, -22.7F},
-            true,
-            true);
-    add_box(parts,
+
+        const auto inner_frame_x =
+            inner_x -
+            side_sign * 0.018F;
+        const auto center_y =
+            (min_y + max_y) * 0.5F;
+        const auto center_z =
+            (row_min_z + row_max_z) * 0.5F;
+        add_segment(
+            parts,
             ShipMaterial::Brass,
-            {-5.05F, 1.82F, -24.25F},
-            {-3.40F, 1.94F, -22.85F},
-            false);
-    add_panel(parts,
-              ShipMaterial::CreamCanvas,
-              {-0.82F, 1.01F, -32.5F},
-              {0.82F, 1.05F, -19.0F},
-              {0.0F, 1.0F, 0.0F},
-              0.04F);
-
-    // Je distribue couchettes, cuisine et cargaison sur les flancs pour garder
-    // un passage central continu d'au moins deux metres de haut.
-    for (int bunk = 0; bunk < 3; ++bunk) {
-        const auto z = -14.5F + static_cast<float>(bunk) * 4.2F;
-        add_box(parts, ShipMaterial::LightDeck, {-6.35F, 1.0F, z}, {-2.55F, 1.45F, z + 2.3F}, true, true);
-        add_box(parts, ShipMaterial::LightDeck, {2.55F, 1.0F, z}, {6.35F, 1.45F, z + 2.3F}, true, true);
-        add_panel(parts,
-                  ShipMaterial::CreamCanvas,
-                  {-6.10F, 1.46F, z + 0.18F},
-                  {-2.80F, 1.50F, z + 2.12F},
-                  {0.0F, 1.0F, 0.0F},
-                  0.04F);
-        add_panel(parts,
-                  ShipMaterial::CreamCanvas,
-                  {2.80F, 1.46F, z + 0.18F},
-                  {6.10F, 1.50F, z + 2.12F},
-                  {0.0F, 1.0F, 0.0F},
-                  0.04F);
-    }
-    add_box(parts, ShipMaterial::Iron, {-6.10F, 1.0F, 3.2F}, {-2.35F, 1.65F, 7.8F}, true, true);
-    add_box(parts, ShipMaterial::CleanBeam, {-5.55F, 1.65F, 4.0F}, {-2.90F, 2.15F, 6.8F}, false);
-    add_segment(parts, ShipMaterial::Iron, {-4.20F, 2.15F, 5.4F}, {-4.20F, 5.6F, 5.4F}, 0.38F);
-    add_box(parts, ShipMaterial::LightDeck, {2.65F, 1.0F, 3.2F}, {5.85F, 1.45F, 5.2F}, true, true);
-    add_box(parts, ShipMaterial::LightDeck, {2.65F, 1.0F, 6.0F}, {5.85F, 1.45F, 8.0F}, true, true);
-
-    // Je materialise le dispositif d'eau par un reservoir et un condenseur en
-    // cuivre, sans l'etirer avec la coque ni encombrer le passage central.
-    add_box(parts,
+            {inner_frame_x,
+             min_y + 0.13F,
+             center_z},
+            {inner_frame_x,
+             max_y - 0.13F,
+             center_z},
+            0.055F);
+        add_segment(
+            parts,
             ShipMaterial::Brass,
-            {5.10F, 1.45F, 3.55F},
-            {5.72F, 2.55F, 4.75F},
+            {inner_frame_x,
+             center_y,
+             row_min_z + 0.16F},
+            {inner_frame_x,
+             center_y,
+             row_max_z - 0.16F},
+            0.055F);
+    }
+
+    if (add_shutter) {
+        // Je garde le marqueur comme source canonique de la decoupe moderne. Je
+        // ne le rends pas et je ne le fais pas collisionner : les boites
+        // physiques restent seules responsables des jambages du sabord.
+        add_opening(
+            parts,
+            {x,
+             min_y,
+             row_min_z},
+            {x,
+             max_y,
+             row_max_z},
+            {side_sign, 0.0F, 0.0F});
+
+        const auto shutter_min_y =
+            max_y + 0.16F;
+        const auto shutter_max_y =
+            std::min(
+                3.45F,
+                shutter_min_y + 0.72F);
+        add_panel(
+            parts,
+            ShipMaterial::DarkHull,
+            {x, shutter_min_y, row_min_z + 0.13F},
+            {x, shutter_max_y, row_max_z - 0.13F},
+            {side_sign, 0.0F, 0.0F},
+            0.09F,
             false);
-    add_segment(parts,
-                ShipMaterial::Brass,
-                {5.40F, 2.50F, 4.10F},
-                {4.35F, 2.82F, 6.85F},
-                0.10F);
-    add_box(parts,
+        add_segment(
+            parts,
             ShipMaterial::Iron,
-            {4.00F, 1.45F, 6.15F},
-            {4.75F, 2.05F, 7.55F},
-            false);
-
-    for (int z = 15; z <= 30; z += 4) {
-        const auto center_z = static_cast<float>(z) + 1.25F;
-        const auto outer_x = std::min(4.8F, amelie_half_width(center_z) - 0.55F);
-        auto inner_x = std::max(0.85F, outer_x - 2.40F);
-        if (z == 15) {
-            // Je reserve la continuite du passage lateral jusqu'au bout de
-            // l'escalier avant avant de refermer le couloir central de cale.
-            inner_x = std::min(outer_x - 0.20F, std::max(inner_x, 2.05F));
-        }
-        add_box(parts, ShipMaterial::LightDeck, {-outer_x, 1.0F, static_cast<float>(z)}, {-inner_x, 2.25F, static_cast<float>(z) + 2.5F}, true, true);
-        add_box(parts, ShipMaterial::LightDeck, {inner_x, 1.0F, static_cast<float>(z)}, {outer_x, 2.25F, static_cast<float>(z) + 2.5F}, true, true);
-        const auto rope_x = (inner_x + outer_x) * 0.5F;
-        add_segment(parts, ShipMaterial::Rope, {-rope_x, 2.28F, center_z}, {-rope_x, 2.75F, center_z}, 0.08F);
-        add_segment(parts, ShipMaterial::Rope, {rope_x, 2.28F, center_z}, {rope_x, 2.75F, center_z}, 0.08F);
-    }
-
-    // Je remonte les barrots sous le pont aminci. Il reste 2,65 m en partie
-    // courante et au moins 2,35 m sous chaque poutre, ce qui convient aussi aux
-    // silhouettes d'equipage les plus grandes.
-    for (int z = -32; z <= 32; z += 4) {
-        const auto beam_z = static_cast<float>(z);
-        const auto beam_half_width = std::max(1.20F, amelie_half_width(beam_z) - 0.60F);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-beam_half_width, 3.35F, beam_z},
-                {beam_half_width, 3.55F, beam_z + 0.18F},
-                false);
-    }
-    add_panel(parts, ShipMaterial::CreamCanvas, {-0.72F, 1.01F, -5.0F}, {0.72F, 1.05F, -1.0F}, {0.0F, 1.0F, 0.0F}, 0.04F);
-
-    // Je borde les deux trappes avec des hiloires et des rambardes basses. Les
-    // montants restent hors des 2,10 m utiles de l'escalier et ne ferment aucune
-    // extremite du passage.
-    const auto add_hatch_coaming = [&](float min_z, float max_z) {
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {-1.42F, 4.0F, min_z},
-                {-1.22F, 4.34F, max_z},
-                true);
-        add_box(parts,
-                ShipMaterial::CleanBeam,
-                {1.22F, 4.0F, min_z},
-                {1.42F, 4.34F, max_z},
-                true);
-        add_segment(parts,
-                    ShipMaterial::CleanBeam,
-                    {-1.34F, 4.88F, min_z + 0.12F},
-                    {-1.34F, 4.88F, max_z - 0.12F},
-                    0.12F);
-        add_segment(parts,
-                    ShipMaterial::CleanBeam,
-                    {1.34F, 4.88F, min_z + 0.12F},
-                    {1.34F, 4.88F, max_z - 0.12F},
-                    0.12F);
-        for (const auto z : {min_z + 0.12F, max_z - 0.12F}) {
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {-1.42F, 4.0F, z - 0.07F},
-                    {-1.26F, 4.92F, z + 0.07F},
-                    true);
-            add_box(parts,
-                    ShipMaterial::CleanBeam,
-                    {1.26F, 4.0F, z - 0.07F},
-                    {1.42F, 4.92F, z + 0.07F},
-                    true);
-        }
-    };
-    add_hatch_coaming(-15.0F, -8.0F);
-    add_hatch_coaming(7.0F, 14.0F);
-
-    // Je suspends les lanternes hors des volumes de passage et au-dessus du
-    // mobilier : les ancres de chargement ne traversent plus leur geometrie.
-    for (const auto& lantern : kAmelieInteriorLanterns) {
-        add_segment(parts,
-                    ShipMaterial::Rope,
-                    {lantern.x, 3.20F, lantern.z},
-                    {lantern.x, 3.43F, lantern.z},
-                    0.04F);
-        add_box(parts,
-                ShipMaterial::Lantern,
-                {lantern.x - 0.16F, 2.85F, lantern.z - 0.16F},
-                {lantern.x + 0.16F, 3.20F, lantern.z + 0.16F},
-                false);
+            {x + side_sign * 0.045F,
+             shutter_min_y + 0.20F,
+             row_min_z + 0.22F},
+            {x + side_sign * 0.045F,
+             shutter_max_y - 0.14F,
+             row_min_z + 0.22F},
+            0.055F);
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {x + side_sign * 0.045F,
+             shutter_min_y + 0.20F,
+             row_max_z - 0.22F},
+            {x + side_sign * 0.045F,
+             shutter_max_y - 0.14F,
+             row_max_z - 0.22F},
+            0.055F);
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {x + side_sign * 0.035F, shutter_min_y + 0.10F, row_min_z + 0.25F},
+            {x + side_sign * 0.035F, shutter_min_y + 0.10F, row_max_z - 0.25F},
+            0.045F);
     }
 }
 
-void add_deck_equipment(std::vector<ShipPart>& parts) {
-    // Je place la barre, son pied et le compas sur la dunette.
-    add_box(parts, ShipMaterial::CleanBeam, {-0.20F, 4.50F, -29.25F}, {0.20F, 5.85F, -28.85F}, true, true);
+void add_upper_shell_row(
+    std::vector<ShipPart>& parts,
+    int row_z,
+    float half_width,
+    float row_min_z,
+    float row_max_z) {
+
+    const auto wall_thickness =
+        amelie_wall_thickness(
+            half_width);
+
+    const auto add_side =
+        [&](float side_sign,
+            float opening_min_y,
+            float opening_max_y,
+            bool add_glass,
+            bool add_shutter) {
+
+            const auto min_x =
+                side_sign < 0.0F
+                    ? -half_width
+                    : half_width -
+                          wall_thickness;
+            const auto max_x =
+                side_sign < 0.0F
+                    ? -half_width +
+                          wall_thickness
+                    : half_width;
+
+            add_box(
+                parts,
+                ShipMaterial::DarkHull,
+                {min_x,
+                 kAmelieProtectionProfile.upper_hull_min_y,
+                 row_min_z},
+                {max_x,
+                 opening_min_y,
+                 row_max_z},
+                true);
+            add_box(
+                parts,
+                ShipMaterial::DarkHull,
+                {min_x,
+                 opening_max_y,
+                 row_min_z},
+                {max_x,
+                 3.82F,
+                 row_max_z},
+                true);
+
+            add_side_opening_finish(
+                parts,
+                side_sign,
+                half_width,
+                opening_min_y,
+                opening_max_y,
+                row_min_z,
+                row_max_z,
+                add_glass,
+                add_shutter);
+        };
+
+    if (is_cabin_window_row(row_z)) {
+        add_side(-1.0F, 1.48F, 2.66F, true, false);
+        add_side(1.0F, 1.48F, 2.66F, true, false);
+        return;
+    }
+
+    if (is_gunport_row(row_z)) {
+        add_side(-1.0F, 1.30F, 2.28F, false, true);
+        add_side(1.0F, 1.30F, 2.28F, false, true);
+        return;
+    }
+
+    add_shell_side_band(
+        parts,
+        half_width,
+        kAmelieProtectionProfile.upper_hull_min_y,
+        3.82F,
+        row_min_z,
+        row_max_z);
+}
+
+void add_curved_wale(
+    std::vector<ShipPart>& parts,
+    float local_y,
+    float outside_offset,
+    ShipMaterial material,
+    float thickness) {
+
+    constexpr float segment_length = 4.0F;
+    for (float z = -34.0F;
+         z < 35.0F;
+         z += segment_length) {
+        const auto next_z =
+            std::min(
+                z + segment_length,
+                35.0F);
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            const auto first_x =
+                side_sign *
+                (amelie_band_half_width(
+                     local_y,
+                     z) +
+                 outside_offset);
+            const auto second_x =
+                side_sign *
+                (amelie_band_half_width(
+                     local_y,
+                     next_z) +
+                 outside_offset);
+            add_segment(
+                parts,
+                material,
+                {first_x, local_y, z},
+                {second_x, local_y, next_z},
+                thickness);
+        }
+    }
+}
+
+void add_external_frames(
+    std::vector<ShipPart>& parts) {
+
+    for (int z = -32;
+         z <= 32;
+         z += 4) {
+        const auto local_z =
+            static_cast<float>(z) +
+            0.05F;
+
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            add_segment(
+                parts,
+                ShipMaterial::CleanBeam,
+                {side_sign *
+                     (amelie_band_half_width(
+                          -5.10F,
+                          local_z) +
+                      0.055F),
+                 -5.65F,
+                 local_z},
+                {side_sign *
+                     (amelie_band_half_width(
+                          -4.10F,
+                          local_z) +
+                      0.055F),
+                 -4.08F,
+                 local_z},
+                0.12F);
+            add_segment(
+                parts,
+                ShipMaterial::CleanBeam,
+                {side_sign *
+                     (amelie_band_half_width(
+                          -4.00F,
+                          local_z) +
+                      0.055F),
+                 -4.02F,
+                 local_z},
+                {side_sign *
+                     (amelie_band_half_width(
+                          -1.10F,
+                          local_z) +
+                      0.055F),
+                 -1.08F,
+                 local_z},
+                0.13F);
+            add_segment(
+                parts,
+                ShipMaterial::CleanBeam,
+                {side_sign *
+                     (amelie_half_width(
+                          local_z) +
+                      0.055F),
+                 -1.02F,
+                 local_z},
+                {side_sign *
+                     (amelie_half_width(
+                          local_z) +
+                      0.055F),
+                 3.78F,
+                 local_z},
+                0.14F);
+        }
+    }
+}
+
+void add_hatch_coaming(
+    std::vector<ShipPart>& parts,
+    const AmelieDeckOpening& opening,
+    float deck_y) {
+
+    constexpr float coaming_width = 0.20F;
+    constexpr float coaming_height = 0.32F;
+    constexpr float rail_height = 0.88F;
+
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {opening.min_x - coaming_width,
+         deck_y,
+         opening.min_z},
+        {opening.min_x,
+         deck_y + coaming_height,
+         opening.max_z},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {opening.max_x,
+         deck_y,
+         opening.min_z},
+        {opening.max_x + coaming_width,
+         deck_y + coaming_height,
+         opening.max_z},
+        true);
+
+    for (const auto x :
+         {opening.min_x - 0.10F,
+          opening.max_x + 0.10F}) {
+        add_segment(
+            parts,
+            ShipMaterial::CleanBeam,
+            {x,
+             deck_y + rail_height,
+             opening.min_z + 0.18F},
+            {x,
+             deck_y + rail_height,
+             opening.max_z - 0.18F},
+            0.115F);
+
+        for (const auto z :
+             {opening.min_z + 0.18F,
+              opening.max_z - 0.18F}) {
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {x - 0.075F,
+                 deck_y,
+                 z - 0.075F},
+                {x + 0.075F,
+                 deck_y + rail_height + 0.05F,
+                 z + 0.075F},
+                true);
+        }
+    }
+}
+
+void add_hull_and_decks(
+    std::vector<ShipPart>& parts) {
+
+    // Je traite la quille comme un volume physique et non comme une decoration
+    // flottante. Je la garde entierement contenue dans la peau organique
+    // generee par le renderer.
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-0.34F, -5.85F, kAmelieSternZ - 0.35F},
+        {0.34F, -5.18F, kAmelieBowZ + 0.35F},
+        true);
+
+    for (int z = -35;
+         z <= 35;
+         ++z) {
+        const auto row_min_z =
+            static_cast<float>(z);
+        const auto row_max_z =
+            row_min_z + 1.0F;
+        const auto center_z =
+            row_min_z + 0.5F;
+        const auto upper_half_width =
+            amelie_half_width(center_z);
+        const auto middle_half_width =
+            amelie_band_half_width(
+                -2.20F,
+                center_z);
+        const auto lower_half_width =
+            amelie_band_half_width(
+                -5.20F,
+                center_z);
+
+        add_shell_side_band(
+            parts,
+            lower_half_width,
+            kAmelieProtectionProfile.lower_hull_min_y,
+            kAmelieProtectionProfile.middle_hull_min_y,
+            row_min_z,
+            row_max_z);
+        add_shell_side_band(
+            parts,
+            middle_half_width,
+            kAmelieProtectionProfile.middle_hull_min_y,
+            kAmelieProtectionProfile.upper_hull_min_y,
+            row_min_z,
+            row_max_z);
+        add_shell_chine_transition(
+            parts,
+            lower_half_width,
+            middle_half_width,
+            kAmelieProtectionProfile.middle_hull_min_y,
+            row_min_z,
+            row_max_z);
+        add_shell_chine_transition(
+            parts,
+            middle_half_width,
+            upper_half_width,
+            kAmelieProtectionProfile.upper_hull_min_y,
+            row_min_z,
+            row_max_z);
+        add_upper_shell_row(
+            parts,
+            z,
+            upper_half_width,
+            row_min_z,
+            row_max_z);
+
+        if (z >= -33 &&
+            z <= 23) {
+            add_deck_row(
+                parts,
+                row_min_z,
+                row_max_z,
+                amelie_interior_half_width(
+                    kAmelieHoldFloor,
+                    center_z),
+                kAmelieHoldDeckUnderside,
+                kAmelieHoldFloor,
+                kAmelieNoDeckOpenings);
+        }
+
+        if (z >= -34 &&
+            z <= 30) {
+            add_deck_row(
+                parts,
+                row_min_z,
+                row_max_z,
+                amelie_interior_half_width(
+                    kAmelieCrewDeck,
+                    center_z),
+                kAmelieCrewDeckUnderside,
+                kAmelieCrewDeck,
+                kAmelieCrewDeckOpenings);
+        }
+
+        if (z >= -35 &&
+            z <= 33) {
+            add_deck_row(
+                parts,
+                row_min_z,
+                row_max_z,
+                amelie_interior_half_width(
+                    kAmelieGunDeck,
+                    center_z),
+                kAmelieGunDeckUnderside,
+                kAmelieGunDeck,
+                kAmelieGunDeckOpenings);
+        }
+
+        const auto main_deck_half_width =
+            std::max(
+                0.55F,
+                upper_half_width - 0.12F);
+        add_deck_row(
+            parts,
+            row_min_z,
+            row_max_z,
+            main_deck_half_width,
+            kAmelieMainDeckUnderside,
+            kAmelieMainDeckTop,
+            kAmelieMainDeckOpenings);
+
+        const auto raised_deck =
+            z <= -25 ||
+            z >= 25;
+        if (!raised_deck) {
+            const auto rail_x =
+                std::max(
+                    0.60F,
+                    upper_half_width - 0.10F);
+            const auto boarding_row =
+                z >= kAmelieBoardingMinRowZ &&
+                z <= kAmelieBoardingMaxRowZ;
+
+            if (!boarding_row) {
+                add_box(
+                    parts,
+                    ShipMaterial::CleanBeam,
+                    {-rail_x, 4.46F, row_min_z},
+                    {-rail_x + 0.14F, 4.66F, row_max_z},
+                    true);
+                add_box(
+                    parts,
+                    ShipMaterial::CleanBeam,
+                    {rail_x - 0.14F, 4.46F, row_min_z},
+                    {rail_x, 4.66F, row_max_z},
+                    true);
+            }
+
+            if ((z + 35) % 3 == 0 &&
+                !boarding_row) {
+                add_box(
+                    parts,
+                    ShipMaterial::CleanBeam,
+                    {-rail_x, 4.0F, row_min_z},
+                    {-rail_x + 0.16F, 5.02F, row_min_z + 0.16F},
+                    true);
+                add_box(
+                    parts,
+                    ShipMaterial::CleanBeam,
+                    {rail_x - 0.16F, 4.0F, row_min_z},
+                    {rail_x, 5.02F, row_min_z + 0.16F},
+                    true);
+            }
+        }
+    }
+
+    // Je prolonge le plancher de la cabine jusqu'au tableau arrière. Le dernier
+    // demi-mètre ne peut ainsi plus révéler la carène sous les fenêtres.
+    add_deck_row(
+        parts,
+        kAmelieSternZ,
+        -35.0F,
+        amelie_interior_half_width(
+            kAmelieGunDeck,
+            (kAmelieSternZ +
+             (-35.0F)) *
+                0.5F),
+        kAmelieGunDeckUnderside,
+        kAmelieGunDeck,
+        kAmelieNoDeckOpenings);
+
+    // Je relie les filets d'abordage avec deux levres de pont sans ajouter de
+    // volume invisible au-dessus de l'eau.
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {-kAmelieBoardingOuterX,
+         kAmelieMainDeckUnderside,
+         static_cast<float>(kAmelieBoardingMinRowZ)},
+        {-7.75F,
+         kAmelieMainDeckTop,
+         static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
+        true,
+        true,
+        ShipPartShape::Slab);
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {7.75F,
+         kAmelieMainDeckUnderside,
+         static_cast<float>(kAmelieBoardingMinRowZ)},
+        {kAmelieBoardingOuterX,
+         kAmelieMainDeckTop,
+         static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
+        true,
+        true,
+        ShipPartShape::Slab);
+
+    // Je prolonge visuellement le support jusqu'à la limite entière du couloir
+    // portuaire, sans créer un plafond de collision devant les deux filets.
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {-kAmelieBoardingSupportOuterX,
+         kAmelieMainDeckUnderside,
+         static_cast<float>(kAmelieBoardingMinRowZ)},
+        {-kAmelieBoardingOuterX,
+         kAmelieMainDeckTop,
+         static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
+        false,
+        true,
+        ShipPartShape::Slab);
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {kAmelieBoardingOuterX,
+         kAmelieMainDeckUnderside,
+         static_cast<float>(kAmelieBoardingMinRowZ)},
+        {kAmelieBoardingSupportOuterX,
+         kAmelieMainDeckTop,
+         static_cast<float>(kAmelieBoardingMaxRowZ + 1)},
+        false,
+        true,
+        ShipPartShape::Slab);
+    add_climbable_net(
+        parts,
+        -kAmelieBoardingNetX,
+        {-1.0F, 0.0F, 0.0F});
+    add_climbable_net(
+        parts,
+        kAmelieBoardingNetX,
+        {1.0F, 0.0F, 0.0F});
+
+    // Je ferme l'etrave avec un taille-mer profond. Je ferme separement les
+    // trois ponts au tableau arriere et j'y conserve une vraie baie vitree de
+    // capitaine.
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-0.95F,
+         kAmelieProtectionProfile.lower_hull_min_y,
+         kAmelieBowZ - 0.05F},
+        {0.95F,
+         3.82F,
+         kAmelieBowZ + 0.48F},
+        true);
+
+    const auto stern_upper_half_width =
+        amelie_half_width(
+            kAmelieSternZ + 0.25F);
+    const auto stern_middle_half_width =
+        amelie_band_half_width(
+            -2.20F,
+            kAmelieSternZ + 0.25F);
+    const auto stern_lower_half_width =
+        amelie_band_half_width(
+            -5.20F,
+            kAmelieSternZ + 0.25F);
+
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-stern_lower_half_width,
+         kAmelieProtectionProfile.lower_hull_min_y,
+         kAmelieSternZ - 0.46F},
+        {stern_lower_half_width,
+         kAmelieProtectionProfile.middle_hull_min_y,
+         kAmelieSternZ},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-stern_middle_half_width,
+         kAmelieProtectionProfile.middle_hull_min_y,
+         kAmelieSternZ - 0.46F},
+        {stern_middle_half_width,
+         kAmelieProtectionProfile.upper_hull_min_y,
+         kAmelieSternZ},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-stern_upper_half_width,
+         kAmelieProtectionProfile.upper_hull_min_y,
+         kAmelieSternZ - 0.46F},
+        {stern_upper_half_width,
+         1.34F,
+         kAmelieSternZ},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {-stern_upper_half_width,
+         2.78F,
+         kAmelieSternZ - 0.46F},
+        {stern_upper_half_width,
+         3.82F,
+         kAmelieSternZ},
+        true);
+
+    constexpr std::array<glm::vec2, 4> transom_windows {{
+        {-5.05F, -2.82F},
+        {-2.42F, -0.20F},
+        {0.20F, 2.42F},
+        {2.82F, 5.05F},
+    }};
+    for (const auto& window :
+         transom_windows) {
+        add_panel(
+            parts,
+            ShipMaterial::Glass,
+            {window.x,
+             1.48F,
+             kAmelieSternZ - 0.50F},
+            {window.y,
+             2.62F,
+             kAmelieSternZ - 0.47F},
+            {0.0F, 0.0F, -1.0F},
+            0.06F,
+            true);
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {window.x - 0.10F,
+             1.34F,
+             kAmelieSternZ - 0.52F},
+            {window.x + 0.06F,
+             2.78F,
+             kAmelieSternZ - 0.42F},
+            true);
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {window.y - 0.06F,
+             1.34F,
+             kAmelieSternZ - 0.52F},
+            {window.y + 0.10F,
+             2.78F,
+             kAmelieSternZ - 0.42F},
+            true);
+    }
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-5.15F, 1.34F, kAmelieSternZ - 0.52F},
+        {5.15F, 1.50F, kAmelieSternZ - 0.42F},
+        true);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-5.15F, 2.60F, kAmelieSternZ - 0.52F},
+        {5.15F, 2.78F, kAmelieSternZ - 0.42F},
+        true);
+
+    // Je donne a la dunette et au gaillard avant un demi-niveau qui suffit a
+    // produire une silhouette historique sans multiplier les escaliers ni
+    // casser la circulation.
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {-1.10F, 4.0F, -25.0F},
+        {1.10F, 4.50F, -24.0F},
+        true,
+        true,
+        ShipPartShape::Stair,
+        {0.0F, 0.0F, -1.0F});
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {-1.10F, 4.0F, 24.0F},
+        {1.10F, 4.50F, 25.0F},
+        true,
+        true,
+        ShipPartShape::Stair,
+        {0.0F, 0.0F, 1.0F});
+
+    for (int z = -35;
+         z <= -25;
+         ++z) {
+        const auto row_min_z =
+            static_cast<float>(z);
+        const auto deck_half_width =
+            std::max(
+                0.72F,
+                amelie_half_width(
+                    row_min_z + 0.5F) -
+                    0.12F);
+        add_box(
+            parts,
+            ShipMaterial::LightDeck,
+            {-deck_half_width, 4.0F, row_min_z},
+            {deck_half_width, 4.50F, row_min_z + 1.0F},
+            true,
+            true,
+            ShipPartShape::Slab);
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {-deck_half_width, 4.98F, row_min_z},
+            {-deck_half_width + 0.15F, 5.18F, row_min_z + 1.0F},
+            true);
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {deck_half_width - 0.15F, 4.98F, row_min_z},
+            {deck_half_width, 5.18F, row_min_z + 1.0F},
+            true);
+        if ((z + 35) % 2 == 0) {
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {-deck_half_width, 4.50F, row_min_z},
+                {-deck_half_width + 0.15F, 5.50F, row_min_z + 0.16F},
+                true);
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {deck_half_width - 0.15F, 4.50F, row_min_z},
+                {deck_half_width, 5.50F, row_min_z + 0.16F},
+                true);
+        }
+    }
+
+    for (int z = 25;
+         z <= 34;
+         ++z) {
+        const auto row_min_z =
+            static_cast<float>(z);
+        const auto deck_half_width =
+            std::max(
+                0.72F,
+                amelie_half_width(
+                    row_min_z + 0.5F) -
+                    0.12F);
+        add_box(
+            parts,
+            ShipMaterial::LightDeck,
+            {-deck_half_width, 4.0F, row_min_z},
+            {deck_half_width, 4.50F, row_min_z + 1.0F},
+            true,
+            true,
+            ShipPartShape::Slab);
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {-deck_half_width, 4.98F, row_min_z},
+            {-deck_half_width + 0.15F, 5.18F, row_min_z + 1.0F},
+            true);
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {deck_half_width - 0.15F, 4.98F, row_min_z},
+            {deck_half_width, 5.18F, row_min_z + 1.0F},
+            true);
+        if ((z - 25) % 2 == 0) {
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {-deck_half_width, 4.50F, row_min_z},
+                {-deck_half_width + 0.15F, 5.50F, row_min_z + 0.16F},
+                true);
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {deck_half_width - 0.15F, 4.50F, row_min_z},
+                {deck_half_width, 5.50F, row_min_z + 0.16F},
+                true);
+        }
+    }
+
+    const auto stern_rail_half_width =
+        amelie_half_width(
+            kAmelieSternZ + 0.5F) -
+        0.12F;
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-stern_rail_half_width, 4.98F, kAmelieSternZ},
+        {stern_rail_half_width, 5.18F, kAmelieSternZ + 0.16F},
+        true);
+    for (float x = -stern_rail_half_width;
+         x <= stern_rail_half_width + 0.01F;
+         x += 2.05F) {
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {x, 4.50F, kAmelieSternZ},
+            {std::min(
+                 x + 0.15F,
+                 stern_rail_half_width),
+             5.50F,
+             kAmelieSternZ + 0.16F},
+            true);
+    }
+
+    add_box(
+        parts,
+        ShipMaterial::LightDeck,
+        {-5.65F, 3.84F, kAmelieSternZ - 0.80F},
+        {5.65F, 4.08F, kAmelieSternZ - 0.42F},
+        false,
+        false,
+        ShipPartShape::Slab);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-5.78F, 3.92F, kAmelieSternZ - 0.86F},
+        {5.78F, 3.92F, kAmelieSternZ - 0.86F},
+        0.10F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-6.18F, 1.05F, kAmelieSternZ - 0.54F},
+        {-5.58F, 4.95F, kAmelieSternZ - 0.70F},
+        0.18F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        {6.18F, 1.05F, kAmelieSternZ - 0.54F},
+        {5.58F, 4.95F, kAmelieSternZ - 0.70F},
+        0.18F);
+
+    add_curved_wale(
+        parts,
+        3.18F,
+        0.07F,
+        ShipMaterial::CleanBeam,
+        0.14F);
+    add_curved_wale(
+        parts,
+        1.02F,
+        0.075F,
+        ShipMaterial::CleanBeam,
+        0.15F);
+    add_curved_wale(
+        parts,
+        -1.02F,
+        0.07F,
+        ShipMaterial::CleanBeam,
+        0.13F);
+    add_curved_wale(
+        parts,
+        -4.08F,
+        0.055F,
+        ShipMaterial::CleanBeam,
+        0.11F);
+    add_external_frames(parts);
+
+    add_hatch_coaming(
+        parts,
+        kAftMainDeckOpening,
+        kAmelieMainDeckTop);
+    add_hatch_coaming(
+        parts,
+        kForeMainDeckOpening,
+        kAmelieMainDeckTop);
+    add_hatch_coaming(
+        parts,
+        kCrewStairOpening,
+        kAmelieGunDeck);
+    add_hatch_coaming(
+        parts,
+        kHoldStairOpening,
+        kAmelieCrewDeck);
+}
+
+void add_six_step_stair(
+    std::vector<ShipPart>& parts,
+    float min_x,
+    float max_x,
+    float first_z,
+    float lower_floor_y,
+    bool ascends_positive_z) {
+
+    for (int step = 0;
+         step < 6;
+         ++step) {
+        const auto progression =
+            ascends_positive_z
+                ? step
+                : 5 - step;
+        const auto z =
+            first_z +
+            static_cast<float>(step);
+        add_box(
+            parts,
+            ShipMaterial::LightDeck,
+            {min_x, lower_floor_y, z},
+            {max_x,
+             lower_floor_y +
+                 0.50F +
+                 static_cast<float>(progression) *
+                     0.50F,
+             z + 1.0F},
+            true,
+            true,
+            ShipPartShape::Stair,
+            {0.0F,
+             0.0F,
+             ascends_positive_z
+                 ? 1.0F
+                 : -1.0F});
+    }
+}
+
+void add_bulkhead_with_door(
+    std::vector<ShipPart>& parts,
+    float floor_y,
+    float ceiling_y,
+    float z,
+    float door_center_x,
+    float door_half_width) {
+
+    const auto left_door_edge =
+        door_center_x -
+        door_half_width;
+    const auto right_door_edge =
+        door_center_x +
+        door_half_width;
+    const auto door_top_y =
+        std::min(
+            ceiling_y - 0.10F,
+            floor_y + 2.18F);
+
+    std::vector<float> band_edges {
+        floor_y,
+        ceiling_y,
+    };
+    for (const auto hull_band_y :
+         {
+             kAmelieProtectionProfile.middle_hull_min_y,
+             kAmelieProtectionProfile.upper_hull_min_y,
+         }) {
+        if (hull_band_y >
+                floor_y + 1.0e-4F &&
+            hull_band_y <
+                ceiling_y - 1.0e-4F) {
+            band_edges.push_back(
+                hull_band_y);
+        }
+    }
+    if (door_top_y >
+            floor_y + 1.0e-4F &&
+        door_top_y <
+            ceiling_y - 1.0e-4F) {
+        band_edges.push_back(
+            door_top_y);
+    }
+    std::sort(
+        band_edges.begin(),
+        band_edges.end());
+    band_edges.erase(
+        std::unique(
+            band_edges.begin(),
+            band_edges.end(),
+            [](float first,
+               float second) {
+                return std::abs(
+                           first -
+                           second) <=
+                       1.0e-4F;
+            }),
+        band_edges.end());
+
+    // Je suis chaque bande de largeur de la coque au lieu d'extruder la largeur
+    // du plancher jusqu'au plafond. Les cloisons ferment donc vraiment les
+    // flancs, meme lorsque la muraille s'evase au-dessus du pont.
+    for (std::size_t band = 0U;
+         band + 1U <
+         band_edges.size();
+         ++band) {
+
+        const auto band_min_y =
+            band_edges[band];
+        const auto band_max_y =
+            band_edges[band + 1U];
+        const auto band_center_y =
+            (band_min_y +
+             band_max_y) *
+            0.5F;
+        const auto half_width =
+            amelie_interior_half_width(
+                band_center_y,
+                z);
+        const auto below_door =
+            band_center_y <
+            door_top_y - 1.0e-4F;
+
+        if (!below_door) {
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {-half_width,
+                 band_min_y,
+                 z},
+                {half_width,
+                 band_max_y,
+                 z + 0.22F},
+                true);
+            continue;
+        }
+
+        if (left_door_edge >
+            -half_width + 0.08F) {
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {-half_width,
+                 band_min_y,
+                 z},
+                {std::min(
+                     left_door_edge,
+                     half_width),
+                 band_max_y,
+                 z + 0.22F},
+                true);
+        }
+        if (right_door_edge <
+            half_width - 0.08F) {
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {std::max(
+                     right_door_edge,
+                     -half_width),
+                 band_min_y,
+                 z},
+                {half_width,
+                 band_max_y,
+                 z + 0.22F},
+                true);
+        }
+    }
+
+    add_box(
+        parts,
+        ShipMaterial::Brass,
+        {left_door_edge - 0.07F,
+         floor_y,
+         z - 0.035F},
+        {left_door_edge + 0.07F,
+         door_top_y,
+         z + 0.255F},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::Brass,
+        {right_door_edge - 0.07F,
+         floor_y,
+         z - 0.035F},
+        {right_door_edge + 0.07F,
+         door_top_y,
+         z + 0.255F},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::Brass,
+        {left_door_edge - 0.07F,
+         door_top_y - 0.07F,
+         z - 0.035F},
+        {right_door_edge + 0.07F,
+         door_top_y + 0.07F,
+         z + 0.255F},
+        false);
+
+    const auto lower_panel_top =
+        std::min(
+            door_top_y - 0.20F,
+            floor_y + 0.72F);
+    if (lower_panel_top >
+        floor_y + 0.18F) {
+        const auto lower_half_width =
+            amelie_interior_half_width(
+                floor_y + 0.10F,
+                z);
+        if (left_door_edge >
+            -lower_half_width + 0.20F) {
+            add_panel(
+                parts,
+                ShipMaterial::OiledOak,
+                {-lower_half_width + 0.08F,
+                 floor_y + 0.12F,
+                 z - 0.045F},
+                {left_door_edge - 0.10F,
+                 lower_panel_top,
+                 z - 0.045F},
+                {0.0F, 0.0F, -1.0F},
+                0.045F);
+        }
+        if (right_door_edge <
+            lower_half_width - 0.20F) {
+            add_panel(
+                parts,
+                ShipMaterial::OiledOak,
+                {right_door_edge + 0.10F,
+                 floor_y + 0.12F,
+                 z - 0.045F},
+                {lower_half_width - 0.08F,
+                 lower_panel_top,
+                 z - 0.045F},
+                {0.0F, 0.0F, -1.0F},
+                0.045F);
+        }
+    }
+
+    const auto decorative_half_width =
+        amelie_interior_half_width(
+            floor_y + 1.05F,
+            z);
+    const auto parks_on_right =
+        decorative_half_width -
+            right_door_edge >=
+        left_door_edge +
+            decorative_half_width;
+    const auto available_wall_width =
+        parks_on_right
+            ? decorative_half_width -
+                  right_door_edge
+            : left_door_edge +
+                  decorative_half_width;
+    const auto door_leaf_width =
+        std::min(
+            door_half_width * 2.0F,
+            std::max(
+                0.0F,
+                available_wall_width -
+                    0.28F));
+
+    // Je plaque chaque porte ouverte contre la portion de cloison la plus
+    // large. Elle donne une vraie epaisseur a la piece sans reduire le passage
+    // physique ni modifier le graphe de navigation historique.
+    if (door_leaf_width >= 0.52F) {
+        const auto leaf_min_x =
+            parks_on_right
+                ? right_door_edge + 0.14F
+                : left_door_edge -
+                      0.14F -
+                      door_leaf_width;
+        const auto leaf_max_x =
+            parks_on_right
+                ? right_door_edge +
+                      0.14F +
+                      door_leaf_width
+                : left_door_edge -
+                      0.14F;
+        add_panel(
+            parts,
+            ShipMaterial::OiledOak,
+            {leaf_min_x,
+             floor_y + 0.10F,
+             z - 0.085F},
+            {leaf_max_x,
+             door_top_y - 0.11F,
+             z - 0.085F},
+            {0.0F, 0.0F, -1.0F},
+            0.075F);
+
+        const auto hinge_x =
+            parks_on_right
+                ? leaf_min_x + 0.06F
+                : leaf_max_x - 0.06F;
+        for (const auto hinge_y :
+             {
+                 floor_y + 0.42F,
+                 door_top_y - 0.38F,
+             }) {
+            add_segment(
+                parts,
+                ShipMaterial::Brass,
+                {hinge_x,
+                 hinge_y - 0.10F,
+                 z - 0.14F},
+                {hinge_x,
+                 hinge_y + 0.10F,
+                 z - 0.14F},
+                0.045F);
+        }
+
+        const auto handle_x =
+            parks_on_right
+                ? leaf_max_x - 0.19F
+                : leaf_min_x + 0.19F;
+        add_chamfered_box(
+            parts,
+            ShipMaterial::Brass,
+            {handle_x - 0.055F,
+             floor_y + 1.00F,
+             z - 0.18F},
+            {handle_x + 0.055F,
+             floor_y + 1.11F,
+             z - 0.09F});
+    }
+
+    // Je poursuis la moulure au-dessus de la baie uniquement : aucun bandeau
+    // decoratif ne coupe la silhouette du joueur lorsqu'il franchit la porte.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {-decorative_half_width,
+         ceiling_y - 0.18F,
+         z - 0.075F},
+        {decorative_half_width,
+         ceiling_y - 0.06F,
+         z + 0.275F},
+        false);
+}
+
+void add_solid_bulkhead(
+    std::vector<ShipPart>& parts,
+    float floor_y,
+    float ceiling_y,
+    float z,
+    float outward_sign) {
+
+    std::vector<float> band_edges {
+        floor_y,
+        ceiling_y,
+    };
+    for (const auto hull_band_y :
+         {
+             kAmelieProtectionProfile.middle_hull_min_y,
+             kAmelieProtectionProfile.upper_hull_min_y,
+         }) {
+        if (hull_band_y >
+                floor_y + 1.0e-4F &&
+            hull_band_y <
+                ceiling_y - 1.0e-4F) {
+            band_edges.push_back(
+                hull_band_y);
+        }
+    }
+    std::sort(
+        band_edges.begin(),
+        band_edges.end());
+
+    constexpr auto depth =
+        0.28F;
+    const auto min_z =
+        outward_sign < 0.0F
+            ? z - depth
+            : z;
+    const auto max_z =
+        outward_sign < 0.0F
+            ? z
+            : z + depth;
+
+    // Je ferme chaque extrémité praticable avant le volume effilé de la coque.
+    // La largeur est recalculée par bande afin qu'aucun jour ne subsiste au
+    // raccord avec les deux murailles.
+    for (std::size_t band = 0U;
+         band + 1U <
+             band_edges.size();
+         ++band) {
+        const auto band_min_y =
+            band_edges[band];
+        const auto band_max_y =
+            band_edges[band + 1U];
+        const auto half_width =
+            amelie_interior_half_width(
+                (band_min_y +
+                 band_max_y) *
+                    0.5F,
+                z);
+        add_box(
+            parts,
+            ShipMaterial::DarkHull,
+            {-half_width,
+             band_min_y,
+             min_z},
+            {half_width,
+             band_max_y,
+             max_z},
+            true);
+    }
+
+    const auto trim_half_width =
+        std::max(
+            0.36F,
+            amelie_interior_half_width(
+                floor_y + 0.12F,
+                z) -
+                0.06F);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-0.10F,
+         floor_y,
+         min_z - 0.025F},
+        {0.10F,
+         ceiling_y,
+         max_z + 0.025F},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-trim_half_width,
+         floor_y + 0.68F,
+         min_z - 0.025F},
+        {trim_half_width,
+         floor_y + 0.82F,
+         max_z + 0.025F},
+        false);
+}
+
+void add_ship_wheel(
+    std::vector<ShipPart>& parts,
+    ShipMaterial material,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner,
+    float spoke_thickness) {
+
     parts.push_back({
         ShipPartShape::Wheel,
-        ShipMaterial::CleanBeam,
-        {-1.05F, 5.05F, -29.35F},
-        {1.05F, 7.15F, -29.15F},
+        material,
+        min_corner,
+        max_corner,
         {0.0F, 0.0F, 1.0F},
-        0.13F,
+        spoke_thickness,
         false,
         false,
         U'\0',
     });
-    // Je construis un vrai habitacle de compas : pied en bois, cuvette de
-    // laiton et rose vitrée, au lieu d'un gros cube doré sans fonction lisible.
-    add_box(parts,
-            ShipMaterial::CleanBeam,
-            {1.90F, 4.50F, -29.88F},
-            {2.30F, 4.92F, -29.42F},
-            true,
-            true);
-    add_box(parts,
+}
+
+void add_barrel(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& center,
+    float height,
+    float diameter) {
+
+    // Je donne la collision au noyau visible, plus petit que le cylindre :
+    // le joueur ne rencontre jamais une boîte invisible autour du tonneau.
+    const auto half_core =
+        diameter * 0.31F;
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {center.x - half_core,
+         center.y,
+         center.z - half_core},
+        {center.x + half_core,
+         center.y + height,
+         center.z + half_core},
+        true);
+    add_segment(
+        parts,
+        ShipMaterial::OiledOak,
+        {center.x,
+         center.y + 0.04F,
+         center.z},
+        {center.x,
+         center.y + height - 0.04F,
+         center.z},
+        diameter);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {center.x,
+         center.y + height * 0.23F,
+         center.z},
+        {center.x,
+         center.y + height * 0.31F,
+         center.z},
+        diameter + 0.06F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {center.x,
+         center.y + height * 0.69F,
+         center.z},
+        {center.x,
+         center.y + height * 0.77F,
+         center.z},
+        diameter + 0.06F);
+
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Brass,
+        {center.x - 0.07F,
+         center.y + height - 0.015F,
+         center.z - 0.07F},
+        {center.x + 0.07F,
+         center.y + height + 0.055F,
+         center.z + 0.07F});
+}
+
+void add_crate(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner) {
+
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        min_corner,
+        max_corner,
+        true,
+        true);
+
+    const auto brace_z =
+        max_corner.z + 0.015F;
+    add_segment(
+        parts,
+        ShipMaterial::DarkHull,
+        {min_corner.x + 0.08F,
+         min_corner.y + 0.08F,
+         brace_z},
+        {max_corner.x - 0.08F,
+         max_corner.y - 0.08F,
+         brace_z},
+        0.07F);
+    add_segment(
+        parts,
+        ShipMaterial::DarkHull,
+        {max_corner.x - 0.08F,
+         min_corner.y + 0.08F,
+         brace_z},
+        {min_corner.x + 0.08F,
+         max_corner.y - 0.08F,
+         brace_z},
+        0.07F);
+
+    const auto center_x =
+        (min_corner.x +
+         max_corner.x) *
+        0.5F;
+    const auto center_y =
+        (min_corner.y +
+         max_corner.y) *
+        0.5F;
+    const auto label_half_width =
+        std::min(
+            0.30F,
+            (max_corner.x -
+             min_corner.x) *
+                0.22F);
+    add_panel(
+        parts,
+        ShipMaterial::Paper,
+        {center_x - label_half_width,
+         center_y - 0.18F,
+         max_corner.z + 0.028F},
+        {center_x + label_half_width,
+         center_y + 0.18F,
+         max_corner.z + 0.028F},
+        {0.0F, 0.0F, 1.0F},
+        0.025F);
+
+    for (const auto ratio :
+         {
+             0.28F,
+             0.72F,
+         }) {
+        const auto strap_x =
+            min_corner.x +
+            (max_corner.x -
+             min_corner.x) *
+                ratio;
+        add_segment(
+            parts,
+            ShipMaterial::Rope,
+            {strap_x,
+             min_corner.y + 0.07F,
+             max_corner.z + 0.035F},
+            {strap_x,
+             max_corner.y - 0.07F,
+             max_corner.z + 0.035F},
+            0.045F);
+    }
+}
+
+void add_framed_bed(
+    std::vector<ShipPart>& parts,
+    const glm::vec2& x_bounds,
+    const glm::vec2& z_bounds,
+    float floor_y,
+    ShipMaterial blanket_material,
+    bool ornate) {
+
+    const auto min_x =
+        std::min(
+            x_bounds.x,
+            x_bounds.y);
+    const auto max_x =
+        std::max(
+            x_bounds.x,
+            x_bounds.y);
+    const auto min_z =
+        std::min(
+            z_bounds.x,
+            z_bounds.y);
+    const auto max_z =
+        std::max(
+            z_bounds.x,
+            z_bounds.y);
+
+    // Je donne au lit un unique sommier visible et collidable. Tous les pieds,
+    // tissus et ornements restent decoratifs pour eviter les micro-collisions.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {min_x,
+         floor_y + 0.16F,
+         min_z},
+        {max_x,
+         floor_y + 0.34F,
+         max_z},
+        true);
+
+    constexpr auto leg_half_width =
+        0.085F;
+    for (const auto x :
+         {
+             min_x + 0.11F,
+             max_x - 0.11F,
+         }) {
+        for (const auto z :
+             {
+                 min_z + 0.11F,
+                 max_z - 0.11F,
+             }) {
+            add_chamfered_box(
+                parts,
+                ShipMaterial::OiledOak,
+                {x - leg_half_width,
+                 floor_y,
+                 z - leg_half_width},
+                {x + leg_half_width,
+                 floor_y + 0.36F,
+                 z + leg_half_width});
+        }
+    }
+
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Linen,
+        {min_x + 0.09F,
+         floor_y + 0.34F,
+         min_z + 0.11F},
+        {max_x - 0.09F,
+         floor_y + 0.55F,
+         max_z - 0.11F});
+
+    const auto bed_width =
+        max_x -
+        min_x;
+    const auto pillow_count =
+        bed_width >= 1.55F
+            ? 2
+            : 1;
+    for (int pillow = 0;
+         pillow < pillow_count;
+         ++pillow) {
+        const auto pillow_width =
+            (bed_width - 0.28F) /
+            static_cast<float>(
+                pillow_count);
+        const auto pillow_min_x =
+            min_x +
+            0.14F +
+            static_cast<float>(
+                pillow) *
+                pillow_width;
+        add_chamfered_box(
+            parts,
+            ShipMaterial::Linen,
+            {pillow_min_x + 0.04F,
+             floor_y + 0.54F,
+             min_z + 0.18F},
+            {pillow_min_x +
+                 pillow_width -
+                 0.04F,
+             floor_y + 0.69F,
+             min_z + 0.68F});
+    }
+
+    add_draped_panel(
+        parts,
+        blanket_material,
+        {min_x + 0.07F,
+         floor_y + 0.56F,
+         min_z + 0.78F},
+        {max_x - 0.07F,
+         floor_y + 0.62F,
+         max_z - 0.08F},
+        {0.0F, 1.0F, 0.0F},
+        0.075F);
+
+    add_chamfered_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {min_x - 0.04F,
+         floor_y + 0.18F,
+         min_z - 0.08F},
+        {max_x + 0.04F,
+         floor_y +
+             (ornate
+                  ? 1.36F
+                  : 0.72F),
+         min_z + 0.08F});
+    add_chamfered_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {min_x - 0.025F,
+         floor_y + 0.18F,
+         max_z - 0.07F},
+        {max_x + 0.025F,
+         floor_y +
+             (ornate
+                  ? 0.82F
+                  : 0.55F),
+         max_z + 0.07F});
+
+    if (!ornate) {
+        return;
+    }
+
+    for (const auto x :
+         {
+             min_x,
+             max_x,
+         }) {
+        add_segment(
+            parts,
             ShipMaterial::Brass,
-            {1.78F, 4.90F, -29.98F},
-            {2.42F, 5.08F, -29.32F},
-            true,
+            {x,
+             floor_y + 1.23F,
+             min_z - 0.09F},
+            {x,
+             floor_y + 1.43F,
+             min_z - 0.09F},
+            0.085F);
+    }
+}
+
+void add_table(
+    std::vector<ShipPart>& parts,
+    const glm::vec2& x_bounds,
+    const glm::vec2& z_bounds,
+    float floor_y,
+    float top_y) {
+
+    const auto min_x =
+        std::min(
+            x_bounds.x,
+            x_bounds.y);
+    const auto max_x =
+        std::max(
+            x_bounds.x,
+            x_bounds.y);
+    const auto min_z =
+        std::min(
+            z_bounds.x,
+            z_bounds.y);
+    const auto max_z =
+        std::max(
+            z_bounds.x,
+            z_bounds.y);
+
+    // Je garde le plateau comme unique enveloppe physique de la table. Je fais
+    // suivre sa silhouette aux quatre pieds et à la traverse, qui restent visuels.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {min_x,
+         top_y - 0.14F,
+         min_z},
+        {max_x,
+         top_y,
+         max_z},
+        true,
+        true);
+
+    constexpr auto leg_inset =
+        0.19F;
+    constexpr auto leg_half_width =
+        0.075F;
+    for (const auto x :
+         {
+             min_x + leg_inset,
+             max_x - leg_inset,
+         }) {
+        for (const auto z :
+             {
+                 min_z + leg_inset,
+                 max_z - leg_inset,
+             }) {
+            add_chamfered_box(
+                parts,
+                ShipMaterial::OiledOak,
+                {x - leg_half_width,
+                 floor_y,
+                 z - leg_half_width},
+                {x + leg_half_width,
+                 top_y - 0.13F,
+                 z + leg_half_width});
+        }
+    }
+
+    add_segment(
+        parts,
+        ShipMaterial::DarkHull,
+        {(min_x + max_x) * 0.5F,
+         floor_y + 0.34F,
+         min_z + 0.22F},
+        {(min_x + max_x) * 0.5F,
+         floor_y + 0.34F,
+         max_z - 0.22F},
+        0.075F);
+}
+
+void add_bench(
+    std::vector<ShipPart>& parts,
+    const glm::vec2& x_bounds,
+    const glm::vec2& z_bounds,
+    float floor_y) {
+
+    const auto min_x =
+        std::min(
+            x_bounds.x,
+            x_bounds.y);
+    const auto max_x =
+        std::max(
+            x_bounds.x,
+            x_bounds.y);
+    const auto min_z =
+        std::min(
+            z_bounds.x,
+            z_bounds.y);
+    const auto max_z =
+        std::max(
+            z_bounds.x,
+            z_bounds.y);
+
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {min_x,
+         floor_y + 0.43F,
+         min_z},
+        {max_x,
+         floor_y + 0.54F,
+         max_z},
+        true,
+        true);
+    for (const auto z :
+         {
+             min_z + 0.22F,
+             max_z - 0.22F,
+         }) {
+        add_chamfered_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {min_x + 0.10F,
+             floor_y,
+             z - 0.075F},
+            {max_x - 0.10F,
+             floor_y + 0.45F,
+             z + 0.075F});
+    }
+}
+
+void add_table_setting(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& center) {
+
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Ceramic,
+        {center.x - 0.15F,
+         center.y,
+         center.z - 0.15F},
+        {center.x + 0.15F,
+         center.y + 0.055F,
+         center.z + 0.15F});
+    add_segment(
+        parts,
+        ShipMaterial::Ceramic,
+        {center.x + 0.27F,
+         center.y,
+         center.z + 0.08F},
+        {center.x + 0.27F,
+         center.y + 0.18F,
+         center.z + 0.08F},
+        0.14F);
+}
+
+void add_floor_rope_coil(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& center,
+    float radius) {
+
+    add_ship_wheel(
+        parts,
+        ShipMaterial::Rope,
+        {center.x - radius,
+         center.y,
+         center.z - radius},
+        {center.x + radius,
+         center.y + 0.055F,
+         center.z + radius},
+        0.045F);
+}
+
+void add_bucket(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& center) {
+
+    add_segment(
+        parts,
+        ShipMaterial::OiledOak,
+        center,
+        {center.x,
+         center.y + 0.48F,
+         center.z},
+        0.42F);
+    for (const auto y :
+         {
+             center.y + 0.08F,
+             center.y + 0.39F,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {center.x,
+             y,
+             center.z},
+            {center.x,
+             y + 0.035F,
+             center.z},
+            0.45F);
+    }
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {center.x - 0.20F,
+         center.y + 0.36F,
+         center.z},
+        {center.x,
+         center.y + 0.68F,
+         center.z},
+        0.045F);
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {center.x,
+         center.y + 0.68F,
+         center.z},
+        {center.x + 0.20F,
+         center.y + 0.36F,
+         center.z},
+        0.045F);
+}
+
+void add_sack(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& min_corner,
+    const glm::vec3& max_corner) {
+
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Linen,
+        min_corner,
+        max_corner);
+    const auto tie_y =
+        max_corner.y -
+        0.12F;
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {(min_corner.x + max_corner.x) * 0.5F,
+         tie_y,
+         min_corner.z},
+        {(min_corner.x + max_corner.x) * 0.5F,
+         tie_y,
+         max_corner.z},
+        0.04F);
+}
+
+void add_rolled_textile(
+    std::vector<ShipPart>& parts,
+    const glm::vec3& start,
+    const glm::vec3& end,
+    float diameter,
+    ShipMaterial material) {
+
+    add_segment(
+        parts,
+        material,
+        start,
+        end,
+        diameter);
+    const auto first_tie =
+        glm::mix(
+            start,
+            end,
+            0.25F);
+    const auto second_tie =
+        glm::mix(
+            start,
+            end,
+            0.75F);
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        first_tie,
+        first_tie +
+            glm::vec3 {0.0F, 0.055F, 0.0F},
+        diameter + 0.04F);
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        second_tie,
+        second_tie +
+            glm::vec3 {0.0F, 0.055F, 0.0F},
+        diameter + 0.04F);
+}
+
+void add_cannon(
+    std::vector<ShipPart>& parts,
+    float side_sign,
+    float local_z) {
+
+    const auto outer_half_width =
+        amelie_half_width(local_z);
+    const auto inner_half_width =
+        amelie_interior_half_width(
+            kAmelieGunDeck + 0.20F,
+            local_z);
+    const auto carriage_center_x =
+        side_sign *
+        (inner_half_width - 1.18F);
+
+    // Je garde un noyau de collision bas et lisible, puis je construis l'affut
+    // avec des joues, deux essieux et quatre roues purement visuels.
+    add_box(
+        parts,
+        ShipMaterial::DarkHull,
+        {carriage_center_x - 0.72F,
+         1.00F,
+         local_z - 0.50F},
+        {carriage_center_x + 0.72F,
+         1.22F,
+         local_z + 0.50F},
+        true);
+
+    for (const auto cheek_sign :
+         {-1.0F, 1.0F}) {
+        const auto cheek_z =
+            local_z +
+            cheek_sign * 0.34F;
+        add_box(
+            parts,
+            ShipMaterial::CleanBeam,
+            {carriage_center_x - 0.66F,
+             1.18F,
+             cheek_z - 0.095F},
+            {carriage_center_x + 0.66F,
+             1.51F,
+             cheek_z + 0.095F},
+            false);
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {carriage_center_x - 0.54F,
+             1.48F,
+             cheek_z},
+            {carriage_center_x + 0.54F,
+             1.48F,
+             cheek_z},
+            0.055F);
+    }
+
+    for (const auto axle_offset :
+         {-0.43F, 0.43F}) {
+        const auto axle_x =
+            carriage_center_x +
+            side_sign * axle_offset;
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {axle_x,
+             1.20F,
+             local_z - 0.58F},
+            {axle_x,
+             1.20F,
+             local_z + 0.58F},
+            0.13F);
+        for (const auto wheel_sign :
+             {-1.0F, 1.0F}) {
+            const auto wheel_z =
+                local_z +
+                wheel_sign * 0.49F;
+            add_ship_wheel(
+                parts,
+                ShipMaterial::DarkHull,
+                {axle_x - 0.23F,
+                 0.98F,
+                 wheel_z - 0.052F},
+                {axle_x + 0.23F,
+                 1.44F,
+                 wheel_z + 0.052F},
+                0.075F);
+        }
+    }
+
+    const auto barrel_start_x =
+        side_sign *
+            (inner_half_width - 2.02F);
+    const auto barrel_end_x =
+        side_sign *
+            (outer_half_width + 0.50F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {barrel_start_x, 1.78F, local_z},
+        {barrel_end_x, 1.78F, local_z},
+        0.46F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {side_sign *
+             (inner_half_width - 1.98F),
+         1.78F,
+         local_z},
+        {side_sign *
+             (inner_half_width - 1.25F),
+         1.78F,
+         local_z},
+        0.59F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {side_sign *
+             (inner_half_width - 1.25F),
+         1.78F,
+         local_z},
+        {side_sign *
+             (outer_half_width + 0.20F),
+         1.78F,
+         local_z},
+        0.40F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {side_sign *
+             (outer_half_width + 0.18F),
+         1.78F,
+         local_z},
+        {barrel_end_x,
+         1.78F,
+         local_z},
+        0.60F);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {side_sign *
+             (inner_half_width - 1.45F),
+         1.78F,
+         local_z},
+        {side_sign *
+             (inner_half_width - 1.20F),
+         1.78F,
+         local_z},
+        0.53F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {side_sign *
+             (inner_half_width - 2.28F),
+         1.78F,
+         local_z},
+        {side_sign *
+             (inner_half_width - 2.02F),
+         1.78F,
+         local_z},
+        0.28F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {side_sign *
+             (inner_half_width - 1.35F),
+         1.78F,
+         local_z - 0.54F},
+        {side_sign *
+             (inner_half_width - 1.35F),
+         1.78F,
+         local_z + 0.54F},
+        0.20F);
+
+    const auto wall_anchor_x =
+        side_sign *
+        (inner_half_width - 0.08F);
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {wall_anchor_x,
+         1.46F,
+         local_z - 0.58F},
+        {side_sign *
+             (inner_half_width - 1.93F),
+         1.62F,
+         local_z - 0.20F},
+        0.065F);
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {wall_anchor_x,
+         1.46F,
+         local_z + 0.58F},
+        {side_sign *
+             (inner_half_width - 1.93F),
+         1.62F,
+         local_z + 0.20F},
+        0.065F);
+
+    // Je termine chaque poste de tir par une hampe contre la muraille, sans
+    // ajouter de petit obstacle de collision.
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        {side_sign *
+             (inner_half_width - 1.90F),
+         1.18F,
+         local_z + 0.78F},
+        {side_sign *
+             (inner_half_width - 0.15F),
+         1.18F,
+         local_z + 0.78F},
+        0.075F);
+}
+
+void add_captain_cabin(
+    std::vector<ShipPart>& parts) {
+
+    add_bulkhead_with_door(
+        parts,
+        kAmelieGunDeck,
+        kAmelieMainDeckUnderside,
+        -25.75F,
+        0.30F,
+        1.05F);
+    add_bulkhead_with_door(
+        parts,
+        kAmelieGunDeck,
+        kAmelieMainDeckUnderside,
+        -19.50F,
+        0.0F,
+        1.65F);
+
+    // Je remplace l'ancien bloc de 3,30 x 5,65 m par un vrai lit de cabine,
+    // proportionne a un humain et entierement tenu contre la muraille babord.
+    add_framed_bed(
+        parts,
+        {-5.45F, -3.75F},
+        {-32.20F, -29.30F},
+        kAmelieGunDeck,
+        ShipMaterial::BurgundyTextile,
+        true);
+
+    // Je conserve un unique noyau physique pour le coffre de chevet et un
+    // couvercle capitonné purement visuel.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {-5.40F, 1.00F, -28.95F},
+        {-4.45F, 1.60F, -27.95F},
+        true);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Leather,
+        {-5.44F, 1.59F, -28.99F},
+        {-4.41F, 1.74F, -27.91F});
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-4.93F, 1.56F, -29.03F},
+        {-4.93F, 1.71F, -29.03F},
+        0.075F);
+
+    // Je donne maintenant au bureau un plateau, quatre pieds et une traverse.
+    // Je laisse libres les stations CaptainCabin et ChartTable.
+    add_table(
+        parts,
+        {2.55F, 5.15F},
+        {-29.65F, -27.70F},
+        kAmelieGunDeck,
+        1.76F);
+    add_panel(
+        parts,
+        ShipMaterial::Paper,
+        {2.92F, 1.765F, -29.34F},
+        {4.72F, 1.81F, -28.02F},
+        {0.0F, 1.0F, 0.0F},
+        0.035F);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {3.08F, 1.86F, -28.98F},
+        {4.53F, 1.86F, -28.12F},
+        0.045F);
+    add_segment(
+        parts,
+        ShipMaterial::Leather,
+        {4.62F, 1.86F, -29.22F},
+        {4.05F, 1.86F, -28.36F},
+        0.085F);
+
+    // Je garde le fauteuil en cuir a une echelle humaine sans ajouter de
+    // micro-collision susceptible de retenir le joueur sur le navire en
+    // mouvement.
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Leather,
+        {3.25F, 1.39F, -27.35F},
+        {4.08F, 1.55F, -26.63F});
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Leather,
+        {3.31F, 1.48F, -26.75F},
+        {4.02F, 2.18F, -26.59F});
+    for (const auto x :
+         {
+             3.35F,
+             3.98F,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::OiledOak,
+            {x, 1.00F, -27.22F},
+            {x, 1.47F, -27.22F},
+            0.075F);
+        add_segment(
+            parts,
+            ShipMaterial::OiledOak,
+            {x, 1.00F, -26.74F},
+            {x, 1.52F, -26.74F},
+            0.075F);
+    }
+
+    // Je structure l'antichambre avec la bibliotheque, les livres et les cartes
+    // sans les faire depasser dans l'axe des deux portes.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {5.22F, 1.00F, -25.38F},
+        {5.58F, 3.05F, -20.28F},
+        true);
+    for (int shelf = 0;
+         shelf < 4;
+         ++shelf) {
+        const auto y =
+            1.27F +
+            static_cast<float>(
+                shelf) *
+                0.51F;
+        add_chamfered_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {4.86F, y, -25.20F},
+            {5.64F, y + 0.10F, -20.42F});
+
+        for (int book = 0;
+             book < 5;
+             ++book) {
+            const auto z =
+                -24.88F +
+                static_cast<float>(
+                    book) *
+                    0.86F;
+            add_chamfered_box(
+                parts,
+                book % 2 == 0
+                    ? ShipMaterial::Leather
+                    : ShipMaterial::BurgundyTextile,
+                {4.80F,
+                 y + 0.10F,
+                 z},
+                {5.58F,
+                 y + 0.38F,
+                 z + 0.18F});
+        }
+    }
+    add_panel(
+        parts,
+        ShipMaterial::Paper,
+        {5.66F, 1.72F, -24.65F},
+        {5.70F, 2.70F, -21.15F},
+        {-1.0F, 0.0F, 0.0F},
+        0.035F);
+
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {-5.15F, 1.00F, -24.65F},
+        {-3.55F, 1.62F, -23.15F},
+        true);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Leather,
+        {-5.20F, 1.60F, -24.70F},
+        {-3.50F, 1.76F, -23.10F});
+    for (const auto x :
+         {
+             -4.82F,
+             -3.88F,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {x, 1.05F, -24.73F},
+            {x, 1.71F, -24.73F},
+            0.05F);
+    }
+
+    // Je distingue la chambre et le cabinet de navigation par deux tapis
+    // profonds, sans traverser la cloison intermédiaire.
+    add_draped_panel(
+        parts,
+        ShipMaterial::BurgundyTextile,
+        {-1.15F, 1.012F, -32.65F},
+        {1.15F, 1.045F, -26.12F},
+        {0.0F, 1.0F, 0.0F},
+        0.035F);
+    add_draped_panel(
+        parts,
+        ShipMaterial::NavyTextile,
+        {-1.15F, 1.012F, -25.36F},
+        {1.15F, 1.045F, -20.18F},
+        {0.0F, 1.0F, 0.0F},
+        0.035F);
+
+    // Je referme la composition de la cabine avec le globe, son pied et un compas.
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-2.18F, 1.58F, -22.25F},
+        {-2.18F, 2.38F, -22.25F},
+        0.40F);
+    add_segment(
+        parts,
+        ShipMaterial::OiledOak,
+        {-2.18F, 1.06F, -22.25F},
+        {-2.18F, 1.61F, -22.25F},
+        0.11F);
+    add_segment(
+        parts,
+        ShipMaterial::OiledOak,
+        {-2.55F, 1.05F, -22.25F},
+        {-1.81F, 1.05F, -22.25F},
+        0.12F);
+}
+
+void add_gun_deck(
+    std::vector<ShipPart>& parts) {
+
+    constexpr std::array<float, 6> cannon_rows {{
+        -15.5F,
+        -9.5F,
+        -3.5F,
+        4.5F,
+        10.5F,
+        16.5F,
+    }};
+
+    for (const auto local_z :
+         cannon_rows) {
+        add_cannon(
+            parts,
+            -1.0F,
+            local_z);
+        add_cannon(
+            parts,
+            1.0F,
+            local_z);
+
+        // Je fais alterner seaux, glenes et refouloirs d'un poste a l'autre. Je
+        // les garde au-dela de l'axe des affuts et entierement non collidables.
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            const auto inner_half_width =
+                amelie_interior_half_width(
+                    1.20F,
+                    local_z);
+            const auto accessory_x =
+                side_sign *
+                std::max(
+                    3.35F,
+                    inner_half_width -
+                        2.38F);
+            if (local_z <
+                0.0F) {
+                add_bucket(
+                    parts,
+                    {accessory_x,
+                     1.01F,
+                     local_z + 1.02F});
+            } else {
+                add_floor_rope_coil(
+                    parts,
+                    {accessory_x,
+                     1.015F,
+                     local_z + 0.98F},
+                    0.34F);
+            }
+        }
+    }
+
+    add_bulkhead_with_door(
+        parts,
+        kAmelieGunDeck,
+        kAmelieMainDeckUnderside,
+        20.25F,
+        0.0F,
+        1.10F);
+
+    // Je garde le magasin avant sombre et rangé : les barils de poudre cerclés,
+    // les coffres bas et les outils restent contre les bordés, loin du couloir.
+    for (const auto side_sign :
+         {-1.0F, 1.0F}) {
+        for (const auto z :
+             {23.0F, 26.0F}) {
+            const auto half_width =
+                amelie_interior_half_width(
+                    1.20F,
+                    z);
+            add_barrel(
+                parts,
+                {side_sign *
+                     std::max(
+                         2.25F,
+                         half_width - 0.82F),
+                 1.00F,
+                 z},
+                1.24F,
+                0.90F);
+        }
+        const auto rack_x =
+            side_sign *
+            std::max(
+                2.20F,
+                amelie_interior_half_width(
+                    2.10F,
+                    28.0F) -
+                    0.24F);
+        for (const auto y :
+             {1.55F, 2.12F, 2.69F}) {
+            add_segment(
+                parts,
+                ShipMaterial::Iron,
+                {rack_x,
+                 y,
+                 27.10F},
+                {rack_x,
+                 y,
+                 29.20F},
+                0.075F);
+        }
+
+        // Je calcule la largeur sûre sur les quatre coins du casier. La proue
+        // se resserre fortement ici et une largeur prise au seul centre ferait
+        // ressortir le meuble à travers le bordé.
+        const auto locker_outer_abs =
+            std::min({
+                amelie_interior_half_width(
+                    1.00F,
+                    29.35F),
+                amelie_interior_half_width(
+                    2.64F,
+                    29.35F),
+                amelie_interior_half_width(
+                    1.00F,
+                    31.15F),
+                amelie_interior_half_width(
+                    2.64F,
+                    31.15F),
+            }) -
+            0.20F;
+        const auto locker_inner_abs =
+            std::max(
+                1.42F,
+                locker_outer_abs -
+                    1.02F);
+        const auto locker_inner_x =
+            side_sign *
+            locker_inner_abs;
+        const auto locker_outer_x =
+            side_sign *
+            locker_outer_abs;
+        add_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {std::min(
+                 locker_inner_x,
+                 locker_outer_x),
+             1.00F,
+             29.35F},
+            {std::max(
+                 locker_inner_x,
+                 locker_outer_x),
+             2.64F,
+             31.15F},
             true);
-    add_panel(parts,
-              ShipMaterial::Glass,
-              {1.86F, 5.08F, -29.90F},
-              {2.34F, 5.12F, -29.40F},
-              {0.0F, 1.0F, 0.0F},
-              0.04F);
-    add_segment(parts, ShipMaterial::Iron, {2.10F, 5.13F, -29.86F}, {2.10F, 5.13F, -29.44F}, 0.025F);
-    add_segment(parts, ShipMaterial::Iron, {1.90F, 5.13F, -29.65F}, {2.30F, 5.13F, -29.65F}, 0.025F);
+        add_panel(
+            parts,
+            ShipMaterial::Iron,
+            {std::min(
+                 locker_inner_x,
+                 locker_outer_x) +
+                 0.10F,
+             1.16F,
+             29.29F},
+            {std::max(
+                 locker_inner_x,
+                 locker_outer_x) -
+                 0.10F,
+             2.50F,
+             29.29F},
+            {0.0F, 0.0F, -1.0F},
+            0.045F);
+        const auto locker_handle_x =
+            side_sign *
+            (locker_inner_abs +
+             0.24F);
+        add_chamfered_box(
+            parts,
+            ShipMaterial::Brass,
+            {locker_handle_x -
+                 0.045F,
+             1.77F,
+             29.20F},
+            {locker_handle_x +
+                 0.045F,
+             1.88F,
+             29.30F});
+    }
 
-    // Je garde le cabestan et les panneaux de cale hors des axes de circulation.
-    add_box(parts, ShipMaterial::CleanBeam, {-1.15F, 4.0F, 15.0F}, {1.15F, 4.65F, 16.2F}, true, true);
-    add_segment(parts, ShipMaterial::CleanBeam, {-2.15F, 4.48F, 15.6F}, {2.15F, 4.48F, 15.6F}, 0.16F);
-    add_box(parts, ShipMaterial::CleanBeam, {-3.8F, 4.0F, -4.5F}, {-2.0F, 4.55F, -1.5F}, true, true);
-    add_box(parts, ShipMaterial::CleanBeam, {2.0F, 4.0F, -4.5F}, {3.8F, 4.55F, -1.5F}, true, true);
+    // Je garde les râteliers de boulets et les accessoires contre les flancs,
+    // derrière les affûts, sans réduire l'axe central de circulation.
+    for (const auto local_z :
+         {-12.5F, -6.5F, 1.0F, 7.5F, 13.5F}) {
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            const auto x =
+                side_sign *
+                std::max(
+                    3.60F,
+                    amelie_interior_half_width(
+                        1.20F,
+                        local_z) -
+                        0.55F);
+            add_box(
+                parts,
+                ShipMaterial::CleanBeam,
+                {x - 0.34F,
+                 1.00F,
+                 local_z - 0.52F},
+                {x + 0.34F,
+                 1.34F,
+                 local_z + 0.52F},
+                true);
+            for (const auto ball_z :
+                 {local_z - 0.28F,
+                  local_z,
+                  local_z + 0.28F}) {
+                add_segment(
+                    parts,
+                    ShipMaterial::Iron,
+                    {x, 1.39F, ball_z},
+                    {x, 1.51F, ball_z},
+                    0.28F);
+            }
+        }
+    }
 
-    // Je pose une embarcation legere sur tribord et je laisse le centre libre.
-    add_panel(parts, ShipMaterial::DarkHull, {4.20F, 4.18F, 0.5F}, {5.90F, 5.25F, 8.5F}, {1.0F, 0.0F, 0.0F}, 0.14F);
-    add_segment(parts, ShipMaterial::CleanBeam, {4.45F, 4.35F, 0.9F}, {5.65F, 4.35F, 8.1F}, 0.10F);
-    add_segment(parts, ShipMaterial::CleanBeam, {5.65F, 4.35F, 0.9F}, {4.45F, 4.35F, 8.1F}, 0.10F);
+    // Je rythme le centre de la batterie avec des caillebotis qui ne deviennent
+    // ni supports supplémentaires ni obstacles aux trémies.
+    for (const auto z :
+         {
+             -17.80F,
+             -11.25F,
+             -5.20F,
+             3.15F,
+             9.35F,
+             15.35F,
+         }) {
+        add_panel(
+            parts,
+            ShipMaterial::OiledOak,
+            {-1.22F,
+             1.012F,
+             z},
+            {1.22F,
+             1.052F,
+             z + 1.25F},
+            {0.0F, 1.0F, 0.0F},
+            0.035F);
+        for (int slat = 0;
+             slat < 5;
+             ++slat) {
+            const auto x =
+                -0.96F +
+                static_cast<float>(
+                    slat) *
+                    0.48F;
+            add_segment(
+                parts,
+                ShipMaterial::DarkHull,
+                {x, 1.064F, z + 0.08F},
+                {x, 1.064F, z + 1.17F},
+                0.045F);
+        }
+    }
 
-    for (const float z : {-22.0F, -4.0F, 13.5F, 34.0F}) {
-        // Je suis la largeur reelle du pont au lieu de laisser les fanaux de
-        // proue flotter a plusieurs metres hors de la coque effilee.
-        const auto deck_half_width = std::max(0.70F, amelie_half_width(z + 0.5F) - 0.12F);
-        const auto lantern_outer_x = std::max(0.45F, deck_half_width - 0.08F);
-        const auto lantern_inner_x = std::max(0.15F, lantern_outer_x - 0.30F);
-        add_box(parts,
-                ShipMaterial::Lantern,
-                {-lantern_outer_x, 4.35F, z - 0.14F},
-                {-lantern_inner_x, 4.90F, z + 0.14F},
-                false);
-        add_box(parts,
-                ShipMaterial::Lantern,
-                {lantern_inner_x, 4.35F, z - 0.14F},
-                {lantern_outer_x, 4.90F, z + 0.14F},
-                false);
+    // Je garde les barrots uniquement visuels et au-dessus de 2,30 m de hauteur
+    // libre. Je structure ainsi la cale sans créer de plafond invisible.
+    for (int z = -32;
+         z <= 30;
+         z += 4) {
+        const auto beam_z =
+            static_cast<float>(z);
+        const auto half_width =
+            std::max(
+                1.20F,
+                amelie_interior_half_width(
+                    3.40F,
+                    beam_z) -
+                    0.12F);
+        add_transverse_ceiling_beam(
+            parts,
+            half_width,
+            3.38F,
+            3.55F,
+            beam_z,
+            beam_z + 0.18F,
+            kAmelieMainDeckOpenings);
+    }
+
+    add_captain_cabin(parts);
+}
+
+void add_crew_bunk_module(
+    std::vector<ShipPart>& parts,
+    float side_sign,
+    float local_z,
+    int module_index) {
+
+    constexpr auto module_depth =
+        1.35F;
+    constexpr auto module_length =
+        2.25F;
+    const auto local_end_z =
+        local_z +
+        module_length;
+    const auto safe_half_width =
+        std::min(
+            amelie_interior_half_width(
+                -1.10F,
+                local_z),
+            amelie_interior_half_width(
+                -1.10F,
+                local_end_z)) -
+        0.20F;
+    const auto outer_x =
+        side_sign *
+        std::min(
+            5.78F,
+            safe_half_width);
+    const auto inner_x =
+        outer_x -
+        side_sign *
+            module_depth;
+    const auto min_x =
+        std::min(
+            outer_x,
+            inner_x);
+    const auto max_x =
+        std::max(
+            outer_x,
+            inner_x);
+
+    // Je donne à chaque module de deux couchages un seul sommier bas collidable.
+    // Je garde visuels la couchette haute, la literie, les montants et l'échelle :
+    // aucun petit volume ne peut figer le joueur lorsque le bateau avance.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {min_x,
+         -1.94F,
+         local_z},
+        {max_x,
+         -1.72F,
+         local_end_z},
+        true);
+
+    constexpr std::array<float, 2> tier_y {{
+        -1.72F,
+        -0.55F,
+    }};
+    for (std::size_t tier = 0U;
+         tier < tier_y.size();
+         ++tier) {
+        const auto frame_y =
+            tier_y[tier];
+        const auto blanket_material =
+            (
+                module_index +
+                static_cast<int>(
+                    tier)
+            ) %
+                    2 ==
+                0
+                ? ShipMaterial::NavyTextile
+                : ShipMaterial::BurgundyTextile;
+        add_chamfered_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {min_x,
+             frame_y,
+             local_z},
+            {max_x,
+             frame_y + 0.11F,
+             local_end_z});
+        add_chamfered_box(
+            parts,
+            ShipMaterial::Linen,
+            {min_x + 0.07F,
+             frame_y + 0.10F,
+             local_z + 0.08F},
+            {max_x - 0.07F,
+             frame_y + 0.29F,
+             local_end_z - 0.08F});
+        add_chamfered_box(
+            parts,
+            ShipMaterial::Linen,
+            {min_x + 0.12F,
+             frame_y + 0.28F,
+             local_z + 0.15F},
+            {max_x - 0.12F,
+             frame_y + 0.41F,
+             local_z + 0.61F});
+        add_draped_panel(
+            parts,
+            blanket_material,
+            {min_x + 0.055F,
+             frame_y + 0.30F,
+             local_z + 0.68F},
+            {max_x - 0.055F,
+             frame_y + 0.36F,
+             local_end_z - 0.06F},
+            {0.0F, 1.0F, 0.0F},
+            0.065F);
+    }
+
+    for (const auto x :
+         {
+             min_x + 0.075F,
+             max_x - 0.075F,
+         }) {
+        for (const auto z :
+             {
+                 local_z + 0.075F,
+                 local_end_z - 0.075F,
+             }) {
+            add_segment(
+                parts,
+                ShipMaterial::OiledOak,
+                {x, -1.96F, z},
+                {x, 0.20F, z},
+                0.075F);
+            add_segment(
+                parts,
+                ShipMaterial::Rope,
+                {x, -0.37F, z},
+                {x, 0.48F, z},
+                0.045F);
+        }
+    }
+
+    const auto inboard_x =
+        side_sign > 0.0F
+            ? min_x
+            : max_x;
+    const auto ladder_z_min =
+        local_end_z -
+        0.62F;
+    const auto ladder_z_max =
+        local_end_z -
+        0.18F;
+    for (const auto z :
+         {
+             ladder_z_min,
+             ladder_z_max,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::OiledOak,
+            {inboard_x -
+                 side_sign * 0.07F,
+             -1.62F,
+             z},
+            {inboard_x -
+                 side_sign * 0.07F,
+             0.10F,
+             z},
+            0.055F);
+    }
+    for (int rung = 0;
+         rung < 4;
+         ++rung) {
+        const auto y =
+            -1.31F +
+            static_cast<float>(
+                rung) *
+                0.39F;
+        add_segment(
+            parts,
+            ShipMaterial::OiledOak,
+            {inboard_x -
+                 side_sign * 0.07F,
+             y,
+             ladder_z_min},
+            {inboard_x -
+                 side_sign * 0.07F,
+             y,
+             ladder_z_max},
+            0.045F);
+    }
+
+    // J'ajoute une lisse haute pour éviter la silhouette d'un matelas flottant.
+    add_segment(
+        parts,
+        ShipMaterial::OiledOak,
+        {inboard_x -
+             side_sign * 0.05F,
+         -0.13F,
+         local_z + 0.12F},
+        {inboard_x -
+             side_sign * 0.05F,
+         -0.13F,
+         local_end_z - 0.12F},
+        0.055F);
+}
+
+void add_crew_deck(
+    std::vector<ShipPart>& parts) {
+
+    add_bulkhead_with_door(
+        parts,
+        kAmelieCrewDeck,
+        kAmelieGunDeckUnderside,
+        -19.0F,
+        0.0F,
+        1.10F);
+    add_bulkhead_with_door(
+        parts,
+        kAmelieCrewDeck,
+        kAmelieGunDeckUnderside,
+        -10.0F,
+        -0.78F,
+        1.15F);
+    add_bulkhead_with_door(
+        parts,
+        kAmelieCrewDeck,
+        kAmelieGunDeckUnderside,
+        2.30F,
+        1.20F,
+        1.05F);
+    add_bulkhead_with_door(
+        parts,
+        kAmelieCrewDeck,
+        kAmelieGunDeckUnderside,
+        15.0F,
+        0.0F,
+        1.10F);
+
+    // Je remplace les anciens blocs surdimensionnés par deux vrais lits
+    // d'infirmerie de 1,25 x 2,30 m et je garde le passage central rectiligne.
+    add_framed_bed(
+        parts,
+        {-5.35F, -4.10F},
+        {-27.30F, -25.00F},
+        kAmelieCrewDeck,
+        ShipMaterial::NavyTextile,
+        false);
+    add_framed_bed(
+        parts,
+        {4.10F, 5.35F},
+        {-27.30F, -25.00F},
+        kAmelieCrewDeck,
+        ShipMaterial::BurgundyTextile,
+        false);
+
+    for (const auto side_sign :
+         {-1.0F, 1.0F}) {
+        const auto curtain_x =
+            side_sign *
+            3.78F;
+        add_draped_panel(
+            parts,
+            ShipMaterial::Linen,
+            {curtain_x,
+             -1.58F,
+             -27.55F},
+            {curtain_x,
+             0.28F,
+             -24.72F},
+            {-side_sign, 0.0F, 0.0F},
+            0.055F);
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {curtain_x,
+             0.34F,
+             -27.62F},
+            {curtain_x,
+             0.34F,
+             -24.65F},
+            0.055F);
+
+        const auto table_min_x =
+            side_sign < 0.0F
+                ? -5.28F
+                : 4.40F;
+        const auto table_max_x =
+            side_sign < 0.0F
+                ? -4.40F
+                : 5.28F;
+        add_chamfered_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {table_min_x,
+             -1.44F,
+             -24.60F},
+            {table_max_x,
+             -1.32F,
+             -23.88F});
+        add_segment(
+            parts,
+            ShipMaterial::OiledOak,
+            {(table_min_x +
+              table_max_x) *
+                 0.5F,
+             -2.00F,
+             -24.24F},
+            {(table_min_x +
+              table_max_x) *
+                 0.5F,
+             -1.34F,
+             -24.24F},
+            0.09F);
+        add_chamfered_box(
+            parts,
+            ShipMaterial::Ceramic,
+            {(table_min_x +
+              table_max_x) *
+                     0.5F -
+                 0.18F,
+             -1.31F,
+             -24.42F},
+            {(table_min_x +
+              table_max_x) *
+                     0.5F +
+                 0.18F,
+             -1.21F,
+             -24.06F});
+    }
+
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {-5.43F, -2.00F, -22.55F},
+        {-4.62F, -0.34F, -20.25F},
+        true);
+    for (const auto y :
+         {
+             -1.62F,
+             -1.08F,
+             -0.54F,
+         }) {
+        add_chamfered_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {-5.50F,
+             y,
+             -22.43F},
+            {-4.45F,
+             y + 0.09F,
+             -20.37F});
+    }
+    for (int bottle = 0;
+         bottle < 4;
+         ++bottle) {
+        const auto z =
+            -22.15F +
+            static_cast<float>(
+                bottle) *
+                0.46F;
+        add_segment(
+            parts,
+            ShipMaterial::Ceramic,
+            {-4.57F, -0.98F, z},
+            {-4.57F, -0.73F, z},
+            0.13F);
+    }
+    add_panel(
+        parts,
+        ShipMaterial::Paper,
+        {-4.53F, -1.70F, -21.98F},
+        {-4.50F, -1.15F, -20.84F},
+        {1.0F, 0.0F, 0.0F},
+        0.025F);
+    add_draped_panel(
+        parts,
+        ShipMaterial::BurgundyTextile,
+        {-1.02F, -1.988F, -29.75F},
+        {1.02F, -1.952F, -20.05F},
+        {0.0F, 1.0F, 0.0F},
+        0.035F);
+
+    // Je contiens les six modules dans [-18,55 ; -10,45]. Trois modules doubles
+    // par bord donnent exactement douze couchages.
+    constexpr std::array<float, 3> bunk_starts {{
+        -18.35F,
+        -15.70F,
+        -13.05F,
+    }};
+    for (std::size_t module = 0U;
+         module < bunk_starts.size();
+         ++module) {
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            add_crew_bunk_module(
+                parts,
+                side_sign,
+                bunk_starts[module],
+                static_cast<int>(
+                    module) +
+                    (
+                        side_sign > 0.0F
+                            ? 1
+                            : 0
+                    ));
+        }
+    }
+
+    // Je fonds les coffres personnels dans le pied des modules et les garde
+    // visuels. Je ne laisse plus la troisième rangée déborder dans la distillerie.
+    for (const auto z :
+         {
+             -17.92F,
+             -15.27F,
+             -12.62F,
+         }) {
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            const auto center_x =
+                side_sign *
+                5.10F;
+            add_chamfered_box(
+                parts,
+                ShipMaterial::Leather,
+                {center_x -
+                     0.48F,
+                 -1.92F,
+                 z},
+                {center_x +
+                     0.48F,
+                 -1.54F,
+                 z + 0.62F});
+            add_chamfered_box(
+                parts,
+                ShipMaterial::Brass,
+                {center_x - 0.05F,
+                 -1.78F,
+                 z - 0.035F},
+                {center_x + 0.05F,
+                 -1.66F,
+                 z + 0.055F});
+        }
+    }
+
+    // Je garde les reservoirs, la chaudiere de condensation et les bacs d'eau a
+    // tribord, loin de la tremie. Je rends le circuit lisible avec les jauges et
+    // les tuyaux sans ajouter de collider autour de chaque raccord.
+    add_barrel(
+        parts,
+        {5.05F, -2.00F, -3.35F},
+        1.48F,
+        1.05F);
+    add_barrel(
+        parts,
+        {5.05F, -2.00F, -0.85F},
+        1.48F,
+        1.05F);
+    add_box(
+        parts,
+        ShipMaterial::Iron,
+        {3.55F, -2.00F, -4.45F},
+        {4.35F, -0.88F, -2.10F},
+        true);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Brass,
+        {3.62F, -0.89F, -4.35F},
+        {4.28F, -0.75F, -2.20F});
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {3.95F, -0.90F, -3.20F},
+        {5.05F, 0.10F, -2.05F},
+        0.11F);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Brass,
+        {4.68F, -0.62F, -2.48F},
+        {5.42F, 0.12F, -1.62F});
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {4.35F, -1.42F, -3.82F},
+        {5.05F, -0.82F, -3.35F},
+        0.085F);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {4.35F, -1.28F, -2.72F},
+        {5.05F, -0.82F, -0.85F},
+        0.085F);
+    add_ship_wheel(
+        parts,
+        ShipMaterial::Brass,
+        {3.67F, -1.57F, -2.08F},
+        {4.23F, -1.01F, -2.02F},
+        0.05F);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Ceramic,
+        {4.60F, -1.98F, -5.78F},
+        {5.45F, -1.72F, -4.92F});
+    add_bucket(
+        parts,
+        {3.33F, -1.99F, -5.38F});
+
+    // Je construis maintenant l'etabli comme un vrai meuble a plateau et quatre
+    // pieds. Je donne la collision au seul plateau et je garde l'etau ainsi que
+    // les outils purement visuels.
+    add_table(
+        parts,
+        {-5.42F, -3.25F},
+        {3.00F, 6.82F},
+        kAmelieCrewDeck,
+        -1.26F);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Iron,
+        {-4.92F, -1.25F, 3.48F},
+        {-4.38F, -0.94F, 4.08F});
+    add_panel(
+        parts,
+        ShipMaterial::OiledOak,
+        {-5.50F, -1.12F, 3.12F},
+        {-5.46F, 0.22F, 6.72F},
+        {1.0F, 0.0F, 0.0F},
+        0.055F);
+    for (const auto z :
+         {3.55F, 4.65F, 5.75F, 6.55F}) {
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {-5.42F, -0.76F, z},
+            {-5.12F, -0.18F, z + 0.18F},
+            0.085F);
+    }
+    add_chamfered_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {-5.47F, -0.48F, 8.20F},
+        {-4.32F, -0.36F, 12.45F});
+    for (const auto z :
+         {
+             8.55F,
+             9.72F,
+             10.89F,
+             12.06F,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {-5.23F, -0.34F, z},
+            {-4.64F, -0.34F, z},
+            0.075F);
+    }
+    add_floor_rope_coil(
+        parts,
+        {-4.65F, -1.985F, 9.10F},
+        0.38F);
+    add_ship_wheel(
+        parts,
+        ShipMaterial::Rope,
+        {-5.25F, -0.82F, 12.72F},
+        {-4.20F, 0.23F, 12.80F},
+        0.065F);
+
+    // Je montre les toiles de la voilerie sur leur ralingue plutôt que comme
+    // une grande plaque posée au sol. Je conserve un seul noyau physique pour
+    // le râtelier tribord ; voiles, cordages et hamacs roulés restent visuels.
+    add_draped_panel(
+        parts,
+        ShipMaterial::Linen,
+        {-4.00F, -1.52F, 16.15F},
+        {-4.00F, 0.24F, 21.85F},
+        {1.0F, 0.0F, 0.0F},
+        0.065F);
+    add_segment(
+        parts,
+        ShipMaterial::Rope,
+        {-3.95F, 0.30F, 16.02F},
+        {-3.95F, 0.30F, 21.98F},
+        0.05F);
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {3.42F, -2.00F, 16.15F},
+        {3.94F, 0.18F, 22.20F},
+        true);
+    for (const auto y :
+         {
+             -1.46F,
+             -0.76F,
+             -0.06F,
+         }) {
+        add_chamfered_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {3.18F, y, 16.28F},
+            {3.96F, y + 0.10F, 22.08F});
+    }
+    add_rolled_textile(
+        parts,
+        {3.48F, -1.31F, 16.60F},
+        {3.48F, -1.31F, 18.55F},
+        0.34F,
+        ShipMaterial::Linen);
+    add_rolled_textile(
+        parts,
+        {3.48F, -0.61F, 18.70F},
+        {3.48F, -0.61F, 21.55F},
+        0.31F,
+        ShipMaterial::CreamCanvas);
+    add_rolled_textile(
+        parts,
+        {-3.10F, -1.64F, 23.10F},
+        {-3.10F, -1.64F, 24.75F},
+        0.30F,
+        ShipMaterial::NavyTextile);
+    add_rolled_textile(
+        parts,
+        {-2.62F, -1.64F, 23.40F},
+        {-2.62F, -1.64F, 25.20F},
+        0.30F,
+        ShipMaterial::BurgundyTextile);
+    add_floor_rope_coil(
+        parts,
+        {2.90F, -1.985F, 24.25F},
+        0.42F);
+    add_ship_wheel(
+        parts,
+        ShipMaterial::Rope,
+        {-3.55F, -0.75F, 24.20F},
+        {-2.15F, 0.65F, 24.32F},
+        0.075F);
+
+    for (int z = -30;
+         z <= 28;
+         z += 4) {
+        const auto beam_z =
+            static_cast<float>(z);
+        const auto half_width =
+            std::max(
+                1.10F,
+                amelie_interior_half_width(
+                    0.42F,
+                    beam_z) -
+                    0.12F);
+        add_transverse_ceiling_beam(
+            parts,
+            half_width,
+            0.42F,
+            0.58F,
+            beam_z,
+            beam_z + 0.18F,
+            kAmelieGunDeckOpenings);
+    }
+}
+
+void add_galley_and_mess(
+    std::vector<ShipPart>& parts) {
+
+    add_bulkhead_with_door(
+        parts,
+        kAmelieHoldFloor,
+        kAmelieCrewDeckUnderside,
+        -23.0F,
+        0.0F,
+        1.05F);
+    add_bulkhead_with_door(
+        parts,
+        kAmelieHoldFloor,
+        kAmelieCrewDeckUnderside,
+        -10.0F,
+        2.80F,
+        1.05F);
+
+    // Je place la réserve sèche dans la pièce la plus arrière et je varie les
+    // volumes, les sacs et les cerclages pour éviter une simple rangée de cubes.
+    add_crate(
+        parts,
+        {-4.40F, -5.00F, -29.20F},
+        {-2.65F, -3.82F, -27.35F});
+    add_crate(
+        parts,
+        {2.65F, -5.00F, -29.00F},
+        {4.30F, -4.08F, -27.55F});
+    add_barrel(
+        parts,
+        {-4.15F, -5.00F, -25.30F},
+        1.38F,
+        0.96F);
+    add_barrel(
+        parts,
+        {4.05F, -5.00F, -25.65F},
+        1.26F,
+        0.88F);
+    add_sack(
+        parts,
+        {-4.55F, -4.98F, -27.10F},
+        {-3.80F, -4.22F, -26.10F});
+    add_sack(
+        parts,
+        {3.05F, -4.98F, -27.20F},
+        {3.82F, -4.34F, -26.28F});
+    add_draped_panel(
+        parts,
+        ShipMaterial::NavyTextile,
+        {-0.78F, -4.988F, -29.72F},
+        {0.78F, -4.952F, -23.50F},
+        {0.0F, 1.0F, 0.0F},
+        0.035F);
+
+    // Je conserve l'unique noyau du fourneau aux coordonnees historiques :
+    // les anciennes sauvegardes encastrees dans cette zone restent detectees.
+    add_box(
+        parts,
+        ShipMaterial::Iron,
+        {-5.20F, -5.00F, -20.50F},
+        {-2.45F, -3.65F, -16.30F},
+        true,
+        true);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Brass,
+        {-4.88F, -3.62F, -20.10F},
+        {-2.77F, -3.43F, -16.70F});
+    add_panel(
+        parts,
+        ShipMaterial::DarkHull,
+        {-2.39F, -4.72F, -19.65F},
+        {-2.39F, -3.89F, -17.15F},
+        {1.0F, 0.0F, 0.0F},
+        0.065F);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-2.33F, -4.02F, -19.18F},
+        {-2.33F, -4.02F, -17.62F},
+        0.055F);
+    for (const auto z :
+         {
+             -19.32F,
+             -18.40F,
+             -17.48F,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {-4.26F, -3.38F, z},
+            {-3.38F, -3.38F, z},
+            0.30F);
+    }
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {-3.80F, -3.45F, -18.35F},
+        {-3.80F, -2.45F, -18.35F},
+        0.50F);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Iron,
+        {-4.82F, -3.36F, -19.88F},
+        {-2.82F, -3.15F, -16.82F});
+
+    // Je construis le plan de préparation comme une vraie table : seul son
+    // plateau porte une collision ; pieds et ustensiles restent non bloquants.
+    add_table(
+        parts,
+        {-5.28F, -2.36F},
+        {-15.18F, -11.58F},
+        kAmelieHoldFloor,
+        -4.16F);
+    add_chamfered_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {-4.88F, -4.15F, -14.72F},
+        {-3.18F, -4.07F, -13.62F});
+    add_chamfered_box(
+        parts,
+        ShipMaterial::Ceramic,
+        {-4.78F, -4.04F, -12.98F},
+        {-4.38F, -3.94F, -12.58F});
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {-3.36F, -4.03F, -14.54F},
+        {-2.86F, -4.03F, -13.90F},
+        0.055F);
+
+    // Je suspends poêles et louches à une barre sous le plafond, toutes purement
+    // visuelles afin de conserver la hauteur libre.
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-5.02F, -2.82F, -15.82F},
+        {-2.72F, -2.82F, -15.82F},
+        0.075F);
+    for (const auto x :
+         {
+             -4.72F,
+             -4.05F,
+             -3.38F,
+             -2.85F,
+         }) {
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {x, -2.85F, -15.82F},
+            {x, -3.32F, -15.82F},
+            0.055F);
+        add_ship_wheel(
+            parts,
+            ShipMaterial::Iron,
+            {x - 0.24F,
+             -3.78F,
+             -15.86F},
+            {x + 0.24F,
+             -3.30F,
+             -15.78F},
+            0.045F);
+    }
+
+    // Je place le vaisselier et les reserves de cuisine a tribord en laissant
+    // libre l'axe de la porte.
+    add_box(
+        parts,
+        ShipMaterial::OiledOak,
+        {4.15F, -5.00F, -21.0F},
+        {5.04F, -2.72F, -17.0F},
+        true);
+    for (int shelf = 0;
+         shelf < 3;
+         ++shelf) {
+        const auto y =
+            -4.55F +
+            static_cast<float>(shelf) *
+                0.68F;
+        add_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {4.20F, y, -20.85F},
+            {5.04F, y + 0.11F, -17.15F},
+            false);
+        for (int item = 0;
+             item < 3;
+             ++item) {
+            const auto z =
+                -20.44F +
+                static_cast<float>(
+                    item) *
+                    1.34F;
+            add_segment(
+                parts,
+                ShipMaterial::Ceramic,
+                {4.40F, y + 0.12F, z},
+                {4.40F, y + 0.37F, z},
+                0.14F);
+        }
+    }
+
+    // Je remplace les six blocs pleins du carré par deux ensembles complets. Je
+    // garde plus de 0,55 m entre le passage à x=3,05 et le banc tribord.
+    constexpr std::array<std::pair<float, float>, 2> mess_tables {{
+        {-7.55F, -4.30F},
+        {-2.35F, 0.95F},
+    }};
+    for (const auto& [min_z, max_z] :
+         mess_tables) {
+        add_table(
+            parts,
+            {-1.25F, 1.25F},
+            {min_z, max_z},
+            kAmelieHoldFloor,
+            -4.16F);
+        add_bench(
+            parts,
+            {-2.45F, -1.72F},
+            {min_z + 0.20F,
+             max_z - 0.20F},
+            kAmelieHoldFloor);
+        add_bench(
+            parts,
+            {1.72F, 2.45F},
+            {min_z + 0.20F,
+             max_z - 0.20F},
+            kAmelieHoldFloor);
+
+        for (const auto x :
+             {
+                 -0.65F,
+                 0.65F,
+             }) {
+            for (const auto z :
+                 {
+                     min_z + 0.78F,
+                     max_z - 0.78F,
+                 }) {
+                add_table_setting(
+                    parts,
+                    {x, -4.15F, z});
+            }
+        }
+    }
+}
+
+void add_storage_hold(
+    std::vector<ShipPart>& parts) {
+
+    add_bulkhead_with_door(
+        parts,
+        kAmelieHoldFloor,
+        kAmelieCrewDeckUnderside,
+        15.20F,
+        0.0F,
+        1.15F);
+
+    // Je compose six charges de tailles et de hauteurs differentes. Toutes
+    // restent au-dela de |x|=1,55 : l'allee centrale mesure donc 3,10 m et les
+    // trois stations de tri demeurent accessibles avec le volume du joueur.
+    add_crate(
+        parts,
+        {-3.68F, -5.00F, 16.05F},
+        {-2.28F, -3.70F, 17.62F});
+    add_crate(
+        parts,
+        {1.62F, -5.00F, 16.42F},
+        {3.54F, -4.08F, 17.92F});
+    add_crate(
+        parts,
+        {-3.22F, -5.00F, 18.18F},
+        {-1.68F, -4.18F, 19.82F});
+    add_crate(
+        parts,
+        {1.65F, -5.00F, 18.82F},
+        {3.04F, -3.52F, 20.18F});
+    add_crate(
+        parts,
+        {-2.74F, -5.00F, 20.42F},
+        {-1.55F, -3.72F, 21.84F});
+    add_crate(
+        parts,
+        {1.55F, -5.00F, 20.72F},
+        {2.64F, -4.24F, 22.05F});
+
+    add_barrel(
+        parts,
+        {-2.16F, -5.00F, 22.52F},
+        1.34F,
+        0.82F);
+    add_barrel(
+        parts,
+        {1.96F, -5.00F, 22.68F},
+        1.12F,
+        0.70F);
+
+    // J'adoucis les piles avec des sacs qui ne créent aucun petit obstacle dans
+    // la zone où le joueur et l'équipage trient les réserves.
+    add_sack(
+        parts,
+        {-3.45F, -3.69F, 16.30F},
+        {-2.62F, -3.04F, 17.22F});
+    add_sack(
+        parts,
+        {2.02F, -3.50F, 19.02F},
+        {2.78F, -2.92F, 19.86F});
+    add_sack(
+        parts,
+        {-2.58F, -4.98F, 22.02F},
+        {-1.66F, -4.27F, 22.82F});
+    add_floor_rope_coil(
+        parts,
+        {2.42F, -4.985F, 16.10F},
+        0.37F);
+}
+
+void add_hold_deck(
+    std::vector<ShipPart>& parts) {
+
+    add_galley_and_mess(parts);
+    add_bulkhead_with_door(
+        parts,
+        kAmelieHoldFloor,
+        kAmelieCrewDeckUnderside,
+        2.50F,
+        3.05F,
+        1.05F);
+    add_storage_hold(parts);
+
+    // Je garde les deux socles de pompe contre la muraille bâbord et un seul
+    // noyau physique par pompe. Corps, leviers, soupapes et conduites restent
+    // visuels et ne ferment jamais l'approche de la trémie.
+    for (const auto z :
+         {3.50F, 6.00F}) {
+        add_box(
+            parts,
+            ShipMaterial::OiledOak,
+            {-4.80F, -5.00F, z},
+            {-3.20F, -4.25F, z + 1.45F},
+            true,
+            false);
+        add_segment(
+            parts,
+            ShipMaterial::Iron,
+            {-4.00F, -4.28F, z + 0.72F},
+            {-4.00F, -2.82F, z + 0.72F},
+            0.24F);
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {-4.00F, -3.25F, z + 0.72F},
+            {-3.34F, -2.88F, z + 0.72F},
+            0.12F);
+        add_segment(
+            parts,
+            ShipMaterial::OiledOak,
+            {-3.42F, -2.91F, z + 0.72F},
+            {-2.78F, -2.91F, z + 0.72F},
+            0.13F);
+    }
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-4.00F, -3.95F, 4.22F},
+        {-4.00F, -3.95F, 13.85F},
+        0.10F);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-4.00F, -3.95F, 13.85F},
+        {-4.78F, -3.36F, 14.32F},
+        0.10F);
+    add_ship_wheel(
+        parts,
+        ShipMaterial::Brass,
+        {-4.35F, -3.72F, 8.44F},
+        {-3.65F, -3.02F, 8.50F},
+        0.055F);
+
+    add_panel(
+        parts,
+        ShipMaterial::OiledOak,
+        {-2.72F, -4.988F, 3.22F},
+        {0.72F, -4.948F, 7.48F},
+        {0.0F, 1.0F, 0.0F},
+        0.035F);
+    for (int slat = 0;
+         slat < 7;
+         ++slat) {
+        const auto x =
+            -2.42F +
+            static_cast<float>(
+                slat) *
+                0.48F;
+        add_segment(
+            parts,
+            ShipMaterial::DarkHull,
+            {x, -4.936F, 3.34F},
+            {x, -4.936F, 7.36F},
+            0.045F);
+    }
+    add_bucket(
+        parts,
+        {-2.78F, -4.99F, 8.08F});
+
+    for (int z = -30;
+         z <= 22;
+         z += 4) {
+        const auto beam_z =
+            static_cast<float>(z);
+        const auto half_width =
+            std::max(
+                0.95F,
+                amelie_interior_half_width(
+                    -2.55F,
+                    beam_z) -
+                    0.10F);
+        add_transverse_ceiling_beam(
+            parts,
+            half_width,
+            -2.56F,
+            -2.40F,
+            beam_z,
+            beam_z + 0.18F,
+            kAmelieCrewDeckOpenings);
+    }
+}
+
+void add_interior_hull_details(
+    std::vector<ShipPart>& parts) {
+
+    constexpr std::array deck_bands {
+        std::pair {
+            kAmelieGunDeck,
+            kAmelieMainDeckUnderside,
+        },
+        std::pair {
+            kAmelieCrewDeck,
+            kAmelieGunDeckUnderside,
+        },
+        std::pair {
+            kAmelieHoldFloor,
+            kAmelieCrewDeckUnderside,
+        },
+    };
+
+    // Je double les murailles de membrures et de lisses continues. Ce rythme
+    // casse les grandes surfaces uniformes et rend la coque opaque et epaisse
+    // depuis chaque piece, sans ajouter de collision contre les joueurs.
+    for (const auto& [floor_y, ceiling_y] :
+         deck_bands) {
+        // Je garde une membrure et une lisse continues par travée de douze
+        // mètres. Le veinage moderne conserve le rythme du bordé, tandis que
+        // cette fusion des petites pièces réserve le budget au mobilier vu de
+        // près et laisse une marge sous le plafond de 3 300 pièces.
+        constexpr auto detail_spacing =
+            12;
+        for (int z = -34;
+             z < 34;
+             z += detail_spacing) {
+            const auto local_z =
+                static_cast<float>(z);
+            for (const auto side_sign :
+                 {-1.0F, 1.0F}) {
+                const auto rib_x =
+                    side_sign *
+                    std::max(
+                        0.55F,
+                        amelie_interior_half_width(
+                            (floor_y +
+                             ceiling_y) *
+                                0.5F,
+                            local_z) -
+                            0.035F);
+                add_segment(
+                    parts,
+                    ShipMaterial::OiledOak,
+                    {rib_x,
+                     floor_y + 0.10F,
+                     local_z},
+                    {rib_x,
+                     ceiling_y - 0.12F,
+                     local_z},
+                    0.13F);
+
+                const auto next_z =
+                    std::min(
+                        34.0F,
+                        local_z +
+                            static_cast<float>(
+                                detail_spacing));
+                for (const auto rail_y :
+                     {
+                         floor_y + 1.05F,
+                     }) {
+                    const auto first_x =
+                        side_sign *
+                        std::max(
+                            0.55F,
+                            amelie_interior_half_width(
+                                rail_y,
+                                local_z) -
+                                0.045F);
+                    const auto second_x =
+                        side_sign *
+                        std::max(
+                            0.55F,
+                            amelie_interior_half_width(
+                                rail_y,
+                                next_z) -
+                                0.045F);
+                    add_segment(
+                        parts,
+                        ShipMaterial::OiledOak,
+                        {first_x,
+                         rail_y,
+                         local_z},
+                        {second_x,
+                         rail_y,
+                         next_z},
+                        0.11F);
+                }
+            }
+        }
+    }
+}
+
+void add_interior_lanterns(
+    std::vector<ShipPart>& parts) {
+
+    for (const auto& interior_light :
+         amelie_interior_lights()) {
+        const auto& lantern =
+            interior_light.local_position;
+        add_segment(
+            parts,
+            ShipMaterial::Rope,
+            {lantern.x,
+             lantern.y + 0.18F,
+             lantern.z},
+            {lantern.x,
+             lantern.y + 0.42F,
+             lantern.z},
+            0.04F);
+        add_box(
+            parts,
+            ShipMaterial::Lantern,
+            {lantern.x - 0.16F,
+             lantern.y - 0.18F,
+             lantern.z - 0.16F},
+            {lantern.x + 0.16F,
+             lantern.y + 0.18F,
+             lantern.z + 0.16F},
+            false);
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {lantern.x,
+             lantern.y - 0.23F,
+             lantern.z},
+            {lantern.x,
+             lantern.y - 0.16F,
+             lantern.z},
+            0.25F);
+        add_segment(
+            parts,
+            ShipMaterial::Brass,
+            {lantern.x,
+             lantern.y + 0.16F,
+             lantern.z},
+            {lantern.x,
+             lantern.y + 0.23F,
+             lantern.z},
+            0.25F);
+        for (const auto x_sign :
+             {-1.0F, 1.0F}) {
+            for (const auto z_sign :
+                 {-1.0F, 1.0F}) {
+                add_segment(
+                    parts,
+                    ShipMaterial::Iron,
+                    {lantern.x +
+                         x_sign * 0.14F,
+                     lantern.y - 0.15F,
+                     lantern.z +
+                         z_sign * 0.14F},
+                    {lantern.x +
+                         x_sign * 0.14F,
+                     lantern.y + 0.15F,
+                     lantern.z +
+                         z_sign * 0.14F},
+                    0.035F);
+            }
+        }
+    }
+}
+
+void add_accesses_and_interior(
+    std::vector<ShipPart>& parts) {
+
+    add_solid_bulkhead(
+        parts,
+        kAmelieHoldFloor,
+        kAmelieCrewDeckUnderside,
+        -33.0F,
+        -1.0F);
+    add_solid_bulkhead(
+        parts,
+        kAmelieHoldFloor,
+        kAmelieCrewDeckUnderside,
+        24.0F,
+        1.0F);
+    add_solid_bulkhead(
+        parts,
+        kAmelieCrewDeck,
+        kAmelieGunDeckUnderside,
+        -34.0F,
+        -1.0F);
+    add_solid_bulkhead(
+        parts,
+        kAmelieCrewDeck,
+        kAmelieGunDeckUnderside,
+        31.0F,
+        1.0F);
+    add_solid_bulkhead(
+        parts,
+        kAmelieGunDeck,
+        kAmelieMainDeckUnderside,
+        34.0F,
+        1.0F);
+
+    // Je relie ici le pont principal au pont-batterie.
+    add_six_step_stair(
+        parts,
+        -1.05F,
+        1.05F,
+        -15.0F,
+        kAmelieGunDeck,
+        false);
+    add_six_step_stair(
+        parts,
+        -1.05F,
+        1.05F,
+        8.0F,
+        kAmelieGunDeck,
+        true);
+
+    // Je relie ici le pont-batterie au pont de l'equipage, puis le pont de
+    // l'equipage a la cale.
+    add_six_step_stair(
+        parts,
+        -3.35F,
+        -1.15F,
+        -4.0F,
+        kAmelieCrewDeck,
+        true);
+    add_six_step_stair(
+        parts,
+        1.15F,
+        3.35F,
+        8.0F,
+        kAmelieHoldFloor,
+        true);
+
+    add_gun_deck(parts);
+    add_crew_deck(parts);
+    add_hold_deck(parts);
+    add_interior_hull_details(parts);
+    add_interior_lanterns(parts);
+}
+
+void add_deck_equipment(
+    std::vector<ShipPart>& parts) {
+
+    // Je regroupe ici la barre, l'habitacle de compas et le mobilier de dunette.
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-0.20F, 4.50F, -29.25F},
+        {0.20F, 5.85F, -28.85F},
+        true,
+        true);
+    add_ship_wheel(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-1.05F, 5.05F, -29.35F},
+        {1.05F, 7.15F, -29.15F},
+        0.13F);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {1.90F, 4.50F, -29.88F},
+        {2.30F, 4.92F, -29.42F},
+        true,
+        true);
+    add_box(
+        parts,
+        ShipMaterial::Brass,
+        {1.78F, 4.90F, -29.98F},
+        {2.42F, 5.08F, -29.32F},
+        true,
+        true);
+    add_panel(
+        parts,
+        ShipMaterial::Glass,
+        {1.86F, 5.08F, -29.90F},
+        {2.34F, 5.12F, -29.40F},
+        {0.0F, 1.0F, 0.0F},
+        0.04F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {2.10F, 5.13F, -29.86F},
+        {2.10F, 5.13F, -29.44F},
+        0.025F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {1.90F, 5.13F, -29.65F},
+        {2.30F, 5.13F, -29.65F},
+        0.025F);
+
+    // Je garde le cabestan et les deux panneaux de cale hors des axes de
+    // circulation.
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-1.15F, 4.0F, 15.0F},
+        {1.15F, 4.65F, 16.2F},
+        true,
+        true);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-2.15F, 4.48F, 15.6F},
+        {2.15F, 4.48F, 15.6F},
+        0.16F);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-3.8F, 4.0F, -4.5F},
+        {-2.0F, 4.55F, -1.5F},
+        true,
+        true);
+    add_box(
+        parts,
+        ShipMaterial::CleanBeam,
+        {2.0F, 4.0F, -4.5F},
+        {3.8F, 4.55F, -1.5F},
+        true,
+        true);
+
+    // Je pose la chaloupe sur tribord avec deux traverses visibles.
+    add_panel(
+        parts,
+        ShipMaterial::DarkHull,
+        {4.20F, 4.18F, 0.5F},
+        {5.90F, 5.25F, 8.5F},
+        {1.0F, 0.0F, 0.0F},
+        0.14F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        {4.45F, 4.35F, 0.9F},
+        {5.65F, 4.35F, 8.1F},
+        0.10F);
+    add_segment(
+        parts,
+        ShipMaterial::CleanBeam,
+        {5.65F, 4.35F, 0.9F},
+        {4.45F, 4.35F, 8.1F},
+        0.10F);
+
+    // Je construis les huit fanaux latéraux depuis la même table que leur
+    // lumière : leur boîtier ne peut donc plus dériver du point éclairant.
+    const auto& exterior_lanterns =
+        amelie_exterior_lantern_definitions();
+    for (auto index = std::size_t {0U};
+         index < 8U;
+         ++index) {
+        const auto& lantern =
+            exterior_lanterns[index];
+        add_box(
+            parts,
+            ShipMaterial::Lantern,
+            lantern.fixture_min,
+            lantern.fixture_max,
+            false);
     }
 }
 
 constexpr float kBlackSailThickness = 0.07F;
-constexpr float kGoldSailTrimDiameter = 0.045F;
+constexpr float kBrassSailTrimDiameter = 0.045F;
 
 void add_black_square_sail(
     std::vector<ShipPart>& parts,
@@ -1606,97 +5767,45 @@ void add_black_square_sail(
 
     const auto top_half_width =
         bottom_half_width * 0.78F;
-
     const auto panel_min_z =
         mast_z + 0.16F;
-
     const auto panel_max_z =
         mast_z + 0.25F;
-
     const auto trim_z =
         mast_z + 0.255F;
 
-    // Le panneau conserve exactement l'enveloppe de l'ancienne voile.
-    // Le cadre doré se place légèrement devant la toile et reste décoratif.
     add_panel(
         parts,
         ShipMaterial::BlackCanvas,
-        {
-            -bottom_half_width,
-            bottom_y,
-            panel_min_z,
-        },
-        {
-            bottom_half_width,
-            top_y,
-            panel_max_z,
-        },
+        {-bottom_half_width, bottom_y, panel_min_z},
+        {bottom_half_width, top_y, panel_max_z},
         {0.0F, 0.0F, 1.0F},
         kBlackSailThickness);
 
-    // Bord inférieur.
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
-        {
-            -bottom_half_width,
-            bottom_y,
-            trim_z,
-        },
-        {
-            bottom_half_width,
-            bottom_y,
-            trim_z,
-        },
-        kGoldSailTrimDiameter);
-
-    // Bord supérieur.
+        ShipMaterial::Brass,
+        {-bottom_half_width, bottom_y, trim_z},
+        {bottom_half_width, bottom_y, trim_z},
+        kBrassSailTrimDiameter);
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
-        {
-            -top_half_width,
-            top_y,
-            trim_z,
-        },
-        {
-            top_half_width,
-            top_y,
-            trim_z,
-        },
-        kGoldSailTrimDiameter);
-
-    // Bord latéral gauche.
+        ShipMaterial::Brass,
+        {-top_half_width, top_y, trim_z},
+        {top_half_width, top_y, trim_z},
+        kBrassSailTrimDiameter);
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
-        {
-            -bottom_half_width,
-            bottom_y,
-            trim_z,
-        },
-        {
-            -top_half_width,
-            top_y,
-            trim_z,
-        },
-        kGoldSailTrimDiameter);
-
-    // Bord latéral droit.
+        ShipMaterial::Brass,
+        {-bottom_half_width, bottom_y, trim_z},
+        {-top_half_width, top_y, trim_z},
+        kBrassSailTrimDiameter);
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
-        {
-            bottom_half_width,
-            bottom_y,
-            trim_z,
-        },
-        {
-            top_half_width,
-            top_y,
-            trim_z,
-        },
-        kGoldSailTrimDiameter);
+        ShipMaterial::Brass,
+        {bottom_half_width, bottom_y, trim_z},
+        {top_half_width, top_y, trim_z},
+        kBrassSailTrimDiameter);
 }
 
 void add_black_triangular_sail(
@@ -1713,39 +5822,30 @@ void add_black_triangular_sail(
         normal,
         kBlackSailThickness);
 
-    // Je reproduis les trois sommets utilisés par le maillage afin que le
-    // liseré suive réellement le triangle sans flotter à côté de la voile.
     const auto sign =
         normal.x >= 0.0F
             ? 1.0F
             : -1.0F;
-
-    const auto center_x =
-        (min_corner.x + max_corner.x) *
-        0.5F;
-
     const auto trim_x =
-        center_x +
+        (min_corner.x + max_corner.x) *
+            0.5F +
         sign *
-            (kBlackSailThickness * 0.5F + 0.01F);
-
+            (kBlackSailThickness * 0.5F +
+             0.01F);
     const auto apex_z =
         sign > 0.0F
             ? min_corner.z
             : max_corner.z;
-
     const auto first = glm::vec3 {
         trim_x,
         min_corner.y,
         min_corner.z,
     };
-
     const auto second = glm::vec3 {
         trim_x,
         min_corner.y,
         max_corner.z,
     };
-
     const auto apex = glm::vec3 {
         trim_x,
         max_corner.y,
@@ -1754,54 +5854,42 @@ void add_black_triangular_sail(
 
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
+        ShipMaterial::Brass,
         first,
         second,
-        kGoldSailTrimDiameter);
-
+        kBrassSailTrimDiameter);
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
+        ShipMaterial::Brass,
         second,
         apex,
-        kGoldSailTrimDiameter);
-
+        kBrassSailTrimDiameter);
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
+        ShipMaterial::Brass,
         apex,
         first,
-        kGoldSailTrimDiameter);
+        kBrassSailTrimDiameter);
 }
 
-void add_gold_mast_collar(
+void add_mast_collar(
     std::vector<ShipPart>& parts,
     float mast_z,
     float center_y,
     float diameter) {
 
-    // Une courte surépaisseur casse la silhouette trop uniforme du mât sans
-    // modifier sa collision, son axe ou son emplacement historique.
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
-        {
-            0.0F,
-            center_y - 0.10F,
-            mast_z,
-        },
-        {
-            0.0F,
-            center_y + 0.10F,
-            mast_z,
-        },
+        ShipMaterial::Brass,
+        {0.0F, center_y - 0.10F, mast_z},
+        {0.0F, center_y + 0.10F, mast_z},
         diameter);
 }
 
 void add_main_mast_engraving(
     std::vector<ShipPart>& parts) {
 
-    constexpr std::array<char32_t, 8> name {
+    constexpr std::array<char32_t, 8> name {{
         U'L',
         U'\'',
         U'a',
@@ -1810,47 +5898,35 @@ void add_main_mast_engraving(
         U'l',
         U'i',
         U'e',
-    };
+    }};
+    constexpr float top_y = 18.95F;
+    constexpr float glyph_height = 0.52F;
+    constexpr float glyph_advance = 0.63F;
+    constexpr float glyph_half_width = 0.18F;
 
-    constexpr float kTopY = 18.95F;
-    constexpr float kGlyphHeight = 0.52F;
-    constexpr float kGlyphAdvance = 0.63F;
-    constexpr float kGlyphHalfWidth = 0.18F;
-
-    // Les glyphes pénètrent légèrement la face arrière du grand mât.
-    // Seule leur surface sombre reste visible, simulant une incision remplie
-    // d'ombre plutôt que des lettres simplement collées sur l'or.
     for (std::size_t index = 0;
          index < name.size();
          ++index) {
-
         const auto max_y =
-            kTopY -
+            top_y -
             static_cast<float>(index) *
-                kGlyphAdvance;
-
-        const auto min_y =
-            max_y -
-            kGlyphHeight;
-
+                glyph_advance;
         add_glyph(
             parts,
             name[index],
-            {
-                -kGlyphHalfWidth,
-                min_y,
-                -0.232F,
-            },
-            {
-                kGlyphHalfWidth,
-                max_y,
-                -0.205F,
-            },
+            {-glyph_half_width,
+             max_y - glyph_height,
+             -0.232F},
+            {glyph_half_width,
+             max_y,
+             -0.205F},
             ShipMaterial::Iron);
     }
 }
 
-void add_rigging(std::vector<ShipPart>& parts) {
+void add_rigging(
+    std::vector<ShipPart>& parts) {
+
     struct MastDefinition {
         float z = 0.0F;
         float top = 0.0F;
@@ -1860,127 +5936,64 @@ void add_rigging(std::vector<ShipPart>& parts) {
         float upper_half_width = 0.0F;
     };
 
-    // Ces valeurs sont exactement celles du gréement historique.
     constexpr std::array<MastDefinition, 3> masts {{
-        {
-            -17.5F,
-            20.0F,
-            11.5F,
-            16.2F,
-            4.9F,
-            3.6F,
-        },
-        {
-            0.0F,
-            26.0F,
-            13.4F,
-            19.5F,
-            7.3F,
-            5.2F,
-        },
-        {
-            18.0F,
-            22.5F,
-            12.3F,
-            17.4F,
-            6.1F,
-            4.3F,
-        },
+        {-17.5F, 20.0F, 11.5F, 16.2F, 4.9F, 3.6F},
+        {0.0F, 26.0F, 13.4F, 19.5F, 7.3F, 5.2F},
+        {18.0F, 22.5F, 12.3F, 17.4F, 6.1F, 4.3F},
     }};
 
-    for (const auto& mast : masts) {
-        // Le pied collidable garde exactement son ancienne enveloppe.
+    for (const auto& mast :
+         masts) {
+        // Je fais traverser aux mats les trois ponts et je limite leur collision
+        // a un fut visible de 60 cm qui ne forme aucun mur invisible.
         add_box(
             parts,
-            ShipMaterial::SolidGold,
-            {
-                -0.30F,
-                kAmelieMainDeckUnderside,
-                mast.z - 0.30F,
-            },
-            {
-                0.30F,
-                8.0F,
-                mast.z + 0.30F,
-            },
+            ShipMaterial::CleanBeam,
+            {-0.30F,
+             kAmelieHoldFloor,
+             mast.z - 0.30F},
+            {0.30F,
+             8.0F,
+             mast.z + 0.30F},
             true);
-
-        // Axe vertical du mât.
         add_segment(
             parts,
-            ShipMaterial::SolidGold,
-            {
-                0.0F,
-                4.0F,
-                mast.z,
-            },
-            {
-                0.0F,
-                mast.top,
-                mast.z,
-            },
+            ShipMaterial::CleanBeam,
+            {0.0F, kAmelieHoldFloor, mast.z},
+            {0.0F, mast.top, mast.z},
             0.42F);
-
-        // Vergue inférieure.
         add_segment(
             parts,
-            ShipMaterial::SolidGold,
-            {
-                -mast.lower_half_width,
-                mast.lower_yard,
-                mast.z,
-            },
-            {
-                mast.lower_half_width,
-                mast.lower_yard,
-                mast.z,
-            },
+            ShipMaterial::CleanBeam,
+            {-mast.lower_half_width,
+             mast.lower_yard,
+             mast.z},
+            {mast.lower_half_width,
+             mast.lower_yard,
+             mast.z},
             0.28F);
-
-        // Vergue supérieure.
         add_segment(
             parts,
-            ShipMaterial::SolidGold,
-            {
-                -mast.upper_half_width,
-                mast.upper_yard,
-                mast.z,
-            },
-            {
-                mast.upper_half_width,
-                mast.upper_yard,
-                mast.z,
-            },
+            ShipMaterial::CleanBeam,
+            {-mast.upper_half_width,
+             mast.upper_yard,
+             mast.z},
+            {mast.upper_half_width,
+             mast.upper_yard,
+             mast.z},
             0.23F);
 
-        // Bagues décoratives de renfort.
-        add_gold_mast_collar(
-            parts,
-            mast.z,
-            8.0F,
-            0.56F);
+        add_mast_collar(parts, mast.z, 4.15F, 0.56F);
+        add_mast_collar(parts, mast.z, 8.0F, 0.54F);
+        add_mast_collar(parts, mast.z, mast.lower_yard, 0.52F);
+        add_mast_collar(parts, mast.z, mast.upper_yard, 0.46F);
 
-        add_gold_mast_collar(
-            parts,
-            mast.z,
-            mast.lower_yard,
-            0.52F);
-
-        add_gold_mast_collar(
-            parts,
-            mast.z,
-            mast.upper_yard,
-            0.46F);
-
-        // Voile carrée inférieure.
         add_black_square_sail(
             parts,
             mast.z,
             mast.lower_yard + 0.35F,
             mast.upper_yard - 0.35F,
             mast.lower_half_width - 0.35F);
-
-        // Voile carrée supérieure.
         add_black_square_sail(
             parts,
             mast.z,
@@ -1994,203 +6007,179 @@ void add_rigging(std::vector<ShipPart>& parts) {
                 amelie_half_width(
                     mast.z - 3.0F) -
                     0.35F);
-
-        // Hauban gauche inchangé.
         add_segment(
             parts,
             ShipMaterial::Rope,
-            {
-                0.0F,
-                mast.top,
-                mast.z,
-            },
-            {
-                -shroud_half_width,
-                4.35F,
-                mast.z - 3.0F,
-            },
+            {0.0F, mast.top, mast.z},
+            {-shroud_half_width,
+             4.35F,
+             mast.z - 3.0F},
             0.055F);
-
-        // Hauban droit inchangé.
         add_segment(
             parts,
             ShipMaterial::Rope,
-            {
-                0.0F,
-                mast.top,
-                mast.z,
-            },
-            {
-                shroud_half_width,
-                4.35F,
-                mast.z - 3.0F,
-            },
+            {0.0F, mast.top, mast.z},
+            {shroud_half_width,
+             4.35F,
+             mast.z - 3.0F},
             0.055F);
     }
 
-    // La gravure est uniquement posée sur le grand mât central.
     add_main_mast_engraving(parts);
 
-    // Les étais conservent leurs coordonnées historiques.
     add_segment(
         parts,
         ShipMaterial::Rope,
-        {
-            0.0F,
-            20.0F,
-            -17.5F,
-        },
-        {
-            0.0F,
-            26.0F,
-            0.0F,
-        },
+        {0.0F, 20.0F, -17.5F},
+        {0.0F, 26.0F, 0.0F},
         0.055F);
-
     add_segment(
         parts,
         ShipMaterial::Rope,
-        {
-            0.0F,
-            26.0F,
-            0.0F,
-        },
-        {
-            0.0F,
-            22.5F,
-            18.0F,
-        },
+        {0.0F, 26.0F, 0.0F},
+        {0.0F, 22.5F, 18.0F},
         0.055F);
 
-    // Voile d'étai arrière.
     add_black_triangular_sail(
         parts,
-        {
-            0.12F,
-            8.6F,
-            -15.4F,
-        },
-        {
-            0.20F,
-            22.4F,
-            -1.8F,
-        },
-        {
-            -1.0F,
-            0.0F,
-            0.0F,
-        });
-
-    // Voile d'étai centrale.
+        {0.12F, 8.6F, -15.4F},
+        {0.20F, 22.4F, -1.8F},
+        {-1.0F, 0.0F, 0.0F});
     add_black_triangular_sail(
         parts,
-        {
-            0.12F,
-            8.4F,
-            2.2F,
-        },
-        {
-            0.20F,
-            21.4F,
-            16.2F,
-        },
-        {
-            1.0F,
-            0.0F,
-            0.0F,
-        });
+        {0.12F, 8.4F, 2.2F},
+        {0.20F, 21.4F, 16.2F},
+        {1.0F, 0.0F, 0.0F});
 
-    // Beaupré doré, avec coordonnées et longueur inchangées.
     add_segment(
         parts,
-        ShipMaterial::SolidGold,
-        {
-            0.0F,
-            4.50F,
-            34.0F,
-        },
-        {
-            0.0F,
-            7.65F,
-            46.0F,
-        },
+        ShipMaterial::CleanBeam,
+        {0.0F, 4.50F, 34.0F},
+        {0.0F, 7.65F, 46.0F},
         0.38F);
-
-    // Étai du beaupré inchangé.
+    add_mast_collar(parts, 34.0F, 4.70F, 0.50F);
     add_segment(
         parts,
         ShipMaterial::Rope,
-        {
-            0.0F,
-            22.5F,
-            18.0F,
-        },
-        {
-            0.0F,
-            7.65F,
-            46.0F,
-        },
+        {0.0F, 22.5F, 18.0F},
+        {0.0F, 7.65F, 46.0F},
         0.055F);
-
-    // Voile triangulaire avant.
     add_black_triangular_sail(
         parts,
-        {
-            0.18F,
-            7.80F,
-            34.0F,
-        },
-        {
-            0.27F,
-            17.2F,
-            44.4F,
-        },
-        {
-            1.0F,
-            0.0F,
-            0.0F,
-        });
+        {0.18F, 7.80F, 34.0F},
+        {0.27F, 17.2F, 44.4F},
+        {1.0F, 0.0F, 0.0F});
 }
 
-void add_stern_identity_and_hardware(std::vector<ShipPart>& parts) {
-    // Je conserve la plaque historique de poupe. La seconde gravure demandée
-    // appartient au grand mât et ne modifie donc aucun élément de coque.
-    add_panel(parts,
-              ShipMaterial::CleanBeam,
-              {-4.25F, 4.52F, kAmelieSternZ - 0.72F},
-              {4.25F, 5.79F, kAmelieSternZ - 0.52F},
-              {0.0F, 0.0F, -1.0F},
-              0.12F);
-    constexpr std::array<char32_t, 8> name {{U'L', U'\'', U'A', U'm', U'\u00E9', U'l', U'i', U'e'}};
-    constexpr std::array<float, 8> widths {{0.62F, 0.30F, 0.72F, 0.78F, 0.62F, 0.28F, 0.28F, 0.62F}};
+void add_stern_identity_and_hardware(
+    std::vector<ShipPart>& parts) {
+
+    add_panel(
+        parts,
+        ShipMaterial::CleanBeam,
+        {-4.25F, 4.52F, kAmelieSternZ - 0.72F},
+        {4.25F, 5.79F, kAmelieSternZ - 0.52F},
+        {0.0F, 0.0F, -1.0F},
+        0.12F);
+
+    constexpr std::array<char32_t, 8> name {{
+        U'L',
+        U'\'',
+        U'A',
+        U'm',
+        U'\u00E9',
+        U'l',
+        U'i',
+        U'e',
+    }};
+    constexpr std::array<float, 8> widths {{
+        0.62F,
+        0.30F,
+        0.72F,
+        0.78F,
+        0.62F,
+        0.28F,
+        0.28F,
+        0.62F,
+    }};
     auto cursor = 2.60F;
-    for (std::size_t index = 0; index < name.size(); ++index) {
-        add_glyph(parts,
-                  name[index],
-                  {cursor - widths[index], 4.79F, kAmelieSternZ - 0.82F},
-                  {cursor, 5.52F, kAmelieSternZ - 0.74F});
+    for (std::size_t index = 0;
+         index < name.size();
+         ++index) {
+        add_glyph(
+            parts,
+            name[index],
+            {cursor - widths[index],
+             4.79F,
+             kAmelieSternZ - 0.82F},
+            {cursor,
+             5.52F,
+             kAmelieSternZ - 0.74F});
         cursor -= widths[index] + 0.14F;
     }
 
-    add_segment(parts,
-                ShipMaterial::Brass,
-                {-5.85F, 3.20F, kAmelieSternZ - 0.68F},
-                {5.85F, 3.20F, kAmelieSternZ - 0.68F},
-                0.11F);
-    add_segment(parts,
-                ShipMaterial::Brass,
-                {-5.55F, 4.35F, kAmelieSternZ - 0.66F},
-                {5.55F, 4.35F, kAmelieSternZ - 0.66F},
-                0.09F);
-    add_box(parts,
-            ShipMaterial::Iron,
-            {-0.65F, -1.30F, kAmelieSternZ - 1.05F},
-            {0.65F, 1.30F, kAmelieSternZ - 0.35F},
-            true);
-    add_segment(parts, ShipMaterial::Iron, {-2.15F, 2.15F, 30.0F}, {-2.70F, -0.55F, 32.0F}, 0.24F);
-    add_segment(parts, ShipMaterial::Iron, {2.15F, 2.15F, 30.0F}, {2.70F, -0.55F, 32.0F}, 0.24F);
-    add_box(parts, ShipMaterial::Iron, {-3.05F, -0.85F, 31.7F}, {-2.35F, 0.15F, 32.35F}, false);
-    add_box(parts, ShipMaterial::Iron, {2.35F, -0.85F, 31.7F}, {3.05F, 0.15F, 32.35F}, false);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-5.95F, 3.20F, kAmelieSternZ - 0.68F},
+        {5.95F, 3.20F, kAmelieSternZ - 0.68F},
+        0.11F);
+    add_segment(
+        parts,
+        ShipMaterial::Brass,
+        {-5.65F, 4.35F, kAmelieSternZ - 0.66F},
+        {5.65F, 4.35F, kAmelieSternZ - 0.66F},
+        0.09F);
+
+    // J'adapte le gouvernail profond a la nouvelle carene et je fais
+    // correspondre sa collision au volume sombre visible derriere le tableau.
+    add_box(
+        parts,
+        ShipMaterial::Iron,
+        {-0.68F, -5.25F, kAmelieSternZ - 1.08F},
+        {0.68F, 0.85F, kAmelieSternZ - 0.35F},
+        true);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {-2.15F, 2.15F, 30.0F},
+        {-2.70F, -0.55F, 32.0F},
+        0.24F);
+    add_segment(
+        parts,
+        ShipMaterial::Iron,
+        {2.15F, 2.15F, 30.0F},
+        {2.70F, -0.55F, 32.0F},
+        0.24F);
+    add_box(
+        parts,
+        ShipMaterial::Iron,
+        {-3.05F, -0.85F, 31.7F},
+        {-2.35F, 0.15F, 32.35F},
+        false);
+    add_box(
+        parts,
+        ShipMaterial::Iron,
+        {2.35F, -0.85F, 31.7F},
+        {3.05F, 0.15F, 32.35F},
+        false);
+
+    // Je conserve les deux fanaux de poupe à leur place historique tout en
+    // partageant leurs limites exactes avec les données d'éclairage.
+    const auto& exterior_lanterns =
+        amelie_exterior_lantern_definitions();
+    for (auto index = std::size_t {8U};
+         index < exterior_lanterns.size();
+         ++index) {
+        const auto& lantern =
+            exterior_lanterns[index];
+        add_box(
+            parts,
+            ShipMaterial::Lantern,
+            lantern.fixture_min,
+            lantern.fixture_max,
+            false);
+    }
 }
 
 auto part_bounds(const ShipPart& part) noexcept -> ShipBounds {
@@ -2200,6 +6189,7 @@ auto part_bounds(const ShipPart& part) noexcept -> ShipBounds {
     };
     if (part.shape == ShipPartShape::Segment ||
         part.shape == ShipPartShape::Panel ||
+        part.shape == ShipPartShape::DrapedPanel ||
         part.shape == ShipPartShape::ClimbableNet) {
         // La bordure renforcee du filet atteint 1,65 fois le diametre nominal;
         // je l'inclus donc entierement dans les limites partagees avec le rendu.
@@ -2279,10 +6269,12 @@ auto calculate_navigation_revision(std::span<const ShipCrewNavigationNode> nodes
     return hash;
 }
 
+#include "gameplay/AmelieLegacyVisualParts.inc"
+
 auto amelie_parts() -> const std::vector<ShipPart>& {
     static const auto parts = [] {
         std::vector<ShipPart> output;
-        output.reserve(1'280U);
+        output.reserve(3'200U);
         add_hull_and_decks(output);
         add_accesses_and_interior(output);
         add_deck_equipment(output);
@@ -2323,10 +6315,13 @@ auto ship_collision_index() -> const ShipCollisionIndex& {
                 }
             }
 
-            if (part.supports_player) {
-                // Une colonne 2D suffit pour les faces de support. Cela evite
-                // de reparcourir les quelque 1 280 pieces du blueprint a chaque
-                // sondage des pieds du joueur ou d'un objet depose.
+            if (part.supports_player ||
+                part.collidable) {
+                // Je conserve une seule colonne 2D pour les faces de support
+                // afin de ne pas reparcourir les milliers de pieces du blueprint
+                // a chaque sondage des pieds du joueur ou d'un objet depose. Je
+                // donne aussi une face superieure physique a toute collision
+                // solide pour pouvoir monter sur une rambarde sans perdre le navire.
                 for (int z = min_z; z <= max_z; ++z) {
                     for (int x = min_x; x <= max_x; ++x) {
                         output.support_columns[{x, 0, z}].push_back(
@@ -2534,7 +6529,8 @@ auto support_height_for_pose(const glm::vec3& feet_position,
                              float min_height,
                              float max_height,
                              const glm::vec3& ship_origin,
-                             const glm::quat& ship_orientation) noexcept
+                             const glm::quat& ship_orientation,
+                             bool include_collidable) noexcept
     -> std::optional<float> {
     if (!std::isfinite(feet_position.x) ||
         !std::isfinite(feet_position.y) ||
@@ -2651,7 +6647,9 @@ auto support_height_for_pose(const glm::vec3& feet_position,
                      column->second) {
                     const auto& part =
                         blueprint.parts[part_index];
-                    if (!part.supports_player) {
+                    if (!part.supports_player &&
+                        (!include_collidable ||
+                         !part.collidable)) {
                         continue;
                     }
 
@@ -2798,6 +6796,12 @@ auto maximum_ship_position_z() noexcept -> float {
 
 } // namespace
 
+auto amelie_exterior_lights() noexcept
+    -> std::span<const ShipExteriorLight> {
+
+    return amelie_exterior_light_table();
+}
+
 auto amelie_ship_blueprint() noexcept -> const ShipBlueprint& {
     static const auto blueprint = [] {
         const auto& parts = amelie_parts();
@@ -2820,12 +6824,15 @@ auto amelie_ship_blueprint() noexcept -> const ShipBlueprint& {
             std::span<const ShipPart>(parts),
             std::span<const ShipCrewNavigationNode>(navigation_nodes),
             std::span<const ShipCrewNavigationEdge>(navigation_edges),
-            std::span<const glm::vec3>(kAmelieInteriorLanterns),
+            amelie_interior_lights(),
             bounds,
             anchors,
             kAmelieProtectionProfile,
             calculate_geometry_revision(parts, bounds),
             calculate_navigation_revision(navigation_nodes, navigation_edges),
+            std::span<const ShipPart> {
+                kAmelieLegacyVisualParts},
+            amelie_exterior_lights(),
         };
     }();
     return blueprint;
@@ -3145,6 +7152,7 @@ auto ShipEntity::render_state(bool visible) const noexcept -> ShipRenderState {
         blueprint.bounds,
         world_bounds(),
         blueprint.geometry_revision,
+        velocity_,
     };
 }
 
@@ -3169,7 +7177,8 @@ auto ShipEntity::previous_support_height(
         previous_world_origin(),
         motion_history_valid_
             ? previous_orientation_
-            : orientation_);
+            : orientation_,
+        true);
 }
 
 auto ShipEntity::support_height_in_range(
@@ -3182,7 +7191,26 @@ auto ShipEntity::support_height_in_range(
         min_height,
         max_height,
         world_origin(),
-        orientation_);
+        orientation_,
+        true);
+}
+
+auto ShipEntity::step_support_height_in_range(
+    const glm::vec3& feet_position,
+    float min_height,
+    float max_height) const noexcept
+    -> std::optional<float> {
+
+    // Je reserve la montee automatique aux ponts et marches declares. Les
+    // rambardes, canons et meubles restent de vrais appuis apres un saut sans
+    // devenir pour autant des demi-marches franchies sans intention.
+    return support_height_for_pose(
+        feet_position,
+        min_height,
+        max_height,
+        world_origin(),
+        orientation_,
+        false);
 }
 
 auto ShipEntity::climb_contact(
@@ -3523,7 +7551,8 @@ auto supported_world_point_in_persisted_neutral_pose(
             persisted_position.y +
                 kShipSupportProbeDepth,
             persisted_origin,
-            glm::quat {1.0F, 0.0F, 0.0F, 0.0F});
+            glm::quat {1.0F, 0.0F, 0.0F, 0.0F},
+            true);
     if (!persisted_support.has_value()) {
         return std::nullopt;
     }
@@ -3646,9 +7675,17 @@ auto reconcile_loaded_ship_occupant(const ShipEntity& ship,
                       origin)
             : glm::vec3 {0.0F};
 
-    // Je ne recale que les occupants plausiblement poses dans le navire. Un
-    // nageur sous la coque ou un joueur deja eloigne conserve donc sa position.
-    const auto in_habitable_height = sane_position && local.y >= 0.70F && local.y <= 6.50F;
+    // Je couvre désormais les trois ponts habitables lors d'une migration. Un
+    // nageur sous la coque ou un joueur déjà éloigné conserve sa position.
+    const auto& protection_profile =
+        amelie_ship_blueprint().protection_profile;
+    const auto in_habitable_height =
+        sane_position &&
+        local.y >=
+            protection_profile.lower_hull_min_y &&
+        local.y <=
+            protection_profile.main_deck_top_y +
+                2.50F;
     const auto overlaps_new_layout = in_habitable_height && ship.intersects_aabb(
         saved_position + glm::vec3 {-safe_half_width, 0.0F, -safe_half_width},
         saved_position + glm::vec3 {safe_half_width, safe_height, safe_half_width});
@@ -4337,8 +8374,8 @@ auto SeaAdventureSystem::update(
 
             if (resolve_support) {
                 if (const auto support =
-                        ship_.support_height(
-                            player.position());
+                        player.dynamic_support_height(
+                            ship_);
                     support.has_value()) {
                     player.resolve_dynamic_platform_support(
                         *support);
@@ -4360,11 +8397,19 @@ auto SeaAdventureSystem::update(
         !player_intersected_ship_before_move &&
         player.overlaps_dynamic_obstacle(
             ship_)) {
-        // Si la coque penetre le joueur durant ce pas, on applique le mouvement
-        // local de la coque. La resolution AABB du controleur terminera le
-        // depoussage au prochain sous-pas sans coller le joueur au navire.
+        // Je lui applique le mouvement local de la coque si elle penetre le
+        // joueur durant ce pas. Je termine ensuite le depoussage avec la
+        // resolution bornee sans coller le joueur au navire.
         move_player_with_ship(false);
     }
+
+    // Je termine chaque pas avec une pose joueur valide. Cela couvre aussi une
+    // ancienne sauvegarde deja coincee ou une penetration laterale qui existait
+    // avant le mouvement courant, cas que la seule detection de nouveau contact
+    // ne pouvait jamais liberer.
+    (void)player.resolve_dynamic_obstacle_overlap(
+        world,
+        ship_);
 
     state_.stamped_ship_x = ship_origin_x(state_);
     state_.stamped_ship_z = ship_origin_z(state_);
@@ -4802,19 +8847,31 @@ auto SeaAdventureSystem::update_old_guard_combat(
                            kImpactTolerance;
         };
     context.wind_velocity = wind_velocity;
-    context.sky_light =
-        std::clamp(
-            std::isfinite(environment.daylight_factor)
-                ? environment.daylight_factor
-                : 1.0F,
-            0.0F,
-            1.0F);
-    context.local_light =
-        std::clamp(
-            0.18F +
-                (1.0F - context.sky_light) * 0.30F,
-            0.0F,
-            1.0F);
+    // Je laisse le shader appliquer une seule fois le facteur solaire global :
+    // tous les soldats de la Vieille Garde sont exposés au ciel sur le pont.
+    context.sky_light = 1.0F;
+    context.local_light = 0.0F;
+    const auto exterior_lights =
+        amelie_ship_blueprint()
+            .exterior_lanterns;
+    const auto exterior_light_activation =
+        ship_exterior_light_activation(
+            environment.daylight_factor,
+            environment.storm_intensity,
+            environment.cloud_intensity,
+            environment.overcast_intensity);
+    context.local_light_at =
+        [exterior_lights,
+         exterior_light_activation](
+            const glm::vec3& local_position) noexcept {
+            return std::clamp(
+                ship_exterior_light_level(
+                    exterior_lights,
+                    local_position) *
+                    exterior_light_activation,
+                0.0F,
+                1.0F);
+        };
     context.precipitation_exposure = 1.0F;
 
     const auto& events =
@@ -5014,13 +9071,18 @@ auto SeaAdventureSystem::player_should_ride_ship(const PlayerController& player)
            !player.is_dead() &&
            !player.state().fly_mode &&
            std::abs(player.state().velocity.y) <= kShipRideVerticalSpeedTolerance &&
-           player_on_ship(player.position());
+           player_on_ship(player);
 }
 
-auto SeaAdventureSystem::player_on_ship(const glm::vec3& player_position) const noexcept -> bool {
-    const auto support_height = ship_.support_height(player_position);
+auto SeaAdventureSystem::player_on_ship(const PlayerController& player) const noexcept -> bool {
+    const auto support_height =
+        player.dynamic_support_height(
+            ship_);
     return support_height.has_value() &&
-           std::abs(player_position.y - *support_height) <= kShipRideContactTolerance;
+           std::abs(
+               player.position().y -
+               *support_height) <=
+               kShipRideContactTolerance;
 }
 
 auto SeaAdventureSystem::player_ship_distance(const glm::vec3& player_position) const noexcept -> float {

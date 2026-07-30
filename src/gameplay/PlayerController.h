@@ -91,6 +91,18 @@ struct PlayerState {
     PlayerDeathCause death_cause = PlayerDeathCause::None;
 };
 
+struct PlayerDamageResult {
+    float requested_damage = 0.0F;
+    float damage_after_resistance = 0.0F;
+    float health_damage = 0.0F;
+    bool blocked_by_invulnerability = false;
+    bool killed = false;
+
+    [[nodiscard]] constexpr auto applied() const noexcept -> bool {
+        return health_damage > 0.0F;
+    }
+};
+
 struct BrokenBlockResult {
     BlockCoord block {};
     BlockId block_id = to_block_id(BlockType::Air);
@@ -145,6 +157,7 @@ public:
     void set_velocity(const glm::vec3& velocity) noexcept;
     void set_fly_mode_enabled(bool enabled) noexcept;
     void set_selected_block(BlockId block_id) noexcept;
+    void set_max_health(float max_health) noexcept;
     void set_damage_resistance_percent(float percent) noexcept;
     void set_apnea_resistance_percent(float percent) noexcept;
     void set_fall_safety_multiplier(float multiplier) noexcept;
@@ -154,6 +167,9 @@ public:
     void trigger_secondary_action() noexcept;
     void respawn(const glm::vec3& position) noexcept;
     void apply_external_damage(float amount, PlayerDeathCause cause) noexcept;
+    [[nodiscard]] auto apply_external_damage_report(
+        float amount,
+        PlayerDeathCause cause) noexcept -> PlayerDamageResult;
 
     // Les dangers continus possedent leur propre cadence et ne doivent pas etre
     // annules par la fenetre d'invulnerabilite d'une attaque precedente.
@@ -182,6 +198,10 @@ public:
     auto try_place_block(World& world, float max_distance = 8.0F) const -> std::optional<PlacedBlockResult>;
     [[nodiscard]] auto collides_at(const World& world, const glm::vec3& feet_position) const -> bool;
     [[nodiscard]] auto overlaps_dynamic_obstacle(const ShipEntity& obstacle) const noexcept -> bool;
+    [[nodiscard]] auto dynamic_support_height(const ShipEntity& obstacle) const noexcept
+        -> std::optional<float>;
+    [[nodiscard]] auto resolve_dynamic_obstacle_overlap(const World& world,
+                                                        const ShipEntity& obstacle) -> bool;
 
 private:
     struct WaterContactState {
@@ -194,7 +214,10 @@ private:
     void update_survival_state(float dt, const WaterContactState& water_contact);
     void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
     void move_axis(float delta, int axis, const World& world, const ShipEntity* dynamic_obstacle);
-    void apply_damage(float amount, PlayerDeathCause cause, bool bypass_cooldown = false) noexcept;
+    auto apply_damage(
+        float amount,
+        PlayerDeathCause cause,
+        bool bypass_cooldown = false) noexcept -> PlayerDamageResult;
     void enter_death_state(PlayerDeathCause cause) noexcept;
     void heal(float amount) noexcept;
     void reset_jump_assist_state() noexcept;
@@ -211,10 +234,16 @@ private:
         const ShipEntity* dynamic_obstacle,
         const OceanState* dynamic_ocean) const noexcept
         -> WaterContactState;
+    [[nodiscard]] auto dynamic_support_height_at(const ShipEntity& obstacle,
+                                                 const glm::vec3& feet_position,
+                                                 float min_height,
+                                                 float max_height) const noexcept
+        -> std::optional<float>;
 
     PlayerState state_ {};
     BlockBreakProgress block_break_progress_ {};
     BlockId selected_block_ = to_block_id(BlockType::Grass);
+    float max_health_ = 20.0F;
     float damage_resistance_percent_ = 0.0F;
     float apnea_resistance_percent_ = 0.0F;
     float fall_safety_multiplier_ = 1.0F;
@@ -230,7 +259,6 @@ private:
     static constexpr float kPlayerWidth = 0.6F;
     static constexpr float kPlayerHeight = 1.8F;
     static constexpr float kEyeHeight = 1.62F;
-    static constexpr float kMaxHealth = 20.0F;
     static constexpr float kMaxAirSeconds = 10.0F;
 };
 

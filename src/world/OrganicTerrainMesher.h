@@ -19,8 +19,6 @@ inline constexpr std::size_t
 // Je réserve ce bit au contrat visuel géologique. Il signale au shader que
 // `primary_block_id` et `secondary_block_id` forment une paire de couches
 // canonique dont `material_blend` peut être interpolé sans révéler la grille.
-inline constexpr std::uint16_t kTerrainSurfaceFlagGeologicalBlend = 1U << 4U;
-
 struct OrganicTerrainCellSample {
     BlockId block_id = to_block_id(BlockType::Air);
     std::uint8_t sky_light = 15;

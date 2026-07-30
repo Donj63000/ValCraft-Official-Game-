@@ -175,6 +175,11 @@ struct FramePerformanceSample {
     double adaptive_frame_p95_ms = 0.0;
     PerformanceRenderCategoryTimes render_category_cpu_ms {};
     PerformanceRenderCategoryTimes render_category_gpu_ms {};
+    // Je garde gpu_water_ms intact pour les consommateurs historiques et
+    // j'expose separement les passes ajoutees par le rendu moderne.
+    double gpu_water_resolve_ms = 0.0;
+    double gpu_water_surface_ms = 0.0;
+    double gpu_transparent_weather_ms = 0.0;
 };
 
 struct PerformanceEvent {
@@ -309,6 +314,9 @@ struct PerformanceReportSummary {
     std::size_t total_generation_pruned = 0;
     std::size_t total_unloaded_chunks = 0;
     std::size_t total_lighting_jobs_completed = 0;
+    PerformanceMetricSummary gpu_water_resolve_ms {};
+    PerformanceMetricSummary gpu_water_surface_ms {};
+    PerformanceMetricSummary gpu_transparent_weather_ms {};
 };
 
 struct PerformanceHotspotSummary {
@@ -677,6 +685,15 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
             sample.render_category_cpu_ms);
         sanitize_render_category_times(
             sample.render_category_gpu_ms);
+        sample.gpu_water_resolve_ms =
+            sanitize_performance_duration(
+                sample.gpu_water_resolve_ms);
+        sample.gpu_water_surface_ms =
+            sanitize_performance_duration(
+                sample.gpu_water_surface_ms);
+        sample.gpu_transparent_weather_ms =
+            sanitize_performance_duration(
+                sample.gpu_transparent_weather_ms);
         populate_legacy_render_category_fallbacks(sample);
         sample.dominant_stage = detect_dominant_stage(sample);
     }
@@ -708,6 +725,9 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
     std::vector<double> gpu_world_values;
     std::vector<double> gpu_sky_values;
     std::vector<double> gpu_water_values;
+    std::vector<double> gpu_water_resolve_values;
+    std::vector<double> gpu_water_surface_values;
+    std::vector<double> gpu_transparent_weather_values;
     std::vector<double> gpu_entities_values;
     std::vector<double> gpu_post_process_values;
     std::vector<double> gpu_hud_values;
@@ -753,6 +773,9 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
     gpu_world_values.reserve(samples.size());
     gpu_sky_values.reserve(samples.size());
     gpu_water_values.reserve(samples.size());
+    gpu_water_resolve_values.reserve(samples.size());
+    gpu_water_surface_values.reserve(samples.size());
+    gpu_transparent_weather_values.reserve(samples.size());
     gpu_entities_values.reserve(samples.size());
     gpu_post_process_values.reserve(samples.size());
     gpu_hud_values.reserve(samples.size());
@@ -808,6 +831,12 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
             gpu_world_values.push_back(sample.gpu_world_ms);
             gpu_sky_values.push_back(sample.gpu_sky_ms);
             gpu_water_values.push_back(sample.gpu_water_ms);
+            gpu_water_resolve_values.push_back(
+                sample.gpu_water_resolve_ms);
+            gpu_water_surface_values.push_back(
+                sample.gpu_water_surface_ms);
+            gpu_transparent_weather_values.push_back(
+                sample.gpu_transparent_weather_ms);
             gpu_entities_values.push_back(sample.gpu_entities_ms);
             gpu_post_process_values.push_back(sample.gpu_post_process_ms);
             gpu_hud_values.push_back(sample.gpu_hud_ms);
@@ -888,6 +917,12 @@ inline auto build_performance_report(const PerformanceReportMetadata& metadata,
     report.summary.gpu_world_ms = summarize_metric(gpu_world_values);
     report.summary.gpu_sky_ms = summarize_metric(gpu_sky_values);
     report.summary.gpu_water_ms = summarize_metric(gpu_water_values);
+    report.summary.gpu_water_resolve_ms =
+        summarize_metric(gpu_water_resolve_values);
+    report.summary.gpu_water_surface_ms =
+        summarize_metric(gpu_water_surface_values);
+    report.summary.gpu_transparent_weather_ms =
+        summarize_metric(gpu_transparent_weather_values);
     report.summary.gpu_entities_ms = summarize_metric(gpu_entities_values);
     report.summary.gpu_post_process_ms = summarize_metric(gpu_post_process_values);
     report.summary.gpu_hud_ms = summarize_metric(gpu_hud_values);
@@ -1102,6 +1137,12 @@ inline void append_sample_json(
            << ", \"gpu_world_ms\": " << sample.gpu_world_ms
            << ", \"gpu_sky_ms\": " << sample.gpu_sky_ms
            << ", \"gpu_water_ms\": " << sample.gpu_water_ms
+           << ", \"gpu_water_resolve_ms\": "
+           << sample.gpu_water_resolve_ms
+           << ", \"gpu_water_surface_ms\": "
+           << sample.gpu_water_surface_ms
+           << ", \"gpu_transparent_weather_ms\": "
+           << sample.gpu_transparent_weather_ms
            << ", \"gpu_entities_ms\": " << sample.gpu_entities_ms
            << ", \"gpu_post_process_ms\": " << sample.gpu_post_process_ms
            << ", \"gpu_hud_ms\": " << sample.gpu_hud_ms
@@ -1222,6 +1263,18 @@ inline auto format_performance_json(const PerformanceRunReport& report) -> std::
     append_metric_json(stream, "gpu_world_ms", report.summary.gpu_world_ms);
     append_metric_json(stream, "gpu_sky_ms", report.summary.gpu_sky_ms);
     append_metric_json(stream, "gpu_water_ms", report.summary.gpu_water_ms);
+    append_metric_json(
+        stream,
+        "gpu_water_resolve_ms",
+        report.summary.gpu_water_resolve_ms);
+    append_metric_json(
+        stream,
+        "gpu_water_surface_ms",
+        report.summary.gpu_water_surface_ms);
+    append_metric_json(
+        stream,
+        "gpu_transparent_weather_ms",
+        report.summary.gpu_transparent_weather_ms);
     append_metric_json(stream, "gpu_entities_ms", report.summary.gpu_entities_ms);
     append_metric_json(stream, "gpu_post_process_ms", report.summary.gpu_post_process_ms);
     append_metric_json(stream, "gpu_hud_ms", report.summary.gpu_hud_ms);
@@ -1424,6 +1477,12 @@ inline auto format_performance_report(const PerformanceRunReport& report) -> std
            << " world=" << report.summary.gpu_world_ms.average
            << " sky=" << report.summary.gpu_sky_ms.average
            << " water=" << report.summary.gpu_water_ms.average
+           << " water_resolve="
+           << report.summary.gpu_water_resolve_ms.average
+           << " water_surface="
+           << report.summary.gpu_water_surface_ms.average
+           << " transparent_weather="
+           << report.summary.gpu_transparent_weather_ms.average
            << " entities=" << report.summary.gpu_entities_ms.average
            << " post=" << report.summary.gpu_post_process_ms.average
            << " hud=" << report.summary.gpu_hud_ms.average << '\n';

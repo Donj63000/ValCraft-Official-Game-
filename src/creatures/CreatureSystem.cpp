@@ -52,6 +52,7 @@ constexpr float kResidentPanicDuration = 1.45F;
 constexpr float kResidentStepLookahead = 0.90F;
 constexpr int kResidentTargetSearchRadius = 3;
 constexpr float kCreatureHurtDuration = 0.34F;
+constexpr float kMaximumCreatureStaggerDuration = 2.0F;
 constexpr float kCreatureDeathVisualDuration = 1.18F;
 constexpr float kCreatureSpawnSuppressionDuration = 14.0F;
 constexpr float kPopulationSyncIntervalSeconds = 0.25F;
@@ -120,6 +121,10 @@ auto has_clear_creature_attack_path(const CreatureInstance& creature,
                                     const glm::vec3& player_position,
                                     float horizontal_distance_sq) -> bool;
 void ensure_creature_health(CreatureInstance& creature) noexcept;
+void synchronize_creature_combat_profile(
+    CreatureInstance& creature,
+    CreaturePhase phase,
+    float morph_factor) noexcept;
 auto horizontal_direction_or_fallback(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3;
 auto ray_intersects_aabb(const glm::vec3& origin,
                          const glm::vec3& direction,
@@ -271,6 +276,7 @@ void sanitize_loaded_creature(CreatureInstance& creature) noexcept {
     creature.resident_cached_phase = 0U;
     creature.resident_target_valid = false;
     creature.resident_heading_valid = false;
+    creature.combat_profile_max_health = 0.0F;
     ensure_creature_health(creature);
 }
 
@@ -1492,13 +1498,42 @@ auto has_clear_creature_attack_path(const CreatureInstance& creature,
 }
 
 void ensure_creature_health(CreatureInstance& creature) noexcept {
-    const auto max_health = creature_max_health(creature.anchor.species);
+    const auto max_health =
+        creature_combat_profile(creature).maximum_health;
     if (!std::isfinite(creature.health)) {
         creature.health = max_health;
-        return;
+    } else {
+        creature.health = std::clamp(creature.health, 0.0F, max_health);
     }
+    creature.combat_profile_max_health = max_health;
+}
 
-    creature.health = std::clamp(creature.health, 0.0F, max_health);
+void synchronize_creature_combat_profile(
+    CreatureInstance& creature,
+    CreaturePhase phase,
+    float morph_factor) noexcept {
+    ensure_creature_health(creature);
+    const auto previous_max_health =
+        creature.combat_profile_max_health;
+    const auto health_ratio =
+        previous_max_health > 1.0e-4F
+            ? std::clamp(
+                  creature.health / previous_max_health,
+                  0.0F,
+                  1.0F)
+            : 1.0F;
+
+    creature.phase = phase;
+    creature.morph_factor =
+        std::clamp(finite_or(morph_factor, 0.0F), 0.0F, 1.0F);
+    const auto next_max_health =
+        creature_combat_profile(creature).maximum_health;
+    if (std::abs(next_max_health - previous_max_health) > 1.0e-4F) {
+        // Je conserve le pourcentage de vie lors des transformations : ni
+        // la nuit ni l'aube ne peuvent soigner ou tuer artificiellement.
+        creature.health = health_ratio * next_max_health;
+    }
+    creature.combat_profile_max_health = next_max_health;
 }
 
 auto horizontal_direction_or_fallback(const glm::vec3& value, const glm::vec3& fallback) noexcept -> glm::vec3 {
@@ -1573,7 +1608,6 @@ auto make_spawned_creature(const CreatureSpawnAnchor& anchor,
     creature.appearance_seed = hash_coords(anchor.ground_block.x * 11, anchor.ground_block.z * 5, seed ^ 0x6C8E9CF5U);
     creature.attack_amount = 0.0F;
     creature.hurt_timer = 0.0F;
-    creature.health = creature_max_health(anchor.species);
     const auto initial_hit_direction = direction_from_yaw(creature.yaw_radians);
     creature.hit_direction = {initial_hit_direction.x, 0.0F, initial_hit_direction.y};
 
@@ -1592,6 +1626,9 @@ auto make_spawned_creature(const CreatureSpawnAnchor& anchor,
         creature.gaze_weight = is_morph_visible(cycle) ? 0.48F : 0.16F;
         creature.attack_cooldown = next_unit(seed) * 0.35F;
     }
+    creature.combat_profile_max_health =
+        creature_combat_profile(creature).maximum_health;
+    creature.health = creature.combat_profile_max_health;
 
     return creature;
 }
@@ -2006,6 +2043,17 @@ void CreatureSystem::update(float dt,
     const auto clamped_dt = non_negative_finite(dt);
     update_spawn_suppressions(clamped_dt);
     const auto safe_player_position = finite_vec3_or(player_position, {});
+    if (hostile_taunt_.has_value()) {
+        hostile_taunt_->remaining_seconds =
+            std::max(
+                hostile_taunt_->remaining_seconds -
+                    clamped_dt,
+                0.0F);
+        if (hostile_taunt_->remaining_seconds <=
+            0.0F) {
+            hostile_taunt_.reset();
+        }
+    }
     if (creatures_.capacity() < kCreatureMaxActiveCount) {
         creatures_.reserve(kCreatureMaxActiveCount);
     }
@@ -2035,7 +2083,33 @@ void CreatureSystem::update(float dt,
 
     const auto active_view = std::span<const CreatureInstance>(creatures_.data(), creatures_.size());
     for (auto& creature : creatures_) {
-        update_creature(creature, clamped_dt, world, safe_player_position, environment, cycle, active_view);
+        auto combat_target =
+            safe_player_position;
+        auto attack_target_id =
+            std::uint64_t {0U};
+        if (hostile_taunt_.has_value() &&
+            is_hostile_creature(creature) &&
+            horizontal_distance_squared(
+                creature.position,
+                hostile_taunt_
+                    ->target_position) <=
+                hostile_taunt_->radius *
+                    hostile_taunt_->radius) {
+            combat_target =
+                hostile_taunt_
+                    ->target_position;
+            attack_target_id =
+                hostile_taunt_->target_id;
+        }
+        update_creature(
+            creature,
+            clamped_dt,
+            world,
+            combat_target,
+            environment,
+            cycle,
+            active_view,
+            attack_target_id);
     }
 
     update_death_visuals(clamped_dt);
@@ -2105,6 +2179,8 @@ auto CreatureSystem::raycast_first_creature(const glm::vec3& origin,
     }
 
     const auto& creature = creatures_[best_index];
+    const auto combat_profile =
+        creature_combat_profile(creature);
     return {
         true,
         creature_id_from_anchor(creature.anchor),
@@ -2112,6 +2188,7 @@ auto CreatureSystem::raycast_first_creature(const glm::vec3& origin,
         creature_disposition(creature),
         creature.position,
         best_distance,
+        combat_profile,
     };
 }
 
@@ -2123,7 +2200,10 @@ auto CreatureSystem::apply_damage(CreatureId target_id,
     result.source =
         source == CreatureDamageSource::Player ||
         source == CreatureDamageSource::OldGuard ||
-        source == CreatureDamageSource::Environment
+        source == CreatureDamageSource::Environment ||
+        source == CreatureDamageSource::PlayerAbility ||
+        source == CreatureDamageSource::PlayerSummon ||
+        source == CreatureDamageSource::PlayerConstruct
             ? source
             : CreatureDamageSource::Environment;
     result.id = target_id;
@@ -2161,12 +2241,19 @@ auto CreatureSystem::apply_damage(CreatureId target_id,
 
     result.hit = true;
     result.killed = creature.health <= 0.0F;
-    result.grants_player_rewards = result.killed && result.source == CreatureDamageSource::Player;
+    result.grants_player_rewards =
+        result.killed &&
+        creature_damage_source_has_player_owner(
+            result.source);
     result.species = creature.anchor.species;
     result.disposition = creature_disposition(creature);
     result.position = creature.position;
     result.damage = applied_damage;
     result.remaining_health = creature.health;
+    result.combat_profile =
+        creature_combat_profile(creature);
+    result.experience_reward =
+        result.combat_profile.experience_reward;
 
     if (result.killed) {
         // Je conserve la meme mort et la meme suppression de respawn quelle
@@ -2185,6 +2272,83 @@ auto CreatureSystem::apply_damage(CreatureId target_id,
     }
 
     return result;
+}
+
+auto CreatureSystem::apply_stagger(CreatureId target_id, float duration_seconds) noexcept -> bool {
+    if (target_id == 0U ||
+        !std::isfinite(duration_seconds) ||
+        duration_seconds <= 0.0F) {
+        return false;
+    }
+
+    auto* creature = find_creature(target_id);
+    if (creature == nullptr || !std::isfinite(creature->health) || creature->health <= 0.0F) {
+        return false;
+    }
+
+    // Je borne l'interruption pour empecher une capacite ou une donnee
+    // corrompue de neutraliser definitivement une creature.
+    const auto bounded_duration =
+        std::clamp(duration_seconds, 0.0F, kMaximumCreatureStaggerDuration);
+    const auto resisted_duration =
+        resolved_stun_duration(
+            creature_combat_profile(*creature).status_resistance,
+            bounded_duration,
+            std::numeric_limits<float>::infinity());
+    creature->attack_cooldown =
+        std::max(non_negative_finite(creature->attack_cooldown), resisted_duration);
+    creature->behavior_timer =
+        std::max(non_negative_finite(creature->behavior_timer), resisted_duration);
+    creature->hurt_timer =
+        std::max(non_negative_finite(creature->hurt_timer), resisted_duration);
+    creature->behavior_state = CreatureBehaviorState::Flee;
+    return true;
+}
+
+auto CreatureSystem::taunt_hostiles(
+    std::uint64_t target_id,
+    const glm::vec3& target_position,
+    float radius,
+    float duration_seconds) noexcept -> std::size_t {
+    if (target_id == 0U ||
+        !is_finite_vec3(target_position) ||
+        !std::isfinite(radius) ||
+        !std::isfinite(duration_seconds) ||
+        radius <= 0.0F ||
+        duration_seconds <= 0.0F) {
+        return 0U;
+    }
+
+    const auto bounded_radius =
+        std::clamp(radius, 0.0F, 64.0F);
+    const auto radius_squared =
+        bounded_radius * bounded_radius;
+    auto affected = std::size_t {0U};
+    for (const auto& creature :
+         creatures_) {
+        if (is_hostile_creature(creature) &&
+            creature.health > 0.0F &&
+            horizontal_distance_squared(
+                creature.position,
+                target_position) <=
+                radius_squared) {
+            ++affected;
+        }
+    }
+    if (affected == 0U) {
+        return 0U;
+    }
+
+    hostile_taunt_ = HostileTaunt {
+        target_id,
+        target_position,
+        bounded_radius,
+        std::clamp(
+            duration_seconds,
+            0.0F,
+            60.0F),
+    };
+    return affected;
 }
 
 auto CreatureSystem::try_damage_by_ray(const glm::vec3& origin,
@@ -2360,6 +2524,7 @@ void CreatureSystem::load_creatures(const std::vector<CreatureInstance>& creatur
     population_sync_accumulator_ = 0.0F;
     population_sync_requested_ = true;
     last_population_center_.reset();
+    hostile_taunt_.reset();
     last_loaded_chunk_count_ = 0;
     rebuild_render_instances(environment);
     audit_stats_ = {};
@@ -2380,6 +2545,7 @@ void CreatureSystem::clear() noexcept {
     spawn_anchor_cache_.clear();
     last_population_center_.reset();
     secondary_population_interest_.reset();
+    hostile_taunt_.reset();
     last_loaded_chunk_count_ = 0;
     population_sync_accumulator_ = 0.0F;
     population_sync_requested_ = true;
@@ -2596,7 +2762,8 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                                      const glm::vec3& player_position,
                                      const EnvironmentState& environment,
                                      const CreatureCycleState& cycle,
-                                     std::span<const CreatureInstance> active_creatures) {
+                                     std::span<const CreatureInstance> active_creatures,
+                                     std::uint64_t attack_target_id) {
     ensure_creature_health(creature);
     creature.hurt_timer = std::max(0.0F, creature.hurt_timer - non_negative_finite(dt));
     if (creature.health <= 0.0F) {
@@ -2623,8 +2790,10 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
 
     const auto tuning = tuning_for(creature.anchor.species);
     const auto resident_species = is_resident_species(creature.anchor.species);
-    creature.phase = resident_species ? CreaturePhase::Day : cycle.phase;
-    creature.morph_factor = resident_species ? 0.0F : cycle.morph_factor;
+    synchronize_creature_combat_profile(
+        creature,
+        resident_species ? CreaturePhase::Day : cycle.phase,
+        resident_species ? 0.0F : cycle.morph_factor);
     creature.animation_time += non_negative_finite(dt);
     creature.behavior_timer -= dt;
     creature.attack_cooldown = std::max(0.0F, creature.attack_cooldown - non_negative_finite(dt));
@@ -2787,6 +2956,13 @@ void CreatureSystem::update_creature(CreatureInstance& creature,
                         attack_direction.y * (is_large_night_creature(creature) ? 0.80F : 0.45F),
                     },
                     kZombieDamage,
+                    CreatureAttackKind::Melee,
+                    glm::vec3 {
+                        attack_direction.x,
+                        0.0F,
+                        attack_direction.y,
+                    },
+                    attack_target_id,
                 });
             }
         } else if (close_but_blocked) {

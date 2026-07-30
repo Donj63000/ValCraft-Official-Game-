@@ -87,10 +87,28 @@ enum class WorldRaycastMode : std::uint8_t {
     ProjectileCollidable = 2,
 };
 
+struct WorldCellSnapshot {
+    BlockCoord coordinate {};
+    BlockId block = to_block_id(BlockType::Air);
+    WaterState water_state = 0U;
+    bool player_placed = false;
+
+    auto operator==(const WorldCellSnapshot&) const -> bool = default;
+};
+
+// Je fixe ici l'ordre binaire du masque : l'index de cellule N utilise le bit
+// (N % 8), du poids faible au poids fort, dans l'octet (N / 8). Le format est
+// ainsi compact, déterministe et directement sérialisable par la sauvegarde.
+inline constexpr std::size_t kWorldPlayerPlacedMaskByteCount =
+    (kChunkVolume + 7U) / 8U;
+using WorldPlayerPlacedMask =
+    std::array<std::uint8_t, kWorldPlayerPlacedMaskByteCount>;
+
 struct WorldChunkSnapshot {
     ChunkCoord coord {};
     std::array<BlockId, kChunkVolume> blocks {};
     std::array<WaterState, kChunkVolume> water_state {};
+    WorldPlayerPlacedMask player_placed_mask {};
 };
 
 struct WorldSavePlanCell {
@@ -104,6 +122,7 @@ struct WorldSavePlanChunk {
     std::vector<WorldSavePlanCell> sparse_cells {};
     std::vector<BlockId> dense_blocks {};
     std::vector<WaterState> dense_water_state {};
+    WorldPlayerPlacedMask player_placed_mask {};
 
     [[nodiscard]] auto dense() const noexcept -> bool {
         return !dense_blocks.empty();
@@ -212,6 +231,27 @@ public:
     [[nodiscard]] auto get_sky_light(int x, int y, int z) const -> std::uint8_t;
     [[nodiscard]] auto get_block_light(int x, int y, int z) const -> std::uint8_t;
     void set_block(int x, int y, int z, BlockId block_id);
+    // Je distingue explicitement le gameplay joueur des écritures du
+    // générateur et des outils d'administration.
+    [[nodiscard]] auto set_player_block(
+        int x,
+        int y,
+        int z,
+        BlockId block_id) -> bool;
+    // Je conserve ce témoin après destruction ou restauration procédurale :
+    // il représente l'historique de la cellule et bloque les gains répétés.
+    [[nodiscard]] auto was_player_placed(
+        int x,
+        int y,
+        int z) const noexcept -> bool;
+    // Je capture et restaure l'état complet utilisé par une transaction. Cette
+    // voie est la seule qui puisse rendre la provenance exactement antérieure.
+    [[nodiscard]] auto capture_cell_snapshot(
+        int x,
+        int y,
+        int z) const noexcept -> std::optional<WorldCellSnapshot>;
+    [[nodiscard]] auto restore_cell_snapshot(
+        const WorldCellSnapshot& snapshot) -> bool;
     // Je restaure simultanement le bloc et l'etat d'eau procedural, y compris
     // le drapeau de source infinie que set_block(Water) ne peut pas exprimer.
     [[nodiscard]] auto restore_generated_cell(int x, int y, int z) -> bool;
@@ -270,6 +310,10 @@ public:
     [[nodiscard]] auto visual_pipeline() const noexcept -> VisualPipeline;
     void set_visual_pipeline(VisualPipeline visual_pipeline);
     [[nodiscard]] auto stream_radius() const noexcept -> int;
+    // Je fournis au LOD d'horizon le relief procédural sans charger de chunk,
+    // sans appliquer de sauvegarde et sans perturber les files de streaming.
+    [[nodiscard]] auto sample_generated_surface(int world_x, int world_z) const noexcept
+        -> TerrainSurfaceSample;
     [[nodiscard]] auto surface_height(int world_x, int world_z) -> int;
     [[nodiscard]] auto loaded_surface_height(int world_x, int world_z) const -> std::optional<int>;
     [[nodiscard]] auto pending_generation_count() const noexcept -> std::size_t;
@@ -313,7 +357,9 @@ private:
         std::bitset<kChunkVolume> changed_cells {};
         std::vector<ChunkOverrideCell> sparse_cells {};
         std::unique_ptr<DenseChunkOverride> dense {};
+        WorldPlayerPlacedMask player_placed_mask {};
         std::size_t generator_mismatch_count = 0;
+        std::size_t player_placed_count = 0;
     };
 
     struct SaveRestoreState {
@@ -403,12 +449,20 @@ private:
     void remove_unsupported_torches_around(int x, int y, int z);
     void refresh_chunk_emissive_cache(ChunkRecord& record);
     void update_chunk_emissive_cache(ChunkRecord& record, const BlockCoord& local_coord, BlockId previous_block, BlockId next_block);
+    [[nodiscard]] auto set_block_internal(
+        int x,
+        int y,
+        int z,
+        BlockId block_id,
+        bool mark_player_placed) -> bool;
     void sync_chunk_override_snapshot(const ChunkCoord& coord, const Chunk& chunk);
     void apply_chunk_override_to_record(ChunkRecord& record, const ChunkOverrideEntry& entry);
     [[nodiscard]] auto make_chunk_override_entry(
         const ChunkCoord& coord,
         const std::array<BlockId, kChunkVolume>& blocks,
-        const std::array<WaterState, kChunkVolume>& water_state) const -> std::optional<ChunkOverrideEntry>;
+        const std::array<WaterState, kChunkVolume>& water_state,
+        const WorldPlayerPlacedMask& player_placed_mask = {}) const
+        -> std::optional<ChunkOverrideEntry>;
     [[nodiscard]] auto materialize_chunk_override(
         const ChunkCoord& coord,
         const ChunkOverrideEntry& entry) const -> WorldChunkSnapshot;
@@ -422,6 +476,7 @@ private:
                                  WaterState water_state,
                                  BlockId fallback_generated_block,
                                  WaterState fallback_generated_water_state,
+                                 bool player_placed,
                                  const Chunk* loaded_chunk);
     [[nodiscard]] auto normalize_water_state_for_generated(const BlockCoord& world_coord, WaterState water_state) const -> WaterState;
     [[nodiscard]] auto raw_water_state(int x, int y, int z) const -> WaterState;
@@ -440,7 +495,8 @@ private:
                                                  BlockId previous_block,
                                                  BlockId next_block,
                                                  WaterState previous_water_state,
-                                                 WaterState next_water_state);
+                                                 WaterState next_water_state,
+                                                 bool mark_player_placed = false);
     void apply_chunk_load_fluid_revalidation(const ChunkCoord& coord);
     [[nodiscard]] auto lighting_region_contains(const LightingJob& job, const ChunkCoord& coord) const noexcept -> bool;
     [[nodiscard]] auto lighting_buffer_index(const BlockCoord& local_coord) const noexcept -> std::size_t;
@@ -483,6 +539,9 @@ private:
     std::unordered_set<ChunkCoord, ChunkCoordHash> pending_gpu_unload_set_ {};
     std::optional<LightingJob> active_lighting_job_ {};
     std::unique_ptr<WorldGenerator::ChunkGenerationState> active_generation_job_ {};
+    // Je termine la toute première publication d'un chunk avant d'en entamer
+    // une autre : le joueur ne doit jamais attendre une cohorte round-robin.
+    std::optional<ChunkCoord> first_publish_mesh_in_progress_ {};
     std::optional<SaveRestoreState> save_restore_state_ {};
     ChunkCoord stream_center_ {};
     bool has_stream_center_ = false;

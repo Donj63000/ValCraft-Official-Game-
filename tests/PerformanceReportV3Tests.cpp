@@ -73,6 +73,18 @@ TEST_CASE("performance report v3 summarizes every render category deterministica
             4.0 + 2.0 * static_cast<double>(sample_index);
         sample.gpu_frame_ms =
             6.0 + 2.0 * static_cast<double>(sample_index);
+        const auto split_sample =
+            static_cast<double>(sample_index + 1U);
+        sample.gpu_water_resolve_ms =
+            0.10 * split_sample;
+        sample.gpu_water_surface_ms =
+            0.50 + 0.25 * static_cast<double>(sample_index);
+        sample.gpu_transparent_weather_ms =
+            0.05 * split_sample;
+        sample.gpu_water_ms =
+            sample.gpu_water_resolve_ms +
+            sample.gpu_water_surface_ms +
+            sample.gpu_transparent_weather_ms;
         sample.gpu_timing_valid = true;
 
         for (std::size_t category_index = 0;
@@ -138,6 +150,21 @@ TEST_CASE("performance report v3 summarizes every render category deterministica
     // rapports sans traduction ni perte de precision.
     CHECK(report.summary.world_ms.average == doctest::Approx(5.0));
     CHECK(report.summary.gpu_world_ms.average == doctest::Approx(6.0));
+    CHECK(
+        report.summary.gpu_water_ms.average ==
+        doctest::Approx(1.05));
+    CHECK(
+        report.summary.gpu_water_resolve_ms.average ==
+        doctest::Approx(0.20));
+    CHECK(
+        report.summary.gpu_water_surface_ms.average ==
+        doctest::Approx(0.75));
+    CHECK(
+        report.summary.gpu_water_surface_ms.p95 ==
+        doctest::Approx(0.975));
+    CHECK(
+        report.summary.gpu_transparent_weather_ms.average ==
+        doctest::Approx(0.10));
 
     const auto json = format_performance_json(report);
     CHECK(json == format_performance_json(repeated_report));
@@ -157,6 +184,18 @@ TEST_CASE("performance report v3 summarizes every render category deterministica
         json.find("\"render_categories\": {") !=
         std::string::npos);
     CHECK(json.find("\"gpu_world_ms\": {") != std::string::npos);
+    CHECK(
+        json.find("\"gpu_water_resolve_ms\": {") !=
+        std::string::npos);
+    CHECK(
+        json.find("\"gpu_water_surface_ms\": {") !=
+        std::string::npos);
+    CHECK(
+        json.find("\"gpu_transparent_weather_ms\": {") !=
+        std::string::npos);
+    CHECK(
+        json.find("\"gpu_water_surface_ms\": 0.500") !=
+        std::string::npos);
     for (const auto category : kPerformanceRenderCategories) {
         const auto category_key =
             "\"" +
@@ -176,6 +215,9 @@ TEST_CASE("performance report v3 summarizes every render category deterministica
     CHECK(
         text.find("render_categories_gpu_ms_avg") !=
         std::string::npos);
+    CHECK(text.find("water_resolve=") != std::string::npos);
+    CHECK(text.find("water_surface=") != std::string::npos);
+    CHECK(text.find("transparent_weather=") != std::string::npos);
 }
 
 TEST_CASE("performance report v3 maps historical render passes without double counting") {
@@ -220,6 +262,18 @@ TEST_CASE("performance report v3 maps historical render passes without double co
                 .gpu(PerformanceRenderCategory::Water)
                 .average ==
         doctest::Approx(2.0));
+    CHECK(
+        report.summary.gpu_water_ms.average ==
+        doctest::Approx(2.0));
+    CHECK(
+        report.summary.gpu_water_resolve_ms.average ==
+        doctest::Approx(0.0));
+    CHECK(
+        report.summary.gpu_water_surface_ms.average ==
+        doctest::Approx(0.0));
+    CHECK(
+        report.summary.gpu_transparent_weather_ms.average ==
+        doctest::Approx(0.0));
     CHECK(
         report.summary.render_categories
                 .gpu(PerformanceRenderCategory::Atmosphere)

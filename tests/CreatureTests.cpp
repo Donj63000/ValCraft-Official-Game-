@@ -1,6 +1,7 @@
 #include "creatures/CreatureGeometry.h"
 #include "creatures/CreatureSystem.h"
 #include "gameplay/StartingVillage.h"
+#include "render/VisualEntityPrimitives.h"
 
 #include "TestUtils.h"
 
@@ -445,6 +446,219 @@ TEST_CASE("creature cycle classification uses explicit dusk night and dawn bound
     CHECK(dawn_mid.morph_factor == doctest::Approx(0.5F));
     CHECK(day.phase == CreaturePhase::Day);
     CHECK(day.morph_factor == doctest::Approx(0.0F));
+}
+
+TEST_CASE("creature combat profiles preserve stable threat faction and weight values") {
+    CHECK(static_cast<std::uint8_t>(ThreatRank::Zero) == 0U);
+    CHECK(static_cast<std::uint8_t>(ThreatRank::One) == 1U);
+    CHECK(static_cast<std::uint8_t>(ThreatRank::Two) == 2U);
+    CHECK(static_cast<std::uint8_t>(ThreatRank::Three) == 3U);
+    CHECK(static_cast<std::uint8_t>(ThreatRank::Four) == 4U);
+    CHECK(static_cast<std::uint8_t>(ThreatRank::Five) == 5U);
+    CHECK(static_cast<std::uint8_t>(ThreatRank::Six) == 6U);
+    CHECK(static_cast<std::uint8_t>(EntityWeight::Light) == 0U);
+    CHECK(static_cast<std::uint8_t>(EntityWeight::Normal) == 1U);
+    CHECK(static_cast<std::uint8_t>(EntityWeight::Heavy) == 2U);
+    CHECK(static_cast<std::uint8_t>(EntityWeight::Boss) == 3U);
+    CHECK(static_cast<std::uint8_t>(Faction::Neutral) == 0U);
+    CHECK(static_cast<std::uint8_t>(Faction::Hostile) == 1U);
+    CHECK(static_cast<std::uint8_t>(Faction::Player) == 2U);
+    CHECK(static_cast<std::uint8_t>(Faction::Ally) == 3U);
+
+    constexpr std::array species {
+        CreatureSpecies::Pig,
+        CreatureSpecies::Sheep,
+        CreatureSpecies::Cow,
+        CreatureSpecies::Villager,
+    };
+    for (const auto value : species) {
+        const auto profile =
+            creature_combat_profile(value, CreaturePhase::Day);
+        CAPTURE(static_cast<int>(value));
+        CHECK(profile.threat_rank == ThreatRank::Zero);
+        CHECK(profile.faction == Faction::Neutral);
+        CHECK(profile.maximum_health ==
+              doctest::Approx(creature_max_health(value)));
+        CHECK(ability_target_has_tag(
+            profile.target_tags,
+            AbilityTargetTags::Creature |
+                AbilityTargetTags::Living |
+                AbilityTargetTags::Damageable |
+                AbilityTargetTags::Neutral));
+        CHECK(profile.experience_reward.experience_points ==
+              (value == CreatureSpecies::Villager ? 0U : 2U));
+    }
+}
+
+TEST_CASE("legacy night forms provide deterministic threat one two and three enemies") {
+    struct ExpectedProfile {
+        CreatureSpecies species;
+        ThreatRank threat;
+        EntityWeight weight;
+        float maximum_health;
+        float knockback_multiplier;
+        float stun_multiplier;
+        std::uint32_t experience;
+    };
+    constexpr std::array expected {
+        ExpectedProfile {
+            CreatureSpecies::Pig,
+            ThreatRank::One,
+            EntityWeight::Light,
+            20.0F,
+            1.0F,
+            1.0F,
+            15U,
+        },
+        ExpectedProfile {
+            CreatureSpecies::Sheep,
+            ThreatRank::Two,
+            EntityWeight::Normal,
+            30.0F,
+            0.70F,
+            0.80F,
+            30U,
+        },
+        ExpectedProfile {
+            CreatureSpecies::Cow,
+            ThreatRank::Three,
+            EntityWeight::Heavy,
+            44.0F,
+            0.20F,
+            0.40F,
+            55U,
+        },
+    };
+
+    for (const auto& item : expected) {
+        const auto profile =
+            creature_combat_profile(item.species, CreaturePhase::Night);
+        CAPTURE(static_cast<int>(item.species));
+        CHECK(profile.threat_rank == item.threat);
+        CHECK(profile.weight == item.weight);
+        CHECK(profile.faction == Faction::Hostile);
+        CHECK(profile.maximum_health == doctest::Approx(item.maximum_health));
+        CHECK(profile.status_resistance.knockback_multiplier ==
+              doctest::Approx(item.knockback_multiplier));
+        CHECK(profile.status_resistance.stun_duration_multiplier ==
+              doctest::Approx(item.stun_multiplier));
+        CHECK(profile.experience_reward.experience_points == item.experience);
+        CHECK(ability_target_has_tag(
+            profile.target_tags,
+            AbilityTargetTags::Hostile |
+                AbilityTargetTags::Wildlife));
+        CHECK(ability_target_has_tag(
+            profile.target_tags,
+            weight_target_tag(item.weight)));
+    }
+
+    CHECK(expected[0].maximum_health >= 15.0F);
+    CHECK(expected[0].maximum_health <= 24.0F);
+    CHECK(expected[1].maximum_health >= 22.0F);
+    CHECK(expected[1].maximum_health <= 36.0F);
+    CHECK(expected[2].maximum_health >= 32.0F);
+    CHECK(expected[2].maximum_health <= 52.0F);
+}
+
+TEST_CASE("weight resistance and deterministic experience cover all balancing ranks") {
+    const auto light = status_resistance_for(EntityWeight::Light);
+    const auto normal = status_resistance_for(EntityWeight::Normal);
+    const auto heavy = status_resistance_for(EntityWeight::Heavy);
+    const auto boss = status_resistance_for(EntityWeight::Boss);
+    CHECK(light.knockback_multiplier == doctest::Approx(1.0F));
+    CHECK(light.stun_duration_multiplier == doctest::Approx(1.0F));
+    CHECK(normal.knockback_multiplier == doctest::Approx(0.70F));
+    CHECK(normal.stun_duration_multiplier == doctest::Approx(0.80F));
+    CHECK(heavy.knockback_multiplier == doctest::Approx(0.20F));
+    CHECK(heavy.stun_duration_multiplier == doctest::Approx(0.40F));
+    CHECK(boss.knockback_multiplier == doctest::Approx(0.0F));
+    CHECK(boss.stun_duration_multiplier == doctest::Approx(0.15F));
+
+    constexpr std::array threats {
+        ThreatRank::One,
+        ThreatRank::Two,
+        ThreatRank::Three,
+        ThreatRank::Four,
+        ThreatRank::Five,
+        ThreatRank::Six,
+    };
+    constexpr std::array<std::uint32_t, threats.size()> rewards {
+        15U,
+        30U,
+        55U,
+        95U,
+        160U,
+        240U,
+    };
+    for (std::size_t index = 0U; index < threats.size(); ++index) {
+        CHECK(
+            deterministic_experience_reward(
+                threats[index],
+                EntityWeight::Normal,
+                Faction::Hostile)
+                .experience_points == rewards[index]);
+    }
+    CHECK(
+        deterministic_experience_reward(
+            ThreatRank::Zero,
+            EntityWeight::Light,
+            Faction::Neutral,
+            true)
+            .experience_points == 2U);
+    CHECK(
+        deterministic_experience_reward(
+            ThreatRank::Zero,
+            EntityWeight::Light,
+            Faction::Neutral,
+            false)
+            .experience_points == 0U);
+    CHECK(
+        deterministic_experience_reward(
+            ThreatRank::Six,
+            EntityWeight::Boss,
+            Faction::Hostile)
+            .experience_points == 0U);
+    CHECK(
+        deterministic_experience_reward(
+            ThreatRank::Six,
+            EntityWeight::Boss,
+            Faction::Hostile,
+            false,
+            100U)
+            .experience_points == 500U);
+    CHECK(
+        deterministic_experience_reward(
+            ThreatRank::Six,
+            EntityWeight::Boss,
+            Faction::Hostile,
+            false,
+            4'000U)
+            .experience_points == 3'000U);
+}
+
+TEST_CASE("pure stun resistance prevents chain control deterministically") {
+    const auto resistance =
+        status_resistance_for(EntityWeight::Normal);
+    CHECK(resolved_stun_duration(
+              resistance,
+              2.0F,
+              std::numeric_limits<float>::infinity()) ==
+          doctest::Approx(1.60F));
+    CHECK(resolved_stun_duration(resistance, 2.0F, 0.0F) ==
+          doctest::Approx(0.0F));
+    CHECK(resolved_stun_duration(resistance, 2.0F, 2.999F) ==
+          doctest::Approx(0.0F));
+    CHECK(resolved_stun_duration(resistance, 2.0F, 3.0F) ==
+          doctest::Approx(0.80F));
+    CHECK(resolved_stun_duration(resistance, 2.0F, 8.999F) ==
+          doctest::Approx(0.80F));
+    CHECK(resolved_stun_duration(resistance, 2.0F, 9.0F) ==
+          doctest::Approx(1.60F));
+    CHECK(resolved_stun_duration(
+              resistance,
+              std::numeric_limits<float>::quiet_NaN(),
+              12.0F) ==
+          doctest::Approx(0.0F));
 }
 
 TEST_CASE("creature spawn anchors map grass chunks to pig cow sheep and reject desert chunks") {
@@ -1159,6 +1373,305 @@ TEST_CASE("player weapon ray damages and kills targeted creatures") {
     CHECK(system.render_instances().empty());
 }
 
+TEST_CASE("raycast and damage results expose the same deterministic combat profile") {
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(23.0F);
+
+    CreatureSpawnAnchor anchor {};
+    anchor.chunk = {0, 0};
+    anchor.ground_block = {0, 12, 2};
+    anchor.spawn_position = {0.5F, 13.001F, 3.0F};
+    anchor.species = CreatureSpecies::Sheep;
+    auto creature =
+        make_test_creature(anchor, anchor.spawn_position);
+    creature.phase = CreaturePhase::Night;
+    creature.morph_factor = 1.0F;
+    creature.health =
+        creature_max_health(
+            creature.anchor.species,
+            CreaturePhase::Night);
+    system.load_creatures({creature}, environment);
+
+    const glm::vec3 origin {0.5F, 13.751F, 0.5F};
+    const glm::vec3 direction {0.0F, 0.0F, 1.0F};
+    const auto ray =
+        system.raycast_first_creature(origin, direction, 4.0F);
+    REQUIRE(ray.hit);
+    CHECK(ray.combat_profile.threat_rank == ThreatRank::Two);
+    CHECK(ray.combat_profile.weight == EntityWeight::Normal);
+    CHECK(ray.combat_profile.faction == Faction::Hostile);
+    CHECK(ray.combat_profile.maximum_health == doctest::Approx(30.0F));
+    CHECK(ray.combat_profile.experience_reward.experience_points == 30U);
+
+    const auto damage =
+        system.apply_damage(
+            ray.id,
+            4.0F,
+            CreatureDamageSource::PlayerAbility);
+    REQUIRE(damage.hit);
+    CHECK_FALSE(damage.killed);
+    CHECK(damage.combat_profile.threat_rank == ray.combat_profile.threat_rank);
+    CHECK(damage.combat_profile.weight == ray.combat_profile.weight);
+    CHECK(damage.combat_profile.faction == ray.combat_profile.faction);
+    CHECK(damage.experience_reward.experience_points == 30U);
+    CHECK(damage.remaining_health == doctest::Approx(26.0F));
+}
+
+TEST_CASE("day and night health transitions preserve the current health ratio") {
+    CreatureSystem system {};
+    World world(9001, 1);
+    test::make_chunk_surface(
+        world,
+        {0, 0},
+        12,
+        to_block_id(BlockType::Grass),
+        to_block_id(BlockType::Dirt));
+    const glm::vec3 player_position {2.5F, 13.001F, 2.5F};
+    const auto day_environment =
+        EnvironmentClock::compute_state(12.0F);
+    const auto day_cycle =
+        EnvironmentClock::classify_creature_cycle(12.0F);
+    system.update(
+        0.0F,
+        world,
+        player_position,
+        day_environment,
+        day_cycle);
+    REQUIRE(system.active_creatures().size() == 1U);
+
+    const auto day_profile =
+        creature_combat_profile(system.active_creatures().front());
+    const auto target_id =
+        creature_id_from_anchor(
+            system.active_creatures().front().anchor);
+    const auto damage =
+        system.apply_damage(
+            target_id,
+            day_profile.maximum_health * 0.5F,
+            CreatureDamageSource::Environment);
+    REQUIRE(damage.hit);
+    CHECK(damage.remaining_health ==
+          doctest::Approx(day_profile.maximum_health * 0.5F));
+
+    const auto night_environment =
+        EnvironmentClock::compute_state(23.0F);
+    const auto night_cycle =
+        EnvironmentClock::classify_creature_cycle(23.0F);
+    system.update(
+        0.0F,
+        world,
+        player_position,
+        night_environment,
+        night_cycle);
+    REQUIRE(system.active_creatures().size() == 1U);
+    const auto& night_creature =
+        system.active_creatures().front();
+    const auto night_profile =
+        creature_combat_profile(night_creature);
+    CHECK(night_profile.faction == Faction::Hostile);
+    CHECK(night_creature.combat_profile_max_health ==
+          doctest::Approx(night_profile.maximum_health));
+    CHECK(night_creature.health ==
+          doctest::Approx(night_profile.maximum_health * 0.5F));
+
+    const auto dawn_environment =
+        EnvironmentClock::compute_state(5.0F);
+    const auto dawn_cycle =
+        EnvironmentClock::classify_creature_cycle(5.0F);
+    system.update(
+        0.0F,
+        world,
+        player_position,
+        dawn_environment,
+        dawn_cycle);
+    REQUIRE(system.active_creatures().size() == 1U);
+    const auto& dawn_creature =
+        system.active_creatures().front();
+    const auto dawn_profile =
+        creature_combat_profile(dawn_creature);
+    CHECK(dawn_profile.faction == Faction::Neutral);
+    CHECK(dawn_creature.combat_profile_max_health ==
+          doctest::Approx(dawn_profile.maximum_health));
+    CHECK(dawn_creature.health ==
+          doctest::Approx(dawn_profile.maximum_health * 0.5F));
+}
+
+TEST_CASE("player-owned ability summon and construct kills grant creature rewards") {
+    static constexpr std::array kPlayerOwnedSources {
+        CreatureDamageSource::PlayerAbility,
+        CreatureDamageSource::PlayerSummon,
+        CreatureDamageSource::PlayerConstruct,
+    };
+
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    for (const auto source : kPlayerOwnedSources) {
+        CAPTURE(static_cast<int>(source));
+        CHECK(creature_damage_source_has_player_owner(source));
+
+        CreatureSystem system {};
+        auto anchor = make_test_resident_anchor({0, 12, 2});
+        anchor.spawn_position = {0.5F, 13.001F, 3.0F};
+        auto villager = make_test_creature(anchor, anchor.spawn_position);
+        villager.health = creature_max_health(CreatureSpecies::Villager);
+        system.load_creatures({villager}, environment);
+
+        REQUIRE(system.active_creatures().size() == 1);
+        const auto target_id = creature_id_from_anchor(system.active_creatures().front().anchor);
+        const auto result = system.apply_damage(
+            target_id,
+            creature_max_health(CreatureSpecies::Villager) + 1.0F,
+            source,
+            {0.0F, 0.0F, 1.0F});
+
+        REQUIRE(result.hit);
+        REQUIRE(result.killed);
+        CHECK(result.source == source);
+        CHECK(result.grants_player_rewards);
+        CHECK(result.species == CreatureSpecies::Villager);
+        CHECK(result.remaining_health == doctest::Approx(0.0F));
+        CHECK(system.active_creatures().empty());
+        CHECK(system.render_instances().empty());
+    }
+}
+
+TEST_CASE("environment creature kills never grant player rewards") {
+    CHECK_FALSE(creature_damage_source_has_player_owner(CreatureDamageSource::Environment));
+
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    auto anchor = make_test_resident_anchor({0, 12, 2});
+    anchor.spawn_position = {0.5F, 13.001F, 3.0F};
+    auto villager = make_test_creature(anchor, anchor.spawn_position);
+    villager.health = creature_max_health(CreatureSpecies::Villager);
+    system.load_creatures({villager}, environment);
+
+    REQUIRE(system.active_creatures().size() == 1);
+    const auto target_id = creature_id_from_anchor(system.active_creatures().front().anchor);
+    const auto result = system.apply_damage(
+        target_id,
+        creature_max_health(CreatureSpecies::Villager) + 1.0F,
+        CreatureDamageSource::Environment,
+        {0.0F, 0.0F, 1.0F});
+
+    REQUIRE(result.hit);
+    REQUIRE(result.killed);
+    CHECK(result.source == CreatureDamageSource::Environment);
+    CHECK_FALSE(result.grants_player_rewards);
+    CHECK(result.species == CreatureSpecies::Villager);
+    CHECK(result.remaining_health == doctest::Approx(0.0F));
+    CHECK(system.active_creatures().empty());
+    CHECK(system.render_instances().empty());
+}
+
+TEST_CASE("creature stagger rejects invalid durations and clamps finite durations") {
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    auto anchor = make_test_resident_anchor({0, 12, 2});
+    auto creature = make_test_creature(anchor, anchor.spawn_position);
+    creature.behavior_state = CreatureBehaviorState::Strike;
+    creature.behavior_timer = 0.15F;
+    creature.attack_cooldown = 0.25F;
+    creature.hurt_timer = 0.10F;
+    system.load_creatures({creature}, environment);
+
+    REQUIRE(system.active_creatures().size() == 1U);
+    const auto target_id =
+        creature_id_from_anchor(system.active_creatures().front().anchor);
+    const auto initial = system.active_creatures().front();
+
+    CHECK_FALSE(system.apply_stagger(
+        target_id,
+        std::numeric_limits<float>::quiet_NaN()));
+    CHECK_FALSE(system.apply_stagger(
+        target_id,
+        std::numeric_limits<float>::infinity()));
+    CHECK_FALSE(system.apply_stagger(target_id, 0.0F));
+    CHECK_FALSE(system.apply_stagger(target_id, -0.25F));
+
+    const auto& unchanged = system.active_creatures().front();
+    CHECK(unchanged.behavior_state == initial.behavior_state);
+    CHECK(unchanged.behavior_timer == doctest::Approx(initial.behavior_timer));
+    CHECK(unchanged.attack_cooldown == doctest::Approx(initial.attack_cooldown));
+    CHECK(unchanged.hurt_timer == doctest::Approx(initial.hurt_timer));
+
+    REQUIRE(system.apply_stagger(target_id, 1000.0F));
+    const auto& staggered = system.active_creatures().front();
+    CHECK(staggered.behavior_state == CreatureBehaviorState::Flee);
+    CHECK(staggered.behavior_timer == doctest::Approx(2.0F));
+    CHECK(staggered.attack_cooldown == doctest::Approx(2.0F));
+    CHECK(staggered.hurt_timer == doctest::Approx(2.0F));
+
+    REQUIRE(system.apply_stagger(target_id, 0.25F));
+    CHECK(system.active_creatures().front().behavior_timer == doctest::Approx(2.0F));
+    CHECK(system.active_creatures().front().attack_cooldown == doctest::Approx(2.0F));
+    CHECK(system.active_creatures().front().hurt_timer == doctest::Approx(2.0F));
+}
+
+TEST_CASE("creature stagger leaves the population unchanged when the target is absent") {
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    auto anchor = make_test_resident_anchor({0, 12, 2});
+    const auto creature = make_test_creature(anchor, anchor.spawn_position);
+    system.load_creatures({creature}, environment);
+
+    REQUIRE(system.active_creatures().size() == 1U);
+    const auto initial = system.active_creatures().front();
+    CHECK_FALSE(system.apply_stagger(0U, 0.75F));
+    CHECK_FALSE(system.apply_stagger(
+        creature_id_from_anchor(initial.anchor) + 1U,
+        0.75F));
+
+    REQUIRE(system.active_creatures().size() == 1U);
+    const auto& unchanged = system.active_creatures().front();
+    CHECK(unchanged.behavior_state == initial.behavior_state);
+    CHECK(unchanged.behavior_timer == doctest::Approx(initial.behavior_timer));
+    CHECK(unchanged.attack_cooldown == doctest::Approx(initial.attack_cooldown));
+    CHECK(unchanged.hurt_timer == doctest::Approx(initial.hurt_timer));
+    CHECK(unchanged.health == doctest::Approx(initial.health));
+}
+
+TEST_CASE("creature stagger is deterministic and preserves unrelated state") {
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    auto anchor = make_test_resident_anchor({0, 12, 2});
+    auto creature = make_test_creature(anchor, anchor.spawn_position);
+    creature.behavior_state = CreatureBehaviorState::Chase;
+    creature.behavior_timer = 0.30F;
+    creature.attack_cooldown = 0.90F;
+    creature.hurt_timer = 0.12F;
+    creature.health = 9.0F;
+
+    CreatureSystem first {};
+    CreatureSystem second {};
+    first.load_creatures({creature}, environment);
+    second.load_creatures({creature}, environment);
+    const auto target_id = creature_id_from_anchor(anchor);
+
+    REQUIRE(first.apply_stagger(target_id, 0.65F));
+    REQUIRE(second.apply_stagger(target_id, 0.65F));
+    REQUIRE(first.active_creatures().size() == 1U);
+    REQUIRE(second.active_creatures().size() == 1U);
+    const auto& first_state = first.active_creatures().front();
+    const auto& second_state = second.active_creatures().front();
+
+    CHECK(first_state.behavior_state == CreatureBehaviorState::Flee);
+    CHECK(first_state.behavior_timer == doctest::Approx(0.65F));
+    CHECK(first_state.attack_cooldown == doctest::Approx(0.90F));
+    CHECK(first_state.hurt_timer == doctest::Approx(0.65F));
+    CHECK(first_state.position == creature.position);
+    CHECK(first_state.health == doctest::Approx(creature.health));
+    CHECK(first_state.behavior_seed == creature.behavior_seed);
+    CHECK(first_state.appearance_seed == creature.appearance_seed);
+
+    CHECK(second_state.behavior_state == first_state.behavior_state);
+    CHECK(second_state.behavior_timer == first_state.behavior_timer);
+    CHECK(second_state.attack_cooldown == first_state.attack_cooldown);
+    CHECK(second_state.hurt_timer == first_state.hurt_timer);
+    CHECK(second_state.position == first_state.position);
+    CHECK(second_state.health == first_state.health);
+    CHECK(second_state.behavior_seed == first_state.behavior_seed);
+    CHECK(second_state.appearance_seed == first_state.appearance_seed);
+}
+
 TEST_CASE("player weapon ray can hit the giant night monster torso and head") {
     CreatureSystem system {};
     const auto environment = EnvironmentClock::compute_state(23.0F);
@@ -1726,6 +2239,102 @@ TEST_CASE("six crew roles have distinct detailed silhouettes and coherent propor
     CHECK(std::any_of(captain_parts.begin(), captain_parts.end(), [](const CreaturePartInstance& part) {
         return part_uses_tile(part, CreatureAtlasTile::CrewGold);
     }));
+}
+
+TEST_CASE("la nouvelle anatomie des marins reste complète pour tous les rôles et activités") {
+    constexpr std::array<CrewVisualRole, 6> roles {{
+        CrewVisualRole::Captain,
+        CrewVisualRole::Fisher,
+        CrewVisualRole::Rigger,
+        CrewVisualRole::WaterTender,
+        CrewVisualRole::Deckhand,
+        CrewVisualRole::Quartermaster,
+    }};
+    constexpr std::array<CrewVisualActivity, 18> activities {{
+        CrewVisualActivity::Idle,
+        CrewVisualActivity::Walk,
+        CrewVisualActivity::Steer,
+        CrewVisualActivity::Inspect,
+        CrewVisualActivity::FishCast,
+        CrewVisualActivity::FishWait,
+        CrewVisualActivity::FishReel,
+        CrewVisualActivity::TendWater,
+        CrewVisualActivity::Carry,
+        CrewVisualActivity::HaulRope,
+        CrewVisualActivity::Scrub,
+        CrewVisualActivity::TurnCapstan,
+        CrewVisualActivity::SortCargo,
+        CrewVisualActivity::Socialize,
+        CrewVisualActivity::Rest,
+        CrewVisualActivity::Hurt,
+        CrewVisualActivity::KnockedOut,
+        CrewVisualActivity::Recover,
+    }};
+
+    auto maximum_part_count = std::size_t {0U};
+    for (std::size_t role_index = 0U;
+         role_index < roles.size();
+         ++role_index) {
+        for (const auto activity : activities) {
+            CrewRenderInstance crew {};
+            crew.role = roles[role_index];
+            crew.activity = activity;
+            crew.activity_phase = 0.68F;
+            crew.animation_time = 1.37F;
+            crew.motion_amount = 0.84F;
+            crew.locomotion_phase = 0.29F;
+            crew.appearance_seed =
+                0x51A0U +
+                static_cast<std::uint32_t>(role_index) * 97U;
+
+            const auto first = build_crew_parts(crew);
+            const auto second = build_crew_parts(crew);
+            const auto modern =
+                build_visual_entity_primitive_instances(
+                    first,
+                    VisualEntityContext::Crew);
+            CAPTURE(role_index);
+            CAPTURE(static_cast<int>(activity));
+            REQUIRE(first.size() == second.size());
+            REQUIRE(modern.size() == first.size());
+            CHECK(first.size() <= kCrewVisualPartBudget);
+            CHECK(all_part_transforms_are_finite(first));
+            CHECK(std::equal(
+                first.begin(),
+                first.end(),
+                second.begin(),
+                [](const auto& left, const auto& right) {
+                    return left.transform == right.transform &&
+                           left.material_class == right.material_class &&
+                           left.cavity_mask == right.cavity_mask;
+                }));
+            CHECK(
+                std::count_if(
+                    modern.begin(),
+                    modern.end(),
+                    [](const auto& part) {
+                        return part.primitive ==
+                               StylizedPrimitiveType::Capsule;
+                    }) >=
+                8U);
+            CHECK(
+                std::count_if(
+                    modern.begin(),
+                    modern.end(),
+                    [](const auto& part) {
+                        return part.primitive ==
+                               StylizedPrimitiveType::Ellipsoid;
+                    }) >=
+                14U);
+            maximum_part_count =
+                std::max(
+                    maximum_part_count,
+                    first.size());
+        }
+    }
+
+    CHECK(maximum_part_count == 60U);
+    CHECK(maximum_part_count + 20U == kCrewVisualPartBudget);
 }
 
 TEST_CASE("every maritime crew activity remains finite animated and inside its part budget") {

@@ -40,6 +40,8 @@ struct CreatureDamageResult {
     float damage = 0.0F;
     float remaining_health = 0.0F;
     float distance = 0.0F;
+    CreatureCombatProfile combat_profile {};
+    ExperienceReward experience_reward {};
 };
 
 struct CreaturePopulationInterest {
@@ -82,6 +84,12 @@ public:
                       float damage,
                       CreatureDamageSource source,
                       const glm::vec3& hit_direction = {0.0F, 0.0F, 1.0F}) -> CreatureDamageResult;
+    [[nodiscard]] auto apply_stagger(CreatureId target_id, float duration_seconds) noexcept -> bool;
+    [[nodiscard]] auto taunt_hostiles(
+        std::uint64_t target_id,
+        const glm::vec3& target_position,
+        float radius,
+        float duration_seconds) noexcept -> std::size_t;
     auto try_damage_by_ray(const glm::vec3& origin,
                            const glm::vec3& direction,
                            float max_distance,
@@ -105,7 +113,8 @@ private:
                          const glm::vec3& player_position,
                          const EnvironmentState& environment,
                          const CreatureCycleState& cycle,
-                         std::span<const CreatureInstance> active_creatures);
+                         std::span<const CreatureInstance> active_creatures,
+                         std::uint64_t attack_target_id);
     void update_death_visuals(float dt) noexcept;
     void update_spawn_suppressions(float dt) noexcept;
     void rebuild_render_instances(const EnvironmentState& environment);
@@ -160,6 +169,13 @@ private:
         std::uint64_t mesh_revision = 0;
     };
 
+    struct HostileTaunt {
+        std::uint64_t target_id = 0U;
+        glm::vec3 target_position {0.0F};
+        float radius = 0.0F;
+        float remaining_seconds = 0.0F;
+    };
+
     std::vector<CreatureInstance> creatures_ {};
     std::vector<CreatureRenderInstance> render_instances_ {};
     std::vector<CreatureAttackEvent> attacks_ {};
@@ -173,6 +189,7 @@ private:
     std::unordered_map<ChunkCoord, SpawnAnchorCacheEntry, ChunkCoordHash> spawn_anchor_cache_ {};
     std::optional<ChunkCoord> last_population_center_ {};
     std::optional<CreaturePopulationInterest> secondary_population_interest_ {};
+    std::optional<HostileTaunt> hostile_taunt_ {};
     std::size_t last_loaded_chunk_count_ = 0;
     float population_sync_accumulator_ = 0.0F;
     bool population_sync_requested_ = true;

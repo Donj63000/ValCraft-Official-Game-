@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 
 namespace valcraft {
 
@@ -59,6 +60,10 @@ constexpr float kDrowningDamageInterval = 1.0F;
 constexpr float kMaxCollisionStep = 0.45F;
 constexpr float kDynamicPlatformStepHeight = 0.55F;
 constexpr float kDynamicPlatformContactTolerance = 0.04F;
+constexpr float kDynamicOverlapRecoveryStep = 0.025F;
+constexpr float kDynamicOverlapRecoveryDistance = 1.50F;
+constexpr float kDynamicSupportClearanceStep = 0.025F;
+constexpr float kDynamicSupportMaximumClearance = 0.60F;
 constexpr float kBodyYawMoveThreshold = 0.15F;
 constexpr float kBodyYawMoveTurnSpeed = 540.0F;
 constexpr float kBodyYawIdleTurnSpeed = 360.0F;
@@ -206,6 +211,15 @@ void PlayerController::update(
         state_.look_sway_yaw = snap_small_sway(state_.look_sway_yaw);
         state_.look_sway_pitch = snap_small_sway(state_.look_sway_pitch);
         return;
+    }
+
+    if (dynamic_obstacle != nullptr) {
+        // Je repare une penetration heritee du pas precedent avant de calculer
+        // les appuis et les commandes. La physique ne doit jamais demarrer sa
+        // dichotomie depuis une fraction zero deja invalide.
+        (void)resolve_dynamic_obstacle_overlap(
+            world,
+            *dynamic_obstacle);
     }
 
     const auto was_on_ground = state_.on_ground;
@@ -440,11 +454,20 @@ void PlayerController::update(
         }
     }
 
-    const auto standing_on_dynamic_obstacle = [dynamic_obstacle](const glm::vec3& feet_position) noexcept {
+    const auto standing_on_dynamic_obstacle =
+        [this, dynamic_obstacle](const glm::vec3& feet_position) noexcept {
         if (dynamic_obstacle == nullptr) {
             return false;
         }
-        const auto support_height = dynamic_obstacle->support_height(feet_position);
+        const auto support_height =
+            dynamic_support_height_at(
+                *dynamic_obstacle,
+                feet_position,
+                feet_position.y -
+                    kDynamicSupportMaximumClearance -
+                    kDynamicPlatformContactTolerance,
+                feet_position.y +
+                    kDynamicPlatformContactTolerance);
         return support_height.has_value() && std::abs(feet_position.y - *support_height) <= 0.01F;
     };
     const auto standing_on_solid = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F}) ||
@@ -813,7 +836,7 @@ auto PlayerController::selected_block() const noexcept -> BlockId {
 }
 
 auto PlayerController::max_health() const noexcept -> float {
-    return kMaxHealth;
+    return max_health_;
 }
 
 auto PlayerController::max_air_seconds() const noexcept -> float {
@@ -861,7 +884,7 @@ void PlayerController::load_state(const PlayerState& state) noexcept {
     state_.body_yaw_degrees = wrap_degrees(finite_or(state_.body_yaw_degrees, state_.yaw_degrees));
     state_.animation_time = clamped_non_negative_finite_or(state_.animation_time, 0.0F, 3600.0F);
     state_.step_phase = wrap_step_phase(state_.step_phase);
-    state_.health = std::clamp(finite_or(state_.health, kMaxHealth), 0.0F, kMaxHealth);
+    state_.health = std::clamp(finite_or(state_.health, max_health_), 0.0F, max_health_);
     state_.air_seconds = std::clamp(finite_or(state_.air_seconds, kMaxAirSeconds), 0.0F, kMaxAirSeconds);
     state_.hurt_timer = clamped_non_negative_finite_or(state_.hurt_timer, 0.0F, kHurtFlashDuration);
     state_.damage_cooldown = clamped_non_negative_finite_or(state_.damage_cooldown, 0.0F, kInvulnerabilityDuration);
@@ -945,6 +968,13 @@ void PlayerController::set_selected_block(BlockId block_id) noexcept {
     selected_block_ = block_item_id(block_id);
 }
 
+void PlayerController::set_max_health(float max_health) noexcept {
+    // Je garde la santé maximale hors du format historique du contrôleur :
+    // elle reste entièrement dérivée du niveau et de la Robustesse du build.
+    max_health_ = std::clamp(finite_or(max_health, 20.0F), 1.0F, 1000.0F);
+    state_.health = std::clamp(state_.health, 0.0F, max_health_);
+}
+
 void PlayerController::set_damage_resistance_percent(float percent) noexcept {
     damage_resistance_percent_ = std::clamp(finite_or(percent, 0.0F), 0.0F, 99.0F);
 }
@@ -989,18 +1019,35 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
     reset_jump_assist_state();
     reset_dynamic_climb_state();
     state_.position = finite_vec3_or(position, state_.position);
+    state_.health = max_health_;
     state_.fall_start_y = state_.position.y;
     state_.body_yaw_degrees = state_.yaw_degrees;
 }
 
 void PlayerController::apply_external_damage(float amount, PlayerDeathCause cause) noexcept {
-    apply_damage(amount, cause, false);
+    static_cast<void>(
+        apply_external_damage_report(
+            amount,
+            cause));
+}
+
+auto PlayerController::apply_external_damage_report(
+    float amount,
+    PlayerDeathCause cause) noexcept -> PlayerDamageResult {
+    return apply_damage(
+        amount,
+        cause,
+        false);
 }
 
 void PlayerController::apply_environmental_damage(float amount, PlayerDeathCause cause) noexcept {
     // La resistance d'armure reste appliquee ; seule l'invulnerabilite commune
     // aux impacts est contournee, comme pour la chute, la noyade et le vide.
-    apply_damage(amount, cause, true);
+    static_cast<void>(
+        apply_damage(
+            amount,
+            cause,
+            true));
 }
 
 void PlayerController::force_death(PlayerDeathCause cause) noexcept {
@@ -1166,7 +1213,13 @@ auto PlayerController::try_place_block(World& world, float max_distance) const -
         return std::nullopt;
     }
 
-    world.set_block(placement_coord.x, placement_coord.y, placement_coord.z, block_to_place);
+    if (!world.set_player_block(
+            placement_coord.x,
+            placement_coord.y,
+            placement_coord.z,
+            block_to_place)) {
+        return std::nullopt;
+    }
     return PlacedBlockResult {placement_coord, block_to_place};
 }
 
@@ -1208,6 +1261,288 @@ auto PlayerController::overlaps_dynamic_obstacle(const ShipEntity& obstacle) con
         state_.position.z + half_width,
     };
     return obstacle.intersects_aabb(min_corner, max_corner);
+}
+
+auto PlayerController::dynamic_support_height_at(
+    const ShipEntity& obstacle,
+    const glm::vec3& feet_position,
+    float min_height,
+    float max_height) const noexcept
+    -> std::optional<float> {
+
+    const auto geometric_support =
+        obstacle.support_height_in_range(
+            feet_position,
+            min_height,
+            max_height);
+    if (!geometric_support.has_value()) {
+        return std::nullopt;
+    }
+
+    constexpr float half_width =
+        kPlayerWidth *
+        0.5F;
+    const auto overlaps_at =
+        [&](float feet_y) noexcept {
+            return obstacle.intersects_aabb(
+                {
+                    feet_position.x -
+                        half_width,
+                    feet_y,
+                    feet_position.z -
+                        half_width,
+                },
+                {
+                    feet_position.x +
+                        half_width,
+                    feet_y +
+                        kPlayerHeight,
+                    feet_position.z +
+                        half_width,
+                });
+        };
+
+    if (!overlaps_at(
+            *geometric_support)) {
+        return geometric_support;
+    }
+
+    auto colliding_height =
+        *geometric_support;
+    auto clear_height =
+        std::optional<float> {};
+    constexpr auto clearance_steps =
+        static_cast<int>(
+            kDynamicSupportMaximumClearance /
+            kDynamicSupportClearanceStep);
+    for (int step_index = 1;
+         step_index <= clearance_steps;
+         ++step_index) {
+        const auto candidate_height =
+            *geometric_support +
+            static_cast<float>(step_index) *
+                kDynamicSupportClearanceStep;
+        if (!overlaps_at(
+                candidate_height)) {
+            clear_height =
+                candidate_height;
+            break;
+        }
+        colliding_height =
+            candidate_height;
+    }
+
+    if (!clear_height.has_value()) {
+        return std::nullopt;
+    }
+
+    // Je cherche le premier Y libre au dixieme de millimetre pres. Le joueur
+    // reste vertical tandis que le dessus du navire s'incline : cette hauteur
+    // de degagement est donc plus fiable qu'un simple echantillon au centre.
+    for (int iteration = 0;
+         iteration < 10;
+         ++iteration) {
+        const auto candidate_height =
+            (colliding_height +
+             *clear_height) *
+            0.5F;
+        if (overlaps_at(
+                candidate_height)) {
+            colliding_height =
+                candidate_height;
+        } else {
+            clear_height =
+                candidate_height;
+        }
+    }
+    return clear_height;
+}
+
+auto PlayerController::dynamic_support_height(
+    const ShipEntity& obstacle) const noexcept
+    -> std::optional<float> {
+
+    return dynamic_support_height_at(
+        obstacle,
+        state_.position,
+        state_.position.y -
+            kDynamicSupportMaximumClearance -
+            kDynamicPlatformContactTolerance,
+        state_.position.y +
+            kDynamicPlatformContactTolerance);
+}
+
+auto PlayerController::resolve_dynamic_obstacle_overlap(
+    const World& world,
+    const ShipEntity& obstacle) -> bool {
+
+    if (!overlaps_dynamic_obstacle(obstacle)) {
+        return false;
+    }
+
+    const auto initial_position = state_.position;
+    auto resolved_position = std::optional<glm::vec3> {};
+    auto resolved_distance_squared =
+        std::numeric_limits<float>::infinity();
+
+    const auto is_clear = [&](const glm::vec3& candidate) {
+        constexpr float half_width = kPlayerWidth * 0.5F;
+        if (collides_at(world, candidate)) {
+            return false;
+        }
+        return !obstacle.intersects_aabb(
+            {
+                candidate.x - half_width,
+                candidate.y,
+                candidate.z - half_width,
+            },
+            {
+                candidate.x + half_width,
+                candidate.y + kPlayerHeight,
+                candidate.z + half_width,
+            });
+    };
+
+    const auto consider_clear_candidate =
+        [&](const glm::vec3& candidate) {
+            const auto displacement =
+                candidate -
+                initial_position;
+            const auto distance_squared =
+                glm::dot(
+                    displacement,
+                    displacement);
+            if (distance_squared >=
+                    resolved_distance_squared ||
+                !is_clear(candidate)) {
+                return;
+            }
+            resolved_position =
+                candidate;
+            resolved_distance_squared =
+                distance_squared;
+        };
+
+    // Je privilegie la face superieure qui vient de porter le joueur. Cette
+    // correction exacte evite qu'un roulis transforme une rambarde inclinee en
+    // coin dans l'AABB verticale du personnage.
+    if (const auto support =
+            dynamic_support_height_at(
+                obstacle,
+                initial_position,
+                initial_position.y -
+                    kDynamicPlatformStepHeight -
+                    kDynamicSupportMaximumClearance,
+                initial_position.y +
+                    kDynamicOverlapRecoveryDistance);
+        support.has_value()) {
+        auto support_candidate =
+            initial_position;
+        support_candidate.y =
+            *support +
+            kCollisionEpsilon;
+        consider_clear_candidate(
+            support_candidate);
+    }
+
+    constexpr float diagonal =
+        0.70710678118654752440F;
+    constexpr float spatial_diagonal =
+        0.57735026918962576451F;
+    constexpr std::array<glm::vec3, 17>
+        recovery_directions {{
+            {0.0F, 1.0F, 0.0F},
+            {1.0F, 0.0F, 0.0F},
+            {-1.0F, 0.0F, 0.0F},
+            {0.0F, 0.0F, 1.0F},
+            {0.0F, 0.0F, -1.0F},
+            {diagonal, diagonal, 0.0F},
+            {-diagonal, diagonal, 0.0F},
+            {0.0F, diagonal, diagonal},
+            {0.0F, diagonal, -diagonal},
+            {diagonal, 0.0F, diagonal},
+            {-diagonal, 0.0F, diagonal},
+            {diagonal, 0.0F, -diagonal},
+            {-diagonal, 0.0F, -diagonal},
+            {spatial_diagonal, spatial_diagonal, spatial_diagonal},
+            {-spatial_diagonal, spatial_diagonal, spatial_diagonal},
+            {spatial_diagonal, spatial_diagonal, -spatial_diagonal},
+            {-spatial_diagonal, spatial_diagonal, -spatial_diagonal},
+        }};
+    constexpr auto recovery_steps =
+        static_cast<int>(
+            kDynamicOverlapRecoveryDistance /
+            kDynamicOverlapRecoveryStep);
+
+    // Je cherche la plus petite sortie libre dans un rayon borne. La montee
+    // reste prioritaire a distance egale pour les obstacles bas ; les sorties
+    // obliques liberent aussi les angles formes par une cloison et une poutre.
+    for (int step_index = 1;
+         step_index <= recovery_steps;
+         ++step_index) {
+        const auto distance =
+            static_cast<float>(step_index) *
+            kDynamicOverlapRecoveryStep;
+        if (distance * distance >
+            resolved_distance_squared) {
+            break;
+        }
+        for (const auto& direction :
+             recovery_directions) {
+            consider_clear_candidate(
+                initial_position +
+                direction *
+                    distance);
+        }
+    }
+
+    if (!resolved_position.has_value()) {
+        return false;
+    }
+
+    const auto correction =
+        *resolved_position -
+        initial_position;
+    state_.position =
+        *resolved_position;
+    if (std::abs(correction.y) >
+        1.0e-6F) {
+        state_.fall_start_y +=
+            correction.y;
+    }
+
+    const auto correction_length =
+        glm::length(correction);
+    if (correction_length > 1.0e-6F) {
+        const auto outward_normal =
+            correction /
+            correction_length;
+        const auto inward_speed =
+            glm::dot(
+                state_.velocity,
+                outward_normal);
+        if (inward_speed < 0.0F) {
+            state_.velocity -=
+                outward_normal *
+                inward_speed;
+        }
+    }
+
+    if (const auto support =
+            dynamic_support_height(
+                obstacle);
+        support.has_value()) {
+        auto supported_position =
+            state_.position;
+        supported_position.y =
+            *support;
+        if (is_clear(
+                supported_position)) {
+            resolve_dynamic_platform_support(
+                *support);
+        }
+    }
+    return true;
 }
 
 void PlayerController::update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept {
@@ -1257,13 +1592,13 @@ void PlayerController::update_survival_state(float dt, const WaterContactState& 
         return;
     }
 
-    if (state_.health < kMaxHealth && state_.regen_delay <= 0.0F && !state_.head_underwater) {
+    if (state_.health < max_health_ && state_.regen_delay <= 0.0F && !state_.head_underwater) {
         state_.regen_tick_timer += dt;
-        while (state_.regen_tick_timer >= kRegenerationInterval && state_.health < kMaxHealth) {
+        while (state_.regen_tick_timer >= kRegenerationInterval && state_.health < max_health_) {
             heal(1.0F);
             state_.regen_tick_timer -= kRegenerationInterval;
         }
-    } else if (state_.health >= kMaxHealth || state_.head_underwater) {
+    } else if (state_.health >= max_health_ || state_.head_underwater) {
         state_.regen_tick_timer = 0.0F;
     }
 }
@@ -1352,20 +1687,6 @@ void PlayerController::move_axis(float delta, int axis, const World& world, cons
     }
 
     if (dynamic_obstacle != nullptr) {
-        // Je resous d'abord l'atterrissage sur le pont pour conserver une hauteur
-        // exacte, puis je borne la recherche de contact lateral a huit iterations.
-        if (axis == 1 && delta < 0.0F) {
-            const auto support_height = dynamic_obstacle->support_height(next_position);
-            if (support_height.has_value() && state_.position.y >= *support_height - kCollisionEpsilon &&
-                next_position.y <= *support_height + kCollisionEpsilon) {
-                next_position.y = *support_height + kCollisionEpsilon;
-                state_.velocity.y = 0.0F;
-                state_.on_ground = true;
-                state_.position = next_position;
-                return;
-            }
-        }
-
         const auto intersects_dynamic_obstacle = [&](const glm::vec3& feet_position) noexcept {
             const auto obstacle_min = glm::vec3 {
                 feet_position.x - half_width,
@@ -1380,17 +1701,54 @@ void PlayerController::move_axis(float delta, int axis, const World& world, cons
             return dynamic_obstacle->intersects_aabb(obstacle_min, obstacle_max);
         };
 
-        const auto current_support = dynamic_obstacle->support_height_in_range(
-            state_.position,
-            state_.position.y - kDynamicPlatformContactTolerance,
-            state_.position.y + kDynamicPlatformContactTolerance);
+        // Je resous d'abord l'atterrissage sur le pont pour conserver une hauteur
+        // exacte, puis je borne la recherche de contact lateral a huit iterations.
+        // Le volume complet doit tenir au-dessus de l'appui : un meuble sous un
+        // plafond bas ne peut jamais devenir une position de joueur valide.
+        if (axis == 1 && delta < 0.0F) {
+            const auto support_height =
+                dynamic_support_height_at(
+                    *dynamic_obstacle,
+                    next_position,
+                    next_position.y -
+                        kDynamicPlatformContactTolerance,
+                    state_.position.y +
+                        kDynamicPlatformContactTolerance);
+            if (support_height.has_value() && state_.position.y >= *support_height - kCollisionEpsilon &&
+                next_position.y <= *support_height + kCollisionEpsilon) {
+                auto supported_position = next_position;
+                supported_position.y = *support_height + kCollisionEpsilon;
+                if (!collides_at(world, supported_position) &&
+                    !intersects_dynamic_obstacle(supported_position)) {
+                    state_.velocity.y = 0.0F;
+                    state_.on_ground = true;
+                    state_.position = supported_position;
+                    return;
+                }
+            }
+        }
+
+        const auto current_support =
+            dynamic_support_height_at(
+                *dynamic_obstacle,
+                state_.position,
+                state_.position.y -
+                    kDynamicSupportMaximumClearance -
+                    kDynamicPlatformContactTolerance,
+                state_.position.y +
+                    kDynamicPlatformContactTolerance);
         const auto can_follow_dynamic_steps =
             axis != 1 && !state_.fly_mode && state_.velocity.y <= 0.0F &&
-            (state_.on_ground || current_support.has_value());
+            (state_.on_ground ||
+             (current_support.has_value() &&
+              std::abs(
+                  state_.position.y -
+                  *current_support) <=
+                  kDynamicPlatformContactTolerance));
 
         if (intersects_dynamic_obstacle(next_position)) {
             if (can_follow_dynamic_steps) {
-                const auto step_support = dynamic_obstacle->support_height_in_range(
+                const auto step_support = dynamic_obstacle->step_support_height_in_range(
                     next_position,
                     state_.position.y - kCollisionEpsilon,
                     state_.position.y + kDynamicPlatformStepHeight);
@@ -1431,10 +1789,15 @@ void PlayerController::move_axis(float delta, int axis, const World& world, cons
                 state_.on_ground = true;
             }
         } else if (can_follow_dynamic_steps) {
-            const auto lower_support = dynamic_obstacle->support_height_in_range(
-                next_position,
-                state_.position.y - kDynamicPlatformStepHeight,
-                state_.position.y + kDynamicPlatformContactTolerance);
+            const auto lower_support =
+                dynamic_support_height_at(
+                    *dynamic_obstacle,
+                    next_position,
+                    state_.position.y -
+                        kDynamicPlatformStepHeight -
+                        kDynamicSupportMaximumClearance,
+                    state_.position.y +
+                        kDynamicPlatformContactTolerance);
             if (lower_support.has_value()) {
                 auto snapped_position = next_position;
                 snapped_position.y = *lower_support + kCollisionEpsilon;
@@ -1468,27 +1831,46 @@ auto PlayerController::block_overlaps_player(const BlockCoord& block_coord) cons
            player_min.z < block_max.z && player_max.z > block_min.z;
 }
 
-void PlayerController::apply_damage(
+auto PlayerController::apply_damage(
     float amount,
     PlayerDeathCause cause,
-    bool bypass_cooldown) noexcept {
+    bool bypass_cooldown) noexcept -> PlayerDamageResult {
+
+    PlayerDamageResult result {};
+    result.requested_damage =
+        std::isfinite(amount) &&
+                amount > 0.0F
+            ? amount
+            : 0.0F;
 
     if (!std::isfinite(amount) || amount <= 0.0F || state_.dead) {
-        return;
+        return result;
     }
 
     if (!bypass_cooldown && state_.damage_cooldown > 0.0F) {
-        return;
+        result.blocked_by_invulnerability = true;
+        return result;
     }
 
     const auto mitigated_amount =
         amount * (1.0F - damage_resistance_percent_ / 100.0F);
+    result.damage_after_resistance =
+        std::max(
+            mitigated_amount,
+            0.0F);
 
     if (mitigated_amount <= 0.0F) {
-        return;
+        return result;
     }
 
+    const auto health_before =
+        state_.health;
     state_.health = std::max(0.0F, state_.health - mitigated_amount);
+    result.health_damage =
+        std::max(
+            health_before -
+                state_.health,
+            0.0F);
     state_.hurt_timer = kHurtFlashDuration;
     state_.damage_cooldown = kInvulnerabilityDuration;
     state_.regen_delay = kRegenerationDelay;
@@ -1497,6 +1879,9 @@ void PlayerController::apply_damage(
     if (state_.health <= 0.0F) {
         enter_death_state(cause);
     }
+    result.killed =
+        state_.dead;
+    return result;
 }
 
 void PlayerController::enter_death_state(PlayerDeathCause cause) noexcept {
@@ -1522,7 +1907,7 @@ void PlayerController::heal(float amount) noexcept {
     if (!std::isfinite(amount) || amount <= 0.0F || state_.dead) {
         return;
     }
-    state_.health = std::min(kMaxHealth, state_.health + amount);
+    state_.health = std::min(max_health_, state_.health + amount);
 }
 
 void PlayerController::reset_jump_assist_state() noexcept {

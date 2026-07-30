@@ -739,4 +739,42 @@ auto build_visual_entity_primitive_instances(
     return output;
 }
 
+auto select_visual_entity_primitive_lod(
+    float distance_squared,
+    float maximum_dimension,
+    int available_lod_count,
+    bool simplified_shadow,
+    bool viewmodel) noexcept -> StylizedPrimitiveLod {
+    auto lod = StylizedPrimitiveLod::Low;
+    if (viewmodel) {
+        lod = StylizedPrimitiveLod::High;
+    } else if (!simplified_shadow &&
+               std::isfinite(distance_squared)) {
+        if (available_lod_count >= 3 &&
+            distance_squared <= 18.0F * 18.0F) {
+            lod = StylizedPrimitiveLod::High;
+        } else if (
+            available_lod_count >= 2 &&
+            distance_squared <= 56.0F * 56.0F) {
+            lod = StylizedPrimitiveLod::Medium;
+        }
+    }
+
+    if (!std::isfinite(maximum_dimension) ||
+        maximum_dimension < 0.060F) {
+        return StylizedPrimitiveLod::Low;
+    }
+    if (maximum_dimension < 0.125F &&
+        lod == StylizedPrimitiveLod::High) {
+        return StylizedPrimitiveLod::Medium;
+    }
+    return lod;
+}
+
+auto visual_entity_part_casts_simplified_shadow(
+    float maximum_dimension) noexcept -> bool {
+    return std::isfinite(maximum_dimension) &&
+           maximum_dimension >= 0.085F;
+}
+
 } // namespace valcraft

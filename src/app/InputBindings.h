@@ -4,6 +4,9 @@
 
 #include <SDL.h>
 
+#include <cstddef>
+#include <optional>
+
 namespace valcraft {
 
 inline auto read_player_movement_input(const Uint8* keys) noexcept -> PlayerInput {
@@ -38,6 +41,30 @@ inline auto is_super_vision_action_key(const SDL_Keysym& keysym) noexcept -> boo
 
 inline auto is_reload_action_key(const SDL_Keysym& keysym) noexcept -> bool {
     return keysym.scancode == SDL_SCANCODE_R;
+}
+
+inline auto is_progression_menu_key(
+    const SDL_Keysym& keysym) noexcept -> bool {
+    return keysym.scancode == SDL_SCANCODE_P;
+}
+
+inline auto ability_slot_from_key(
+    const SDL_Keysym& keysym) noexcept
+    -> std::optional<std::size_t> {
+    switch (keysym.scancode) {
+    case SDL_SCANCODE_F1:
+        return 0U;
+    case SDL_SCANCODE_F2:
+        return 1U;
+    case SDL_SCANCODE_F3:
+        return 2U;
+    case SDL_SCANCODE_F4:
+        return 3U;
+    case SDL_SCANCODE_F5:
+        return 4U;
+    default:
+        return std::nullopt;
+    }
 }
 
 inline auto is_command_console_key(const SDL_Keysym& keysym) noexcept -> bool {

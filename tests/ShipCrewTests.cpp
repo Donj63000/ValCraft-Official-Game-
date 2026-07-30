@@ -16,6 +16,7 @@
 #include <queue>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace valcraft {
 
@@ -37,6 +38,26 @@ void place_at_station(ShipCrewMemberSaveState& member, ShipCrewStation station) 
     member.destination_station = station;
 }
 
+auto part_uses_tile_for_test(
+    const CreaturePartInstance& part,
+    CreatureAtlasTile tile) noexcept -> bool {
+
+    const auto coordinates =
+        creature_atlas_tile_coordinates(tile);
+    const auto uv_step =
+        1.0F /
+        kCreatureAtlasTilesPerAxis;
+    return
+        part.face_uvs[0].u0 ==
+            static_cast<float>(
+                coordinates[0]) *
+                uv_step &&
+        part.face_uvs[0].v0 ==
+            static_cast<float>(
+                coordinates[1]) *
+                uv_step;
+}
+
 auto update_for(ShipCrewSystem& crew,
                 const ShipEntity& ship,
                 const EnvironmentState& environment,
@@ -55,13 +76,52 @@ auto update_for(ShipCrewSystem& crew,
     return combined;
 }
 
+[[nodiscard]] auto interior_half_width_for_test(
+    const ShipProtectionProfile& profile,
+    float local_y,
+    float local_z) noexcept -> float {
+
+    auto half_width =
+        profile.half_width_at(
+            local_z);
+    if (local_y <
+        profile.middle_hull_min_y) {
+        half_width =
+            std::max(
+                profile.lower_minimum_half_width,
+                half_width -
+                    profile.lower_width_inset);
+    } else if (
+        local_y <
+        profile.upper_hull_min_y) {
+        half_width =
+            std::max(
+                profile.middle_minimum_half_width,
+                half_width -
+                    profile.middle_width_inset);
+    }
+    const auto thickness =
+        std::min(
+            0.44F,
+            std::max(
+                0.22F,
+                half_width *
+                    0.36F));
+    return std::max(
+        0.48F,
+        half_width -
+            thickness);
+}
+
 } // namespace
 
 TEST_CASE("L'Amelie expose un graphe d'equipage stable et connexe") {
     const auto& blueprint = amelie_ship_blueprint();
     CHECK(std::string(blueprint.name) == "L'Amélie");
     REQUIRE(blueprint.crew_navigation_nodes.size() == static_cast<std::size_t>(ShipCrewStation::Count));
-    CHECK(blueprint.navigation_revision != 0U);
+    CHECK(
+        blueprint.navigation_revision ==
+        11'548'132'376'574'709'708ULL);
 
     std::array<bool, static_cast<std::size_t>(ShipCrewStation::Count)> present {};
     for (const auto& node : blueprint.crew_navigation_nodes) {
@@ -115,8 +175,8 @@ TEST_CASE("la refonte de L'Amelie ferme la poupe et libere la hauteur des marins
         REQUIRE_MESSAGE(support.has_value(), "le plancher de la cabine doit atteindre la poupe");
     }
     CHECK(ship.intersects_aabb(
-        origin + glm::vec3 {-0.25F, 4.72F, -35.12F},
-        origin + glm::vec3 {0.25F, 5.28F, -34.88F}));
+        origin + glm::vec3 {-0.25F, 3.00F, -35.75F},
+        origin + glm::vec3 {0.25F, 3.50F, -35.55F}));
 
     for (const auto& node : blueprint.crew_navigation_nodes) {
         CAPTURE(static_cast<int>(node.station));
@@ -129,46 +189,668 @@ TEST_CASE("la refonte de L'Amelie ferme la poupe et libere la hauteur des marins
     }
 }
 
-TEST_CASE("chaque route hors escalier garde le marin sur un passage degage") {
+TEST_CASE("L'Amelie contient trois ponts interieurs equipes sans collision decorative") {
+    const auto& blueprint = amelie_ship_blueprint();
+
+    CHECK(blueprint.parts.size() <= 3'300U);
+    CHECK(blueprint.protection_profile.lower_hull_min_y <= -5.80F);
+    CHECK(
+        blueprint.anchors.safe_spawn ==
+        (glm::vec3 {0.5F, 4.10F, -7.5F}));
+    CHECK(
+        blueprint.anchors.lower_deck ==
+        (glm::vec3 {0.0F, 1.01F, -7.5F}));
+    CHECK(
+        blueprint.anchors.captain_cabin ==
+        (glm::vec3 {0.0F, 1.01F, -22.0F}));
+    CHECK(
+        blueprint.anchors.crew_quarters ==
+        (glm::vec3 {0.0F, 1.01F, -5.0F}));
+    CHECK(
+        blueprint.anchors.galley ==
+        (glm::vec3 {0.0F, 1.01F, 5.0F}));
+    CHECK(
+        blueprint.anchors.cargo_hold ==
+        (glm::vec3 {0.0F, 1.01F, 23.0F}));
+    CHECK(
+        blueprint.anchors.helm ==
+        (glm::vec3 {-1.5F, 4.51F, -29.0F}));
+    CHECK(
+        blueprint.anchors.aft_hatch ==
+        (glm::vec3 {0.0F, 4.01F, -7.5F}));
+    CHECK(
+        blueprint.anchors.fore_hatch ==
+        (glm::vec3 {0.0F, 4.01F, 14.5F}));
+
+    auto cannon_barrel_count = std::size_t {0U};
+    auto navy_sail_panel_count = std::size_t {0U};
+    auto obsolete_gold_part_count = std::size_t {0U};
+    for (const auto& part : blueprint.parts) {
+        if (part.material == ShipMaterial::Iron &&
+            part.shape == ShipPartShape::Segment &&
+            std::abs(part.thickness - 0.46F) <= 1.0e-4F &&
+            std::abs(part.local_start.y - 1.78F) <= 1.0e-4F &&
+            std::abs(part.local_end.y - 1.78F) <= 1.0e-4F) {
+            ++cannon_barrel_count;
+        }
+        if (part.material == ShipMaterial::BlackCanvas &&
+            part.shape == ShipPartShape::Panel) {
+            ++navy_sail_panel_count;
+        }
+        if (part.material == ShipMaterial::SolidGold) {
+            ++obsolete_gold_part_count;
+        }
+
+        // Je garde les cordages et les voiles purement visuels afin qu'ils ne
+        // creent jamais de mur invisible autour des mats ou dans les coursives.
+        if (part.material == ShipMaterial::Rope ||
+            part.material == ShipMaterial::BlackCanvas) {
+            CHECK_FALSE(part.collidable);
+            CHECK_FALSE(part.supports_player);
+        }
+        if (part.shape == ShipPartShape::ChamferedBox ||
+            part.shape == ShipPartShape::DrapedPanel ||
+            part.material == ShipMaterial::Linen ||
+            part.material == ShipMaterial::BurgundyTextile ||
+            part.material == ShipMaterial::NavyTextile ||
+            part.material == ShipMaterial::Paper ||
+            part.material == ShipMaterial::Ceramic) {
+            CHECK_FALSE(part.collidable);
+            CHECK_FALSE(part.supports_player);
+        }
+    }
+
+    CHECK(cannon_barrel_count == 12U);
+    CHECK(navy_sail_panel_count >= 9U);
+    CHECK(obsolete_gold_part_count == 0U);
+
+    ShipEntity ship {};
+    ship.set_position({0.5F, 49.0F, 0.5F});
+    const auto origin = ship.world_origin();
+    const std::array interior_anchors {
+        blueprint.anchors.lower_deck,
+        blueprint.anchors.captain_cabin,
+        blueprint.anchors.crew_quarters,
+        blueprint.anchors.galley,
+        blueprint.anchors.cargo_hold,
+    };
+    for (const auto& anchor : interior_anchors) {
+        CAPTURE(anchor.x);
+        CAPTURE(anchor.y);
+        CAPTURE(anchor.z);
+        const auto feet = origin + anchor;
+        CHECK(ship.support_height_in_range(
+                  feet,
+                  feet.y - 0.16F,
+                  feet.y + 0.16F)
+                  .has_value());
+        CHECK(blueprint.protection_profile.shelters_from_weather_local(anchor));
+    }
+
+    const std::array gameplay_anchors {
+        blueprint.anchors.safe_spawn,
+        blueprint.anchors.lower_deck,
+        blueprint.anchors.captain_cabin,
+        blueprint.anchors.crew_quarters,
+        blueprint.anchors.galley,
+        blueprint.anchors.cargo_hold,
+        blueprint.anchors.helm,
+        blueprint.anchors.aft_hatch,
+        blueprint.anchors.fore_hatch,
+    };
+    for (const auto& anchor : gameplay_anchors) {
+        const auto feet =
+            origin +
+            anchor;
+        CAPTURE(anchor.x);
+        CAPTURE(anchor.y);
+        CAPTURE(anchor.z);
+        CHECK(
+            ship.support_height_in_range(
+                feet,
+                feet.y - 0.16F,
+                feet.y + 0.16F)
+                .has_value());
+        CHECK_FALSE(
+            ship.intersects_aabb(
+                feet +
+                    glm::vec3 {
+                        -0.34F,
+                        0.04F,
+                        -0.34F,
+                    },
+                feet +
+                    glm::vec3 {
+                        0.34F,
+                        1.88F,
+                        0.34F,
+                    }));
+    }
+
+    CHECK_FALSE(blueprint.protection_profile.shelters_from_weather_local(
+        {20.0F, -4.99F, 0.0F}));
+}
+
+TEST_CASE("les douze canons disposent de vrais sabords ouverts et encadres") {
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto opening_count =
+        std::ranges::count_if(
+            blueprint.parts,
+            [](const ShipPart& part) {
+                return part.shape ==
+                       ShipPartShape::Opening;
+            });
+    const auto side_window_count =
+        std::ranges::count_if(
+            blueprint.parts,
+            [](const ShipPart& part) {
+                const auto normal =
+                    glm::abs(
+                        part.orientation);
+                const auto center =
+                    (part.local_start +
+                     part.local_end) *
+                    0.5F;
+                return part.shape ==
+                           ShipPartShape::Panel &&
+                       part.material ==
+                           ShipMaterial::Glass &&
+                       normal.x >= normal.y &&
+                       normal.x >= normal.z &&
+                       std::abs(center.x) >
+                           0.20F &&
+                       center.y <
+                           4.0F;
+            });
+    CHECK(opening_count == 12);
+    CHECK(side_window_count == 8);
+
+    ShipEntity ship {};
+    ship.set_position(
+        {0.5F, 49.0F, 0.5F});
+    const auto origin =
+        ship.world_origin();
+    constexpr std::array cannon_rows {
+        -15.5F,
+        -9.5F,
+        -3.5F,
+        4.5F,
+        10.5F,
+        16.5F,
+    };
+    for (const auto local_z :
+         cannon_rows) {
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            const auto outer_half_width =
+                blueprint.protection_profile
+                    .half_width_at(
+                        local_z);
+            const auto wall_x =
+                side_sign *
+                (outer_half_width -
+                 0.20F);
+            CAPTURE(local_z);
+            CAPTURE(side_sign);
+
+            const auto matching_opening =
+                std::ranges::any_of(
+                    blueprint.parts,
+                    [&](const ShipPart& part) {
+                        const auto center =
+                            (part.local_start +
+                             part.local_end) *
+                            0.5F;
+                        return part.shape ==
+                                   ShipPartShape::Opening &&
+                               part.orientation.x *
+                                       side_sign >
+                                   0.90F &&
+                               std::abs(
+                                   center.z -
+                                   local_z) <
+                                   0.01F;
+                    });
+            CHECK(matching_opening);
+            CHECK_FALSE(
+                ship.intersects_aabb(
+                    origin +
+                        glm::vec3 {
+                            wall_x - 0.04F,
+                            1.62F,
+                            local_z - 0.12F,
+                        },
+                    origin +
+                        glm::vec3 {
+                            wall_x + 0.04F,
+                            1.94F,
+                            local_z + 0.12F,
+                        }));
+            CHECK(
+                ship.intersects_aabb(
+                    origin +
+                        glm::vec3 {
+                            wall_x - 0.04F,
+                            1.12F,
+                            local_z - 0.12F,
+                        },
+                    origin +
+                        glm::vec3 {
+                            wall_x + 0.04F,
+                            1.24F,
+                            local_z + 0.12F,
+                        }));
+            CHECK(
+                ship.intersects_aabb(
+                    origin +
+                        glm::vec3 {
+                            wall_x - 0.04F,
+                            2.34F,
+                            local_z - 0.12F,
+                        },
+                    origin +
+                        glm::vec3 {
+                            wall_x + 0.04F,
+                            2.46F,
+                            local_z + 0.12F,
+                        }));
+
+            const auto side_sample_z =
+                local_z +
+                0.66F;
+            const auto side_wall_x =
+                side_sign *
+                (blueprint.protection_profile
+                     .half_width_at(
+                         side_sample_z) -
+                 0.20F);
+            CHECK(
+                ship.intersects_aabb(
+                    origin +
+                        glm::vec3 {
+                            side_wall_x - 0.04F,
+                            1.66F,
+                            side_sample_z - 0.06F,
+                        },
+                    origin +
+                        glm::vec3 {
+                            side_wall_x + 0.04F,
+                            1.90F,
+                            side_sample_z + 0.06F,
+                        }));
+        }
+    }
+}
+
+TEST_CASE("les cloisons ferment chaque piece jusqu'aux deux murailles") {
+    struct BulkheadSample {
+        float floor_y;
+        float ceiling_y;
+        float z;
+        float door_center_x;
+        float door_half_width;
+    };
+    constexpr std::array bulkheads {
+        BulkheadSample {1.00F, 3.65F, -25.75F, 0.30F, 1.05F},
+        BulkheadSample {1.00F, 3.65F, -19.50F, 0.00F, 1.65F},
+        BulkheadSample {1.00F, 3.65F, 20.25F, 0.00F, 1.10F},
+        BulkheadSample {-2.00F, 0.72F, -19.00F, 0.00F, 1.10F},
+        BulkheadSample {-2.00F, 0.72F, -10.00F, -0.78F, 1.15F},
+        BulkheadSample {-2.00F, 0.72F, 2.30F, 1.20F, 1.05F},
+        BulkheadSample {-2.00F, 0.72F, 15.00F, 0.00F, 1.10F},
+        BulkheadSample {-5.00F, -2.28F, -23.00F, 0.00F, 1.05F},
+        BulkheadSample {-5.00F, -2.28F, -10.00F, 2.80F, 1.05F},
+        BulkheadSample {-5.00F, -2.28F, 2.50F, 3.05F, 1.05F},
+        BulkheadSample {-5.00F, -2.28F, 15.20F, 0.00F, 1.15F},
+    };
+
+    ShipEntity ship {};
+    ship.set_position(
+        {0.5F, 49.0F, 0.5F});
+    const auto origin =
+        ship.world_origin();
+    const auto& profile =
+        amelie_ship_blueprint()
+            .protection_profile;
+    const auto interior_half_width =
+        [&](float local_y,
+            float local_z) {
+            return interior_half_width_for_test(
+                profile,
+                local_y,
+                local_z);
+        };
+
+    for (const auto& bulkhead :
+         bulkheads) {
+        CAPTURE(bulkhead.z);
+        CHECK_FALSE(
+            ship.intersects_aabb(
+                origin +
+                    glm::vec3 {
+                        bulkhead.door_center_x -
+                            0.30F,
+                        bulkhead.floor_y +
+                            0.04F,
+                        bulkhead.z -
+                            0.04F,
+                    },
+                origin +
+                    glm::vec3 {
+                        bulkhead.door_center_x +
+                            0.30F,
+                        bulkhead.floor_y +
+                            1.88F,
+                        bulkhead.z +
+                            0.26F,
+                    }));
+        const auto solid_x =
+            bulkhead.door_center_x +
+            bulkhead.door_half_width +
+            0.45F;
+        CHECK(
+            ship.intersects_aabb(
+                origin +
+                    glm::vec3 {
+                        solid_x - 0.08F,
+                        bulkhead.floor_y +
+                            0.55F,
+                        bulkhead.z +
+                            0.06F,
+                    },
+                origin +
+                    glm::vec3 {
+                        solid_x + 0.08F,
+                        bulkhead.floor_y +
+                            0.85F,
+                        bulkhead.z +
+                            0.16F,
+                    }));
+
+        const auto upper_y =
+            bulkhead.ceiling_y -
+            0.24F;
+        const auto edge_x =
+            interior_half_width(
+                upper_y,
+                bulkhead.z) -
+            0.08F;
+        for (const auto side_sign :
+             {-1.0F, 1.0F}) {
+            CHECK(
+                ship.intersects_aabb(
+                    origin +
+                        glm::vec3 {
+                            side_sign * edge_x -
+                                0.05F,
+                            upper_y - 0.08F,
+                            bulkhead.z +
+                                0.06F,
+                        },
+                    origin +
+                        glm::vec3 {
+                            side_sign * edge_x +
+                                0.05F,
+                            upper_y + 0.08F,
+                            bulkhead.z +
+                                0.16F,
+                        }));
+        }
+    }
+}
+
+TEST_CASE("les bouchains et les fins de pont ferment toute la coque intérieure") {
+    ShipEntity ship {};
+    ship.set_position(
+        {0.5F, 49.0F, 0.5F});
+    const auto origin =
+        ship.world_origin();
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto& profile =
+        blueprint.protection_profile;
+
+    constexpr std::array sample_z {
+        -28.0F,
+        0.0F,
+        21.35F,
+    };
+    const std::array transitions {
+        profile.middle_hull_min_y,
+        profile.upper_hull_min_y,
+    };
+    for (const auto local_z :
+         sample_z) {
+        for (const auto transition_y :
+             transitions) {
+            const auto narrower_inner =
+                interior_half_width_for_test(
+                    profile,
+                    transition_y - 0.02F,
+                    local_z);
+            const auto wider_inner =
+                interior_half_width_for_test(
+                    profile,
+                    transition_y + 0.02F,
+                    local_z);
+            const auto probe_x =
+                (narrower_inner +
+                 wider_inner) *
+                0.5F;
+            for (const auto side_sign :
+                 {-1.0F, 1.0F}) {
+                CAPTURE(local_z);
+                CAPTURE(transition_y);
+                CAPTURE(side_sign);
+                CHECK(
+                    ship.intersects_aabb(
+                        origin +
+                            glm::vec3 {
+                                side_sign * probe_x -
+                                    0.055F,
+                                transition_y - 0.045F,
+                                local_z - 0.08F,
+                            },
+                        origin +
+                            glm::vec3 {
+                                side_sign * probe_x +
+                                    0.055F,
+                                transition_y + 0.045F,
+                                local_z + 0.08F,
+                            }));
+            }
+        }
+    }
+
+    struct TerminalBulkhead {
+        float floor_y;
+        float ceiling_y;
+        float z;
+    };
+    constexpr std::array terminal_bulkheads {
+        TerminalBulkhead {-5.00F, -2.28F, -33.0F},
+        TerminalBulkhead {-5.00F, -2.28F, 24.0F},
+        TerminalBulkhead {-2.00F, 0.72F, -34.0F},
+        TerminalBulkhead {-2.00F, 0.72F, 31.0F},
+        TerminalBulkhead {1.00F, 3.65F, 34.0F},
+    };
+    for (const auto& bulkhead :
+         terminal_bulkheads) {
+        const auto local_y =
+            (bulkhead.floor_y +
+             bulkhead.ceiling_y) *
+            0.5F;
+        const auto half_width =
+            interior_half_width_for_test(
+                profile,
+                local_y,
+                bulkhead.z);
+        for (const auto x_ratio :
+             {-0.90F, 0.0F, 0.90F}) {
+            CAPTURE(bulkhead.z);
+            CAPTURE(x_ratio);
+            const auto local_x =
+                half_width *
+                x_ratio;
+            CHECK(
+                ship.intersects_aabb(
+                    origin +
+                        glm::vec3 {
+                            local_x - 0.08F,
+                            local_y - 0.12F,
+                            bulkhead.z - 0.04F,
+                        },
+                    origin +
+                        glm::vec3 {
+                            local_x + 0.08F,
+                            local_y + 0.12F,
+                            bulkhead.z + 0.04F,
+                        }));
+        }
+    }
+
+    const auto cabin_stern_feet =
+        origin +
+        glm::vec3 {
+            0.0F,
+            1.01F,
+            -35.25F,
+        };
+    CHECK(
+        ship.support_height_in_range(
+                cabin_stern_feet,
+                cabin_stern_feet.y -
+                    0.12F,
+                cabin_stern_feet.y +
+                    0.12F)
+            .has_value());
+}
+
+TEST_CASE("les 56 routes gardent le volume du marin dégagé dans les deux sens") {
     ShipEntity ship {};
     ship.set_position({0.5F, 49.0F, 0.5F});
     const auto origin = ship.world_origin();
     const auto& blueprint = amelie_ship_blueprint();
-
-    const auto is_stair_edge = [](const ShipCrewNavigationEdge& edge) {
-        const auto matches = [&](ShipCrewStation first, ShipCrewStation second) {
-            return (edge.first == first && edge.second == second) ||
-                   (edge.first == second && edge.second == first);
-        };
-        return matches(ShipCrewStation::AftStairsTop, ShipCrewStation::AftStairsMid) ||
-               matches(ShipCrewStation::AftStairsMid, ShipCrewStation::AftStairsBottom) ||
-               matches(ShipCrewStation::ForeStairsTop, ShipCrewStation::ForeStairsMid) ||
-               matches(ShipCrewStation::ForeStairsMid, ShipCrewStation::ForeStairsBottom) ||
-               matches(ShipCrewStation::QuarterdeckStepTop, ShipCrewStation::QuarterdeckStepBottom) ||
-               matches(ShipCrewStation::ForecastleStepBottom, ShipCrewStation::ForecastleStepTop);
+    constexpr std::array stepped_edges {
+        std::pair {30U, 31U},
+        std::pair {32U, 33U},
+        std::pair {16U, 17U},
+        std::pair {17U, 18U},
+        std::pair {19U, 20U},
+        std::pair {20U, 21U},
+        std::pair {42U, 43U},
+        std::pair {43U, 44U},
+        std::pair {45U, 46U},
+        std::pair {46U, 47U},
     };
 
     std::ostringstream failures;
     for (const auto& edge : blueprint.crew_navigation_edges) {
-        if (is_stair_edge(edge)) {
-            continue;
-        }
-        const auto start = station_position(edge.first);
-        const auto end = station_position(edge.second);
-        const auto sample_count = std::max(1, static_cast<int>(std::ceil(glm::length(end - start) / 0.20F)));
-        bool edge_reported = false;
-        for (int sample = 0; sample <= sample_count; ++sample) {
-            const auto amount = static_cast<float>(sample) / static_cast<float>(sample_count);
-            const auto feet = origin + start + (end - start) * amount;
-            const auto supported = ship.support_height_in_range(feet, feet.y - 0.16F, feet.y + 0.16F).has_value();
-            const auto blocked = ship.intersects_aabb(
-                feet + glm::vec3 {-0.34F, 0.04F, -0.34F},
-                feet + glm::vec3 {0.34F, 1.88F, 0.34F});
-            if ((!supported || blocked) && !edge_reported) {
-                failures << static_cast<int>(edge.first) << "->" << static_cast<int>(edge.second)
-                         << " sample=" << sample << " position=(" << feet.x << ',' << feet.y << ',' << feet.z
-                         << ") support=" << supported << " blocked=" << blocked << '\n';
-                edge_reported = true;
+        for (int direction = 0;
+             direction < 2;
+             ++direction) {
+            const auto first =
+                direction == 0
+                    ? edge.first
+                    : edge.second;
+            const auto second =
+                direction == 0
+                    ? edge.second
+                    : edge.first;
+            const auto start =
+                station_position(first);
+            const auto end =
+                station_position(second);
+            const auto stepped_edge =
+                std::ranges::any_of(
+                    stepped_edges,
+                    [first, second](const auto& candidate) {
+                        const auto first_index =
+                            static_cast<unsigned int>(first);
+                        const auto second_index =
+                            static_cast<unsigned int>(second);
+                        return
+                            (candidate.first == first_index &&
+                             candidate.second == second_index) ||
+                            (candidate.first == second_index &&
+                             candidate.second == first_index);
+                    });
+            const auto sample_count =
+                std::max(
+                    1,
+                    static_cast<int>(
+                        std::ceil(
+                            glm::length(
+                                end -
+                                start) /
+                            0.20F)));
+            auto edge_reported = false;
+            for (int sample = 0;
+                 sample <= sample_count;
+                 ++sample) {
+                const auto amount =
+                    static_cast<float>(sample) /
+                    static_cast<float>(sample_count);
+                const auto feet =
+                    origin +
+                    start +
+                    (end - start) *
+                        amount;
+                const auto supported =
+                    ship.support_height_in_range(
+                            feet,
+                            feet.y -
+                                (stepped_edge
+                                     ? 0.62F
+                                     : 0.16F),
+                            feet.y +
+                                (stepped_edge
+                                     ? 0.62F
+                                     : 0.16F))
+                        .has_value();
+                const auto blocked =
+                    ship.intersects_aabb(
+                        feet +
+                            glm::vec3 {
+                                -0.34F,
+                                // Je réserve sur les marches le volume bas au
+                                // franchissement déjà validé par les scénarios
+                                // joueur des quatre escaliers. Le buste et la
+                                // tête restent balayés sur chaque échantillon.
+                                stepped_edge
+                                    ? 0.80F
+                                    : 0.04F,
+                                -0.34F,
+                            },
+                        feet +
+                            glm::vec3 {
+                                0.34F,
+                                1.88F,
+                                0.34F,
+                            });
+                if ((!supported ||
+                     blocked) &&
+                    !edge_reported) {
+                    failures
+                        << static_cast<int>(first)
+                        << "->"
+                        << static_cast<int>(second)
+                        << " sample="
+                        << sample
+                        << " position=("
+                        << feet.x
+                        << ','
+                        << feet.y
+                        << ','
+                        << feet.z
+                        << ") support="
+                        << supported
+                        << " blocked="
+                        << blocked
+                        << '\n';
+                    edge_reported = true;
+                }
             }
         }
     }
@@ -578,13 +1260,13 @@ TEST_CASE("un chargement reprend en double appui sans sauvegarder la phase") {
     }
 }
 
-TEST_CASE("les deux escaliers conservent la demarche sous tangage et roulis") {
+TEST_CASE("les quatre escaliers conservent la demarche sous tangage et roulis") {
     struct StairRoute {
         ShipCrewStation start;
         ShipCrewStation middle;
         ShipCrewStation destination;
     };
-    constexpr std::array<StairRoute, 2> kRoutes {{
+    constexpr std::array<StairRoute, 4> kRoutes {{
         {
             ShipCrewStation::AftStairsTop,
             ShipCrewStation::AftStairsMid,
@@ -594,6 +1276,16 @@ TEST_CASE("les deux escaliers conservent la demarche sous tangage et roulis") {
             ShipCrewStation::ForeStairsTop,
             ShipCrewStation::ForeStairsMid,
             ShipCrewStation::ForeStairsBottom,
+        },
+        {
+            ShipCrewStation::CrewStairsTop,
+            ShipCrewStation::CrewStairsMid,
+            ShipCrewStation::CrewStairsBottom,
+        },
+        {
+            ShipCrewStation::HoldStairsTop,
+            ShipCrewStation::HoldStairsMid,
+            ShipCrewStation::HoldStairsBottom,
         },
     }};
     constexpr std::array<ShipCrewStation, 5> kParkingStations {{
@@ -882,7 +1574,9 @@ TEST_CASE("le poisson est credite uniquement apres son transport dans la cale") 
     CHECK(fish == 0U);
     CHECK(crew.members()[1].cargo == ShipCrewCargo::Fish);
 
-    const auto result = update_for(crew, ship, {}, 120.0F, fish, water);
+    // Je laisse au pêcheur le temps de franchir les deux nouvelles volées
+    // d'escalier avant d'atteindre la cale.
+    const auto result = update_for(crew, ship, {}, 240.0F, fish, water);
     CHECK(result.fish_delivered);
     CHECK(fish == 1U);
     CHECK(crew.members()[1].cargo == ShipCrewCargo::None);
@@ -1311,18 +2005,159 @@ TEST_CASE("les postes partages gardent des positions visuelles distinctes") {
     CHECK(glm::length(crew.render_instances()[2].position - crew.render_instances()[4].position) > 1.0F);
 }
 
-TEST_CASE("les lumieres d'equipage reutilisent exactement les lanternes de la cale") {
+TEST_CASE("les lumieres d'equipage reutilisent exactement les lanternes des trois ponts") {
     const auto& blueprint = amelie_ship_blueprint();
-    REQUIRE(blueprint.interior_lanterns.size() == 4U);
+    REQUIRE(blueprint.interior_lanterns.size() == 19U);
+    std::array<std::size_t, 3> lights_by_deck {};
     for (const auto& lantern : blueprint.interior_lanterns) {
+        const auto deck =
+            lantern.local_position.y >= 0.86F
+                ? 0U
+                : lantern.local_position.y >= -2.14F
+                      ? 1U
+                      : 2U;
+        ++lights_by_deck[deck];
+        CHECK(lantern.radius >= 4.0F);
+        CHECK(lantern.radius <= 7.0F);
+        CHECK(lantern.intensity > 0.0F);
+        CHECK(lantern.color.r > lantern.color.g);
+        CHECK(lantern.color.g > lantern.color.b);
+        CHECK(lantern.zone_min.x <= lantern.local_position.x);
+        CHECK(lantern.zone_min.y <= lantern.local_position.y);
+        CHECK(lantern.zone_min.z <= lantern.local_position.z);
+        CHECK(lantern.zone_max.x >= lantern.local_position.x);
+        CHECK(lantern.zone_max.y >= lantern.local_position.y);
+        CHECK(lantern.zone_max.z >= lantern.local_position.z);
         const auto matching_part = std::ranges::any_of(blueprint.parts, [&](const ShipPart& part) {
             if (part.material != ShipMaterial::Lantern) {
                 return false;
             }
             const auto center = (part.local_start + part.local_end) * 0.5F;
-            return glm::length(center - lantern) < 0.01F;
+            return glm::length(center - lantern.local_position) < 0.01F;
         });
         CHECK(matching_part);
+    }
+    const std::array<std::size_t, 3> expected_lights {{
+        7U,
+        6U,
+        6U,
+    }};
+    CHECK(lights_by_deck == expected_lights);
+}
+
+TEST_CASE("deux marins du pont gardent leurs couleurs et recoivent des fanaux selon leur distance") {
+    ShipEntity ship {};
+    ship.set_position(
+        {0.5F, 49.0F, 0.5F});
+    ShipCrewSystem crew {};
+    crew.reset(413, ship);
+    auto state =
+        crew.save_state();
+    place_at_station(
+        state.members[1],
+        ShipCrewStation::PortFishing);
+    place_at_station(
+        state.members[2],
+        ShipCrewStation::MainMast);
+    crew.load_state(
+        state,
+        413,
+        ship);
+
+    EnvironmentState night {};
+    night.daylight_factor = 0.0F;
+    night.storm_intensity = 0.0F;
+    night.cloud_intensity = 0.0F;
+    night.overcast_intensity = 0.0F;
+    std::uint32_t fish = 0U;
+    std::uint32_t water = 0U;
+    (void)crew.update(
+        ship,
+        night,
+        0.0F,
+        fish,
+        water);
+
+    const auto render =
+        crew.render_instances();
+    const auto& near_fisher =
+        render[1];
+    const auto& distant_rigger =
+        render[2];
+    CHECK(
+        near_fisher.sky_light ==
+        doctest::Approx(1.0F));
+    CHECK(
+        distant_rigger.sky_light ==
+        doctest::Approx(1.0F));
+    CHECK(
+        near_fisher.local_light >
+        distant_rigger.local_light);
+    CHECK(
+        distant_rigger.local_light >
+        0.0F);
+
+    const auto& blueprint =
+        amelie_ship_blueprint();
+    const auto activation =
+        ship_exterior_light_activation(
+            night.daylight_factor,
+            night.storm_intensity,
+            night.cloud_intensity,
+            night.overcast_intensity);
+    const auto expected_light =
+        [&](const CrewRenderInstance& instance) {
+            return std::clamp(
+                ship_exterior_light_level(
+                    blueprint.exterior_lanterns,
+                    ship.world_to_local_point(
+                        instance.position)) *
+                    activation,
+                0.0F,
+                1.0F);
+        };
+    CHECK(
+        near_fisher.local_light ==
+        doctest::Approx(
+            expected_light(
+                near_fisher)));
+    CHECK(
+        distant_rigger.local_light ==
+        doctest::Approx(
+            expected_light(
+                distant_rigger)));
+
+    const auto fisher_parts =
+        build_crew_parts(
+            near_fisher);
+    const auto rigger_parts =
+        build_crew_parts(
+            distant_rigger);
+    REQUIRE_FALSE(
+        fisher_parts.empty());
+    REQUIRE_FALSE(
+        rigger_parts.empty());
+    CHECK(
+        part_uses_tile_for_test(
+            fisher_parts.front(),
+            CreatureAtlasTile::CrewIvoryCloth));
+    CHECK(
+        part_uses_tile_for_test(
+            rigger_parts.front(),
+            CreatureAtlasTile::CrewStripedCloth));
+    for (const auto& part :
+         fisher_parts) {
+        CHECK(
+            part.block_light ==
+            doctest::Approx(
+                near_fisher.local_light));
+    }
+    for (const auto& part :
+         rigger_parts) {
+        CHECK(
+            part.block_light ==
+            doctest::Approx(
+                distant_rigger.local_light));
     }
 }
 

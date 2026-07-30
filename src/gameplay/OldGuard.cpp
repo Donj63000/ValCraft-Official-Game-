@@ -1067,8 +1067,24 @@ void OldGuardSystem::rebuild_render_instances(
             1.0F);
         render.sky_light =
             std::clamp(finite_or(context.sky_light, 1.0F), 0.0F, 1.0F);
+        const auto fallback_local_light =
+            std::clamp(
+                finite_or(context.local_light, 0.0F),
+                0.0F,
+                1.0F);
+        // Je sonde chaque soldat dans le repère local du pont : deux gardes
+        // éloignés ne reçoivent ainsi plus une teinte nocturne uniforme.
+        const auto sampled_local_light =
+            context.local_light_at
+                ? context.local_light_at(member.local_position)
+                : fallback_local_light;
         render.local_light =
-            std::clamp(finite_or(context.local_light, 0.0F), 0.0F, 1.0F);
+            std::clamp(
+                finite_or(
+                    sampled_local_light,
+                    fallback_local_light),
+                0.0F,
+                1.0F);
         render.precipitation_exposure =
             std::clamp(
                 finite_or(context.precipitation_exposure, 1.0F),

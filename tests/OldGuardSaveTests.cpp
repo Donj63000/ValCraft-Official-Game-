@@ -28,6 +28,46 @@ constexpr auto kSerializedOldGuardPayloadBytes =
     sizeof(std::uint64_t) +
     kOldGuardMemberCount *
         kSerializedOldGuardMemberBytes;
+constexpr auto kSerializedStatusEntryBytes =
+    4U * sizeof(std::uint64_t) +
+    sizeof(std::uint8_t) +
+    sizeof(float) +
+    sizeof(std::uint8_t);
+constexpr auto kSerializedSummonedStatsBytes =
+    10U * sizeof(float) +
+    2U * sizeof(std::uint8_t);
+constexpr auto kSerializedSummonedSnapshotBytes =
+    sizeof(std::uint8_t) +
+    3U * sizeof(std::uint64_t) +
+    3U * sizeof(float) +
+    sizeof(std::uint8_t) +
+    kSerializedSummonedStatsBytes +
+    3U * sizeof(double) +
+    5U * sizeof(float) +
+    2U * sizeof(double) +
+    3U * sizeof(std::uint8_t);
+constexpr auto kSerializedDefaultRuntimeBytes =
+    sizeof(std::uint32_t) +
+    kMaximumStatusEffects *
+        kSerializedStatusEntryBytes +
+    sizeof(double) +
+    sizeof(std::uint64_t) +
+    sizeof(std::uint64_t) +
+    3U * sizeof(float) +
+    4U * sizeof(float) +
+    sizeof(std::uint8_t) +
+    sizeof(std::uint64_t) +
+    sizeof(std::uint32_t) +
+    kMaximumSavedPlayerSummons *
+        (kSerializedSummonedSnapshotBytes +
+         sizeof(std::uint8_t) +
+         sizeof(float) +
+         sizeof(std::uint64_t)) +
+    2U * sizeof(std::uint64_t);
+constexpr auto kSerializedV14RuntimeExtensionBytes =
+    2U * sizeof(std::uint64_t) +
+    2U * sizeof(std::uint8_t) +
+    kSerializedDefaultRuntimeBytes;
 
 auto temporary_save_root(std::string_view label) -> std::filesystem::path {
     const auto suffix =
@@ -109,6 +149,58 @@ void erase_item_extension_without_drops(
     bytes.erase(extension_begin, bytes.end());
 }
 
+void erase_progression_build_extension(
+    std::vector<char>& bytes) {
+    constexpr auto player_state_byte_count =
+        2U * 3U * sizeof(float) +
+        19U * sizeof(float) +
+        8U * sizeof(std::uint8_t);
+    constexpr auto build_offset =
+        8U +
+        sizeof(std::uint32_t) +
+        sizeof(std::uint64_t) +
+        sizeof(int) +
+        2U * sizeof(float) +
+        2U * sizeof(std::uint32_t) +
+        3U * sizeof(std::uint8_t) +
+        3U * sizeof(float) +
+        player_state_byte_count +
+        sizeof(std::uint32_t) +
+        sizeof(std::uint64_t);
+    constexpr auto serialized_v13_build_byte_count =
+        kPlayerAttributeCount * sizeof(std::uint8_t) +
+        2U * kAbilityCount * sizeof(std::uint8_t) +
+        kEquippedAbilitySlotCount * sizeof(std::uint8_t) +
+        3U * sizeof(float) +
+        kAbilityCount * sizeof(float) +
+        kAbilityCount * sizeof(std::uint8_t) +
+        kConstructionPlanCount *
+            (3U * sizeof(std::uint8_t) +
+             kConstructionPlanMaximumCellCount *
+                 (3U * sizeof(std::int8_t) +
+                  sizeof(std::uint16_t))) +
+        sizeof(std::uint8_t) +
+        sizeof(std::uint64_t) +
+        sizeof(std::uint8_t) +
+        sizeof(std::uint64_t);
+    constexpr auto serialized_build_byte_count =
+        serialized_v13_build_byte_count +
+        (7U + kConstructionPlanCount) *
+            sizeof(std::uint32_t);
+    REQUIRE(
+        bytes.size() >=
+        build_offset +
+            serialized_build_byte_count);
+    bytes.erase(
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                build_offset),
+        bytes.begin() +
+            static_cast<std::ptrdiff_t>(
+                build_offset +
+                serialized_build_byte_count));
+}
+
 void write_save_version(
     std::vector<char>& bytes,
     std::uint32_t version) {
@@ -137,8 +229,33 @@ void write_all_bytes(
 }
 
 void downgrade_to_version_11(
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path,
+    SeaVoyagePhase phase,
+    float elapsed) {
     auto bytes = read_all_bytes(path);
+    erase_progression_build_extension(bytes);
+    const auto departure =
+        find_departure_extension(
+            bytes,
+            phase,
+            elapsed);
+    REQUIRE(departure != bytes.end());
+    const auto runtime_begin =
+        departure +
+        static_cast<std::ptrdiff_t>(
+            sizeof(std::uint8_t) +
+            sizeof(float) +
+            kSerializedOldGuardPayloadBytes);
+    REQUIRE(
+        static_cast<std::size_t>(
+            bytes.end() -
+            runtime_begin) >=
+        kSerializedV14RuntimeExtensionBytes);
+    bytes.erase(
+        runtime_begin,
+        runtime_begin +
+            static_cast<std::ptrdiff_t>(
+                kSerializedV14RuntimeExtensionBytes));
     erase_item_extension_without_drops(bytes);
     write_save_version(bytes, 11U);
     write_all_bytes(path, bytes);
@@ -149,6 +266,7 @@ void downgrade_to_version_10(
     SeaVoyagePhase phase,
     float elapsed) {
     auto bytes = read_all_bytes(path);
+    erase_progression_build_extension(bytes);
     const auto departure =
         find_departure_extension(
             bytes,
@@ -163,12 +281,14 @@ void downgrade_to_version_10(
     REQUIRE(
         static_cast<std::size_t>(
             bytes.end() - guard_begin) >=
-        kSerializedOldGuardPayloadBytes);
+        kSerializedOldGuardPayloadBytes +
+            kSerializedV14RuntimeExtensionBytes);
     bytes.erase(
         guard_begin,
         guard_begin +
             static_cast<std::ptrdiff_t>(
-                kSerializedOldGuardPayloadBytes));
+                kSerializedOldGuardPayloadBytes +
+                kSerializedV14RuntimeExtensionBytes));
     erase_item_extension_without_drops(bytes);
     write_save_version(bytes, 10U);
     write_all_bytes(path, bytes);
@@ -214,7 +334,10 @@ TEST_CASE("la sauvegarde v11 restaure exactement le rechargement des six gardes"
     downgrade_to_version_11(
         save_slot_file_path(
             save_root,
-            0U));
+            0U),
+        snapshot.sea_adventure.voyage_phase,
+        snapshot.sea_adventure
+            .voyage_phase_elapsed);
     const auto loaded =
         load_save_slot(
             save_root,
@@ -332,6 +455,11 @@ TEST_CASE("un payload v11 tronque au milieu des gardes est refuse") {
         save_slot_file_path(
             save_root,
             0U);
+    downgrade_to_version_11(
+        path,
+        snapshot.sea_adventure.voyage_phase,
+        snapshot.sea_adventure
+            .voyage_phase_elapsed);
     auto bytes =
         read_all_bytes(path);
     const auto departure =
@@ -345,8 +473,6 @@ TEST_CASE("un payload v11 tronque au milieu des gardes est refuse") {
             departure - bytes.begin()) +
         sizeof(std::uint8_t) +
         sizeof(float);
-    write_save_version(bytes, 11U);
-    write_all_bytes(path, bytes);
     std::filesystem::resize_file(
         path,
         payload_offset +

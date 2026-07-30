@@ -20,6 +20,7 @@ enum class WorldGenerationVersion : std::uint32_t {
     Latest = 0,
     LegacyV1 = 1,
     SparseArchipelagoV2 = 2,
+    LivingOceanV3 = 3,
 };
 
 [[nodiscard]] inline constexpr auto resolve_world_generation_version(
@@ -29,7 +30,7 @@ enum class WorldGenerationVersion : std::uint32_t {
         return requested_version;
     }
     return profile == WorldGenerationProfile::OceanAdventure
-               ? WorldGenerationVersion::SparseArchipelagoV2
+               ? WorldGenerationVersion::LivingOceanV3
                : WorldGenerationVersion::LegacyV1;
 }
 
@@ -101,7 +102,10 @@ private:
 
     [[nodiscard]] auto sample_column(int world_x, int world_z) const noexcept -> TerrainColumnSample;
     [[nodiscard]] auto sample_ocean_column(int world_x, int world_z) const noexcept -> TerrainColumnSample;
-    [[nodiscard]] auto sample_sparse_ocean_column(int world_x, int world_z) const noexcept -> TerrainColumnSample;
+    [[nodiscard]] auto sample_archipelago_ocean_column(int world_x,
+                                                       int world_z,
+                                                       bool living_seabed) const noexcept
+        -> TerrainColumnSample;
     [[nodiscard]] auto classify_biome(float temperature, float moisture, float ridge_noise, float base_noise) const noexcept -> BiomeType;
     [[nodiscard]] auto choose_surface_block(BiomeType biome, int world_x, int world_z, int surface_height) const noexcept -> BlockId;
     [[nodiscard]] auto choose_filler_block(BiomeType biome, int world_x, int world_z) const noexcept -> BlockId;

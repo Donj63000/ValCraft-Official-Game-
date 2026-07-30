@@ -88,6 +88,12 @@ auto smoothstep(float value) noexcept -> float {
     return t * t * (3.0F - 2.0F * t);
 }
 
+[[nodiscard]] auto uses_sparse_archipelago(
+    WorldGenerationVersion version) noexcept -> bool {
+    return version == WorldGenerationVersion::SparseArchipelagoV2 ||
+           version == WorldGenerationVersion::LivingOceanV3;
+}
+
 auto hash_grid_cell(int x, int z, int seed, std::uint32_t salt) noexcept -> std::uint32_t {
     return ocean_adventure_layout_hash(x, z, seed, salt);
 }
@@ -252,7 +258,8 @@ WorldGenerator::WorldGenerator(int seed,
     moisture_noise_->SetFractalOctaves(2);
 
     if (generation_version_ != WorldGenerationVersion::LegacyV1 &&
-        generation_version_ != WorldGenerationVersion::SparseArchipelagoV2) {
+        generation_version_ != WorldGenerationVersion::SparseArchipelagoV2 &&
+        generation_version_ != WorldGenerationVersion::LivingOceanV3) {
         throw std::invalid_argument("Unknown world generation version");
     }
     if (profile_ != WorldGenerationProfile::OceanAdventure &&
@@ -328,7 +335,7 @@ void WorldGenerator::advance_chunk_generation(ChunkGenerationState& state, std::
         const auto column_hash = hash_column(world_x, world_z, seed_);
         const auto port_layout_reserved =
             profile_ == WorldGenerationProfile::OceanAdventure &&
-            generation_version_ == WorldGenerationVersion::SparseArchipelagoV2 &&
+            uses_sparse_archipelago(generation_version_) &&
             is_starting_port_bounds_column(world_x, world_z);
         if (state.generate_decorations && !port_layout_reserved &&
             column.water_level <= column.surface_height) {
@@ -404,8 +411,11 @@ auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const n
 
 auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> TerrainColumnSample {
     if (profile_ == WorldGenerationProfile::OceanAdventure) {
-        if (generation_version_ == WorldGenerationVersion::SparseArchipelagoV2) {
-            return sample_sparse_ocean_column(world_x, world_z);
+        if (uses_sparse_archipelago(generation_version_)) {
+            return sample_archipelago_ocean_column(
+                world_x,
+                world_z,
+                generation_version_ == WorldGenerationVersion::LivingOceanV3);
         }
         return sample_ocean_column(world_x, world_z);
     }
@@ -480,7 +490,10 @@ auto WorldGenerator::sample_ocean_column(int world_x, int world_z) const noexcep
     return sample;
 }
 
-auto WorldGenerator::sample_sparse_ocean_column(int world_x, int world_z) const noexcept -> TerrainColumnSample {
+auto WorldGenerator::sample_archipelago_ocean_column(
+    int world_x,
+    int world_z,
+    bool living_seabed) const noexcept -> TerrainColumnSample {
     // Je reserve les bruits lents a la matiere et au relief interne. La
     // repartition geographique vient des cellules et macro-secteurs ci-dessus,
     // ce qui empeche un bruit rapide de semer des iles tout le long du trajet.
@@ -522,7 +535,7 @@ auto WorldGenerator::sample_sparse_ocean_column(int world_x, int world_z) const 
         return sample;
     }
 
-    const auto base_seabed = std::clamp(
+    auto base_seabed = std::clamp(
         static_cast<int>(std::round(33.0F + base * 3.2F + detail * 1.6F)),
         27,
         kSeaLevel - 5);
@@ -533,6 +546,20 @@ auto WorldGenerator::sample_sparse_ocean_column(int world_x, int world_z) const 
         sample.filler_block = to_block_id(BlockType::Sand);
         sample.water_level = kSeaLevel;
         return sample;
+    }
+
+    if (living_seabed) {
+        // Je garde le bassin du port sur son ancien plateau, puis je creuse
+        // seulement la pleine mer. Les mêmes bruits suffisent à former des
+        // bassins, des dorsales et des ravines sans coût de sampling en plus.
+        base_seabed = std::clamp(
+            static_cast<int>(std::round(
+                24.0F +
+                base * 7.0F +
+                detail * 4.0F -
+                ridge * 5.0F)),
+            kLivingOceanMinimumSeabedY,
+            kLivingOceanMaximumDeepSeabedY);
     }
 
     auto island_field = std::max(
@@ -555,7 +582,10 @@ auto WorldGenerator::sample_sparse_ocean_column(int world_x, int world_z) const 
     } else {
         const auto seabed = static_cast<int>(std::round(
             static_cast<float>(base_seabed) + reef_strength * 12.0F));
-        sample.surface_height = std::clamp(seabed, 24, kSeaLevel - 1);
+        sample.surface_height = std::clamp(
+            seabed,
+            living_seabed ? kLivingOceanMinimumSeabedY : 24,
+            kSeaLevel - 1);
     }
 
     const auto absolute_x = std::abs(static_cast<std::int64_t>(world_x));
@@ -581,8 +611,38 @@ auto WorldGenerator::sample_sparse_ocean_column(int world_x, int world_z) const 
     }
 
     if (sample.surface_height <= kSeaLevel + 2) {
-        sample.surface_block = to_block_id(BlockType::Sand);
-        sample.filler_block = to_block_id(BlockType::Sand);
+        if (living_seabed && sample.surface_height < kSeaLevel) {
+            const auto material_hash =
+                ocean_adventure_layout_hash(
+                    world_x,
+                    world_z,
+                    seed_,
+                    0x4D41544CU);
+            const auto water_depth =
+                kSeaLevel - sample.surface_height;
+            if (water_depth >= 23) {
+                sample.surface_block =
+                    (material_hash % 5U) == 0U
+                        ? to_block_id(BlockType::MossyStone)
+                        : to_block_id(BlockType::Gravel);
+                sample.filler_block = to_block_id(BlockType::Stone);
+            } else if (water_depth >= 13 &&
+                       (material_hash % 4U) == 0U) {
+                sample.surface_block =
+                    to_block_id(BlockType::MossyStone);
+                sample.filler_block =
+                    to_block_id(BlockType::Gravel);
+            } else {
+                sample.surface_block = to_block_id(BlockType::Sand);
+                sample.filler_block =
+                    (material_hash % 7U) == 0U
+                        ? to_block_id(BlockType::Gravel)
+                        : to_block_id(BlockType::Sand);
+            }
+        } else {
+            sample.surface_block = to_block_id(BlockType::Sand);
+            sample.filler_block = to_block_id(BlockType::Sand);
+        }
     } else {
         sample.surface_block = choose_surface_block(
             sample.biome,
@@ -603,7 +663,7 @@ void WorldGenerator::finalize_ocean_navigation_corridor(Chunk& chunk) const {
     const auto coord = chunk.coord();
     const auto base_world_x = coord.x * kChunkSizeX;
     const auto base_world_z = coord.z * kChunkSizeZ;
-    if (generation_version_ == WorldGenerationVersion::SparseArchipelagoV2) {
+    if (uses_sparse_archipelago(generation_version_)) {
         for (int local_z = 0; local_z < kChunkSizeZ; ++local_z) {
             const auto world_z = base_world_z + local_z;
             if (world_z < kOceanNavigationCorridorStartZ) {
@@ -617,7 +677,11 @@ void WorldGenerator::finalize_ocean_navigation_corridor(Chunk& chunk) const {
                     continue;
                 }
 
-                const auto column = sample_sparse_ocean_column(world_x, world_z);
+                const auto column = sample_archipelago_ocean_column(
+                    world_x,
+                    world_z,
+                    generation_version_ ==
+                        WorldGenerationVersion::LivingOceanV3);
                 for (int y = column.surface_height + 1; y <= kWorldMaxY; ++y) {
                     const auto expected_water =
                         y <= column.water_level
@@ -799,7 +863,7 @@ auto WorldGenerator::choose_base_terrain_block(const TerrainColumnSample& column
         }
 
         if (profile_ == WorldGenerationProfile::OceanAdventure &&
-            generation_version_ == WorldGenerationVersion::SparseArchipelagoV2 &&
+            uses_sparse_archipelago(generation_version_) &&
             is_starting_port_terrain_foundation_column(world_x, world_z)) {
             return block;
         }

@@ -128,6 +128,16 @@ enum class ShipMaterial : std::uint8_t {
     // à la fin pour ne casser aucune donnée utilisant encore les anciens index.
     BlackCanvas,
     SolidGold,
+
+    // Je garde les nouveaux matériaux d'intérieur en fin d'enum afin de
+    // préserver tous les identifiants historiques du navire.
+    OiledOak,
+    Linen,
+    BurgundyTextile,
+    NavyTextile,
+    Leather,
+    Paper,
+    Ceramic,
 };
 
 enum class ShipPartShape : std::uint8_t {
@@ -139,7 +149,75 @@ enum class ShipPartShape : std::uint8_t {
     Wheel,
     Glyph,
     ClimbableNet,
+
+    // Je represente une ouverture comme une donnee de construction explicite :
+    // elle ne produit ni rendu ni collision, mais garde coque et doublure alignees.
+    Opening,
+
+    // Je réserve ces formes au mobilier moderne. Le pipeline Legacy les ignore
+    // et reconstruit son décor historique figé avec les formes d'origine.
+    ChamferedBox,
+    DrapedPanel,
 };
+
+inline constexpr std::size_t kMaximumShipInteriorLights = 24U;
+inline constexpr std::size_t kMaximumShipExteriorLights = 12U;
+
+struct ShipInteriorLight {
+    glm::vec3 local_position {0.0F};
+    glm::vec3 color {1.0F, 0.68F, 0.38F};
+    float radius = 6.0F;
+    float intensity = 1.0F;
+    float flicker_seed = 0.0F;
+    glm::vec3 zone_min {-64.0F};
+    glm::vec3 zone_max {64.0F};
+    float zone_spill = 0.55F;
+    // Je limite le léger débordement aux ouvertures réelles des cloisons :
+    // chaque paire contient le centre X puis la demi-largeur de la porte.
+    glm::vec2 minimum_z_door {0.0F};
+    glm::vec2 maximum_z_door {0.0F};
+
+    auto operator==(const ShipInteriorLight&) const -> bool = default;
+};
+
+[[nodiscard]] auto ship_interior_light_attenuation(
+    const ShipInteriorLight& light,
+    const glm::vec3& local_position,
+    float time_seconds = 0.0F) noexcept -> float;
+
+[[nodiscard]] auto amelie_interior_lights() noexcept
+    -> std::span<const ShipInteriorLight>;
+
+struct ShipExteriorLight {
+    glm::vec3 local_position {0.0F};
+    glm::vec3 color {1.0F, 0.62F, 0.30F};
+    float radius = 14.0F;
+    float intensity = 0.95F;
+    float minimum_y = 3.65F;
+    float maximum_y = 7.50F;
+    // Je conserve les dimensions du fanal avec sa lumière afin que le rendu
+    // visible et le point lumineux partagent toujours la même source.
+    glm::vec3 fixture_half_extent {0.15F, 0.275F, 0.14F};
+
+    auto operator==(const ShipExteriorLight&) const -> bool = default;
+};
+
+[[nodiscard]] auto ship_exterior_light_attenuation(
+    const ShipExteriorLight& light,
+    const glm::vec3& local_position) noexcept -> float;
+
+[[nodiscard]] auto ship_exterior_light_level(
+    std::span<const ShipExteriorLight> lights,
+    const glm::vec3& local_position) noexcept -> float;
+
+[[nodiscard]] auto ship_exterior_light_activation(
+    float daylight_factor,
+    float storm_intensity,
+    float cloud_intensity,
+    float overcast_intensity) noexcept -> float;
+
+[[nodiscard]] auto amelie_exterior_lights() noexcept
+    -> std::span<const ShipExteriorLight>;
 
 struct ShipPart {
     ShipPartShape shape = ShipPartShape::Box;
@@ -223,12 +301,18 @@ struct ShipBlueprint {
     std::span<const ShipPart> parts {};
     std::span<const ShipCrewNavigationNode> crew_navigation_nodes {};
     std::span<const ShipCrewNavigationEdge> crew_navigation_edges {};
-    std::span<const glm::vec3> interior_lanterns {};
+    std::span<const ShipInteriorLight> interior_lanterns {};
     ShipBounds bounds {};
     ShipAnchors anchors {};
     ShipProtectionProfile protection_profile {};
     std::uint64_t geometry_revision = 0U;
     std::uint64_t navigation_revision = 0U;
+    // Je conserve une photographie géométrique séparée pour que la refonte
+    // moderne ne modifie jamais l'apparence du pipeline Legacy.
+    std::span<const ShipPart> legacy_visual_parts {};
+    // Je l'ajoute en fin d'agrégat pour préserver l'ordre de tous les champs
+    // historiques utilisés par les tests, outils et sauvegardes existants.
+    std::span<const ShipExteriorLight> exterior_lanterns {};
 };
 
 [[nodiscard]] auto amelie_ship_blueprint() noexcept -> const ShipBlueprint&;
@@ -244,6 +328,9 @@ struct ShipRenderState {
     ShipBounds local_bounds {};
     ShipBounds world_bounds {};
     std::uint64_t geometry_revision = 0U;
+    // Je garde la vitesse transitoire en fin d'agrégat : le sillage moderne
+    // peut suivre le navire sans toucher au format de sauvegarde historique.
+    glm::vec3 linear_velocity {0.0F};
 };
 
 struct LegacyShipMigrationStats {
@@ -292,6 +379,10 @@ public:
     [[nodiscard]] auto support_height_in_range(const glm::vec3& feet_position,
                                                float min_height,
                                                float max_height) const noexcept -> std::optional<float>;
+    [[nodiscard]] auto step_support_height_in_range(const glm::vec3& feet_position,
+                                                    float min_height,
+                                                    float max_height) const noexcept
+        -> std::optional<float>;
     [[nodiscard]] auto climb_contact(const glm::vec3& min_corner,
                                      const glm::vec3& max_corner) const noexcept
         -> std::optional<ShipClimbContact>;
@@ -407,7 +498,7 @@ public:
 
 private:
     [[nodiscard]] auto player_should_ride_ship(const PlayerController& player) const noexcept -> bool;
-    [[nodiscard]] auto player_on_ship(const glm::vec3& player_position) const noexcept -> bool;
+    [[nodiscard]] auto player_on_ship(const PlayerController& player) const noexcept -> bool;
     [[nodiscard]] auto player_ship_distance(const glm::vec3& player_position) const noexcept -> float;
     void consume_automatic_supplies(bool player_on_ship,
                                     SeaAdventureFrameResult& result) noexcept;

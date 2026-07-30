@@ -25,7 +25,10 @@ namespace {
 
 constexpr std::array<char, 8> kSaveMagic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
 constexpr std::array<char, 4> kItemInstanceStateMagic {{'I', 'T', 'E', 'M'}};
-constexpr std::uint32_t kSaveVersion = 12;
+constexpr std::uint32_t kSaveVersion = 14;
+constexpr std::uint32_t kSaveVersionRuntimeState = 14;
+constexpr std::uint32_t kSaveVersionCountedBuildArrays = 14;
+constexpr std::uint32_t kSaveVersionProgressionBuilds = 13;
 constexpr std::uint32_t kSaveVersionItemInstanceState = 12;
 constexpr std::uint32_t kSaveVersionOldGuard = 11;
 constexpr std::uint32_t kSaveVersionSeaDeparture = 10;
@@ -43,6 +46,10 @@ constexpr std::uint32_t kMaxSavedItemDropCount = 128;
 constexpr std::uint32_t kMaxSavedChunkSnapshotCount = 4096;
 constexpr int kSavedChunkNeighborMargin = kMaxStreamRadius + 1;
 constexpr float kMaxSavedWorldCoordinateMagnitude = 1'000'000.0F;
+constexpr std::uint64_t kMaximumSavedNavigationMilestone =
+    1'000'000ULL /
+    ExperienceRewardPolicy::kNavigationExperienceDistanceMeters;
+constexpr float kMaximumSavedAbilityRuntimeSeconds = 86'400.0F;
 
 static_assert(kChunkSizeX > 0 && kChunkSizeZ > 0);
 static_assert(kShipCrewMemberCount == 6U, "Changer le roster v9 exige une nouvelle version de sauvegarde");
@@ -67,8 +74,21 @@ enum class SavedChunkEncoding : std::uint8_t {
     Sparse = 1,
 };
 
+[[nodiscard]] auto world_player_placed_mask_empty(
+    const WorldPlayerPlacedMask& mask) noexcept -> bool {
+    return std::all_of(
+        mask.begin(),
+        mask.end(),
+        [](std::uint8_t value) noexcept {
+            return value == 0U;
+        });
+}
+
 class BinaryWriter;
 class BinaryReader;
+[[nodiscard]] auto read_expected_array_count(
+    BinaryReader& reader,
+    std::size_t expected) -> bool;
 
 auto is_supported_save_version(std::uint32_t version) noexcept -> bool {
     return version >= kSaveVersionLegacy && version <= kSaveVersion;
@@ -91,7 +111,8 @@ auto is_supported_world_generation_version(WorldGenerationProfile profile,
     }
     return profile == WorldGenerationProfile::OceanAdventure &&
            (version == WorldGenerationVersion::LegacyV1 ||
-            version == WorldGenerationVersion::SparseArchipelagoV2);
+            version == WorldGenerationVersion::SparseArchipelagoV2 ||
+            version == WorldGenerationVersion::LivingOceanV3);
 }
 
 auto is_world_generation_version_compatible_with_save(std::uint32_t save_version,
@@ -101,8 +122,8 @@ auto is_world_generation_version_compatible_with_save(std::uint32_t save_version
         return false;
     }
     // Les formats v8/v9 possedaient deja le champ, mais seule la geographie
-    // historique V1 existait alors. Une valeur V2 dans ces entetes est donc un
-    // payload corrompu et ne doit jamais changer leur monde retroactivement.
+    // historique V1 existait alors. Une valeur V2/V3 dans ces entêtes est donc
+    // un payload corrompu et ne doit jamais changer leur monde rétroactivement.
     return save_version >= kSaveVersionSeaDeparture ||
            generation_version == WorldGenerationVersion::LegacyV1;
 }
@@ -189,7 +210,11 @@ void validate_world_save_plan(const SaveGameSnapshot& snapshot, const WorldSaveP
             continue;
         }
 
-        if (chunk.sparse_cells.empty() || !chunk.dense_water_state.empty()) {
+        if ((!chunk.dense_blocks.empty() ||
+             !chunk.dense_water_state.empty()) ||
+            (chunk.sparse_cells.empty() &&
+             world_player_placed_mask_empty(
+                 chunk.player_placed_mask))) {
             throw std::runtime_error("Sparse world save chunk has an invalid payload");
         }
         auto previous_index = std::optional<std::size_t> {};
@@ -590,6 +615,448 @@ auto read_sea_adventure_state(BinaryReader& reader,
     return true;
 }
 
+void write_maritime_experience_state(
+    BinaryWriter& writer,
+    MaritimeExperienceAwardState state) {
+    state =
+        sanitize_maritime_experience_award_state(
+            state);
+    writer.write_value(
+        std::min(
+            state.navigation_milestones_awarded,
+            kMaximumSavedNavigationMilestone));
+    writer.write_value(
+        state.first_delivery_milestones_mask);
+    writer.write_value(
+        state.departure_awarded);
+    writer.write_value(
+        state.open_sea_awarded);
+}
+
+auto read_maritime_experience_state(
+    BinaryReader& reader,
+    MaritimeExperienceAwardState& state) -> bool {
+    MaritimeExperienceAwardState raw {};
+    if (!reader.read_value(
+            raw.navigation_milestones_awarded) ||
+        !reader.read_value(
+            raw.first_delivery_milestones_mask) ||
+        !reader.read_value(
+            raw.departure_awarded) ||
+        !reader.read_value(
+            raw.open_sea_awarded)) {
+        return false;
+    }
+    raw.navigation_milestones_awarded =
+        std::min(
+            raw.navigation_milestones_awarded,
+            kMaximumSavedNavigationMilestone);
+    state =
+        sanitize_maritime_experience_award_state(
+            raw);
+    return true;
+}
+
+[[nodiscard]] auto derive_legacy_maritime_experience_state(
+    const SeaAdventureSaveState& state) noexcept
+    -> MaritimeExperienceAwardState {
+    if (!state.active) {
+        return {};
+    }
+
+    MaritimeExperienceAwardState derived {};
+    const auto route_distance =
+        static_cast<std::uint64_t>(
+            std::max(
+                state.route_distance,
+                0.0F));
+    derived.navigation_milestones_awarded =
+        std::min(
+            ExperienceRewardPolicy::navigation_milestone(
+                route_distance),
+            kMaximumSavedNavigationMilestone);
+    derived.departure_awarded =
+        static_cast<std::uint8_t>(
+            state.voyage_phase !=
+                SeaVoyagePhase::Moored ||
+            route_distance > 0ULL);
+    derived.open_sea_awarded =
+        static_cast<std::uint8_t>(
+            state.voyage_phase ==
+                SeaVoyagePhase::Underway);
+
+    auto fish_delivery_observed =
+        state.fish > 0U;
+    auto water_delivery_observed =
+        state.water_flasks > 5U;
+    for (const auto& member :
+         state.crew.members) {
+        fish_delivery_observed =
+            fish_delivery_observed ||
+            (member.role ==
+                 ShipCrewRole::Fisher &&
+             member.routine_step >= 2U);
+        water_delivery_observed =
+            water_delivery_observed ||
+            (member.role ==
+                 ShipCrewRole::WaterTender &&
+             member.routine_step >= 2U);
+    }
+    if (fish_delivery_observed) {
+        derived.first_delivery_milestones_mask |=
+            std::uint64_t {1ULL};
+    }
+    if (water_delivery_observed) {
+        derived.first_delivery_milestones_mask |=
+            std::uint64_t {1ULL} << 1U;
+    }
+    return derived;
+}
+
+void write_status_effect_snapshot_entry(
+    BinaryWriter& writer,
+    const StatusEffectSnapshotEntry& entry) {
+    writer.write_value(entry.target_id);
+    writer.write_value(entry.stack_tag);
+    write_enum(writer, entry.kind);
+    writer.write_value(entry.value);
+    writer.write_value(entry.remaining_ticks);
+    writer.write_value(entry.sequence);
+    write_bool(writer, entry.active);
+}
+
+auto read_status_effect_snapshot_entry(
+    BinaryReader& reader,
+    StatusEffectSnapshotEntry& entry) -> bool {
+    return reader.read_value(entry.target_id) &&
+           reader.read_value(entry.stack_tag) &&
+           read_enum(reader, entry.kind) &&
+           reader.read_value(entry.value) &&
+           reader.read_value(entry.remaining_ticks) &&
+           reader.read_value(entry.sequence) &&
+           read_bool(reader, entry.active);
+}
+
+void write_status_effect_system_snapshot(
+    BinaryWriter& writer,
+    const StatusEffectSystemSnapshot& state) {
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            state.entries.size()));
+    for (const auto& entry : state.entries) {
+        write_status_effect_snapshot_entry(
+            writer,
+            entry);
+    }
+    writer.write_value(
+        state.fractional_tick_accumulator);
+    writer.write_value(
+        state.next_sequence);
+}
+
+auto read_status_effect_system_snapshot(
+    BinaryReader& reader,
+    StatusEffectSystemSnapshot& state) -> bool {
+    if (!read_expected_array_count(
+            reader,
+            state.entries.size())) {
+        return false;
+    }
+    for (auto& entry : state.entries) {
+        if (!read_status_effect_snapshot_entry(
+                reader,
+                entry)) {
+            return false;
+        }
+    }
+    return reader.read_value(
+               state.fractional_tick_accumulator) &&
+           reader.read_value(
+               state.next_sequence);
+}
+
+void write_player_ability_effects_snapshot(
+    BinaryWriter& writer,
+    const PlayerAbilityEffectsSnapshot& state) {
+    write_status_effect_system_snapshot(
+        writer,
+        state.status_effects);
+    writer.write_value(
+        state.iron_guard_cast_sequence);
+    writer.write_value(
+        state.iron_guard_wave_damage);
+    writer.write_value(
+        state.iron_guard_wave_radius);
+    writer.write_value(
+        state.iron_guard_energy_refund);
+}
+
+auto read_player_ability_effects_snapshot(
+    BinaryReader& reader,
+    PlayerAbilityEffectsSnapshot& state) -> bool {
+    return read_status_effect_system_snapshot(
+               reader,
+               state.status_effects) &&
+           reader.read_value(
+               state.iron_guard_cast_sequence) &&
+           reader.read_value(
+               state.iron_guard_wave_damage) &&
+           reader.read_value(
+               state.iron_guard_wave_radius) &&
+           reader.read_value(
+               state.iron_guard_energy_refund);
+}
+
+void write_summoned_unit_stats(
+    BinaryWriter& writer,
+    const SummonedUnitStats& stats) {
+    writer.write_value(stats.duration_seconds);
+    writer.write_value(stats.maximum_health);
+    writer.write_value(stats.attack_damage);
+    writer.write_value(
+        stats.attack_interval_seconds);
+    write_bool(
+        writer,
+        stats.has_light_taunt);
+    write_bool(
+        writer,
+        stats.has_projectile_block);
+    writer.write_value(
+        stats.taunt_interval_seconds);
+    writer.write_value(stats.taunt_radius);
+    writer.write_value(
+        stats.projectile_block_interval_seconds);
+    writer.write_value(
+        stats.mastery_survival_health);
+    writer.write_value(
+        stats.mastery_damage_reduction);
+    writer.write_value(
+        stats.mastery_damage_reduction_seconds);
+}
+
+auto read_summoned_unit_stats(
+    BinaryReader& reader,
+    SummonedUnitStats& stats) -> bool {
+    return reader.read_value(
+               stats.duration_seconds) &&
+           reader.read_value(
+               stats.maximum_health) &&
+           reader.read_value(
+               stats.attack_damage) &&
+           reader.read_value(
+               stats.attack_interval_seconds) &&
+           read_bool(
+               reader,
+               stats.has_light_taunt) &&
+           read_bool(
+               reader,
+               stats.has_projectile_block) &&
+           reader.read_value(
+               stats.taunt_interval_seconds) &&
+           reader.read_value(
+               stats.taunt_radius) &&
+           reader.read_value(
+               stats.projectile_block_interval_seconds) &&
+           reader.read_value(
+               stats.mastery_survival_health) &&
+           reader.read_value(
+               stats.mastery_damage_reduction) &&
+           reader.read_value(
+               stats.mastery_damage_reduction_seconds);
+}
+
+void write_summoned_unit_snapshot(
+    BinaryWriter& writer,
+    const SummonedUnitSystemSnapshot& state) {
+    write_bool(writer, state.active);
+    writer.write_value(state.unit_id);
+    writer.write_value(state.owner_id);
+    writer.write_value(state.cast_sequence);
+    write_vec3(writer, state.position);
+    write_enum(writer, state.rank);
+    write_summoned_unit_stats(
+        writer,
+        state.stats);
+    writer.write_value(state.age_seconds);
+    writer.write_value(
+        state.next_attack_seconds);
+    writer.write_value(
+        state.next_taunt_seconds);
+    writer.write_value(state.health);
+    writer.write_value(
+        state.projectile_block_cooldown);
+    writer.write_value(
+        state.mastery_damage_reduction_seconds);
+    writer.write_value(state.yaw_radians);
+    writer.write_value(state.animation_time);
+    writer.write_value(
+        state.last_attack_event_seconds);
+    writer.write_value(
+        state.last_taunt_event_seconds);
+    write_bool(writer, state.mastered);
+    write_bool(
+        writer,
+        state.death_refusal_used);
+    write_bool(
+        writer,
+        state.pending_mastery_taunt);
+}
+
+auto read_summoned_unit_snapshot(
+    BinaryReader& reader,
+    SummonedUnitSystemSnapshot& state) -> bool {
+    return read_bool(reader, state.active) &&
+           reader.read_value(state.unit_id) &&
+           reader.read_value(state.owner_id) &&
+           reader.read_value(state.cast_sequence) &&
+           read_vec3(reader, state.position) &&
+           read_enum(reader, state.rank) &&
+           read_summoned_unit_stats(
+               reader,
+               state.stats) &&
+           reader.read_value(state.age_seconds) &&
+           reader.read_value(
+               state.next_attack_seconds) &&
+           reader.read_value(
+               state.next_taunt_seconds) &&
+           reader.read_value(state.health) &&
+           reader.read_value(
+               state.projectile_block_cooldown) &&
+           reader.read_value(
+               state.mastery_damage_reduction_seconds) &&
+           reader.read_value(state.yaw_radians) &&
+           reader.read_value(state.animation_time) &&
+           reader.read_value(
+               state.last_attack_event_seconds) &&
+           reader.read_value(
+               state.last_taunt_event_seconds) &&
+           read_bool(reader, state.mastered) &&
+           read_bool(
+               reader,
+               state.death_refusal_used) &&
+           read_bool(
+               reader,
+               state.pending_mastery_taunt);
+}
+
+void write_player_ability_runtime_state(
+    BinaryWriter& writer,
+    const PlayerAbilityRuntimeSaveState& requested) {
+    const auto state =
+        sanitize_player_ability_runtime_save_state(
+            requested);
+    write_player_ability_effects_snapshot(
+        writer,
+        state.player_effects);
+    writer.write_value(
+        state.wind.remaining_seconds);
+    writer.write_value(
+        state.wind.movement_bonus);
+    writer.write_value(
+        state.wind.recovery_bonus);
+    writer.write_value(
+        state.wind.dodge_remaining_seconds);
+    write_bool(
+        writer,
+        state.wind.blade_armed);
+    writer.write_value(
+        state.wind.cast_sequence);
+
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            state.summoned_footmen.size()));
+    for (const auto& footman :
+         state.summoned_footmen) {
+        write_summoned_unit_snapshot(
+            writer,
+            footman.runtime);
+        write_bool(
+            writer,
+            footman.ship_local_position
+                .has_value());
+        if (footman.ship_local_position
+                .has_value()) {
+            write_vec3(
+                writer,
+                *footman.ship_local_position);
+        }
+        writer.write_value(
+            footman.far_seconds);
+        writer.write_value(
+            footman.cast_sequence);
+    }
+    writer.write_value(
+        state.next_summoned_unit_id);
+    writer.write_value(
+        state.next_cast_sequence);
+}
+
+auto read_player_ability_runtime_state(
+    BinaryReader& reader,
+    PlayerAbilityRuntimeSaveState& state) -> bool {
+    PlayerAbilityRuntimeSaveState raw {};
+    if (!read_player_ability_effects_snapshot(
+            reader,
+            raw.player_effects) ||
+        !reader.read_value(
+            raw.wind.remaining_seconds) ||
+        !reader.read_value(
+            raw.wind.movement_bonus) ||
+        !reader.read_value(
+            raw.wind.recovery_bonus) ||
+        !reader.read_value(
+            raw.wind.dodge_remaining_seconds) ||
+        !read_bool(
+            reader,
+            raw.wind.blade_armed) ||
+        !reader.read_value(
+            raw.wind.cast_sequence) ||
+        !read_expected_array_count(
+            reader,
+            raw.summoned_footmen.size())) {
+        return false;
+    }
+
+    for (auto& footman :
+         raw.summoned_footmen) {
+        auto has_ship_local_position = false;
+        if (!read_summoned_unit_snapshot(
+                reader,
+                footman.runtime) ||
+            !read_bool(
+                reader,
+                has_ship_local_position)) {
+            return false;
+        }
+        if (has_ship_local_position) {
+            glm::vec3 local_position {0.0F};
+            if (!read_vec3(
+                    reader,
+                    local_position)) {
+                return false;
+            }
+            footman.ship_local_position =
+                local_position;
+        }
+        if (!reader.read_value(
+                footman.far_seconds) ||
+            !reader.read_value(
+                footman.cast_sequence)) {
+            return false;
+        }
+    }
+    if (!reader.read_value(
+            raw.next_summoned_unit_id) ||
+        !reader.read_value(
+            raw.next_cast_sequence)) {
+        return false;
+    }
+    state =
+        sanitize_player_ability_runtime_save_state(
+            raw);
+    return true;
+}
+
 void write_hotbar_slot(BinaryWriter& writer, const HotbarSlot& slot) {
     writer.write_value(slot.block_id);
     writer.write_value(slot.count);
@@ -746,13 +1213,324 @@ void write_player_progression(BinaryWriter& writer, const PlayerProgressionState
     writer.write_value(normalized.experience);
 }
 
-auto read_player_progression(BinaryReader& reader, PlayerProgressionState& progression) -> bool {
+[[nodiscard]] auto migrate_v13_player_progression_state(
+    PlayerProgressionState state) noexcept
+    -> PlayerProgressionState {
+    // Je conserve exactement le niveau et le ratio de la barre v13 avant
+    // d'appliquer la courbe v14, sans transformer un excédent corrompu en gain.
+    state.level = normalize_player_progression_level(
+        state.level);
+    if (state.level >= kPlayerProgressionMaxLevel) {
+        state.experience = 0ULL;
+        return state;
+    }
+
+    const auto old_threshold =
+        player_experience_for_next_level_v13(
+            state.level);
+    const auto new_threshold =
+        player_experience_for_next_level(
+            state.level);
+    if (old_threshold == 0ULL ||
+        new_threshold == 0ULL) {
+        state.experience = 0ULL;
+        return state;
+    }
+
+    const auto bounded_experience =
+        std::min(
+            state.experience,
+            old_threshold - 1ULL);
+    const auto ratio =
+        static_cast<long double>(
+            bounded_experience) /
+        static_cast<long double>(
+            old_threshold);
+    const auto migrated_experience =
+        static_cast<std::uint64_t>(
+            std::floor(
+                ratio *
+                    static_cast<long double>(
+                        new_threshold) +
+                0.5L));
+    state.experience =
+        std::min(
+            migrated_experience,
+            new_threshold - 1ULL);
+    return state;
+}
+
+auto read_player_progression(
+    BinaryReader& reader,
+    PlayerProgressionState& progression,
+    std::uint32_t save_version) -> bool {
     PlayerProgressionState raw {};
     if (!reader.read_value(raw.level) ||
         !reader.read_value(raw.experience)) {
         return false;
     }
-    progression = sanitize_player_progression_state(raw);
+    if (save_version <
+        kSaveVersionProgressionBuilds) {
+        progression =
+            migrate_legacy_player_progression_state(
+                raw);
+    } else if (save_version <
+               kSaveVersionRuntimeState) {
+        progression =
+            migrate_v13_player_progression_state(
+                raw);
+    } else {
+        progression =
+            sanitize_player_progression_state(
+                raw);
+    }
+    return true;
+}
+
+void write_player_build_state(
+    BinaryWriter& writer,
+    const PlayerBuildState& build,
+    std::uint32_t level) {
+    auto normalized = build;
+    sanitize_player_build_state(
+        normalized,
+        level);
+
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.attributes.values.size()));
+    for (const auto value :
+         normalized.attributes.values) {
+        writer.write_value(value);
+    }
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.ability_ranks.size()));
+    for (const auto rank :
+         normalized.ability_ranks) {
+        writer.write_value(rank);
+    }
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.ability_masteries.size()));
+    for (const auto mastery :
+         normalized.ability_masteries) {
+        writer.write_value(mastery);
+    }
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.equipped_abilities.size()));
+    for (const auto ability :
+         normalized.equipped_abilities) {
+        write_enum(
+            writer,
+            ability);
+    }
+
+    writer.write_value(
+        normalized.val_energy);
+    writer.write_value(
+        normalized.global_cooldown_remaining);
+    writer.write_value(
+        normalized
+            .energy_regeneration_delay_remaining);
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.cooldowns_remaining.size()));
+    for (const auto cooldown :
+         normalized.cooldowns_remaining) {
+        writer.write_value(cooldown);
+    }
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.charges.size()));
+    for (const auto charges :
+         normalized.charges) {
+        writer.write_value(charges);
+    }
+
+    writer.write_value(
+        static_cast<std::uint32_t>(
+            normalized.construction_plans.size()));
+    for (const auto& plan :
+         normalized.construction_plans) {
+        writer.write_value(plan.cell_count);
+        write_enum(
+            writer,
+            plan.shape);
+        write_bool(
+            writer,
+            plan.mirrored);
+        writer.write_value(
+            static_cast<std::uint32_t>(
+                plan.cells.size()));
+        for (const auto& cell : plan.cells) {
+            writer.write_value(cell.x);
+            writer.write_value(cell.y);
+            writer.write_value(cell.z);
+            writer.write_value(
+                cell.material_id);
+        }
+    }
+    writer.write_value(
+        normalized.selected_construction_plan);
+    writer.write_value(
+        normalized.successful_cast_sequence);
+    write_enum(
+        writer,
+        normalized.last_dominant_path);
+    writer.write_value(
+        normalized.revision);
+}
+
+[[nodiscard]] auto read_expected_array_count(
+    BinaryReader& reader,
+    std::size_t expected) -> bool {
+    auto count = std::uint32_t {0U};
+    return reader.read_value(count) &&
+           count ==
+               static_cast<std::uint32_t>(
+                   expected);
+}
+
+auto read_player_build_state(
+    BinaryReader& reader,
+    PlayerBuildState& build,
+    std::uint32_t level,
+    std::uint32_t save_version) -> bool {
+    PlayerBuildState raw {};
+    const auto counted_arrays =
+        save_version >=
+        kSaveVersionCountedBuildArrays;
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.attributes.values.size())) {
+        return false;
+    }
+    for (auto& value : raw.attributes.values) {
+        if (!reader.read_value(value)) {
+            return false;
+        }
+    }
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.ability_ranks.size())) {
+        return false;
+    }
+    for (auto& rank : raw.ability_ranks) {
+        if (!reader.read_value(rank)) {
+            return false;
+        }
+    }
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.ability_masteries.size())) {
+        return false;
+    }
+    for (auto& mastery :
+         raw.ability_masteries) {
+        if (!reader.read_value(mastery)) {
+            return false;
+        }
+    }
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.equipped_abilities.size())) {
+        return false;
+    }
+    for (auto& ability :
+         raw.equipped_abilities) {
+        if (!read_enum(
+                reader,
+                ability)) {
+            return false;
+        }
+    }
+
+    if (!reader.read_value(raw.val_energy) ||
+        !reader.read_value(
+            raw.global_cooldown_remaining) ||
+        !reader.read_value(
+            raw.energy_regeneration_delay_remaining)) {
+        return false;
+    }
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.cooldowns_remaining.size())) {
+        return false;
+    }
+    for (auto& cooldown :
+         raw.cooldowns_remaining) {
+        if (!reader.read_value(cooldown)) {
+            return false;
+        }
+    }
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.charges.size())) {
+        return false;
+    }
+    for (auto& charges : raw.charges) {
+        if (!reader.read_value(charges)) {
+            return false;
+        }
+    }
+
+    if (counted_arrays &&
+        !read_expected_array_count(
+            reader,
+            raw.construction_plans.size())) {
+        return false;
+    }
+    for (auto& plan :
+         raw.construction_plans) {
+        if (!reader.read_value(plan.cell_count) ||
+            !read_enum(
+                reader,
+                plan.shape) ||
+            !read_bool(
+                reader,
+                plan.mirrored)) {
+            return false;
+        }
+        if (counted_arrays &&
+            !read_expected_array_count(
+                reader,
+                plan.cells.size())) {
+            return false;
+        }
+        for (auto& cell : plan.cells) {
+            if (!reader.read_value(cell.x) ||
+                !reader.read_value(cell.y) ||
+                !reader.read_value(cell.z) ||
+                !reader.read_value(
+                    cell.material_id)) {
+                return false;
+            }
+        }
+    }
+    if (!reader.read_value(
+            raw.selected_construction_plan) ||
+        !reader.read_value(
+            raw.successful_cast_sequence) ||
+        !read_enum(
+            reader,
+            raw.last_dominant_path) ||
+        !reader.read_value(
+            raw.revision)) {
+        return false;
+    }
+
+    sanitize_player_build_state(
+        raw,
+        level);
+    build = raw;
     return true;
 }
 
@@ -895,6 +1673,440 @@ auto load_metadata_from_file(const std::filesystem::path& file_path) -> std::opt
 
 } // namespace
 
+auto sanitize_player_ability_runtime_save_state(
+    const PlayerAbilityRuntimeSaveState& requested) noexcept
+    -> PlayerAbilityRuntimeSaveState {
+    PlayerAbilityRuntimeSaveState sanitized {};
+
+    PlayerAbilityEffects normalized_effects {};
+    static_cast<void>(
+        normalized_effects.load_state(
+            requested.player_effects));
+    sanitized.player_effects =
+        normalized_effects.snapshot();
+    if (sanitized.player_effects
+            .iron_guard_cast_sequence ==
+        std::numeric_limits<
+            AbilityCastSequence>::max()) {
+        sanitized.player_effects = {};
+    }
+
+    const auto finite_clamp =
+        [](float value,
+           float minimum,
+           float maximum) noexcept {
+            return std::isfinite(value)
+                       ? std::clamp(
+                             value,
+                             minimum,
+                             maximum)
+                       : minimum;
+        };
+    const auto finite_position =
+        [](const glm::vec3& value) noexcept {
+            return std::isfinite(value.x) &&
+                   std::isfinite(value.y) &&
+                   std::isfinite(value.z) &&
+                   std::abs(value.x) <=
+                       kMaxSavedWorldCoordinateMagnitude &&
+                   std::abs(value.y) <=
+                       kMaxSavedWorldCoordinateMagnitude &&
+                   std::abs(value.z) <=
+                       kMaxSavedWorldCoordinateMagnitude;
+        };
+
+    if (std::isfinite(
+            requested.wind.remaining_seconds) &&
+        requested.wind.remaining_seconds > 0.0F &&
+        requested.wind.cast_sequence != 0U &&
+        requested.wind.cast_sequence !=
+            std::numeric_limits<
+                AbilityCastSequence>::max()) {
+        sanitized.wind.remaining_seconds =
+            std::clamp(
+                requested.wind.remaining_seconds,
+                0.0F,
+                kMaximumSavedAbilityRuntimeSeconds);
+        sanitized.wind.movement_bonus =
+            finite_clamp(
+                requested.wind.movement_bonus,
+                0.0F,
+                kMaximumTemporaryMovementSpeedBonus);
+        sanitized.wind.recovery_bonus =
+            finite_clamp(
+                requested.wind.recovery_bonus,
+                0.0F,
+                kMaximumTemporaryRecoverySpeedBonus);
+        sanitized.wind.dodge_remaining_seconds =
+            finite_clamp(
+                requested.wind
+                    .dodge_remaining_seconds,
+                0.0F,
+                sanitized.wind.remaining_seconds);
+        sanitized.wind.blade_armed =
+            requested.wind.blade_armed;
+        sanitized.wind.cast_sequence =
+            requested.wind.cast_sequence;
+    }
+
+    const auto rank_is_valid =
+        [](SummonedUnitRank rank) noexcept {
+            return rank ==
+                       SummonedUnitRank::RankOne ||
+                   rank ==
+                       SummonedUnitRank::RankTwo ||
+                   rank ==
+                       SummonedUnitRank::RankThree;
+        };
+    const auto positive_bounded =
+        [](float value,
+           float maximum) noexcept {
+            return std::isfinite(value) &&
+                   value > 0.0F &&
+                   value <= maximum;
+        };
+    const auto stats_are_valid =
+        [&positive_bounded](
+            const SummonedUnitStats& stats) noexcept {
+            if (!positive_bounded(
+                    stats.duration_seconds,
+                    kSummonedUnitMaximumDurationSeconds) ||
+                !positive_bounded(
+                    stats.maximum_health,
+                    kSummonedUnitMaximumResolvedStat) ||
+                !std::isfinite(
+                    stats.attack_damage) ||
+                stats.attack_damage < 0.0F ||
+                stats.attack_damage >
+                    kSummonedUnitMaximumResolvedStat ||
+                !positive_bounded(
+                    stats.attack_interval_seconds,
+                    kSummonedUnitMaximumDurationSeconds) ||
+                stats.attack_interval_seconds <
+                    kSummonedUnitMinimumIntervalSeconds ||
+                !std::isfinite(
+                    stats.mastery_damage_reduction) ||
+                stats.mastery_damage_reduction < 0.0F ||
+                stats.mastery_damage_reduction > 1.0F ||
+                !positive_bounded(
+                    stats.mastery_survival_health,
+                    stats.maximum_health) ||
+                !positive_bounded(
+                    stats.mastery_damage_reduction_seconds,
+                    kSummonedUnitMaximumDurationSeconds)) {
+                return false;
+            }
+
+            const auto taunt_is_valid =
+                std::isfinite(
+                    stats.taunt_interval_seconds) &&
+                stats.taunt_interval_seconds >= 0.0F &&
+                stats.taunt_interval_seconds <=
+                    kSummonedUnitMaximumDurationSeconds &&
+                std::isfinite(
+                    stats.taunt_radius) &&
+                stats.taunt_radius >= 0.0F &&
+                stats.taunt_radius <=
+                    kSummonedUnitMaximumRadius &&
+                (!stats.has_light_taunt ||
+                 (stats.taunt_interval_seconds >=
+                      kSummonedUnitMinimumIntervalSeconds &&
+                  stats.taunt_radius > 0.0F));
+            const auto projectile_is_valid =
+                std::isfinite(
+                    stats
+                        .projectile_block_interval_seconds) &&
+                stats
+                        .projectile_block_interval_seconds >=
+                    0.0F &&
+                stats
+                        .projectile_block_interval_seconds <=
+                    kSummonedUnitMaximumDurationSeconds &&
+                (!stats.has_projectile_block ||
+                 stats
+                         .projectile_block_interval_seconds >=
+                     kSummonedUnitMinimumIntervalSeconds);
+            return taunt_is_valid &&
+                   projectile_is_valid;
+        };
+    const auto event_epsilon =
+        [](double first,
+           double second) noexcept {
+            constexpr auto absolute = 1.0e-7;
+            constexpr auto relative =
+                static_cast<double>(
+                    std::numeric_limits<
+                        float>::epsilon()) *
+                4.0;
+            return std::max(
+                absolute,
+                std::max(
+                    std::abs(first),
+                    std::abs(second)) *
+                    relative);
+        };
+
+    auto used_ids =
+        std::array<
+            SummonedUnitId,
+            kMaximumSavedPlayerSummons> {};
+    auto used_cast_sequences =
+        std::array<
+            AbilityCastSequence,
+            kMaximumSavedPlayerSummons> {};
+    auto used_count = std::size_t {0U};
+    auto maximum_unit_id =
+        SummonedUnitId {0U};
+    auto maximum_cast_sequence =
+        std::max(
+            sanitized.player_effects
+                .iron_guard_cast_sequence,
+            sanitized.wind.cast_sequence);
+
+    for (std::size_t index = 0U;
+         index <
+         requested.summoned_footmen.size();
+         ++index) {
+        const auto& source =
+            requested.summoned_footmen[index];
+        if (!source.runtime.active) {
+            continue;
+        }
+
+        auto runtime = source.runtime;
+        if (runtime.cast_sequence == 0U) {
+            runtime.cast_sequence =
+                source.cast_sequence;
+        }
+        const auto duplicate_id =
+            std::find(
+                used_ids.begin(),
+                used_ids.begin() +
+                    static_cast<
+                        std::ptrdiff_t>(
+                        used_count),
+                runtime.unit_id) !=
+            used_ids.begin() +
+                static_cast<
+                    std::ptrdiff_t>(
+                    used_count);
+        const auto duplicate_cast =
+            std::find(
+                used_cast_sequences.begin(),
+                used_cast_sequences.begin() +
+                    static_cast<
+                        std::ptrdiff_t>(
+                        used_count),
+                runtime.cast_sequence) !=
+            used_cast_sequences.begin() +
+                static_cast<
+                    std::ptrdiff_t>(
+                    used_count);
+        const auto critical_state_valid =
+            runtime.unit_id != 0U &&
+            runtime.unit_id !=
+                std::numeric_limits<
+                    SummonedUnitId>::max() &&
+            runtime.cast_sequence != 0U &&
+            runtime.cast_sequence !=
+                std::numeric_limits<
+                    AbilityCastSequence>::max() &&
+            !duplicate_id &&
+            !duplicate_cast &&
+            finite_position(runtime.position) &&
+            rank_is_valid(runtime.rank) &&
+            stats_are_valid(runtime.stats) &&
+            std::isfinite(runtime.age_seconds) &&
+            runtime.age_seconds >= 0.0 &&
+            std::isfinite(runtime.health) &&
+            runtime.health > 0.0F;
+        if (!critical_state_valid) {
+            continue;
+        }
+        const auto duration =
+            static_cast<double>(
+                runtime.stats.duration_seconds);
+        if (runtime.age_seconds >=
+            duration -
+                event_epsilon(
+                    runtime.age_seconds,
+                    duration)) {
+            continue;
+        }
+
+        runtime.health =
+            std::min(
+                runtime.health,
+                runtime.stats.maximum_health);
+        const auto sanitize_next_event =
+            [&event_epsilon](
+                double value,
+                double age,
+                float interval) noexcept {
+                const auto maximum =
+                    age +
+                    static_cast<double>(
+                        interval);
+                const auto epsilon =
+                    event_epsilon(
+                        value,
+                        maximum);
+                if (!std::isfinite(value) ||
+                    value <= age + epsilon ||
+                    value >
+                        maximum + epsilon) {
+                    return age +
+                           static_cast<double>(
+                               interval);
+                }
+                return value;
+            };
+        runtime.next_attack_seconds =
+            sanitize_next_event(
+                runtime.next_attack_seconds,
+                runtime.age_seconds,
+                runtime.stats
+                    .attack_interval_seconds);
+        if (runtime.stats.has_light_taunt) {
+            runtime.next_taunt_seconds =
+                sanitize_next_event(
+                    runtime.next_taunt_seconds,
+                    runtime.age_seconds,
+                    runtime.stats
+                        .taunt_interval_seconds);
+        } else if (
+            !std::isfinite(
+                runtime.next_taunt_seconds) ||
+            runtime.next_taunt_seconds < 0.0) {
+            runtime.next_taunt_seconds =
+                static_cast<double>(
+                    runtime.stats
+                        .taunt_interval_seconds);
+        }
+
+        runtime.projectile_block_cooldown =
+            runtime.stats.has_projectile_block
+                ? finite_clamp(
+                      runtime
+                          .projectile_block_cooldown,
+                      0.0F,
+                      runtime.stats
+                          .projectile_block_interval_seconds)
+                : 0.0F;
+        runtime.mastery_damage_reduction_seconds =
+            runtime.mastered
+                ? finite_clamp(
+                      runtime
+                          .mastery_damage_reduction_seconds,
+                      0.0F,
+                      runtime.stats
+                          .mastery_damage_reduction_seconds)
+                : 0.0F;
+        runtime.yaw_radians =
+            std::isfinite(
+                runtime.yaw_radians)
+                ? runtime.yaw_radians
+                : 0.0F;
+        const auto maximum_animation_time =
+            runtime.age_seconds +
+            event_epsilon(
+                runtime.animation_time,
+                runtime.age_seconds);
+        runtime.animation_time =
+            std::isfinite(
+                runtime.animation_time) &&
+                    runtime.animation_time >= 0.0F &&
+                    static_cast<double>(
+                        runtime.animation_time) <=
+                        maximum_animation_time
+                ? runtime.animation_time
+                : static_cast<float>(
+                      runtime.age_seconds);
+        const auto sanitize_last_event =
+            [&event_epsilon](
+                double value,
+                double age) noexcept {
+                if (value == -1.0) {
+                    return value;
+                }
+                return !std::isfinite(value) ||
+                               value < 0.0 ||
+                               value >
+                                   age +
+                                       event_epsilon(
+                                           value,
+                                           age)
+                           ? -1.0
+                           : value;
+            };
+        runtime.last_attack_event_seconds =
+            sanitize_last_event(
+                runtime.last_attack_event_seconds,
+                runtime.age_seconds);
+        runtime.last_taunt_event_seconds =
+            sanitize_last_event(
+                runtime.last_taunt_event_seconds,
+                runtime.age_seconds);
+        runtime.death_refusal_used =
+            runtime.mastered &&
+            runtime.death_refusal_used;
+        runtime.pending_mastery_taunt =
+            runtime.mastered &&
+            runtime.death_refusal_used &&
+            runtime.pending_mastery_taunt;
+
+        auto& destination =
+            sanitized.summoned_footmen[index];
+        destination.runtime = runtime;
+        destination.cast_sequence =
+            runtime.cast_sequence;
+        destination.far_seconds =
+            finite_clamp(
+                source.far_seconds,
+                0.0F,
+                kMaximumSavedAbilityRuntimeSeconds);
+        if (source.ship_local_position
+                .has_value() &&
+            finite_position(
+                *source.ship_local_position)) {
+            destination.ship_local_position =
+                source.ship_local_position;
+        }
+
+        used_ids[used_count] =
+            runtime.unit_id;
+        used_cast_sequences[used_count] =
+            runtime.cast_sequence;
+        ++used_count;
+        maximum_unit_id =
+            std::max(
+                maximum_unit_id,
+                runtime.unit_id);
+        maximum_cast_sequence =
+            std::max(
+                maximum_cast_sequence,
+                runtime.cast_sequence);
+    }
+
+    const auto minimum_next_unit_id =
+        maximum_unit_id + 1U;
+    sanitized.next_summoned_unit_id =
+        std::max(
+            requested.next_summoned_unit_id,
+            std::max(
+                minimum_next_unit_id,
+                SummonedUnitId {1U}));
+    const auto minimum_next_cast_sequence =
+        maximum_cast_sequence + 1U;
+    sanitized.next_cast_sequence =
+        std::max(
+            requested.next_cast_sequence,
+            std::max(
+                minimum_next_cast_sequence,
+                AbilityCastSequence {1U}));
+    return sanitized;
+}
+
 auto save_slot_file_path(const std::filesystem::path& root_directory, std::size_t slot_index) -> std::filesystem::path {
     if (slot_index >= kSaveSlotCount) {
         return {};
@@ -1001,11 +2213,23 @@ auto load_save_slot(const std::filesystem::path& root_directory,
         return std::nullopt;
     }
     if (version >= kSaveVersionPlayerProgression) {
-        if (!read_player_progression(reader, snapshot.progression)) {
+        if (!read_player_progression(reader, snapshot.progression, version)) {
             return std::nullopt;
         }
     } else {
         snapshot.progression = {};
+    }
+    if (version >=
+        kSaveVersionProgressionBuilds) {
+        if (!read_player_build_state(
+                reader,
+                snapshot.player_build,
+                snapshot.progression.level,
+                version)) {
+            return std::nullopt;
+        }
+    } else {
+        snapshot.player_build = {};
     }
     if (version >= kSaveVersionGameMode) {
         if (!read_sea_adventure_state(reader, snapshot.sea_adventure, version)) {
@@ -1014,6 +2238,24 @@ auto load_save_slot(const std::filesystem::path& root_directory,
     } else {
         snapshot.metadata.game_mode = GameMode::ClassicAdventure;
         snapshot.sea_adventure = {};
+    }
+    if (version >=
+        kSaveVersionRuntimeState) {
+        if (!read_maritime_experience_state(
+                reader,
+                snapshot.maritime_experience) ||
+            !read_player_ability_runtime_state(
+                reader,
+                snapshot.player_ability_runtime)) {
+            return std::nullopt;
+        }
+    } else {
+        // Je marque uniquement les jalons déductibles de l'ancien état : je
+        // n'accorde aucune XP au chargement et je laisse les runtimes absents.
+        snapshot.maritime_experience =
+            derive_legacy_maritime_experience_state(
+                snapshot.sea_adventure);
+        snapshot.player_ability_runtime = {};
     }
     if (!report_load_progress(input, total_bytes, SaveLoadPhase::ReadingPlayer, progress_callback)) {
         return std::nullopt;
@@ -1098,6 +2340,7 @@ auto load_save_slot(const std::filesystem::path& root_directory,
     snapshot.world_save_plan.chunks.reserve(chunk_count);
     for (std::uint32_t chunk_number = 0; chunk_number < chunk_count; ++chunk_number) {
         WorldSavePlanChunk chunk_plan {};
+        auto sparse_encoding = false;
         if (!reader.read_value(chunk_plan.coord.x) ||
             !reader.read_value(chunk_plan.coord.z) ||
             !is_safe_saved_chunk_coord(chunk_plan.coord)) {
@@ -1110,8 +2353,12 @@ auto load_save_slot(const std::filesystem::path& root_directory,
             }
             const auto encoding = static_cast<SavedChunkEncoding>(raw_encoding);
             if (encoding == SavedChunkEncoding::Sparse) {
+                sparse_encoding = true;
                 auto sparse_count = std::uint32_t {0};
-                if (!reader.read_value(sparse_count) || sparse_count == 0U || sparse_count > kChunkVolume) {
+                if (!reader.read_value(sparse_count) ||
+                    sparse_count > kChunkVolume ||
+                    (sparse_count == 0U &&
+                     version < kSaveVersionProgressionBuilds)) {
                     return std::nullopt;
                 }
                 chunk_plan.sparse_cells.resize(sparse_count);
@@ -1130,48 +2377,76 @@ auto load_save_slot(const std::filesystem::path& root_directory,
                     }
                     previous_index = index;
                     if ((cell_number & 255U) == 255U &&
-                        !report_load_progress(input, total_bytes, SaveLoadPhase::ReadingWorld, progress_callback)) {
+                            !report_load_progress(input, total_bytes, SaveLoadPhase::ReadingWorld, progress_callback)) {
                         return std::nullopt;
                     }
                 }
-                snapshot.world_save_plan.chunks.push_back(std::move(chunk_plan));
-                if (!report_load_progress(input, total_bytes, SaveLoadPhase::ReadingWorld, progress_callback)) {
+            }
+            if (encoding != SavedChunkEncoding::Dense &&
+                encoding != SavedChunkEncoding::Sparse) {
+                return std::nullopt;
+            }
+        }
+
+        if (!sparse_encoding) {
+            chunk_plan.dense_blocks.resize(kChunkVolume);
+            chunk_plan.dense_water_state.resize(kChunkVolume);
+            if (!reader.read_bytes(
+                    chunk_plan.dense_blocks.data(),
+                    chunk_plan.dense_blocks.size() *
+                        sizeof(BlockId))) {
+                return std::nullopt;
+            }
+            if (version >= kSaveVersionWaterState) {
+                if (!reader.read_bytes(
+                        chunk_plan.dense_water_state.data(),
+                        chunk_plan.dense_water_state.size() *
+                            sizeof(WaterState))) {
                     return std::nullopt;
                 }
-                continue;
-            }
-            if (encoding != SavedChunkEncoding::Dense) {
-                return std::nullopt;
+            } else {
+                std::fill(
+                    chunk_plan.dense_water_state.begin(),
+                    chunk_plan.dense_water_state.end(),
+                    WaterState {0});
+                for (std::size_t block_index = 0;
+                     block_index <
+                     chunk_plan.dense_blocks.size();
+                     ++block_index) {
+                    auto& block_id =
+                        chunk_plan.dense_blocks[
+                            block_index];
+                    if (block_id !=
+                        to_block_id(
+                            BlockType::Water)) {
+                        continue;
+                    }
+                    chunk_plan.dense_water_state[
+                        block_index] =
+                        make_water_state(
+                            kMaxWaterLevel,
+                            true);
+                    block_id =
+                        to_block_id(
+                            BlockType::Air);
+                }
             }
         }
 
-        chunk_plan.dense_blocks.resize(kChunkVolume);
-        chunk_plan.dense_water_state.resize(kChunkVolume);
-        if (!reader.read_bytes(chunk_plan.dense_blocks.data(), chunk_plan.dense_blocks.size() * sizeof(BlockId))) {
-            return std::nullopt;
-        }
-        if (version >= kSaveVersionWaterState) {
+        if (version >= kSaveVersionProgressionBuilds) {
             if (!reader.read_bytes(
-                    chunk_plan.dense_water_state.data(),
-                    chunk_plan.dense_water_state.size() * sizeof(WaterState))) {
+                    chunk_plan.player_placed_mask.data(),
+                    chunk_plan.player_placed_mask.size())) {
                 return std::nullopt;
             }
-            snapshot.world_save_plan.chunks.push_back(std::move(chunk_plan));
-            if (!report_load_progress(input, total_bytes, SaveLoadPhase::ReadingWorld, progress_callback)) {
+            if (sparse_encoding &&
+                chunk_plan.sparse_cells.empty() &&
+                world_player_placed_mask_empty(
+                    chunk_plan.player_placed_mask)) {
                 return std::nullopt;
             }
-            continue;
         }
 
-        std::fill(chunk_plan.dense_water_state.begin(), chunk_plan.dense_water_state.end(), WaterState {0});
-        for (std::size_t block_index = 0; block_index < chunk_plan.dense_blocks.size(); ++block_index) {
-            auto& block_id = chunk_plan.dense_blocks[block_index];
-            if (block_id != to_block_id(BlockType::Water)) {
-                continue;
-            }
-            chunk_plan.dense_water_state[block_index] = make_water_state(kMaxWaterLevel, true);
-            block_id = to_block_id(BlockType::Air);
-        }
         snapshot.world_save_plan.chunks.push_back(std::move(chunk_plan));
         if (!report_load_progress(input, total_bytes, SaveLoadPhase::ReadingWorld, progress_callback)) {
             return std::nullopt;
@@ -1306,7 +2581,19 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
     write_vec3(writer, snapshot.spawn_position);
     write_player_state(writer, snapshot.player_state);
     write_player_progression(writer, snapshot.progression);
+    write_player_build_state(
+        writer,
+        snapshot.player_build,
+        sanitize_player_progression_state(
+            snapshot.progression)
+            .level);
     write_sea_adventure_state(writer, snapshot.sea_adventure);
+    write_maritime_experience_state(
+        writer,
+        snapshot.maritime_experience);
+    write_player_ability_runtime_state(
+        writer,
+        snapshot.player_ability_runtime);
 
     for (const auto& slot : snapshot.hotbar.slots) {
         write_hotbar_slot(writer, slot);
@@ -1343,6 +2630,9 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
             writer.write_bytes(
                 chunk_snapshot.water_state.data(),
                 chunk_snapshot.water_state.size() * sizeof(WaterState));
+            writer.write_bytes(
+                chunk_snapshot.player_placed_mask.data(),
+                chunk_snapshot.player_placed_mask.size());
             if (!writer.ok()) {
                 throw std::runtime_error("Unable to write dense world save chunk");
             }
@@ -1358,6 +2648,9 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
             writer.write_bytes(
                 chunk_plan.dense_water_state.data(),
                 chunk_plan.dense_water_state.size() * sizeof(WaterState));
+            writer.write_bytes(
+                chunk_plan.player_placed_mask.data(),
+                chunk_plan.player_placed_mask.size());
             if (!writer.ok()) {
                 throw std::runtime_error("Unable to write dense world save plan chunk");
             }
@@ -1371,6 +2664,9 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
             writer.write_value(cell.block);
             writer.write_value(cell.water_state);
         }
+        writer.write_bytes(
+            chunk_plan.player_placed_mask.data(),
+            chunk_plan.player_placed_mask.size());
         if (!writer.ok()) {
             throw std::runtime_error("Unable to write sparse world save plan chunk");
         }

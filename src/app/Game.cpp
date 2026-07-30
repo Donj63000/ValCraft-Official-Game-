@@ -1,12 +1,16 @@
 #include "app/Game.h"
 #include "app/SmokeCamera.h"
+#include "app/StreamingFocus.h"
 #include "app/GameBranding.h"
 #include "app/InputBindings.h"
 #include "app/GameLoop.h"
 #include "gameplay/StartingPort.h"
+#include "gameplay/progression/VanguardTargeting.h"
 #include "player/PlayerGeometry.h"
+#include "render/SeaHorizon.h"
 #include "render/ShipMesh.h"
 #include "render/StylizedShipMesh.h"
+#include "world/OceanAdventureLayout.h"
 #include "world/OceanSimulation.h"
 
 #include <glm/geometric.hpp>
@@ -194,6 +198,314 @@ auto block_coord_from_position(const glm::vec3& position) noexcept -> BlockCoord
         static_cast<int>(std::floor(position.y)),
         static_cast<int>(std::floor(position.z)),
     };
+}
+
+auto ability_cast_failure_detail(
+    AbilityCastFailure failure) noexcept
+    -> std::string_view {
+    switch (failure) {
+    case AbilityCastFailure::None:
+        return "LANCEMENT REUSSI";
+    case AbilityCastFailure::UnimplementedAbility:
+        return "COMPETENCE EN PREPARATION";
+    case AbilityCastFailure::AbilityNotLearned:
+        return "COMPETENCE NON APPRISE";
+    case AbilityCastFailure::AbilityNotEquipped:
+        return "COMPETENCE NON EQUIPEE";
+    case AbilityCastFailure::GlobalCooldown:
+    case AbilityCastFailure::Cooldown:
+    case AbilityCastFailure::NoCharges:
+        return "RECHARGE EN COURS";
+    case AbilityCastFailure::InsufficientEnergy:
+        return "PAS ASSEZ D'ENERGIE";
+    case AbilityCastFailure::InvalidTarget:
+    case AbilityCastFailure::TargetOutOfRange:
+        return "CIBLE INVALIDE";
+    case AbilityCastFailure::MovingShipConstruction:
+        return "CONSTRUCTION IMPOSSIBLE A BORD";
+    case AbilityCastFailure::InvalidConstructionPlan:
+        return "PLAN DE CHANTIER INVALIDE";
+    case AbilityCastFailure::ExternalValidationRejected:
+        return "ZONE NON CHARGEE";
+    case AbilityCastFailure::ExternalCommitRejected:
+        return "ACTION REFUSEE";
+    case AbilityCastFailure::InvalidAbility:
+    case AbilityCastFailure::PassiveAbility:
+    case AbilityCastFailure::MissingCommitter:
+    default:
+        return "COMPETENCE INVALIDE";
+    }
+}
+
+auto construction_plan_editor_failure_text(
+    ConstructionPlanEditorFailure failure) noexcept
+    -> std::string_view {
+    switch (failure) {
+    case ConstructionPlanEditorFailure::InvalidMaterial:
+        return "MATERIAU INVALIDE OU ABSENT";
+    case ConstructionPlanEditorFailure::PlanFull:
+        return "LIMITE DU RANG ATTEINTE";
+    case ConstructionPlanEditorFailure::CellMissing:
+        return "AUCUNE CELLULE ICI";
+    case ConstructionPlanEditorFailure::MirrorLocked:
+        return "MAITRISE REQUISE POUR LE MIROIR";
+    case ConstructionPlanEditorFailure::ConcurrentBuildMutation:
+        return "BUILD MODIFIE - ROUVRE LE PLAN";
+    case ConstructionPlanEditorFailure::InvalidPlan:
+    case ConstructionPlanEditorFailure::InvalidShape:
+        return "PLAN INVALIDE";
+    case ConstructionPlanEditorFailure::Inactive:
+    case ConstructionPlanEditorFailure::None:
+    default:
+        return "ACTION DE PLAN REFUSEE";
+    }
+}
+
+auto inventory_material_count(
+    const InventoryMenuState& inventory,
+    const HotbarState& hotbar,
+    BlockId block_id) noexcept -> std::uint32_t {
+    const auto item_id =
+        block_item_id(block_id);
+    auto total = std::uint32_t {0U};
+    const auto accumulate =
+        [&](const HotbarSlot& slot) noexcept {
+            if (inventory_slot_has_item(slot) &&
+                block_item_id(slot.block_id) ==
+                    item_id) {
+                total += slot.count;
+            }
+        };
+    for (const auto& slot : hotbar.slots) {
+        accumulate(slot);
+    }
+    for (const auto& slot :
+         inventory.storage_slots) {
+        accumulate(slot);
+    }
+    if (inventory.carrying_item) {
+        accumulate(inventory.carried_slot);
+    }
+    return total;
+}
+
+auto consume_inventory_materials(
+    InventoryMenuState& inventory,
+    HotbarState& hotbar,
+    BlockId block_id,
+    std::uint32_t count) noexcept -> bool {
+    if (inventory_material_count(
+            inventory,
+            hotbar,
+            block_id) < count) {
+        return false;
+    }
+    const auto item_id =
+        block_item_id(block_id);
+    auto remaining = count;
+    const auto consume =
+        [&](HotbarSlot& slot) noexcept {
+            if (remaining == 0U ||
+                !inventory_slot_has_item(slot) ||
+                block_item_id(slot.block_id) !=
+                    item_id) {
+                return;
+            }
+            const auto removed =
+                std::min<std::uint32_t>(
+                    remaining,
+                    slot.count);
+            static_cast<void>(
+                inventory_take_from_slot(
+                    slot,
+                    static_cast<std::uint8_t>(
+                        removed)));
+            remaining -= removed;
+        };
+    for (auto& slot : hotbar.slots) {
+        consume(slot);
+    }
+    for (auto& slot :
+         inventory.storage_slots) {
+        consume(slot);
+    }
+    if (inventory.carrying_item) {
+        consume(inventory.carried_slot);
+    }
+    normalize_inventory_state(
+        inventory,
+        hotbar);
+    return remaining == 0U;
+}
+
+auto horizontal_distance_squared(
+    const glm::vec3& lhs,
+    const glm::vec3& rhs) noexcept -> float {
+    const auto dx = lhs.x - rhs.x;
+    const auto dz = lhs.z - rhs.z;
+    return dx * dx + dz * dz;
+}
+
+[[nodiscard]] auto horizontal_segment_distance_squared(
+    const glm::vec3& point,
+    const glm::vec3& segment_start,
+    const glm::vec3& segment_end) noexcept -> float {
+    const auto segment =
+        glm::vec2 {
+            segment_end.x - segment_start.x,
+            segment_end.z - segment_start.z,
+        };
+    const auto relative =
+        glm::vec2 {
+            point.x - segment_start.x,
+            point.z - segment_start.z,
+        };
+    const auto length_squared =
+        glm::dot(segment, segment);
+    const auto projection =
+        length_squared > 1.0e-6F
+            ? std::clamp(
+                  glm::dot(relative, segment) /
+                      length_squared,
+                  0.0F,
+                  1.0F)
+            : 0.0F;
+    const auto closest =
+        segment_start +
+        glm::vec3 {
+            segment.x * projection,
+            0.0F,
+            segment.y * projection,
+        };
+    return horizontal_distance_squared(
+        point,
+        closest);
+}
+
+[[nodiscard]] auto is_construction_plan_material(
+    BlockId block_id) noexcept -> bool {
+    block_id =
+        block_item_id(
+            block_id);
+    return is_placeable_item(block_id) &&
+           block_id != to_block_id(BlockType::Air) &&
+           block_id != to_block_id(BlockType::Water) &&
+           !is_torch_block(block_id) &&
+           is_block_collidable(block_id);
+}
+
+[[nodiscard]] auto cycle_construction_plan_material(
+    const InventoryMenuState& inventory,
+    const HotbarState& hotbar,
+    std::uint16_t current_material,
+    int direction) noexcept
+    -> std::optional<std::uint16_t> {
+    std::array<std::uint16_t, 256U>
+        materials {};
+    auto material_count =
+        std::size_t {0U};
+    for (std::uint32_t raw = 0U;
+         raw <=
+         static_cast<std::uint32_t>(
+             std::numeric_limits<
+                 BlockId>::max());
+         ++raw) {
+        const auto block_id =
+            static_cast<BlockId>(raw);
+        if (!is_construction_plan_material(
+                block_id) ||
+            inventory_material_count(
+                inventory,
+                hotbar,
+                block_id) == 0U) {
+            continue;
+        }
+        materials[material_count++] =
+            static_cast<std::uint16_t>(
+                block_id);
+    }
+    if (material_count == 0U) {
+        return std::nullopt;
+    }
+
+    auto current_index =
+        material_count;
+    for (std::size_t index = 0U;
+         index < material_count;
+         ++index) {
+        if (materials[index] ==
+            current_material) {
+            current_index = index;
+            break;
+        }
+    }
+    if (current_index ==
+        material_count) {
+        return direction < 0
+                   ? materials[
+                         material_count - 1U]
+                   : materials[0U];
+    }
+    const auto offset =
+        direction < 0
+            ? material_count - 1U
+            : 1U;
+    return materials[
+        (current_index + offset) %
+        material_count];
+}
+
+[[nodiscard]] auto block_overlaps_actor(
+    const BlockCoord& block,
+    const glm::vec3& feet,
+    float half_width,
+    float height) noexcept -> bool {
+    const auto block_min =
+        glm::vec3 {
+            static_cast<float>(block.x),
+            static_cast<float>(block.y),
+            static_cast<float>(block.z),
+        };
+    const auto block_max =
+        block_min + glm::vec3 {1.0F};
+    const auto actor_min =
+        feet +
+        glm::vec3 {
+            -half_width,
+            0.0F,
+            -half_width,
+        };
+    const auto actor_max =
+        feet +
+        glm::vec3 {
+            half_width,
+            height,
+            half_width,
+        };
+    return actor_min.x < block_max.x &&
+           actor_max.x > block_min.x &&
+           actor_min.y < block_max.y &&
+           actor_max.y > block_min.y &&
+           actor_min.z < block_max.z &&
+           actor_max.z > block_min.z;
+}
+
+[[nodiscard]] auto ability_display_title(
+    AbilityId id) noexcept -> std::string_view {
+    switch (id) {
+    case AbilityId::KnightVanguardStrike:
+        return "FRAPPE DU VANGUARD";
+    case AbilityId::KnightIronGuard:
+        return "GARDE DE FER";
+    case AbilityId::NinjaWindAcceleration:
+        return "ACCELERATION DU VENT";
+    case AbilityId::CommanderFootman:
+        return "FANTASSIN INVOQUE";
+    case AbilityId::BuilderConstructionPlan:
+        return "PLAN DE CHANTIER";
+    default:
+        return "POUVOIR RUNIQUE";
+    }
 }
 
 auto executable_directory_from_sdl() -> std::filesystem::path {
@@ -474,6 +786,13 @@ auto Game::run() -> int {
             frame_stats.render_preparation_ms =
                 std::chrono::duration<double, std::milli>(clock::now() - render_preparation_begin).count();
 
+            renderer_.set_progression_hud(
+                progression_menu_.make_view_model(
+                    player_build_,
+                    progression_.level()),
+                player_build_);
+            rebuild_progression_creature_render_instances(
+                environment_state);
             const auto render_begin = clock::now();
             renderer_.render_frame(
                 world_,
@@ -487,7 +806,7 @@ auto Game::run() -> int {
                 save_slot_menu_,
                 options_menu_,
                 confirm_dialog_,
-                creatures_.render_instances(),
+                progression_creature_render_instances_,
                 sea_adventure_.crew_render_instances(),
                 sea_adventure_.old_guard_render_instances(),
                 sea_adventure_.old_guard_flashes(),
@@ -533,6 +852,12 @@ auto Game::run() -> int {
                 frame_stats.gpu_world_ms = render_stats.gpu.opaque_ms;
                 frame_stats.gpu_sky_ms = render_stats.gpu.sky_ms;
                 frame_stats.gpu_water_ms = render_stats.gpu.water_ms;
+                frame_stats.gpu_water_resolve_ms =
+                    render_stats.gpu.water_resolve_ms;
+                frame_stats.gpu_water_surface_ms =
+                    render_stats.gpu.water_surface_ms;
+                frame_stats.gpu_transparent_weather_ms =
+                    render_stats.gpu.transparent_weather_ms;
                 frame_stats.gpu_entities_ms = render_stats.gpu.entities_ms;
                 frame_stats.gpu_post_process_ms = render_stats.gpu.post_process_ms;
                 frame_stats.gpu_hud_ms = render_stats.gpu.ui_ms;
@@ -1023,6 +1348,9 @@ void Game::process_events() {
                 refresh_pause_menu_hover();
                 break;
             }
+            if (progression_menu_.visible()) {
+                break;
+            }
             if (mouse_captured_) {
                 const auto aim_ratio =
                     selected_musket_active()
@@ -1137,6 +1465,9 @@ void Game::process_events() {
                 }
                 break;
             }
+            if (progression_menu_.visible()) {
+                break;
+            }
             if (!mouse_captured_) {
                 set_mouse_capture(true);
                 record_audit_event(
@@ -1215,6 +1546,7 @@ void Game::process_events() {
             break;
         case SDL_MOUSEWHEEL: {
             if (confirm_dialog_.visible || death_screen_visible_ || paused_ || inventory_visible_ ||
+                progression_menu_.visible() ||
                 save_slot_menu_.visible || options_menu_.visible || main_menu_.visible) {
                 break;
             }
@@ -1404,6 +1736,19 @@ void Game::process_events() {
                 break;
             }
 
+            if (progression_menu_.visible()) {
+                handle_progression_menu_keydown(
+                    event.key);
+                break;
+            }
+
+            if (event.key.repeat == 0 &&
+                is_progression_menu_key(
+                    event.key.keysym)) {
+                set_progression_menu_visible(true);
+                break;
+            }
+
             if (event.key.keysym.sym == SDLK_ESCAPE) {
                 set_paused(!paused_);
                 record_audit_event(
@@ -1452,6 +1797,13 @@ void Game::process_events() {
                         {"visible", audit_json_bool(inventory_visible_)},
                     }),
                     AuditPriority::Normal);
+            } else if (const auto ability_slot =
+                           ability_slot_from_key(
+                               event.key.keysym);
+                       ability_slot.has_value() &&
+                       event.key.repeat == 0) {
+                pending_ability_slot_ =
+                    *ability_slot;
             } else if (
                 is_reload_action_key(
                     event.key.keysym) &&
@@ -1565,13 +1917,94 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         return;
     }
 
-    if (!options_.smoke_test && (death_screen_visible_ || paused_)) {
+    if (!options_.smoke_test &&
+        (death_screen_visible_ ||
+         paused_ ||
+         progression_menu_.visible())) {
         (void)dt;
         (void)frame_stats;
         return;
     }
 
     update_gameplay_announcements(dt);
+    ability_system_.update(
+        player_build_,
+        dt,
+        player_ability_energy_parameters(
+            player_build_));
+    const auto ability_effect_update =
+        player_ability_effects_.update(
+            dt);
+    if (ability_effect_update
+            .iron_guard_expired) {
+        AbilityEventPayload payload {};
+        payload.ability_id =
+            AbilityId::KnightIronGuard;
+        payload.source_id = 1U;
+        payload.position =
+            player_.position();
+        static_cast<void>(
+            ability_system_
+                .publish_logical_event(
+                    AbilityEventType::Expired,
+                    ability_effect_update
+                        .iron_guard_cast_sequence,
+                    payload));
+    }
+    if (ability_effect_update
+            .expired_effect_count != 0U) {
+        sync_selected_hotbar_slot();
+    }
+    melee_attack_cooldown_remaining_ =
+        std::max(
+            melee_attack_cooldown_remaining_ -
+                dt,
+            0.0F);
+    wind_dodge_remaining_ =
+        std::max(
+            wind_dodge_remaining_ - dt,
+            0.0F);
+    if (seconds_since_successful_shield_block_ >=
+        0.0F) {
+        seconds_since_successful_shield_block_ +=
+            dt;
+        if (seconds_since_successful_shield_block_ >
+            3.0F) {
+            seconds_since_successful_shield_block_ =
+                -1.0F;
+        }
+    }
+    if (wind_acceleration_remaining_ > 0.0F) {
+        wind_acceleration_remaining_ =
+            std::max(
+                wind_acceleration_remaining_ -
+                    dt,
+                0.0F);
+        if (wind_acceleration_remaining_ <=
+            0.0F) {
+            if (wind_acceleration_cast_sequence_ !=
+                0U) {
+                AbilityEventPayload payload {};
+                payload.ability_id =
+                    AbilityId::NinjaWindAcceleration;
+                payload.source_id = 1U;
+                payload.position =
+                    player_.position();
+                static_cast<void>(
+                    ability_system_
+                        .publish_logical_event(
+                            AbilityEventType::Expired,
+                            wind_acceleration_cast_sequence_,
+                            payload));
+                wind_acceleration_cast_sequence_ =
+                    0U;
+            }
+            wind_movement_bonus_ = 0.0F;
+            wind_recovery_bonus_ = 0.0F;
+            wind_blade_available_ = false;
+            sync_selected_hotbar_slot();
+        }
+    }
 
     environment_.set_frozen(options_.freeze_time || options_.smoke_test);
     environment_.update(dt);
@@ -1693,6 +2126,11 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             }
             if (sea_result.fish_caught) {
                 queue_gameplay_announcement("POISSON ATTRAPE", "LA FAIM REMONTE", 2.6F);
+                award_player_experience(
+                    FishingExperienceEvent {},
+                    block_coord_from_position(
+                        player_.position()),
+                    "fishing_common");
             }
             if (sea_result.consumed_food) {
                 queue_gameplay_announcement("VIVRES", "RATION CONSOMMEE", 2.2F);
@@ -1702,16 +2140,59 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             }
             if (sea_result.crew_fish_delivered) {
                 queue_gameplay_announcement("EQUIPAGE", "POISSON RANGE DANS LA CALE", 2.4F);
+                award_player_experience(
+                    FirstDeliveryExperienceEvent {
+                        0U,
+                    },
+                    block_coord_from_position(
+                        player_.position()),
+                    "crew_first_fish_delivery");
             }
             if (sea_result.crew_water_delivered) {
                 queue_gameplay_announcement("EQUIPAGE", "EAU RANGEE DANS LA CALE", 2.4F);
+                award_player_experience(
+                    FirstDeliveryExperienceEvent {
+                        1U,
+                    },
+                    block_coord_from_position(
+                        player_.position()),
+                    "crew_first_water_delivery");
             }
             if (sea_result.departure_started) {
                 queue_gameplay_announcement("LARGUEZ LES AMARRES", "DEPART DU PORT", 3.0F);
+                award_player_experience(
+                    DepartureExperienceEvent {},
+                    block_coord_from_position(
+                        player_.position()),
+                    "sea_departure");
             }
             if (sea_result.reached_open_sea) {
                 queue_gameplay_announcement("CAP SUR LE LARGE", "NAVIGATION DE CROISIERE", 3.0F);
+                award_player_experience(
+                    OpenSeaReachedExperienceEvent {},
+                    block_coord_from_position(
+                        player_.position()),
+                    "open_sea_reached");
             }
+            const auto route_distance =
+                sea_adventure_
+                    .save_state()
+                    .route_distance;
+            const auto route_meters =
+                std::isfinite(route_distance) &&
+                        route_distance > 0.0F
+                    ? static_cast<std::uint64_t>(
+                          std::floor(
+                              static_cast<double>(
+                                  route_distance)))
+                    : 0ULL;
+            award_player_experience(
+                NavigationExperienceEvent {
+                    route_meters,
+                },
+                block_coord_from_position(
+                    player_.position()),
+                "sea_navigation");
             if (sea_result.stranded_warning) {
                 queue_gameplay_announcement("NAVIRE LOINTAIN", "RETOURNE A BORD", 3.0F);
             }
@@ -1720,6 +2201,14 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             }
         } else {
             pending_fishing_ = false;
+        }
+
+        if (gameplay_input_enabled &&
+            !player_.is_dead()) {
+            resolve_pending_player_ability(
+                maritime_session_active);
+        } else {
+            pending_ability_slot_.reset();
         }
 
         const auto musket_active =
@@ -1833,14 +2322,33 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                 1.5F);
         }
 
+        if (pending_primary_attack_ &&
+            melee_attack_cooldown_remaining_ >
+                0.0F) {
+            pending_primary_attack_ = false;
+        }
         if (gameplay_input_enabled &&
             pending_primary_attack_ &&
-            !player_.is_dead()) {
+            !player_.is_dead() &&
+            melee_attack_cooldown_remaining_ <=
+                0.0F) {
 
             pending_primary_attack_ = false;
             if (const auto weapon = inventory_active_weapon_stats(inventory_menu_, hotbar_); weapon.has_value()) {
                 player_.trigger_primary_action();
                 music_.play_sfx(GameSfxKind::SwordSwing, 0.72F);
+                const auto agility =
+                    player_attribute_value(
+                        player_build_.attributes,
+                        PlayerAttribute::Agility);
+                melee_attack_cooldown_remaining_ =
+                    0.22F /
+                    std::max(
+                        0.25F,
+                        player_melee_recovery_multiplier(
+                            agility) *
+                            (1.0F +
+                             wind_recovery_bonus_));
                 player_.cancel_block_breaking();
                 pending_break_block_ = false;
 
@@ -1864,7 +2372,45 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     }
                 }
 
-                const auto damage = weapon->damage * progression_.attack_damage_multiplier();
+                const auto strength =
+                    player_attribute_value(
+                        player_build_.attributes,
+                        PlayerAttribute::Strength);
+                const auto damage =
+                    weapon->damage *
+                    player_melee_damage_multiplier(
+                        progression_.level(),
+                        strength);
+                const auto wind_blade_was_armed =
+                    std::exchange(
+                        wind_blade_available_,
+                        false);
+                const auto wind_rank =
+                    player_ability_rank(
+                        player_build_,
+                        AbilityId::
+                            NinjaWindAcceleration);
+                const auto* wind_rank_definition =
+                    ability_rank_definition(
+                        AbilityId::
+                            NinjaWindAcceleration,
+                        wind_rank);
+                const auto wind_blade_damage =
+                    wind_rank_definition != nullptr
+                        ? std::max(
+                              wind_rank_definition
+                                  ->values[
+                                      kWindBladeDamageValueIndex],
+                              0.0F)
+                        : 0.0F;
+                const auto wind_blade_range =
+                    wind_rank_definition != nullptr
+                        ? std::max(
+                              wind_rank_definition
+                                  ->values[
+                                      kWindBladeRangeValueIndex],
+                              0.0F)
+                        : 0.0F;
                 const auto old_guard_hit =
                     maritime_session_active
                         ? sea_adventure_.intercept_old_guard(
@@ -1911,21 +2457,8 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                         music_.play_sfx(hit_result.killed ? GameSfxKind::CreatureDeath : GameSfxKind::CreatureHit,
                                         hit_result.killed ? 0.88F : 0.72F);
                         if (hit_result.killed) {
-                            if (maritime_session_active &&
-                                sea_adventure_.record_hunt(
-                                    hit_result.species)) {
-
-                                queue_gameplay_announcement(
-                                    "CHASSE",
-                                    "VIANDE RECUPEREE",
-                                    2.4F);
-                            }
-                            grant_player_experience(
-                                creature_kill_experience(
-                                    hit_result.species,
-                                    hit_result.position,
-                                    static_cast<std::uint32_t>(world_.seed()) ^ static_cast<std::uint32_t>(rendered_frames_)),
-                                block_coord_from_position(hit_result.position),
+                            grant_creature_kill_rewards(
+                                hit_result,
                                 "creature_kill");
                         }
                         record_audit_event(
@@ -1938,6 +2471,127 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                                 {"remaining_health", audit_json_number(hit_result.remaining_health)},
                             }),
                             hit_result.killed ? AuditPriority::High : AuditPriority::Normal);
+                        if (wind_blade_was_armed &&
+                            wind_blade_damage > 0.0F &&
+                            wind_blade_range > 0.0F) {
+                            const auto origin =
+                                player_.eye_position();
+                            const auto direction =
+                                safe_drop_direction(
+                                    player_.look_direction());
+                            const auto maximum_projection =
+                                hit_result.distance +
+                                wind_blade_range;
+                            auto selected_id =
+                                CreatureId {0U};
+                            auto selected_projection =
+                                maximum_projection +
+                                1.0F;
+                            for (const auto& candidate :
+                                 creatures_
+                                     .active_creatures()) {
+                                const auto candidate_id =
+                                    creature_id_from_anchor(
+                                        candidate.anchor);
+                                if (candidate_id ==
+                                        hit_result.id ||
+                                    !is_hostile_creature(
+                                        candidate)) {
+                                    continue;
+                                }
+                                const auto aim_position =
+                                    candidate.position +
+                                    glm::vec3 {
+                                        0.0F,
+                                        0.75F,
+                                        0.0F,
+                                    };
+                                const auto delta =
+                                    aim_position -
+                                    origin;
+                                const auto projection =
+                                    glm::dot(
+                                        delta,
+                                        direction);
+                                if (projection <=
+                                        hit_result.distance +
+                                            0.10F ||
+                                    projection >
+                                        maximum_projection) {
+                                    continue;
+                                }
+                                const auto lateral =
+                                    delta -
+                                    direction *
+                                        projection;
+                                if (glm::dot(
+                                        lateral,
+                                        lateral) >
+                                    0.90F * 0.90F) {
+                                    continue;
+                                }
+                                const auto target_distance =
+                                    glm::length(delta);
+                                if (!std::isfinite(
+                                        target_distance) ||
+                                    target_distance <=
+                                        0.06F) {
+                                    continue;
+                                }
+                                const auto target_ray =
+                                    delta /
+                                    target_distance;
+                                const auto maximum_ray =
+                                    target_distance -
+                                    0.06F;
+                                const auto obstruction =
+                                    world_
+                                        .raycast_collidable(
+                                            origin,
+                                            target_ray,
+                                            maximum_ray);
+                                if (obstruction.hit ||
+                                    (maritime_session_active &&
+                                     sea_adventure_
+                                         .ship_entity()
+                                         .raycast_collidable_distance(
+                                             origin,
+                                             target_ray,
+                                             maximum_ray)
+                                         .has_value())) {
+                                    continue;
+                                }
+                                if (projection <
+                                        selected_projection ||
+                                    (projection ==
+                                         selected_projection &&
+                                     candidate_id <
+                                         selected_id)) {
+                                    selected_id =
+                                        candidate_id;
+                                    selected_projection =
+                                        projection;
+                                }
+                            }
+                            if (selected_id != 0U) {
+                                const auto blade =
+                                    creatures_.apply_damage(
+                                        selected_id,
+                                        wind_blade_damage *
+                                            player_ninja_damage_multiplier(
+                                                progression_
+                                                    .level(),
+                                                agility),
+                                        CreatureDamageSource::
+                                            PlayerAbility,
+                                        direction);
+                                if (blade.hit) {
+                                    grant_creature_kill_rewards(
+                                        blade,
+                                        "wind_blade");
+                                }
+                            }
+                        }
                     } else if (old_guard_hit.hit) {
                         // Je laisse le garde invulnerable tout en consommant le
                         // rayon : aucun coup du joueur ne traverse son corps.
@@ -1961,6 +2615,12 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         if (gameplay_input_enabled &&
             pending_break_block_) {
             const auto break_target = player_.current_target(world_);
+            const auto target_was_player_placed =
+                break_target.hit &&
+                world_.was_player_placed(
+                    break_target.block.x,
+                    break_target.block.y,
+                    break_target.block.z);
             const auto tool_speed_multiplier =
                 break_target.hit ? selected_tool_break_speed_multiplier(break_target.block_id) : 1.0F;
             if (const auto broken_block =
@@ -1970,8 +2630,11 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     PerformanceEventKind::BlockBreak,
                     broken_block->block,
                     inventory_item_label(broken_block->block_id));
-                grant_player_experience(
-                    block_break_experience(broken_block->block_id),
+                award_player_experience(
+                    HarvestExperienceEvent {
+                        broken_block->block_id,
+                        target_was_player_placed,
+                    },
                     broken_block->block,
                     "block_break");
                 if (maritime_session_active &&
@@ -2068,6 +2731,9 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
     }
 
     creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
+    update_summoned_footman(
+        dt,
+        maritime_session_active);
     if (maritime_session_active) {
         const auto& guard_events =
             sea_adventure_.update_old_guard_combat(
@@ -2173,8 +2839,342 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
     }
 
     if (!options_.smoke_test) {
-        for (const auto& attack : creatures_.recent_attacks()) {
-            player_.apply_external_damage(attack.damage, PlayerDeathCause::Zombie);
+        const auto trigger_iron_guard_reaction =
+            [&](const IronGuardDamageInterceptionResult&
+                    interception) {
+                const auto& reactive =
+                    interception.reactive;
+                if (!reactive.triggered) {
+                    return;
+                }
+
+                const auto energy =
+                    player_ability_energy_parameters(
+                        player_build_);
+                player_build_.val_energy =
+                    std::min(
+                        energy.maximum_energy,
+                        player_build_.val_energy +
+                            reactive.energy_refund);
+                if (player_build_.revision !=
+                    std::numeric_limits<
+                        std::uint64_t>::max()) {
+                    ++player_build_.revision;
+                }
+
+                std::array<
+                    CreatureId,
+                    kCreatureMaxActiveCount>
+                    wave_targets {};
+                auto wave_target_count =
+                    std::size_t {0U};
+                const auto radius =
+                    std::max(
+                        reactive.wave_radius,
+                        0.0F);
+                for (const auto& creature :
+                     creatures_.active_creatures()) {
+                    if (!is_hostile_creature(
+                            creature) ||
+                        horizontal_distance_squared(
+                            player_.position(),
+                            creature.position) >
+                            radius * radius ||
+                        wave_target_count >=
+                            wave_targets.size()) {
+                        continue;
+                    }
+                    wave_targets[
+                        wave_target_count++] =
+                        creature_id_from_anchor(
+                            creature.anchor);
+                }
+
+                for (std::size_t index = 0U;
+                     index < wave_target_count;
+                     ++index) {
+                    const auto hit =
+                        creatures_.apply_damage(
+                            wave_targets[index],
+                            reactive.wave_damage,
+                            CreatureDamageSource::
+                                PlayerAbility,
+                            player_.look_direction());
+                    grant_creature_kill_rewards(
+                        hit,
+                        "iron_guard_reactive");
+                    if (!hit.hit) {
+                        continue;
+                    }
+                    AbilityEventPayload hit_payload {};
+                    hit_payload.ability_id =
+                        AbilityId::KnightIronGuard;
+                    hit_payload.source_id = 1U;
+                    hit_payload.target_id =
+                        hit.id;
+                    hit_payload.position =
+                        hit.position;
+                    hit_payload.primary_value =
+                        hit.damage;
+                    hit_payload.detail_code =
+                        hit.killed ? 1U : 0U;
+                    static_cast<void>(
+                        ability_system_
+                            .publish_logical_event(
+                                AbilityEventType::Hit,
+                                reactive.cast_sequence,
+                                hit_payload));
+                }
+
+                AbilityEventPayload
+                    blocked_payload {};
+                blocked_payload.ability_id =
+                    AbilityId::KnightIronGuard;
+                blocked_payload.source_id = 1U;
+                blocked_payload.position =
+                    player_.position();
+                blocked_payload.primary_value =
+                    interception.absorbed_damage;
+                blocked_payload.secondary_value =
+                    reactive.energy_refund;
+                blocked_payload.detail_code = 1U;
+                static_cast<void>(
+                    ability_system_
+                        .publish_logical_event(
+                            AbilityEventType::Blocked,
+                            reactive.cast_sequence,
+                            blocked_payload));
+                queue_gameplay_announcement(
+                    "FER REACTIF",
+                    "ONDE DEFENSIVE - 5 EV",
+                    1.4F);
+            };
+
+        for (const auto& attack :
+             creatures_.recent_attacks()) {
+            if (!std::isfinite(attack.damage) ||
+                attack.damage <= 0.0F) {
+                continue;
+            }
+
+            const auto player_target =
+                player_.position() +
+                glm::vec3 {
+                    0.0F,
+                    0.85F,
+                    0.0F,
+                };
+            const auto attack_delta =
+                player_target - attack.origin;
+            const auto attack_distance =
+                glm::length(attack_delta);
+            if (!std::isfinite(attack_distance) ||
+                attack_distance <= 1.0e-4F) {
+                continue;
+            }
+            const auto attack_ray =
+                attack_delta / attack_distance;
+            const auto occlusion_distance =
+                std::max(
+                    attack_distance - 0.06F,
+                    0.0F);
+            if (world_
+                    .raycast_collidable(
+                        attack.origin,
+                        attack_ray,
+                        occlusion_distance)
+                    .hit ||
+                (sea_adventure_.active() &&
+                 sea_adventure_
+                     .ship_entity()
+                     .raycast_collidable_distance(
+                         attack.origin,
+                         attack_ray,
+                         occlusion_distance)
+                     .has_value())) {
+                continue;
+            }
+
+            auto* protecting_footman =
+                static_cast<SummonedUnitSystem*>(
+                    nullptr);
+            auto protecting_distance =
+                0.95F * 0.95F;
+            for (auto& footman :
+                 summoned_footmen_) {
+                const auto state =
+                    footman.state();
+                if (!state.active ||
+                    horizontal_distance_squared(
+                        player_.position(),
+                        state.position) >
+                        3.0F * 3.0F) {
+                    continue;
+                }
+                const auto distance =
+                    horizontal_segment_distance_squared(
+                        state.position,
+                        attack.origin,
+                        player_target);
+                if (distance <=
+                    protecting_distance) {
+                    protecting_distance =
+                        distance;
+                    protecting_footman =
+                        &footman;
+                }
+            }
+            if (protecting_footman != nullptr) {
+                const auto intercepted =
+                    protecting_footman
+                        ->apply_damage({
+                            attack.damage,
+                            attack.kind ==
+                                    CreatureAttackKind::
+                                        Projectile
+                                ? SummonedUnitDamageKind::
+                                      Projectile
+                                : SummonedUnitDamageKind::
+                                      Melee,
+                        });
+                if (intercepted.handled) {
+                    continue;
+                }
+            }
+
+            if (wind_dodge_remaining_ > 0.0F) {
+                wind_dodge_remaining_ = 0.0F;
+                queue_gameplay_announcement(
+                    "ESQUIVE",
+                    "LE VENT DETOURNE L'ATTAQUE",
+                    1.4F);
+                continue;
+            }
+
+            const auto interception =
+                player_ability_effects_
+                    .intercept_iron_guard_damage(
+                        attack.damage);
+            if (interception.absorbed) {
+                trigger_iron_guard_reaction(
+                    interception);
+                continue;
+            }
+            auto remaining_damage =
+                interception.accepted
+                    ? interception
+                          .remaining_damage
+                    : attack.damage;
+
+            auto to_attacker =
+                attack.origin -
+                player_.position();
+            to_attacker.y = 0.0F;
+            auto look =
+                player_.look_direction();
+            look.y = 0.0F;
+            const auto to_attacker_length_squared =
+                glm::dot(
+                    to_attacker,
+                    to_attacker);
+            const auto look_length_squared =
+                glm::dot(look, look);
+            const auto frontal =
+                to_attacker_length_squared >
+                    1.0e-6F &&
+                look_length_squared > 1.0e-6F &&
+                glm::dot(
+                    to_attacker /
+                        std::sqrt(
+                            to_attacker_length_squared),
+                    look /
+                        std::sqrt(
+                            look_length_squared)) >=
+                    0.5F;
+            const auto temporary_effects =
+                player_ability_effects_
+                    .aggregate(
+                        player_.max_health());
+            if (attack.kind ==
+                    CreatureAttackKind::
+                        Projectile &&
+                frontal) {
+                remaining_damage *=
+                    std::clamp(
+                        1.0F -
+                            temporary_effects
+                                .frontal_projectile_reduction,
+                        0.0F,
+                        1.0F);
+            }
+
+            const auto shield_blocking =
+                frontal &&
+                inventory_slot_has_item(
+                    inventory_menu_
+                        .equipment_slots[
+                            equipment_slot_index(
+                                EquipmentSlot::
+                                    Shield)]) &&
+                player_.state()
+                    .secondary_action_active;
+            if (shield_blocking) {
+                constexpr auto
+                    kActiveShieldDamageRetained =
+                        0.35F;
+                remaining_damage *=
+                    kActiveShieldDamageRetained;
+                seconds_since_successful_shield_block_ =
+                    0.0F;
+            }
+
+            const auto damage =
+                player_
+                    .apply_external_damage_report(
+                        remaining_damage,
+                        PlayerDeathCause::
+                            Zombie);
+            if (!damage.applied()) {
+                continue;
+            }
+
+            auto knockback_direction =
+                attack.direction;
+            knockback_direction.y = 0.0F;
+            auto knockback_length_squared =
+                glm::dot(
+                    knockback_direction,
+                    knockback_direction);
+            if (knockback_length_squared <=
+                1.0e-6F) {
+                knockback_direction =
+                    player_.position() -
+                    attack.origin;
+                knockback_direction.y = 0.0F;
+                knockback_length_squared =
+                    glm::dot(
+                        knockback_direction,
+                        knockback_direction);
+            }
+            if (knockback_length_squared >
+                1.0e-6F) {
+                constexpr auto
+                    kCreatureKnockbackSpeed =
+                        2.0F;
+                const auto knockback =
+                    knockback_direction /
+                    std::sqrt(
+                        knockback_length_squared) *
+                    kCreatureKnockbackSpeed *
+                    temporary_effects
+                        .knockback_multiplier();
+                auto velocity =
+                    player_.state().velocity;
+                velocity.x += knockback.x;
+                velocity.z += knockback.z;
+                player_.set_velocity(
+                    velocity);
+            }
         }
 
         if (!creatures_.recent_attacks().empty()) {
@@ -2188,6 +3188,8 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                 }),
                 AuditPriority::High);
         }
+
+        consume_ability_logical_events();
 
         if (player_.is_dead()) {
             record_audit_event(
@@ -2211,6 +3213,2201 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             mark_session_dirty();
         }
     }
+}
+
+void Game::consume_ability_logical_events() {
+    std::array<
+        AbilityLogicalEvent,
+        kAbilityLogicalEventCapacity>
+        events {};
+    const auto count =
+        ability_system_
+            .drain_logical_events(
+                events);
+    if (count == 0U ||
+        !audit_ ||
+        !audit_->enabled()) {
+        return;
+    }
+
+    auto critical_count =
+        std::size_t {0U};
+    auto hit_count =
+        std::size_t {0U};
+    for (std::size_t index = 0U;
+         index < count;
+         ++index) {
+        critical_count +=
+            events[index].priority ==
+                    AbilityEventPriority::
+                        Critical
+                ? 1U
+                : 0U;
+        hit_count +=
+            events[index].type ==
+                    AbilityEventType::Hit
+                ? 1U
+                : 0U;
+    }
+
+    // Je consomme la file après la simulation : les observateurs ne peuvent
+    // jamais décider du résultat d'un sort ni saturer le gameplay à long terme.
+    record_audit_event(
+        AuditEventCategory::InputAction,
+        "ability_logical_events",
+        AuditSeverity::Info,
+        audit_json_object({
+            {
+                "count",
+                audit_json_number(
+                    count),
+            },
+            {
+                "critical_count",
+                audit_json_number(
+                    critical_count),
+            },
+            {
+                "hit_count",
+                audit_json_number(
+                    hit_count),
+            },
+        }),
+        critical_count != 0U
+            ? AuditPriority::High
+            : AuditPriority::Normal);
+}
+
+void Game::resolve_pending_player_ability(
+    bool maritime_session_active) {
+    if (!pending_ability_slot_.has_value()) {
+        return;
+    }
+
+    const auto slot =
+        *std::exchange(
+            pending_ability_slot_,
+            std::nullopt);
+    if (slot >=
+        player_build_.equipped_abilities.size()) {
+        return;
+    }
+
+    const auto ability_id =
+        player_build_.equipped_abilities[slot];
+    if (!ability_id_is_valid(ability_id)) {
+        queue_gameplay_announcement(
+            "EMPLACEMENT VIDE",
+            "EQUIPE UNE COMPETENCE AVEC P",
+            2.0F);
+        return;
+    }
+
+    struct AbilityRuntimeContext {
+        struct DeferredEvent {
+            AbilityEventType type =
+                AbilityEventType::Hit;
+            AbilityEventPayload payload {};
+        };
+
+        Game* game = nullptr;
+        AbilityId ability = AbilityId::None;
+        bool maritime = false;
+        WeaponStats weapon {2.0F, 3.0F};
+        std::array<
+            VanguardTargetCandidate,
+            kCreatureMaxActiveCount>
+            vanguard_candidates {};
+        VanguardTargetSelection
+            vanguard_targets {};
+        std::size_t summon_slot =
+            std::numeric_limits<std::size_t>::max();
+        glm::vec3 summon_position {0.0F};
+        std::optional<glm::vec3>
+            summon_ship_local_position {};
+        RaycastHit construction_hit {};
+        std::array<
+            WorldEditCell,
+            kWorldEditShapeMaximumCellCount>
+            authorized_cells {};
+        std::array<
+            bool,
+            kWorldEditShapeMaximumCellCount>
+            construction_was_player_placed {};
+        std::size_t authorized_cell_count = 0U;
+        HotbarState hotbar_before {};
+        InventoryMenuState inventory_before {};
+        WorldEditTransactionResult transaction {};
+        std::array<
+            DeferredEvent,
+            kCreatureMaxActiveCount * 2U +
+                kWorldEditShapeMaximumCellCount +
+                2U>
+            deferred_events {};
+        std::size_t deferred_event_count =
+            0U;
+        std::uint32_t
+            construction_xp_cell_count =
+                0U;
+        bool missing_materials = false;
+        bool no_authorized_cells = false;
+
+        void defer_event(
+            AbilityEventType type,
+            const AbilityEventPayload&
+                payload) noexcept {
+            if (deferred_event_count >=
+                deferred_events.size()) {
+                return;
+            }
+            deferred_events[
+                deferred_event_count++] = {
+                type,
+                payload,
+            };
+        }
+    };
+
+    AbilityRuntimeContext context {};
+    context.game = this;
+    context.ability = ability_id;
+    context.maritime =
+        maritime_session_active;
+    context.hotbar_before = hotbar_;
+    context.inventory_before =
+        inventory_menu_;
+
+    AbilityCastRequest request {};
+    request.id = ability_id;
+    const auto origin =
+        player_.eye_position();
+    const auto direction =
+        safe_drop_direction(
+            player_.look_direction());
+    request.event_payload.ability_id =
+        ability_id;
+    request.event_payload.source_id = 1U;
+    request.event_payload.position =
+        player_.position();
+    request.event_payload.direction =
+        direction;
+
+    switch (ability_id) {
+    case AbilityId::KnightVanguardStrike: {
+        context.weapon =
+            inventory_active_weapon_stats(
+                inventory_menu_,
+                hotbar_)
+                .value_or(
+                    WeaponStats {
+                        2.0F,
+                        3.0F,
+                    });
+        auto candidate_count =
+            std::size_t {0U};
+        for (const auto& creature :
+             creatures_.active_creatures()) {
+            if (candidate_count >=
+                context
+                    .vanguard_candidates
+                    .size()) {
+                break;
+            }
+            context.vanguard_candidates[
+                candidate_count++] = {
+                creature_id_from_anchor(
+                    creature.anchor),
+                creature.position +
+                    glm::vec3 {
+                        0.0F,
+                        0.75F,
+                        0.0F,
+                    },
+                is_hostile_creature(
+                    creature),
+            };
+        }
+        context.vanguard_targets =
+            select_vanguard_targets(
+                VanguardTargetingQuery {
+                .origin = origin,
+                .forward = direction,
+                .range_meters =
+                    context.weapon.range,
+                .half_angle_degrees =
+                    45.0F,
+                .candidates =
+                    std::span<
+                        const VanguardTargetCandidate> {
+                        context
+                            .vanguard_candidates
+                            .data(),
+                        candidate_count,
+                    },
+                .visibility_user_data =
+                    &context,
+                .is_visible =
+                    +[](void* user_data,
+                        const glm::vec3&
+                            ray_origin,
+                        const glm::vec3&
+                            ray_direction,
+                        float target_distance)
+                        noexcept {
+                    const auto& runtime =
+                        *static_cast<
+                            AbilityRuntimeContext*>(
+                            user_data);
+                    constexpr auto
+                        kTargetTolerance =
+                            0.06F;
+                    const auto maximum =
+                        std::max(
+                            0.0F,
+                            target_distance -
+                                kTargetTolerance);
+                    const auto world_hit =
+                        runtime.game
+                            ->world_
+                            .raycast_collidable(
+                                ray_origin,
+                                ray_direction,
+                                maximum);
+                    if (world_hit.hit) {
+                        return false;
+                    }
+                    if (!runtime.maritime) {
+                        return true;
+                    }
+                    return !runtime.game
+                                ->sea_adventure_
+                                .ship_entity()
+                                .raycast_collidable_distance(
+                                    ray_origin,
+                                    ray_direction,
+                                    maximum)
+                                .has_value();
+                },
+            });
+        request.target_valid =
+            !context.vanguard_targets
+                 .empty();
+        request.target_distance_meters =
+            request.target_valid
+                ? glm::length(
+                      context
+                          .vanguard_targets
+                          .targets[0U]
+                          .aim_position -
+                      origin)
+                : 0.0F;
+        request.effective_range_meters =
+            context.weapon.range;
+        request
+            .seconds_since_successful_shield_block =
+            seconds_since_successful_shield_block_;
+        break;
+    }
+    case AbilityId::KnightIronGuard:
+        request.target_valid = true;
+        break;
+    case AbilityId::NinjaWindAcceleration:
+        request.target_valid = true;
+        break;
+    case AbilityId::CommanderFootman: {
+        for (std::size_t index = 0U;
+             index < summoned_footmen_.size();
+             ++index) {
+            if (!summoned_footmen_[index]
+                     .active()) {
+                context.summon_slot =
+                    index;
+                break;
+            }
+        }
+        if (context.summon_slot >=
+            summoned_footmen_.size()) {
+            request.target_valid = false;
+            break;
+        }
+
+        const auto on_ship =
+            maritime_session_active &&
+            player_
+                .dynamic_support_height(
+                    sea_adventure_
+                        .ship_entity())
+                .has_value();
+        if (on_ship) {
+            const auto horizontal =
+                safe_drop_direction({
+                    direction.x,
+                    0.0F,
+                    direction.z,
+                });
+            auto candidate =
+                player_.position() +
+                horizontal * 2.0F;
+            const auto& ship =
+                sea_adventure_
+                    .ship_entity();
+            auto support =
+                ship.support_height_in_range(
+                    candidate,
+                    player_.position().y -
+                        2.0F,
+                    player_.position().y +
+                        2.0F);
+            if (!support.has_value()) {
+                candidate =
+                    sea_adventure_
+                        .deck_spawn_position();
+                support =
+                    ship.support_height_in_range(
+                        candidate,
+                        candidate.y - 2.0F,
+                        candidate.y + 2.0F);
+            }
+            if (support.has_value()) {
+                candidate.y =
+                    *support + 0.002F;
+                context.summon_position =
+                    candidate;
+                context
+                    .summon_ship_local_position =
+                    ship.world_to_local_point(
+                        candidate);
+                request.target_valid = true;
+                request.ground_target_valid =
+                    true;
+                request.target_distance_meters =
+                    glm::length(
+                        candidate -
+                        player_.position());
+            }
+        } else {
+            const auto hit =
+                world_.raycast_collidable(
+                    origin,
+                    direction,
+                    8.0F);
+            if (hit.hit) {
+                context.summon_position = {
+                    static_cast<float>(
+                        hit.block.x) +
+                        0.5F,
+                    static_cast<float>(
+                        hit.block.y) +
+                        1.002F,
+                    static_cast<float>(
+                        hit.block.z) +
+                        0.5F,
+                };
+                request.target_valid = true;
+                request.ground_target_valid =
+                    true;
+                request.target_distance_meters =
+                    hit.distance;
+            }
+        }
+        break;
+    }
+    case AbilityId::BuilderConstructionPlan: {
+        const auto on_ship =
+            maritime_session_active &&
+            player_
+                .dynamic_support_height(
+                    sea_adventure_
+                        .ship_entity())
+                .has_value();
+        const auto ship_velocity =
+            maritime_session_active
+                ? sea_adventure_
+                      .ship_entity()
+                      .velocity()
+                : glm::vec3 {0.0F};
+        request.on_moving_ship =
+            on_ship &&
+            glm::dot(
+                ship_velocity,
+                ship_velocity) >
+                0.0001F;
+        if (request.on_moving_ship) {
+            // Je fournis une cible syntaxiquement valide pour que le système
+            // retourne précisément le refus de construction permanente à bord.
+            request.target_valid = true;
+            request.ground_target_valid =
+                true;
+            request.target_distance_meters =
+                0.0F;
+            break;
+        }
+        context.construction_hit =
+            world_.raycast_collidable(
+                origin,
+                direction,
+                8.0F);
+        request.target_valid =
+            context.construction_hit.hit;
+        if (request.target_valid &&
+            maritime_session_active) {
+            const auto ship_hit =
+                sea_adventure_
+                    .ship_entity()
+                    .raycast_collidable_distance(
+                        origin,
+                        direction,
+                        context.construction_hit
+                            .distance);
+            if (ship_hit.has_value() &&
+                *ship_hit <=
+                    context.construction_hit
+                        .distance) {
+                request.target_valid = false;
+            }
+        }
+        request.ground_target_valid =
+            request.target_valid;
+        request.target_distance_meters =
+            context.construction_hit.distance;
+        request.construction_cell_count =
+            0U;
+        break;
+    }
+    default:
+        request.target_valid = true;
+        request.ground_target_valid = true;
+        break;
+    }
+
+    const auto validate =
+        +[](void* user_data,
+            const AbilityCastRequest&,
+            const AbilityCastResolution& resolution) noexcept -> bool {
+        auto& runtime =
+            *static_cast<
+                AbilityRuntimeContext*>(
+                user_data);
+        auto& game =
+            *runtime.game;
+
+        switch (resolution.id) {
+        case AbilityId::KnightVanguardStrike:
+            if (runtime.vanguard_targets
+                    .empty()) {
+                return false;
+            }
+            for (std::size_t target_index =
+                     0U;
+                 target_index <
+                 runtime.vanguard_targets
+                     .target_count;
+                 ++target_index) {
+                const auto id =
+                    runtime.vanguard_targets
+                        .targets[
+                            target_index]
+                        .id;
+                const auto found =
+                    std::any_of(
+                        game.creatures_
+                            .active_creatures()
+                            .begin(),
+                        game.creatures_
+                            .active_creatures()
+                            .end(),
+                        [&](const CreatureInstance&
+                                creature) noexcept {
+                            return is_hostile_creature(
+                                       creature) &&
+                                   creature_id_from_anchor(
+                                       creature.anchor) ==
+                                       id;
+                        });
+                if (!found) {
+                    return false;
+                }
+            }
+            return true;
+        case AbilityId::KnightIronGuard:
+            return true;
+        case AbilityId::NinjaWindAcceleration:
+            return true;
+        case AbilityId::CommanderFootman: {
+            if (runtime.summon_slot >=
+                    game.summoned_footmen_
+                        .size() ||
+                game.summoned_footmen_[
+                        runtime.summon_slot]
+                    .active()) {
+                return false;
+            }
+            const auto& position =
+                runtime.summon_position;
+            if (!std::isfinite(position.x) ||
+                !std::isfinite(position.y) ||
+                !std::isfinite(position.z)) {
+                return false;
+            }
+            if (runtime
+                    .summon_ship_local_position
+                    .has_value()) {
+                const auto support =
+                    game.sea_adventure_
+                        .ship_entity()
+                        .support_height_in_range(
+                            position,
+                            position.y - 0.25F,
+                            position.y + 0.25F);
+                if (!support.has_value()) {
+                    return false;
+                }
+            } else {
+                const auto feet =
+                    block_coord_from_position(
+                        position);
+                const auto chunk =
+                    game.world_.world_to_chunk(
+                        feet.x,
+                        feet.z);
+                if (!is_world_y_valid(
+                        feet.y) ||
+                    !is_world_y_valid(
+                        feet.y + 1) ||
+                    game.world_
+                            .find_chunk(chunk) ==
+                        nullptr ||
+                    feet.y <= 0 ||
+                    !is_block_collidable(
+                        game.world_.get_block(
+                            feet.x,
+                            feet.y - 1,
+                            feet.z)) ||
+                    game.world_.has_water(
+                        feet.x,
+                        feet.y,
+                        feet.z) ||
+                    game.world_.has_water(
+                        feet.x,
+                        feet.y + 1,
+                        feet.z) ||
+                    !is_block_replaceable(
+                        game.world_.get_block(
+                            feet.x,
+                            feet.y,
+                            feet.z)) ||
+                    !is_block_replaceable(
+                        game.world_.get_block(
+                            feet.x,
+                            feet.y + 1,
+                            feet.z))) {
+                    return false;
+                }
+            }
+            if (horizontal_distance_squared(
+                    position,
+                    game.player_.position()) <
+                0.85F * 0.85F) {
+                return false;
+            }
+            for (const auto& creature :
+                 game.creatures_
+                     .active_creatures()) {
+                if (horizontal_distance_squared(
+                        position,
+                        creature.position) <
+                    0.90F * 0.90F) {
+                    return false;
+                }
+            }
+            for (const auto& footman :
+                 game.summoned_footmen_) {
+                const auto state =
+                    footman.state();
+                if (state.active &&
+                    horizontal_distance_squared(
+                        position,
+                        state.position) <
+                        0.90F * 0.90F) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case AbilityId::BuilderConstructionPlan: {
+            runtime.authorized_cell_count =
+                0U;
+            runtime.missing_materials =
+                false;
+            runtime.no_authorized_cells =
+                false;
+            if (!runtime.construction_hit.hit) {
+                return false;
+            }
+
+            const auto look =
+                game.player_
+                    .look_direction();
+            auto forward_x = 0;
+            auto forward_z = 1;
+            if (std::abs(look.x) >=
+                    std::abs(look.z) &&
+                std::abs(look.x) >
+                    0.0001F) {
+                forward_x =
+                    look.x < 0.0F ? -1 : 1;
+                forward_z = 0;
+            } else if (std::abs(look.z) >
+                       0.0001F) {
+                forward_z =
+                    look.z < 0.0F ? -1 : 1;
+            }
+            const auto right_x =
+                forward_z;
+            const auto right_z =
+                -forward_x;
+            const auto placement_origin =
+                runtime
+                    .construction_hit
+                    .adjacent;
+            std::array<
+                WorldEditCell,
+                kWorldEditShapeMaximumCellCount>
+                generated {};
+            auto generated_count =
+                std::size_t {0U};
+            const auto append_cell =
+                [&](const ConstructionPlanCell&
+                        source,
+                    int local_x) noexcept {
+                if (source.material_id >
+                    std::numeric_limits<
+                        BlockId>::max()) {
+                    return false;
+                }
+                const auto material =
+                    static_cast<BlockId>(
+                        source.material_id);
+                if (!is_construction_plan_material(
+                        material)) {
+                    return false;
+                }
+                const auto world_x =
+                    static_cast<std::int64_t>(
+                        placement_origin.x) +
+                    static_cast<std::int64_t>(
+                        right_x) *
+                        local_x +
+                    static_cast<std::int64_t>(
+                        forward_x) *
+                        source.z;
+                const auto world_y =
+                    static_cast<std::int64_t>(
+                        placement_origin.y) +
+                    source.y;
+                const auto world_z =
+                    static_cast<std::int64_t>(
+                        placement_origin.z) +
+                    static_cast<std::int64_t>(
+                        right_z) *
+                        local_x +
+                    static_cast<std::int64_t>(
+                        forward_z) *
+                        source.z;
+                if (world_x <
+                        std::numeric_limits<int>::
+                            min() ||
+                    world_x >
+                        std::numeric_limits<int>::
+                            max() ||
+                    world_y <
+                        std::numeric_limits<int>::
+                            min() ||
+                    world_y >
+                        std::numeric_limits<int>::
+                            max() ||
+                    world_z <
+                        std::numeric_limits<int>::
+                            min() ||
+                    world_z >
+                        std::numeric_limits<int>::
+                            max()) {
+                    return false;
+                }
+                const BlockCoord coordinate {
+                    static_cast<int>(world_x),
+                    static_cast<int>(world_y),
+                    static_cast<int>(world_z),
+                };
+                for (std::size_t index = 0U;
+                     index < generated_count;
+                     ++index) {
+                    if (generated[index]
+                            .coordinate ==
+                        coordinate) {
+                        return generated[index]
+                                   .block_id ==
+                               material;
+                    }
+                }
+                if (generated_count >=
+                    generated.size()) {
+                    return false;
+                }
+                generated[generated_count++] = {
+                    coordinate,
+                    material,
+                };
+                return true;
+            };
+
+            const auto& plan =
+                resolution
+                    .construction_plan;
+            for (std::size_t index = 0U;
+                 index < plan.cell_count;
+                 ++index) {
+                const auto& cell =
+                    plan.cells[index];
+                if (!append_cell(
+                        cell,
+                        static_cast<int>(
+                            cell.x))) {
+                    return false;
+                }
+                if (ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            ConstructionMirror) &&
+                    cell.x != 0 &&
+                    !append_cell(
+                        cell,
+                        -static_cast<int>(
+                            cell.x))) {
+                    return false;
+                }
+            }
+            if (generated_count == 0U ||
+                generated_count >
+                    resolution
+                        .maximum_construction_cells) {
+                return false;
+            }
+
+            const auto cell_is_occupied =
+                [&](const BlockCoord& coordinate)
+                    noexcept {
+                if (block_overlaps_actor(
+                        coordinate,
+                        game.player_
+                            .position(),
+                        0.30F,
+                        1.80F)) {
+                    return true;
+                }
+                for (const auto& creature :
+                     game.creatures_
+                         .active_creatures()) {
+                    if (block_overlaps_actor(
+                            coordinate,
+                            creature.position,
+                            0.42F,
+                            1.55F)) {
+                        return true;
+                    }
+                }
+                for (const auto& footman :
+                     game
+                         .summoned_footmen_) {
+                    const auto state =
+                        footman.state();
+                    if (state.active &&
+                        block_overlaps_actor(
+                            coordinate,
+                            state.position,
+                            0.40F,
+                            1.75F)) {
+                        return true;
+                    }
+                }
+                if (runtime.maritime) {
+                    const auto minimum =
+                        glm::vec3 {
+                            static_cast<float>(
+                                coordinate.x),
+                            static_cast<float>(
+                                coordinate.y),
+                            static_cast<float>(
+                                coordinate.z),
+                        };
+                    if (game.sea_adventure_
+                            .ship_entity()
+                            .intersects_aabb(
+                                minimum,
+                                minimum +
+                                    glm::vec3 {
+                                        1.0F,
+                                    })) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            for (std::size_t generated_index =
+                     0U;
+                 generated_index <
+                 generated_count;
+                 ++generated_index) {
+                const auto& cell =
+                    generated[generated_index];
+                const auto& coordinate =
+                    cell.coordinate;
+                if (!is_world_y_valid(
+                        coordinate.y) ||
+                    game.world_
+                            .find_chunk(
+                                game.world_
+                                    .world_to_chunk(
+                                        coordinate.x,
+                                        coordinate.z)) ==
+                        nullptr) {
+                    continue;
+                }
+                const auto current =
+                    game.world_.get_block(
+                        coordinate.x,
+                        coordinate.y,
+                        coordinate.z);
+                if (!is_block_replaceable(
+                        current) ||
+                    is_block_liquid(current) ||
+                    game.world_.has_water(
+                        coordinate.x,
+                        coordinate.y,
+                        coordinate.z) ||
+                    cell_is_occupied(
+                        coordinate)) {
+                    continue;
+                }
+                if (runtime
+                        .authorized_cell_count <
+                    runtime.authorized_cells
+                        .size()) {
+                    const auto authorized_index =
+                        runtime
+                            .authorized_cell_count;
+                    runtime.authorized_cells[
+                        authorized_index] =
+                        cell;
+                    runtime
+                        .construction_was_player_placed[
+                            authorized_index] =
+                        game.world_
+                            .was_player_placed(
+                                coordinate.x,
+                                coordinate.y,
+                                coordinate.z);
+                    ++runtime
+                          .authorized_cell_count;
+                }
+            }
+            if (runtime
+                    .authorized_cell_count == 0U) {
+                runtime.no_authorized_cells =
+                    true;
+                return false;
+            }
+            std::array<
+                std::uint32_t,
+                256U>
+                required_materials {};
+            for (std::size_t index = 0U;
+                 index <
+                 runtime
+                     .authorized_cell_count;
+                 ++index) {
+                ++required_materials[
+                    runtime
+                        .authorized_cells[index]
+                        .block_id];
+            }
+            for (std::size_t material = 0U;
+                 material <
+                 required_materials.size();
+                 ++material) {
+                const auto required =
+                    required_materials[material];
+                if (required == 0U) {
+                    continue;
+                }
+                if (inventory_material_count(
+                        game.inventory_menu_,
+                        game.hotbar_,
+                        static_cast<BlockId>(
+                            material)) <
+                    required) {
+                    runtime.missing_materials =
+                        true;
+                    return false;
+                }
+            }
+            return true;
+        }
+        default:
+            return false;
+        }
+    };
+
+    const auto commit =
+        +[](void* user_data,
+            const AbilityCastRequest&,
+            const AbilityCastResolution& resolution) noexcept -> bool {
+        auto& runtime =
+            *static_cast<
+                AbilityRuntimeContext*>(
+                user_data);
+        auto& game =
+            *runtime.game;
+        try {
+            switch (resolution.id) {
+            case AbilityId::KnightVanguardStrike: {
+                std::array<
+                    CreatureId,
+                    kCreatureMaxActiveCount>
+                    secondary_targets {};
+                auto secondary_count =
+                    std::size_t {0U};
+                const auto primary_contains =
+                    [&](CreatureId id) noexcept {
+                    for (std::size_t index = 0U;
+                         index <
+                         runtime.vanguard_targets
+                             .target_count;
+                         ++index) {
+                        if (runtime
+                                .vanguard_targets
+                                .targets[index]
+                                .id == id) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                if (ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            VanguardSecondaryImpact)) {
+                    const auto radius =
+                        std::max(
+                            resolution.values[2],
+                            0.0F);
+                    for (const auto& creature :
+                         game.creatures_
+                             .active_creatures()) {
+                        const auto id =
+                            creature_id_from_anchor(
+                            creature.anchor);
+                        if (primary_contains(id) ||
+                            !is_hostile_creature(
+                                creature) ||
+                            horizontal_distance_squared(
+                                creature.position,
+                                runtime
+                                    .vanguard_targets
+                                    .targets[0U]
+                                    .aim_position) >
+                                radius * radius ||
+                            secondary_count >=
+                                secondary_targets
+                                    .size()) {
+                            continue;
+                        }
+                        const auto target =
+                            creature.position +
+                            glm::vec3 {
+                                0.0F,
+                                0.75F,
+                                0.0F,
+                            };
+                        const auto ray =
+                            target -
+                            game.player_
+                                .eye_position();
+                        const auto distance =
+                            glm::length(ray);
+                        if (!std::isfinite(distance) ||
+                            distance <= 0.06F) {
+                            continue;
+                        }
+                        const auto line =
+                            ray / distance;
+                        const auto maximum =
+                            distance - 0.06F;
+                        if (game.world_
+                                .raycast_collidable(
+                                    game.player_
+                                        .eye_position(),
+                                    line,
+                                    maximum)
+                                .hit ||
+                            (runtime.maritime &&
+                             game.sea_adventure_
+                                 .ship_entity()
+                                 .raycast_collidable_distance(
+                                     game.player_
+                                         .eye_position(),
+                                     line,
+                                     maximum)
+                                 .has_value())) {
+                            continue;
+                        }
+                        secondary_targets[
+                            secondary_count++] =
+                            id;
+                    }
+                }
+
+                const auto strength =
+                    player_attribute_value(
+                        game.player_build_
+                            .attributes,
+                        PlayerAttribute::
+                            Strength);
+                const auto multiplier =
+                    player_melee_damage_multiplier(
+                        game.progression_
+                            .level(),
+                        strength);
+                auto any_hit = false;
+                auto any_killed = false;
+                AbilityEventPayload
+                    hit_payload {};
+                hit_payload.ability_id =
+                    resolution.id;
+                hit_payload.source_id = 1U;
+                hit_payload.direction =
+                    game.player_
+                        .look_direction();
+                for (std::size_t index = 0U;
+                     index <
+                     runtime.vanguard_targets
+                         .target_count;
+                     ++index) {
+                    const auto id =
+                        runtime.vanguard_targets
+                            .targets[index]
+                            .id;
+                    const auto hit =
+                        game.creatures_
+                            .apply_damage(
+                                id,
+                                runtime.weapon
+                                        .damage *
+                                    resolution
+                                        .values[0] *
+                                    multiplier,
+                                CreatureDamageSource::
+                                    PlayerAbility,
+                                game.player_
+                                    .look_direction());
+                    if (!hit.hit) {
+                        continue;
+                    }
+                    any_hit = true;
+                    any_killed =
+                        any_killed ||
+                        hit.killed;
+                    static_cast<void>(
+                        game.creatures_
+                            .apply_stagger(
+                                id,
+                                resolution
+                                    .values[1]));
+                    game.grant_creature_kill_rewards(
+                        hit,
+                        "vanguard_strike");
+                    auto primary_payload =
+                        hit_payload;
+                    primary_payload.target_id =
+                        hit.id;
+                    primary_payload.position =
+                        hit.position;
+                    primary_payload.primary_value =
+                        hit.damage;
+                    primary_payload.detail_code =
+                        hit.killed ? 1U : 0U;
+                    runtime.defer_event(
+                        AbilityEventType::Hit,
+                        primary_payload);
+                }
+                if (!any_hit) {
+                    return false;
+                }
+                for (std::size_t index = 0U;
+                     index < secondary_count;
+                     ++index) {
+                    const auto secondary =
+                        game.creatures_
+                            .apply_damage(
+                                secondary_targets[
+                                    index],
+                                resolution
+                                    .values[3] *
+                                    multiplier,
+                                CreatureDamageSource::
+                                    PlayerAbility,
+                                game.player_
+                                    .look_direction());
+                    game.grant_creature_kill_rewards(
+                        secondary,
+                        "vanguard_wave");
+                    if (secondary.hit) {
+                        any_killed =
+                            any_killed ||
+                            secondary.killed;
+                        auto secondary_payload =
+                            hit_payload;
+                        secondary_payload.target_id =
+                            secondary.id;
+                        secondary_payload.position =
+                            secondary.position;
+                        secondary_payload.primary_value =
+                            secondary.damage;
+                        secondary_payload.secondary_value =
+                            1.0F;
+                        secondary_payload.detail_code =
+                            secondary.killed
+                                ? 1U
+                                : 0U;
+                        runtime.defer_event(
+                            AbilityEventType::Hit,
+                            secondary_payload);
+                    }
+                }
+                game.music_.play_sfx(
+                    any_killed
+                        ? GameSfxKind::
+                              CreatureDeath
+                        : GameSfxKind::
+                              CreatureHit,
+                    0.90F);
+                return true;
+            }
+            case AbilityId::KnightIronGuard: {
+                const auto shield_equipped =
+                    inventory_slot_has_item(
+                        game.inventory_menu_
+                            .equipment_slots[
+                                equipment_slot_index(
+                                    EquipmentSlot::
+                                        Shield)]);
+                const auto activation =
+                    game.player_ability_effects_
+                        .activate_iron_guard(
+                            resolution,
+                            shield_equipped);
+                if (!activation.applied) {
+                    return false;
+                }
+                game.sync_selected_hotbar_slot();
+                return true;
+            }
+            case AbilityId::NinjaWindAcceleration:
+                game.wind_acceleration_remaining_ =
+                    resolution
+                        .duration_seconds;
+                game.wind_movement_bonus_ =
+                    std::max(
+                        resolution.values[
+                            kWindMovementBonusValueIndex],
+                        0.0F);
+                game.wind_recovery_bonus_ =
+                    std::max(
+                        resolution.values[
+                            kWindRecoveryBonusValueIndex],
+                        0.0F);
+                game.wind_blade_available_ =
+                    ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            WindBlade);
+                game
+                    .wind_acceleration_cast_sequence_ =
+                    resolution.cast_sequence;
+                if (ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            WindMasteryCleanseSlow)) {
+                    static_cast<void>(
+                        game.player_ability_effects_
+                            .clear_slow_effects());
+                }
+                if (ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            WindMasteryDodge)) {
+                    game.wind_dodge_remaining_ =
+                        std::max(
+                            resolution.values[
+                                kWindMasteryDodgeValueIndex],
+                            0.0F);
+                }
+                game.sync_selected_hotbar_slot();
+                return true;
+            case AbilityId::CommanderFootman: {
+                if (runtime.summon_slot >=
+                    game.summoned_footmen_
+                        .size()) {
+                    return false;
+                }
+                const auto wisdom =
+                    player_attribute_value(
+                        game.player_build_
+                            .attributes,
+                        PlayerAttribute::Wisdom);
+                SummonedUnitStats
+                    resolved_stats {};
+                resolved_stats.duration_seconds =
+                    resolution.duration_seconds;
+                resolved_stats.maximum_health =
+                    resolution.values[
+                        kFootmanHealthValueIndex];
+                resolved_stats.attack_damage =
+                    resolution.values[
+                        kFootmanDamageValueIndex];
+                resolved_stats.attack_interval_seconds =
+                    resolution.values[
+                        kFootmanAttackIntervalValueIndex];
+                resolved_stats.has_light_taunt =
+                    ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            FootmanLightTaunt);
+                resolved_stats.has_projectile_block =
+                    ability_effects_contain(
+                        resolution.effects,
+                        AbilityEffectFlag::
+                            FootmanProjectileBlock);
+                if (resolved_stats.has_light_taunt) {
+                    resolved_stats
+                        .taunt_interval_seconds =
+                        resolution.values[
+                            kFootmanTauntIntervalValueIndex];
+                    resolved_stats.taunt_radius =
+                        resolution.values[
+                            kFootmanTauntRadiusValueIndex];
+                }
+                if (resolved_stats
+                        .has_projectile_block) {
+                    resolved_stats
+                        .projectile_block_interval_seconds =
+                        resolution.values[
+                            kFootmanProjectileBlockIntervalValueIndex];
+                }
+                resolved_stats
+                    .mastery_survival_health =
+                    resolution.values[
+                        kFootmanMasteryHealthValueIndex];
+                resolved_stats
+                    .mastery_damage_reduction =
+                    resolution.values[
+                        kFootmanMasteryReductionValueIndex];
+                const auto summon =
+                    game.summoned_footmen_[
+                            runtime.summon_slot]
+                        .summon(
+                            SummonedUnitSpawnRequest {
+                                .owner_id = 1U,
+                                .position =
+                                    runtime
+                                        .summon_position,
+                                .rank =
+                                    static_cast<
+                                        SummonedUnitRank>(
+                                        std::clamp<
+                                            std::uint8_t>(
+                                            resolution.rank,
+                                            1U,
+                                            3U)),
+                                .mastered =
+                                    resolution
+                                        .mastery_active,
+                                .power_multiplier =
+                                    1.0F,
+                                .health_power_multiplier =
+                                    player_summon_health_multiplier(
+                                        game.progression_
+                                            .level(),
+                                        wisdom),
+                                .attack_power_multiplier =
+                                    player_summon_damage_multiplier(
+                                        game.progression_
+                                            .level(),
+                                        wisdom),
+                                .stats =
+                                    resolved_stats,
+                                .cast_sequence =
+                                    resolution
+                                        .cast_sequence,
+                            });
+                if (!summon.spawned) {
+                    return false;
+                }
+                game
+                    .summoned_footman_ship_local_positions_[
+                        runtime.summon_slot] =
+                    runtime
+                        .summon_ship_local_position;
+                game.summoned_footman_far_seconds_[
+                    runtime.summon_slot] =
+                    0.0F;
+                game
+                    .summoned_footman_cast_sequences_[
+                        runtime.summon_slot] =
+                    resolution.cast_sequence;
+                AbilityEventPayload
+                    summon_payload {};
+                summon_payload.ability_id =
+                    resolution.id;
+                summon_payload.source_id = 1U;
+                summon_payload.target_id =
+                    summon.unit_id;
+                summon_payload.position =
+                    runtime.summon_position;
+                summon_payload.duration_seconds =
+                    resolution
+                        .duration_seconds;
+                runtime.defer_event(
+                    AbilityEventType::
+                        SummonSpawned,
+                    summon_payload);
+                return true;
+            }
+            case AbilityId::BuilderConstructionPlan: {
+                if (runtime
+                            .authorized_cell_count ==
+                        0U) {
+                    return false;
+                }
+                WorldEditTransactionCallbacks
+                    callbacks {};
+                callbacks.validate_cell =
+                    [&](const WorldEditCell& cell) {
+                    if (!is_world_y_valid(
+                            cell.coordinate.y) ||
+                        game.world_.find_chunk(
+                            game.world_
+                                .world_to_chunk(
+                                    cell.coordinate.x,
+                                    cell.coordinate.z)) ==
+                            nullptr) {
+                        return false;
+                    }
+                    const auto current =
+                        game.world_.get_block(
+                            cell.coordinate.x,
+                            cell.coordinate.y,
+                            cell.coordinate.z);
+                    return is_block_replaceable(
+                               current) &&
+                           !is_block_liquid(
+                               current) &&
+                           !game.world_
+                                .has_water(
+                                    cell.coordinate.x,
+                                    cell.coordinate.y,
+                                    cell.coordinate.z);
+                };
+                callbacks
+                    .cell_contains_player_or_creature =
+                    [&](const BlockCoord&
+                            coordinate) {
+                    if (block_overlaps_actor(
+                            coordinate,
+                            game.player_
+                                .position(),
+                            0.30F,
+                            1.80F)) {
+                        return true;
+                    }
+                    for (const auto& creature :
+                         game.creatures_
+                             .active_creatures()) {
+                        if (block_overlaps_actor(
+                                coordinate,
+                                creature.position,
+                                0.42F,
+                                1.55F)) {
+                            return true;
+                        }
+                    }
+                    for (const auto& footman :
+                         game
+                             .summoned_footmen_) {
+                        const auto state =
+                            footman.state();
+                        if (state.active &&
+                            block_overlaps_actor(
+                                coordinate,
+                                state.position,
+                                0.40F,
+                                1.75F)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                callbacks.read_current =
+                    [&](const BlockCoord&
+                            coordinate)
+                    -> std::optional<
+                        WorldEditCellState> {
+                    const auto snapshot =
+                        game.world_
+                            .capture_cell_snapshot(
+                                coordinate.x,
+                                coordinate.y,
+                                coordinate.z);
+                    if (!snapshot.has_value()) {
+                        return std::nullopt;
+                    }
+                    return WorldEditCellState {
+                        snapshot->coordinate,
+                        snapshot->block,
+                        snapshot->water_state,
+                        snapshot->player_placed,
+                    };
+                };
+                callbacks.commit_cell =
+                    [&](const WorldEditCell& cell) {
+                    return game.world_
+                        .set_player_block(
+                            cell.coordinate.x,
+                            cell.coordinate.y,
+                            cell.coordinate.z,
+                            cell.block_id);
+                };
+                callbacks.rollback_cell =
+                    [&](const WorldEditCellState&
+                            cell) {
+                    static_cast<void>(
+                        game.world_
+                            .restore_cell_snapshot({
+                                cell.coordinate,
+                                cell.block_id,
+                                cell.water_state,
+                                cell.player_placed,
+                            }));
+                };
+                callbacks.materials_available =
+                    [&](BlockId requested,
+                        std::uint32_t count) {
+                    return is_construction_plan_material(
+                               requested) &&
+                           inventory_material_count(
+                               game.inventory_menu_,
+                               game.hotbar_,
+                               requested) >=
+                               count;
+                };
+                callbacks.consume_materials =
+                    [&](BlockId requested,
+                        std::uint32_t count) {
+                    return is_construction_plan_material(
+                               requested) &&
+                           consume_inventory_materials(
+                               game.inventory_menu_,
+                               game.hotbar_,
+                               requested,
+                               count);
+                };
+                callbacks.refund_materials =
+                    [&](BlockId,
+                        std::uint32_t) {
+                    // Je restaure l'instantané complet : aucun échec partiel
+                    // ne peut dupliquer ou perdre une pile de l'inventaire.
+                    game.hotbar_ =
+                        runtime.hotbar_before;
+                    game.inventory_menu_ =
+                        runtime.inventory_before;
+                };
+                runtime.transaction =
+                    WorldEditTransaction::
+                        execute(
+                            {
+                                runtime
+                                    .authorized_cells
+                                    .data(),
+                                runtime
+                                    .authorized_cell_count,
+                            },
+                            callbacks);
+                game.sync_selected_hotbar_slot();
+                if (!runtime.transaction
+                         .succeeded() ||
+                    runtime.transaction
+                            .changed_cell_count ==
+                        0U) {
+                    return false;
+                }
+                auto newly_marked_count =
+                    std::uint32_t {0U};
+                for (std::size_t index = 0U;
+                     index <
+                     runtime
+                         .authorized_cell_count;
+                     ++index) {
+                    newly_marked_count +=
+                        runtime
+                                .construction_was_player_placed[
+                                    index]
+                            ? 0U
+                            : 1U;
+                }
+                runtime
+                    .construction_xp_cell_count =
+                    newly_marked_count;
+                for (std::size_t index = 0U;
+                     index <
+                     runtime
+                         .authorized_cell_count;
+                     ++index) {
+                    const auto& coordinate =
+                        runtime.authorized_cells[
+                                   index]
+                            .coordinate;
+                    AbilityEventPayload
+                        construct_payload {};
+                    construct_payload.ability_id =
+                        resolution.id;
+                    construct_payload.source_id =
+                        1U;
+                    construct_payload.position = {
+                        static_cast<float>(
+                            coordinate.x) +
+                            0.5F,
+                        static_cast<float>(
+                            coordinate.y) +
+                            0.5F,
+                        static_cast<float>(
+                            coordinate.z) +
+                            0.5F,
+                    };
+                    construct_payload.primary_value =
+                        static_cast<float>(
+                            runtime
+                                .authorized_cells[
+                                    index]
+                                .block_id);
+                    runtime.defer_event(
+                        AbilityEventType::
+                            ConstructPlaced,
+                        construct_payload);
+                }
+                return true;
+            }
+            default:
+                return false;
+            }
+        } catch (...) {
+            game.hotbar_ =
+                runtime.hotbar_before;
+            game.inventory_menu_ =
+                runtime.inventory_before;
+            game.sync_selected_hotbar_slot();
+            return false;
+        }
+    };
+
+    const auto result =
+        ability_system_.try_cast(
+            player_build_,
+            request,
+            {
+                &context,
+                validate,
+                commit,
+            });
+    if (!result.succeeded()) {
+        auto detail =
+            ability_cast_failure_detail(
+                result.failure);
+        if (context.missing_materials) {
+            detail =
+                "MATERIAUX INSUFFISANTS";
+        } else if (
+            context.no_authorized_cells) {
+            detail =
+                "AUCUNE CELLULE AUTORISEE";
+        } else if (
+            ability_id ==
+                AbilityId::
+                    CommanderFootman &&
+            context.summon_slot >=
+                summoned_footmen_.size()) {
+            detail =
+                "LIMITE DE 8 INVOCATIONS";
+        }
+        queue_gameplay_announcement(
+            std::string(
+                ability_display_title(
+                    ability_id)),
+            std::string(detail),
+            2.1F);
+        record_audit_event(
+            AuditEventCategory::InputAction,
+            "ability_cast_rejected",
+            AuditSeverity::Info,
+            audit_json_object({
+                {
+                    "ability",
+                    audit_json_number(
+                        static_cast<int>(
+                            ability_id)),
+                },
+                {
+                    "failure",
+                    audit_json_number(
+                        static_cast<int>(
+                            result.failure)),
+                },
+            }),
+            AuditPriority::Normal);
+        return;
+    }
+
+    // Je publie les impacts uniquement après CastSucceeded : les observateurs
+    // ne peuvent ainsi jamais confondre une validation réussie avec un effet.
+    for (std::size_t index = 0U;
+         index <
+         context.deferred_event_count;
+         ++index) {
+        const auto& event =
+            context.deferred_events[index];
+        static_cast<void>(
+            ability_system_
+                .publish_logical_event(
+                    event.type,
+                    result.resolution
+                        .cast_sequence,
+                event.payload));
+    }
+    if (context.construction_xp_cell_count !=
+        0U) {
+        award_player_experience(
+            ConstructionExperienceEvent {
+                context
+                    .construction_xp_cell_count,
+            },
+            context
+                .authorized_cells[0U]
+                .coordinate,
+            "construction_plan");
+    }
+
+    if (ability_effects_contain(
+            result.resolution.effects,
+            AbilityEffectFlag::
+                VanguardBlockSynergy)) {
+        seconds_since_successful_shield_block_ =
+            -1.0F;
+    }
+    pending_primary_attack_ = false;
+    pending_break_block_ = false;
+    player_.cancel_block_breaking();
+    mark_session_dirty();
+    queue_gameplay_announcement(
+        std::string(
+            ability_display_title(
+                ability_id)),
+        ability_id ==
+                AbilityId::
+                    BuilderConstructionPlan
+            ? "CONSTRUCTION VALIDEE"
+            : ability_id ==
+                      AbilityId::
+                          NinjaWindAcceleration
+                  ? "LE VENT VOUS PORTE"
+                  : "POUVOIR ACTIVE",
+        1.8F);
+    record_audit_event(
+        AuditEventCategory::InputAction,
+        "ability_cast_succeeded",
+        AuditSeverity::Info,
+        audit_json_object({
+            {
+                "ability",
+                audit_json_number(
+                    static_cast<int>(
+                        ability_id)),
+            },
+            {
+                "rank",
+                audit_json_number(
+                    result.resolution.rank),
+            },
+            {
+                "energy_cost",
+                audit_json_number(
+                    result.resolution
+                        .energy_cost),
+            },
+        }),
+        AuditPriority::High);
+}
+
+void Game::update_summoned_footman(
+    float dt,
+    bool maritime_session_active) {
+    const auto safe_dt =
+        std::isfinite(dt)
+            ? std::max(dt, 0.0F)
+            : 0.0F;
+    const auto publish_expiration =
+        [this](
+            std::size_t index,
+            const glm::vec3& position) {
+        const auto cast_sequence =
+            summoned_footman_cast_sequences_[
+                index];
+        if (cast_sequence == 0U) {
+            return;
+        }
+        AbilityEventPayload payload {};
+        payload.ability_id =
+            AbilityId::CommanderFootman;
+        payload.source_id = 1U;
+        payload.position = position;
+        static_cast<void>(
+            ability_system_
+                .publish_logical_event(
+                    AbilityEventType::Expired,
+                    cast_sequence,
+                    payload));
+        summoned_footman_cast_sequences_[
+            index] = 0U;
+    };
+    for (std::size_t index = 0U;
+         index < summoned_footmen_.size();
+         ++index) {
+        auto& footman =
+            summoned_footmen_[index];
+        if (!footman.active()) {
+            publish_expiration(
+                index,
+                player_.position());
+            summoned_footman_ship_local_positions_[
+                index]
+                .reset();
+            summoned_footman_far_seconds_[index] =
+                0.0F;
+            continue;
+        }
+
+        if (summoned_footman_ship_local_positions_[
+                index]
+                .has_value()) {
+            if (!maritime_session_active) {
+                publish_expiration(
+                    index,
+                    footman.state()
+                        .position);
+                footman.clear();
+                summoned_footman_ship_local_positions_[
+                    index]
+                    .reset();
+                continue;
+            }
+            footman.set_position(
+                sea_adventure_
+                    .ship_entity()
+                    .local_to_world_point(
+                        *summoned_footman_ship_local_positions_[
+                            index]));
+        } else {
+            const auto state =
+                footman.state();
+            const auto distance_squared =
+                horizontal_distance_squared(
+                    state.position,
+                    player_.position());
+            if (distance_squared >
+                48.0F * 48.0F) {
+                summoned_footman_far_seconds_[
+                    index] += safe_dt;
+                if (summoned_footman_far_seconds_[
+                        index] >= 10.0F) {
+                    publish_expiration(
+                        index,
+                        state.position);
+                    footman.clear();
+                    summoned_footman_far_seconds_[
+                        index] = 0.0F;
+                    continue;
+                }
+            } else {
+                summoned_footman_far_seconds_[
+                    index] = 0.0F;
+            }
+
+            if (distance_squared >
+                    3.5F * 3.5F &&
+                distance_squared <
+                    48.0F * 48.0F) {
+                auto delta =
+                    player_.position() -
+                    state.position;
+                delta.y = 0.0F;
+                const auto length_squared =
+                    glm::dot(delta, delta);
+                if (length_squared > 1.0e-5F) {
+                    const auto candidate =
+                        state.position +
+                        delta /
+                            std::sqrt(
+                                length_squared) *
+                            std::min(
+                                2.8F * safe_dt,
+                                std::sqrt(
+                                    length_squared));
+                    const auto feet =
+                        block_coord_from_position(
+                            candidate);
+                    if (feet.y > 0 &&
+                        is_world_y_valid(
+                            feet.y + 1) &&
+                        world_.find_chunk(
+                            world_.world_to_chunk(
+                                feet.x,
+                                feet.z)) !=
+                            nullptr &&
+                        is_block_collidable(
+                            world_.get_block(
+                                feet.x,
+                                feet.y - 1,
+                                feet.z)) &&
+                        is_block_replaceable(
+                            world_.get_block(
+                                feet.x,
+                                feet.y,
+                                feet.z)) &&
+                        is_block_replaceable(
+                            world_.get_block(
+                                feet.x,
+                                feet.y + 1,
+                                feet.z)) &&
+                        !world_.has_water(
+                            feet.x,
+                            feet.y,
+                            feet.z)) {
+                        footman.set_position(
+                            candidate);
+                    }
+                }
+            }
+        }
+
+        const auto callbacks =
+            SummonedUnitCallbacks {
+                .acquire_target =
+                    [this](
+                        const SummonedUnitAcquireRequest&
+                            acquire)
+                    -> std::optional<
+                        SummonedUnitTarget> {
+                    auto best_id =
+                        CreatureId {0U};
+                    auto best_position =
+                        glm::vec3 {0.0F};
+                    auto best_distance_squared =
+                        3.4F * 3.4F;
+                    for (const auto& creature :
+                         creatures_
+                             .active_creatures()) {
+                        if (!is_hostile_creature(
+                                creature)) {
+                            continue;
+                        }
+                        const auto distance_squared =
+                            horizontal_distance_squared(
+                                acquire.origin,
+                                creature.position);
+                        const auto id =
+                            creature_id_from_anchor(
+                                creature.anchor);
+                        if (distance_squared >
+                                best_distance_squared ||
+                            (distance_squared ==
+                                 best_distance_squared &&
+                             best_id != 0U &&
+                             id >= best_id)) {
+                            continue;
+                        }
+                        const auto sight_origin =
+                            acquire.origin +
+                            glm::vec3 {
+                                0.0F,
+                                0.75F,
+                                0.0F,
+                            };
+                        const auto sight_target =
+                            creature.position +
+                            glm::vec3 {
+                                0.0F,
+                                0.65F,
+                                0.0F,
+                            };
+                        auto target_direction =
+                            sight_target -
+                            sight_origin;
+                        const auto target_distance =
+                            glm::length(
+                                target_direction);
+                        if (!std::isfinite(
+                                target_distance) ||
+                            target_distance <=
+                                1.0e-4F) {
+                            continue;
+                        }
+                        target_direction /=
+                            target_distance;
+                        const auto world_hit =
+                            world_
+                                .raycast_collidable(
+                                    sight_origin,
+                                    target_direction,
+                                    target_distance);
+                        if (world_hit.hit &&
+                            world_hit.distance <
+                                target_distance -
+                                    0.12F) {
+                            continue;
+                        }
+                        best_id = id;
+                        best_position =
+                            creature.position;
+                        best_distance_squared =
+                            distance_squared;
+                    }
+                    if (best_id == 0U) {
+                        return std::nullopt;
+                    }
+                    return SummonedUnitTarget {
+                        best_id,
+                        best_position,
+                    };
+                },
+                .strike_target =
+                    [this, index](
+                        const SummonedUnitStrikeRequest&
+                            strike) {
+                    const auto hit =
+                        creatures_.apply_damage(
+                            static_cast<
+                                CreatureId>(
+                                strike.target
+                                    .target_id),
+                            strike.damage,
+                            CreatureDamageSource::
+                                PlayerSummon,
+                            strike.target.position -
+                                strike.origin);
+                    grant_creature_kill_rewards(
+                        hit,
+                        "footman_kill");
+                    if (hit.hit) {
+                        AbilityEventPayload
+                            hit_payload {};
+                        hit_payload.ability_id =
+                            AbilityId::
+                                CommanderFootman;
+                        hit_payload.source_id =
+                            strike.unit_id;
+                        hit_payload.target_id =
+                            hit.id;
+                        hit_payload.position =
+                            hit.position;
+                        hit_payload.direction =
+                            strike.target.position -
+                            strike.origin;
+                        hit_payload.primary_value =
+                            hit.damage;
+                        hit_payload.detail_code =
+                            hit.killed ? 1U : 0U;
+                        const auto cast_sequence =
+                            summoned_footman_cast_sequences_[
+                                index];
+                        if (cast_sequence != 0U) {
+                            static_cast<void>(
+                                ability_system_
+                                    .publish_logical_event(
+                                        AbilityEventType::
+                                            Hit,
+                                        cast_sequence,
+                                        hit_payload));
+                        }
+                        music_.play_sfx(
+                            hit.killed
+                                ? GameSfxKind::
+                                      CreatureDeath
+                                : GameSfxKind::
+                                      CreatureHit,
+                            0.58F);
+                    }
+                    return SummonedUnitStrikeResult {
+                        hit.hit,
+                        hit.killed,
+                        hit.damage,
+                    };
+                },
+                .taunt =
+                    [this](
+                        const SummonedUnitTauntRequest&
+                            taunt) {
+                    record_audit_event(
+                        AuditEventCategory::
+                            Creatures,
+                        taunt.mastery_triggered
+                            ? "footman_mastery_taunt"
+                            : "footman_taunt",
+                        AuditSeverity::Info,
+                        audit_json_object({
+                            {
+                                "unit_id",
+                                audit_json_number(
+                                    taunt.unit_id),
+                            },
+                            {
+                                "radius",
+                                audit_json_number(
+                                    taunt.radius),
+                            },
+                        }),
+                        AuditPriority::Normal);
+                },
+            };
+        const auto update =
+            footman.update(
+                safe_dt,
+                callbacks);
+        if (update.expired ||
+            !footman.active()) {
+            publish_expiration(
+                index,
+                footman.state()
+                    .position);
+            summoned_footman_ship_local_positions_[
+                index]
+                .reset();
+            summoned_footman_far_seconds_[index] =
+                0.0F;
+        }
+    }
+}
+
+void Game::rebuild_progression_creature_render_instances(
+    const EnvironmentState& environment) {
+    const auto base =
+        creatures_.render_instances();
+    progression_creature_render_instances_
+        .assign(
+            base.begin(),
+            base.end());
+    progression_creature_render_instances_
+        .reserve(
+            base.size() +
+            summoned_footmen_.size());
+    const auto daylight =
+        std::clamp(
+            finite_or(
+                environment.daylight_factor,
+                1.0F),
+            0.0F,
+            1.0F);
+    for (const auto& footman :
+         summoned_footmen_) {
+        for (const auto& snapshot :
+             footman.render_snapshots()) {
+            progression_creature_render_instances_
+                .push_back({
+                    CreatureSpecies::Villager,
+                    snapshot.position,
+                    snapshot.yaw_radians,
+                    snapshot.animation_time,
+                    0.0F,
+                    daylight,
+                    snapshot.taunt_amount,
+                    static_cast<std::uint32_t>(
+                        snapshot.unit_id ^
+                        UINT64_C(
+                            0xF07A4A11)),
+                    snapshot.attack_amount > 0.0F
+                        ? CreatureBehaviorState::
+                              Strike
+                        : CreatureBehaviorState::
+                              Idle,
+                    CreaturePhase::Day,
+                    0.0F,
+                    1.0F,
+                    snapshot.attack_amount,
+                    0.0F,
+                    0.0F,
+                    {0.0F, 0.0F, 1.0F},
+                });
+        }
+    }
+}
+
+void Game::grant_creature_kill_rewards(
+    const CreatureDamageResult& result,
+    std::string_view source) {
+    if (!result.killed ||
+        !result.grants_player_rewards) {
+        return;
+    }
+
+    if (active_game_mode_ ==
+            GameMode::SeaAdventure &&
+        sea_adventure_.active() &&
+        sea_adventure_.record_hunt(
+            result.species)) {
+        queue_gameplay_announcement(
+            "CHASSE",
+            "VIANDE RECUPEREE",
+            2.4F);
+    }
+
+    const auto activity_block =
+        block_coord_from_position(
+            result.position);
+    const auto explicit_ocean_surface =
+        active_game_mode_ ==
+            GameMode::SeaAdventure &&
+        sea_adventure_.active() &&
+        std::abs(
+            result.position.y -
+            static_cast<float>(
+                kSeaLevel)) <=
+            12.0F &&
+        world_.has_water(
+            activity_block.x,
+            kSeaLevel,
+            activity_block.z);
+    award_player_experience(
+        CombatExperienceEvent {
+            static_cast<std::uint64_t>(
+                result.experience_reward
+                    .experience_points),
+            result.disposition ==
+                CreatureDisposition::Hostile,
+            explicit_ocean_surface,
+            environment_
+                .current_creature_cycle()
+                .phase,
+        },
+        activity_block,
+        source);
 }
 
 void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
@@ -2322,6 +5519,7 @@ void Game::set_mouse_capture(bool captured) {
         pending_musket_fire_press_ = false;
         musket_aim_held_ = false;
         pending_musket_reload_ = false;
+        pending_ability_slot_.reset();
         player_.cancel_block_breaking();
     }
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
@@ -2345,7 +5543,8 @@ auto Game::can_open_command_console() const noexcept -> bool {
            !confirm_dialog_.visible &&
            !death_screen_visible_ &&
            !paused_ &&
-           !inventory_visible_;
+           !inventory_visible_ &&
+           !progression_menu_.visible();
 }
 
 void Game::set_command_console_visible(bool visible) {
@@ -2385,6 +5584,7 @@ void Game::set_command_console_visible(bool visible) {
             !death_screen_visible_ &&
             !paused_ &&
             !inventory_visible_ &&
+            !progression_menu_.visible() &&
             !confirm_dialog_.visible &&
             !front_end_visible()) {
             set_mouse_capture(true);
@@ -2641,6 +5841,9 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
         if (inventory_visible_) {
             set_inventory_visible(false);
         }
+        if (progression_menu_.visible()) {
+            set_progression_menu_visible(false);
+        }
         if (paused_) {
             paused_ = false;
             pause_menu_.visible = false;
@@ -2779,6 +5982,386 @@ void Game::set_inventory_visible(bool visible) {
         AuditPriority::High);
 }
 
+void Game::set_progression_menu_visible(
+    bool visible) {
+    if (options_.smoke_test ||
+        !has_active_session_ ||
+        (visible &&
+         (death_screen_visible_ ||
+          front_end_visible()))) {
+        return;
+    }
+    if (visible &&
+        (paused_ ||
+         inventory_visible_ ||
+         confirm_dialog_.visible)) {
+        return;
+    }
+    if (progression_menu_.visible() ==
+        visible) {
+        return;
+    }
+
+    if (!visible &&
+        construction_plan_editor_
+            .active()) {
+        static_cast<void>(
+            construction_plan_editor_
+                .cancel());
+    }
+    if (visible) {
+        static_cast<void>(
+            progression_menu_
+                .sync_selected_path_from_build(
+                    player_build_,
+                    progression_.level()));
+    }
+    progression_menu_.set_visible(
+        visible);
+    pending_toggle_fly_ = false;
+    pending_break_block_ = false;
+    pending_primary_attack_ = false;
+    pending_place_block_ = false;
+    pending_fishing_ = false;
+    pending_look_x_ = 0.0F;
+    pending_look_y_ = 0.0F;
+    pending_ability_slot_.reset();
+    player_.cancel_block_breaking();
+    reset_musket_interaction(false);
+    set_mouse_capture(
+        !visible &&
+        !paused_ &&
+        !inventory_visible_ &&
+        !command_console_.visible());
+    record_audit_event(
+        AuditEventCategory::Ui,
+        visible
+            ? "progression_opened"
+            : "progression_closed",
+        AuditSeverity::Info,
+        audit_json_object({
+            {
+                "visible",
+                audit_json_bool(visible),
+            },
+        }),
+        AuditPriority::High);
+}
+
+void Game::handle_progression_menu_keydown(
+    const SDL_KeyboardEvent& event) {
+    if (!progression_menu_.visible() ||
+        event.repeat != 0) {
+        return;
+    }
+
+    if (construction_plan_editor_
+            .active()) {
+        auto editor_result =
+            ConstructionPlanEditorResult {};
+        auto handled = true;
+        switch (event.keysym.sym) {
+        case SDLK_ESCAPE:
+            editor_result =
+                construction_plan_editor_
+                    .cancel();
+            break;
+        case SDLK_1:
+        case SDLK_KP_1:
+        case SDLK_2:
+        case SDLK_KP_2:
+        case SDLK_3:
+        case SDLK_KP_3: {
+            const auto number =
+                hotbar_number_from_keycode(
+                    event.keysym.sym);
+            editor_result =
+                construction_plan_editor_
+                    .select_plan(
+                        static_cast<
+                            std::size_t>(
+                            number - 1));
+            break;
+        }
+        case SDLK_LEFT:
+            editor_result =
+                construction_plan_editor_
+                    .move_cursor(
+                        -1,
+                        0,
+                        0);
+            break;
+        case SDLK_RIGHT:
+            editor_result =
+                construction_plan_editor_
+                    .move_cursor(
+                        1,
+                        0,
+                        0);
+            break;
+        case SDLK_UP:
+            editor_result =
+                construction_plan_editor_
+                    .move_cursor(
+                        0,
+                        0,
+                        -1);
+            break;
+        case SDLK_DOWN:
+            editor_result =
+                construction_plan_editor_
+                    .move_cursor(
+                        0,
+                        0,
+                        1);
+            break;
+        case SDLK_PAGEUP:
+            editor_result =
+                construction_plan_editor_
+                    .move_cursor(
+                        0,
+                        1,
+                        0);
+            break;
+        case SDLK_PAGEDOWN:
+            editor_result =
+                construction_plan_editor_
+                    .move_cursor(
+                        0,
+                        -1,
+                        0);
+            break;
+        case SDLK_q:
+        case SDLK_e: {
+            const auto material =
+                cycle_construction_plan_material(
+                    inventory_menu_,
+                    hotbar_,
+                    construction_plan_editor_
+                        .selected_material(),
+                    event.keysym.sym ==
+                            SDLK_q
+                        ? -1
+                        : 1);
+            if (!material.has_value()) {
+                queue_gameplay_announcement(
+                    "PLAN DE CHANTIER",
+                    "AUCUN BLOC SOLIDE DANS L'INVENTAIRE",
+                    2.6F);
+                return;
+            }
+            editor_result =
+                construction_plan_editor_
+                    .set_material(
+                        *material);
+            break;
+        }
+        case SDLK_m:
+            editor_result =
+                construction_plan_editor_
+                    .toggle_mirrored();
+            break;
+        case SDLK_SPACE: {
+            const auto view =
+                construction_plan_editor_
+                    .make_view_model();
+            editor_result =
+                view.can_remove
+                    ? construction_plan_editor_
+                          .remove_cell()
+                    : construction_plan_editor_
+                          .place_cell();
+            break;
+        }
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:
+            editor_result =
+                construction_plan_editor_
+                    .commit(
+                        player_build_);
+            break;
+        default:
+            handled = false;
+            break;
+        }
+        if (!handled) {
+            return;
+        }
+        if (editor_result.build_changed) {
+            sync_selected_hotbar_slot();
+            mark_session_dirty();
+        }
+        if (!editor_result.succeeded()) {
+            queue_gameplay_announcement(
+                "PLAN DE CHANTIER",
+                std::string(
+                    construction_plan_editor_failure_text(
+                        editor_result
+                            .failure)),
+                2.6F);
+        }
+        return;
+    }
+
+    if (event.keysym.sym == SDLK_c) {
+        if (progression_menu_
+                .selected_ability() !=
+                AbilityId::
+                    BuilderConstructionPlan) {
+            return;
+        }
+        if (player_ability_rank(
+                player_build_,
+                AbilityId::
+                    BuilderConstructionPlan) ==
+            0U) {
+            queue_gameplay_announcement(
+                "PLAN DE CHANTIER",
+                "APPRENDS D'ABORD LA COMPETENCE",
+                2.6F);
+            return;
+        }
+        const auto opened =
+            construction_plan_editor_
+                .begin_editing(
+                    player_build_);
+        if (!opened.succeeded()) {
+            queue_gameplay_announcement(
+                "PLAN DE CHANTIER",
+                std::string(
+                    construction_plan_editor_failure_text(
+                        opened.failure)),
+                2.6F);
+            return;
+        }
+        static_cast<void>(
+            construction_plan_editor_
+                .set_shape(
+                    ConstructionPlanShape::
+                        Grid));
+        const auto selected_material =
+            construction_plan_editor_
+                .selected_material();
+        if (selected_material >
+                std::numeric_limits<
+                    BlockId>::max() ||
+            inventory_material_count(
+                inventory_menu_,
+                hotbar_,
+                static_cast<BlockId>(
+                    selected_material)) ==
+                0U) {
+            const auto material =
+                cycle_construction_plan_material(
+                    inventory_menu_,
+                    hotbar_,
+                    std::numeric_limits<
+                        std::uint16_t>::max(),
+                    1);
+            if (!material.has_value()) {
+                static_cast<void>(
+                    construction_plan_editor_
+                        .cancel());
+                queue_gameplay_announcement(
+                    "PLAN DE CHANTIER",
+                    "AUCUN BLOC SOLIDE DANS L'INVENTAIRE",
+                    2.6F);
+                return;
+            }
+            static_cast<void>(
+                construction_plan_editor_
+                    .set_material(
+                        *material));
+        }
+        return;
+    }
+
+    auto input =
+        std::optional<ProgressionMenuInput> {};
+    switch (event.keysym.sym) {
+    case SDLK_ESCAPE:
+    case SDLK_p:
+        set_progression_menu_visible(false);
+        return;
+    case SDLK_LEFT:
+    case SDLK_a:
+        input = ProgressionMenuInput::PreviousPath;
+        break;
+    case SDLK_RIGHT:
+    case SDLK_d:
+        input = ProgressionMenuInput::NextPath;
+        break;
+    case SDLK_UP:
+    case SDLK_w:
+        input = ProgressionMenuInput::PreviousAbility;
+        break;
+    case SDLK_DOWN:
+    case SDLK_s:
+        input = ProgressionMenuInput::NextAbility;
+        break;
+    case SDLK_TAB:
+        input =
+            (event.keysym.mod &
+             KMOD_SHIFT) != 0
+                ? ProgressionMenuInput::PreviousSlot
+                : ProgressionMenuInput::NextSlot;
+        break;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        input = ProgressionMenuInput::PurchaseRank;
+        break;
+    case SDLK_m:
+        input = ProgressionMenuInput::PurchaseMastery;
+        break;
+    case SDLK_SPACE:
+    case SDLK_e:
+        input = ProgressionMenuInput::EquipOrUnequip;
+        break;
+    case SDLK_1:
+    case SDLK_KP_1:
+        input = ProgressionMenuInput::AllocateStrength;
+        break;
+    case SDLK_2:
+    case SDLK_KP_2:
+        input = ProgressionMenuInput::AllocateWisdom;
+        break;
+    case SDLK_3:
+    case SDLK_KP_3:
+        input = ProgressionMenuInput::AllocateAgility;
+        break;
+    case SDLK_4:
+    case SDLK_KP_4:
+        input = ProgressionMenuInput::AllocateRobustness;
+        break;
+    default:
+        return;
+    }
+
+    const auto result =
+        progression_menu_.handle_input(
+            *input,
+            player_build_,
+            progression_.level());
+    if (result.build_changed) {
+        sync_selected_hotbar_slot();
+        mark_session_dirty();
+    }
+    if (!result.succeeded()) {
+        const auto detail =
+            result.failure ==
+                    ProgressionMenuFailure::
+                        AbilityBuildRejected
+                ? progression_ability_failure_text(
+                      result.ability_failure)
+                : progression_menu_failure_text(
+                      result.failure);
+        queue_gameplay_announcement(
+            "PROGRESSION",
+            std::string(detail),
+            2.4F);
+    }
+}
+
 void Game::set_confirm_dialog_visible(bool visible,
                                       ConfirmDialogIntent intent,
                                       std::optional<std::size_t> slot_index) {
@@ -2801,6 +6384,7 @@ void Game::set_confirm_dialog_visible(bool visible,
         refresh_confirm_dialog_hover();
     } else if (!death_screen_visible_ &&
                !inventory_visible_ &&
+               !progression_menu_.visible() &&
                !paused_ &&
                !command_console_.visible() &&
                !front_end_visible()) {
@@ -3172,16 +6756,22 @@ void Game::spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin,
     item_drops_.spawn_drop(stack, origin, initial_velocity);
 }
 
-void Game::grant_player_experience(std::uint64_t base_experience, const BlockCoord& activity_block, std::string_view source) {
-    if (base_experience == 0ULL || progression_.is_max_level()) {
+void Game::award_player_experience(
+    const ExperienceAwardEvent& event,
+    const BlockCoord& activity_block,
+    std::string_view source) {
+    const auto award =
+        experience_awards_.award(
+            event);
+    if (!award.awarded() ||
+        progression_.is_max_level()) {
         return;
     }
 
-    const auto surface_y = world_.loaded_surface_height(activity_block.x, activity_block.z);
-    const auto multiplier = experience_multiplier_for_activity(environment_.current_creature_cycle(), surface_y, activity_block.y);
-    const auto awarded_experience = multiply_experience(base_experience, multiplier);
     const auto previous_level = progression_.level();
-    const auto result = progression_.add_experience(awarded_experience);
+    const auto result =
+        progression_.add_experience(
+            award.awarded_experience);
     if (result.awarded_experience == 0ULL) {
         return;
     }
@@ -3197,9 +6787,38 @@ void Game::grant_player_experience(std::uint64_t base_experience, const BlockCoo
         result.levels_gained > 0U ? AuditSeverity::Warning : AuditSeverity::Info,
         audit_json_object({
             {"source", audit_json_string(source)},
-            {"base_experience", audit_json_number(base_experience)},
-            {"multiplier", audit_json_number(multiplier)},
+            {
+                "base_experience",
+                audit_json_number(
+                    award.base_experience),
+            },
+            {
+                "night_surface_bonus",
+                audit_json_bool(
+                    award.awarded_experience !=
+                    award.base_experience),
+            },
             {"awarded_experience", audit_json_number(result.awarded_experience)},
+            {
+                "units_awarded",
+                audit_json_number(
+                    award.units_awarded),
+            },
+            {
+                "activity_x",
+                audit_json_number(
+                    activity_block.x),
+            },
+            {
+                "activity_y",
+                audit_json_number(
+                    activity_block.y),
+            },
+            {
+                "activity_z",
+                audit_json_number(
+                    activity_block.z),
+            },
             {"levels_gained", audit_json_number(result.levels_gained)},
             {"level", audit_json_number(progression_.level())},
             {"experience", audit_json_number(progression_.experience())},
@@ -3243,17 +6862,72 @@ void Game::queue_level_up_announcements(std::uint32_t previous_level, std::uint3
         return;
     }
 
-    const auto bonus_percent = static_cast<int>(std::lround(player_progression_bonus_percent(current_level)));
+    const auto delta =
+        player_derived_stats_delta(
+            previous_level,
+            current_level);
+    const auto as_percent =
+        [](float value) noexcept {
+        return static_cast<int>(
+            std::lround(
+                value * 100.0F));
+    };
+    std::ostringstream primary_detail {};
+    primary_detail
+        << "PV +"
+        << static_cast<int>(
+               std::lround(
+                   delta.base_max_health))
+        << "  DEG +"
+        << as_percent(
+               delta
+                   .attack_damage_multiplier)
+        << "%  DEF +"
+        << static_cast<int>(
+               std::lround(
+                   delta
+                       .damage_reduction_percent))
+        << "%";
     queue_gameplay_announcement(
         std::string("NIVEAU ") + std::to_string(current_level),
-        std::string("BONUS +") + std::to_string(bonus_percent) + "% DEGATS DEF VIT MINAGE APNEE CHUTE",
+        primary_detail.str(),
+        3.35F);
+    std::ostringstream secondary_detail {};
+    secondary_detail
+        << "VIT +"
+        << as_percent(
+               delta
+                   .movement_speed_multiplier)
+        << "%  MINAGE +"
+        << as_percent(
+               delta
+                   .mining_speed_multiplier)
+        << "%  APNEE +"
+        << static_cast<int>(
+               std::lround(
+                   delta
+                       .apnea_resistance_percent))
+        << "%  CHUTE +"
+        << as_percent(
+               delta
+                   .safe_fall_multiplier)
+        << "%";
+    queue_gameplay_announcement(
+        "STATISTIQUES",
+        secondary_detail.str(),
         3.35F);
 
     if (!player_has_super_vision_power(previous_level) && player_has_super_vision_power(current_level)) {
         queue_gameplay_announcement("SUPER VISION DEBLOQUEE", "TOUCHE V POUR VOIR DANS LE NOIR", 4.2F);
     }
     if (!player_has_flight_power(previous_level) && player_has_flight_power(current_level)) {
-        queue_gameplay_announcement("VOL DEBLOQUE", "TOUCHE F POUR VOLER", 4.2F);
+        queue_gameplay_announcement(
+            "VOL DEBLOQUE",
+            active_game_mode_ ==
+                    GameMode::SeaAdventure
+                ? "INDISPONIBLE EN MER - F RESTE LA PECHE"
+                : "TOUCHE F POUR VOLER",
+            4.2F);
     }
 }
 
@@ -3608,24 +7282,8 @@ void Game::resolve_player_musket_shot(
                     ? 0.92F
                     : 0.78F);
             if (result.killed) {
-                if (maritime_session_active &&
-                    sea_adventure_.record_hunt(
-                        result.species)) {
-                    queue_gameplay_announcement(
-                        "CHASSE",
-                        "VIANDE RECUPEREE",
-                        2.4F);
-                }
-                grant_player_experience(
-                    creature_kill_experience(
-                        result.species,
-                        result.position,
-                        static_cast<std::uint32_t>(
-                            world_.seed()) ^
-                            static_cast<std::uint32_t>(
-                                shot.shot_sequence)),
-                    block_coord_from_position(
-                        result.position),
+                grant_creature_kill_rewards(
+                    result,
                     "creature_kill_musket");
             }
             record_audit_event(
@@ -3742,22 +7400,84 @@ void Game::sync_selected_hotbar_slot() noexcept {
     player_.set_selected_block(
         selected_hotbar_block(hotbar_));
 
-    player_.set_damage_resistance_percent(
-        inventory_equipment_resistance_percent(
-            inventory_menu_) +
-        progression_.damage_resistance_percent());
+    const auto level = progression_.level();
+    const auto robustness =
+        player_attribute_value(
+            player_build_.attributes,
+            PlayerAttribute::Robustness);
+    const auto agility =
+        player_attribute_value(
+            player_build_.attributes,
+            PlayerAttribute::Agility);
+    const auto maximum_health =
+        player_base_max_health(level) +
+        static_cast<float>(robustness);
+    player_.set_max_health(
+        maximum_health);
+    const auto temporary_effects =
+        player_ability_effects_.aggregate(
+            maximum_health);
 
+    const auto armor_resistance =
+        std::clamp(
+            inventory_equipment_resistance_percent(
+                inventory_menu_) /
+                100.0F,
+            0.0F,
+            0.99F);
+    const auto combined_resistance =
+        1.0F -
+        (1.0F - armor_resistance) *
+            (1.0F -
+             player_level_damage_reduction(
+                 level)) *
+            (1.0F -
+             player_robustness_damage_reduction(
+                 robustness)) *
+            (1.0F -
+             temporary_effects
+                 .damage_reduction);
+    player_.set_damage_resistance_percent(
+        std::clamp(
+            combined_resistance,
+            0.0F,
+            0.80F) *
+        100.0F);
+
+    const auto apnea_duration_multiplier =
+        player_total_apnea_duration_multiplier(
+            level,
+            robustness);
     player_.set_apnea_resistance_percent(
-        progression_.apnea_resistance_percent());
+        (1.0F -
+         1.0F /
+             std::max(
+                 apnea_duration_multiplier,
+                 1.0F)) *
+        100.0F);
 
     player_.set_fall_safety_multiplier(
-        progression_.fall_safety_multiplier());
+        player_level_safe_fall_multiplier(
+            level));
 
     player_.set_movement_speed_multiplier(
-        progression_.movement_speed_multiplier());
+        player_total_movement_speed_multiplier(
+            level,
+            agility) *
+        std::clamp(
+            (1.0F +
+             std::max(
+                 wind_movement_bonus_,
+                 0.0F)) *
+                temporary_effects
+                    .movement_speed_multiplier(),
+            0.0F,
+            1.0F +
+                kMaximumTemporaryMovementSpeedBonus));
 
     player_.set_block_break_speed_multiplier(
-        progression_.block_break_speed_multiplier());
+        player_level_mining_speed_multiplier(
+            level));
 
     if (selected_musket_active()) {
         const auto selected_index =
@@ -3883,6 +7603,19 @@ void Game::respawn_player() {
             : find_initial_spawn_position();
 
     player_.respawn(spawn_position_);
+    const auto energy_parameters =
+        player_ability_energy_parameters(
+            player_build_);
+    player_build_.val_energy =
+        energy_parameters.maximum_energy *
+        0.50F;
+    player_ability_effects_.clear();
+    wind_acceleration_remaining_ = 0.0F;
+    wind_movement_bonus_ = 0.0F;
+    wind_recovery_bonus_ = 0.0F;
+    wind_dodge_remaining_ = 0.0F;
+    wind_blade_available_ = false;
+    wind_acceleration_cast_sequence_ = 0U;
     reset_musket_interaction();
     sync_selected_hotbar_slot();
     set_death_screen_visible(false);
@@ -3934,6 +7667,9 @@ auto Game::active_ui_screen() const noexcept -> UiScreen {
     if (inventory_visible_) {
         return UiScreen::Inventory;
     }
+    if (progression_menu_.visible()) {
+        return UiScreen::Progression;
+    }
     if (paused_) {
         return UiScreen::Pause;
     }
@@ -3953,6 +7689,7 @@ auto Game::gameplay_interaction_blocked() const noexcept -> bool {
     return death_screen_visible_ ||
            paused_ ||
            inventory_visible_ ||
+           progression_menu_.visible() ||
            command_console_.visible() ||
            confirm_dialog_.visible ||
            front_end_visible();
@@ -3969,11 +7706,34 @@ auto Game::render_player() const noexcept -> const PlayerController& {
 }
 
 auto Game::streaming_focus_position() const noexcept -> glm::vec3 {
-    if (options_.smoke_test && options_.smoke_ship_view != SmokeShipView::None &&
-        active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active()) {
-        return preview_player_.position();
+    const auto& focus_player =
+        options_.smoke_test &&
+            options_.smoke_ship_view != SmokeShipView::None &&
+            active_game_mode_ == GameMode::SeaAdventure &&
+            sea_adventure_.active()
+        ? preview_player_
+        : (!options_.smoke_test && front_end_visible()
+               ? preview_player_
+               : player_);
+    const auto base_focus =
+        focus_player.position();
+    if (active_game_mode_ == GameMode::SeaAdventure &&
+        sea_adventure_.active()) {
+        const auto& ship =
+            sea_adventure_.ship_entity();
+        const auto player_on_ship =
+            sea_adventure_.hud_state(
+                focus_player)
+                .on_ship;
+        // J'anticipe exactement un chunk dans le sens du navire uniquement
+        // lorsqu'il porte ce joueur ; à terre, je charge autour du joueur.
+        return resolve_sea_adventure_streaming_focus(
+            base_focus,
+            player_on_ship,
+            ship.position(),
+            ship.velocity());
     }
-    return !options_.smoke_test && front_end_visible() ? preview_player_.position() : player_.position();
+    return base_focus;
 }
 
 auto Game::current_renderer_options() const noexcept -> RendererOptions {
@@ -4017,7 +7777,45 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
             : spawn_position_;
     snapshot.player_state = player_.state();
     snapshot.progression = progression_.state();
+    snapshot.player_build = player_build_;
     snapshot.sea_adventure = sea_adventure_.save_state();
+    snapshot.maritime_experience =
+        experience_awards_.state();
+    snapshot.player_ability_runtime
+        .player_effects =
+        player_ability_effects_.snapshot();
+    snapshot.player_ability_runtime.wind = {
+        wind_acceleration_remaining_,
+        wind_movement_bonus_,
+        wind_recovery_bonus_,
+        wind_dodge_remaining_,
+        wind_blade_available_,
+        wind_acceleration_cast_sequence_,
+    };
+    for (std::size_t index = 0U;
+         index < summoned_footmen_.size();
+         ++index) {
+        auto& saved =
+            snapshot.player_ability_runtime
+                .summoned_footmen[index];
+        saved.runtime =
+            summoned_footmen_[index]
+                .snapshot();
+        saved.ship_local_position =
+            summoned_footman_ship_local_positions_[
+                index];
+        saved.far_seconds =
+            summoned_footman_far_seconds_[index];
+        saved.cast_sequence =
+            summoned_footman_cast_sequences_[
+                index];
+    }
+    snapshot.player_ability_runtime
+        .next_summoned_unit_id =
+        next_summoned_unit_id();
+    snapshot.player_ability_runtime
+        .next_cast_sequence =
+        ability_system_.next_cast_sequence();
     snapshot.hotbar = hotbar_;
     snapshot.inventory = inventory_menu_;
     snapshot.musket_shot_sequence =
@@ -4119,32 +7917,67 @@ auto Game::prepare_ship_mesh_during_loading(
     std::string_view loading_title,
     bool restoring) -> bool {
     using clock = std::chrono::steady_clock;
+    struct PreparedShipMeshes {
+        ChunkMeshData near_mesh {};
+        ChunkMeshData far_mesh {};
+        bool has_far_lod = false;
+    };
 
     if (renderer_.ship_mesh_ready(ship)) {
         return true;
     }
 
     const auto dispatch_begin = clock::now();
-    auto parts = std::vector<ShipPart> {ship.parts.begin(), ship.parts.end()};
     const auto* blueprint = ship.blueprint;
+    auto visual_parts = ship.parts;
+    if (options_.visual_pipeline ==
+            VisualPipeline::LegacyVoxel &&
+        blueprint != nullptr &&
+        !blueprint->legacy_visual_parts.empty()) {
+        // Je charge la photographie historique uniquement pour Legacy : la
+        // physique et la sauvegarde continuent d'utiliser le blueprint moderne.
+        visual_parts =
+            blueprint->legacy_visual_parts;
+    }
+    auto parts =
+        std::vector<ShipPart> {
+            visual_parts.begin(),
+            visual_parts.end()};
     const auto geometry_revision = ship.geometry_revision;
     const auto visual_pipeline = options_.visual_pipeline;
     auto mesh_future = std::async(
         std::launch::async,
         [parts = std::move(parts), blueprint, geometry_revision, visual_pipeline] {
+            PreparedShipMeshes prepared {};
             if (visual_pipeline == VisualPipeline::ModernStylized &&
                 blueprint != nullptr) {
-                // Je construis la coque organique hors du thread OpenGL tout en
-                // conservant exactement le plan logique et sa revision.
+                // Je construis les deux LOD hors du thread OpenGL pendant le
+                // chargement afin qu'aucun seuil de distance ne provoque de
+                // génération synchrone en jeu.
                 auto local_blueprint = *blueprint;
                 local_blueprint.parts = std::span<const ShipPart> {parts};
                 local_blueprint.geometry_revision = geometry_revision;
-                return build_stylized_ship_mesh(
-                           local_blueprint,
-                           StylizedShipLod::Near)
-                    .mesh;
+                prepared.near_mesh =
+                    build_stylized_ship_mesh(
+                        local_blueprint,
+                        StylizedShipLod::Near)
+                        .mesh;
+                prepared.far_mesh =
+                    build_stylized_ship_mesh(
+                        local_blueprint,
+                        StylizedShipLod::Far)
+                        .mesh;
+                prepared.has_far_lod = true;
+                return prepared;
             }
-            return build_ship_mesh_data(std::span<const ShipPart> {parts});
+            prepared.near_mesh =
+                build_ship_mesh_data(
+                    std::span<const ShipPart> {
+                        parts},
+                    {},
+                    ShipMeshLightingModel::
+                        LegacyHistorical);
+            return prepared;
         });
     record_loading_step(
         restoring ? "ship_mesh_restore_dispatch" : "ship_mesh_dispatch",
@@ -4164,9 +7997,17 @@ auto Game::prepare_ship_mesh_during_loading(
         return false;
     }
 
-    auto mesh = mesh_future.get();
+    auto prepared_meshes = mesh_future.get();
     const auto upload_begin = clock::now();
-    const auto ready = renderer_.upload_prepared_ship_mesh(ship, mesh);
+    const auto ready =
+        prepared_meshes.has_far_lod
+            ? renderer_.upload_prepared_ship_mesh(
+                  ship,
+                  prepared_meshes.near_mesh,
+                  prepared_meshes.far_mesh)
+            : renderer_.upload_prepared_ship_mesh(
+                  ship,
+                  prepared_meshes.near_mesh);
     record_loading_step(
         restoring ? "ship_mesh_restore_upload" : "ship_mesh_upload",
         upload_begin);
@@ -4255,58 +8096,122 @@ void Game::complete_loading_screen(std::string_view title, std::string_view deta
     loading_active_ = false;
 }
 
-auto Game::preload_readiness(const World& world, const glm::vec3& focus, int radius) const -> float {
-    const auto target_radius = std::max(radius, 0);
+auto Game::initial_preload_targets(const World& world, const glm::vec3& focus) const
+    -> std::vector<ChunkCoord> {
     const auto center = world.world_to_chunk(
         static_cast<int>(std::floor(focus.x)),
         static_cast<int>(std::floor(focus.z)));
+    const auto stream_radius = std::max(world.stream_radius(), 0);
+    const auto maritime =
+        world.generation_profile() == WorldGenerationProfile::OceanAdventure;
+    auto neighborhood_radius = std::min(
+        std::max(options_.performance.spawn_preload_radius, 1),
+        stream_radius);
+    if (maritime) {
+        // Je charge deux anneaux autour du joueur en mer pour que le pont, la
+        // surface et le fond immediat soient deja continus a la premiere frame.
+        neighborhood_radius = std::min(
+            std::max(neighborhood_radius, 2),
+            stream_radius);
+    }
 
-    auto total_chunks = 0;
-    auto ready_chunks = 0;
-    for (int dz = -target_radius; dz <= target_radius; ++dz) {
-        for (int dx = -target_radius; dx <= target_radius; ++dx) {
-            ++total_chunks;
-            const ChunkCoord coord {center.x + dx, center.z + dz};
-            const auto* chunk = world.find_chunk(coord);
-            if (chunk == nullptr) {
-                continue;
+    std::vector<ChunkCoord> targets {};
+    const auto neighborhood_side =
+        static_cast<std::size_t>(neighborhood_radius * 2 + 1);
+    targets.reserve(neighborhood_side * neighborhood_side);
+    for (int dz = -neighborhood_radius; dz <= neighborhood_radius; ++dz) {
+        for (int dx = -neighborhood_radius; dx <= neighborhood_radius; ++dx) {
+            targets.push_back({center.x + dx, center.z + dz});
+        }
+    }
+
+    if (maritime && stream_radius > 0) {
+        const auto port_layout =
+            StartingPortGenerator(world.seed()).build_layout();
+        const auto port_min = world.world_to_chunk(
+            port_layout.min_x,
+            port_layout.min_z);
+        const auto port_max = world.world_to_chunk(
+            port_layout.max_x,
+            port_layout.max_z);
+        const auto retained_min_x = center.x - stream_radius;
+        const auto retained_max_x = center.x + stream_radius;
+        const auto retained_min_z = center.z - stream_radius;
+        const auto retained_max_z = center.z + stream_radius;
+        const auto target_min_x = std::max(port_min.x, retained_min_x);
+        const auto target_max_x = std::min(port_max.x, retained_max_x);
+        const auto target_min_z = std::max(port_min.z, retained_min_z);
+        const auto target_max_z = std::min(port_max.z, retained_max_z);
+
+        // Je n'ajoute le port que lorsqu'il coupe la zone effectivement
+        // conservable par ce monde. Une sauvegarde partie au large ne recharge
+        // donc jamais le port a des kilometres du joueur.
+        if (target_min_x <= target_max_x &&
+            target_min_z <= target_max_z) {
+            for (int z = target_min_z; z <= target_max_z; ++z) {
+                for (int x = target_min_x; x <= target_max_x; ++x) {
+                    targets.push_back({x, z});
+                }
             }
-            if (world.mesh_revision(coord) == 0 || chunk->is_dirty() || chunk->is_lighting_dirty()) {
-                continue;
-            }
+        }
+    }
+
+    std::sort(
+        targets.begin(),
+        targets.end(),
+        [](const ChunkCoord& lhs, const ChunkCoord& rhs) {
+            return lhs.x < rhs.x ||
+                   (lhs.x == rhs.x && lhs.z < rhs.z);
+        });
+    targets.erase(
+        std::unique(targets.begin(), targets.end()),
+        targets.end());
+    return targets;
+}
+
+auto Game::preload_readiness(
+    const World& world,
+    std::span<const ChunkCoord> targets) const -> float {
+    auto ready_chunks = std::size_t {0U};
+    for (const auto& coord : targets) {
+        const auto* chunk = world.find_chunk(coord);
+        if (chunk == nullptr) {
+            continue;
+        }
+        if (world.mesh_revision(coord) == 0 ||
+            chunk->is_dirty() ||
+            chunk->is_lighting_dirty()) {
+            continue;
+        }
+        ++ready_chunks;
+    }
+
+    if (targets.empty()) {
+        return 1.0F;
+    }
+    return static_cast<float>(ready_chunks) /
+           static_cast<float>(targets.size());
+}
+
+auto Game::preload_gpu_readiness(
+    const World& world,
+    std::span<const ChunkCoord> targets) const -> float {
+    auto ready_chunks = std::size_t {0U};
+    for (const auto& coord : targets) {
+        const auto* chunk = world.find_chunk(coord);
+        const auto revision = world.mesh_revision(coord);
+        if (chunk != nullptr &&
+            !chunk->is_dirty() &&
+            !chunk->is_lighting_dirty() &&
+            revision != 0U &&
+            renderer_.world_mesh_uploaded(coord, revision)) {
             ++ready_chunks;
         }
     }
-
-    if (total_chunks == 0) {
-        return 1.0F;
-    }
-    return static_cast<float>(ready_chunks) / static_cast<float>(total_chunks);
-}
-
-auto Game::preload_gpu_readiness(const World& world, const glm::vec3& focus, int radius) const -> float {
-    const auto target_radius = std::max(radius, 0);
-    const auto center = world.world_to_chunk(
-        static_cast<int>(std::floor(focus.x)),
-        static_cast<int>(std::floor(focus.z)));
-
-    auto total_chunks = 0;
-    auto ready_chunks = 0;
-    for (int dz = -target_radius; dz <= target_radius; ++dz) {
-        for (int dx = -target_radius; dx <= target_radius; ++dx) {
-            ++total_chunks;
-            const ChunkCoord coord {center.x + dx, center.z + dz};
-            const auto* chunk = world.find_chunk(coord);
-            const auto revision = world.mesh_revision(coord);
-            if (chunk != nullptr && !chunk->is_dirty() && !chunk->is_lighting_dirty() && revision != 0U &&
-                renderer_.world_mesh_uploaded(coord, revision)) {
-                ++ready_chunks;
-            }
-        }
-    }
-    return total_chunks == 0
+    return targets.empty()
                ? 1.0F
-               : static_cast<float>(ready_chunks) / static_cast<float>(total_chunks);
+               : static_cast<float>(ready_chunks) /
+                     static_cast<float>(targets.size());
 }
 
 void Game::refresh_save_slots() {
@@ -4515,19 +8420,22 @@ void Game::prime_world_around(
     const auto center = world.world_to_chunk(
         static_cast<int>(std::floor(focus.x)),
         static_cast<int>(std::floor(focus.z)));
-    const auto preload_radius = std::min(
-        std::max(options_.performance.spawn_preload_radius, 1),
-        std::max(world.stream_radius(), 0));
-    const auto side = static_cast<std::size_t>(preload_radius * 2 + 1);
-    const auto target_count = side * side;
+    const auto preload_targets = initial_preload_targets(world, focus);
+    const auto target_count = preload_targets.size();
+    auto preload_stream_radius = 0;
+    for (const auto& coord : preload_targets) {
+        preload_stream_radius = std::max(
+            preload_stream_radius,
+            std::max(
+                std::abs(coord.x - center.x),
+                std::abs(coord.z - center.z)));
+    }
     const auto maritime = loading_theme_ == LoadingScreenTheme::Maritime;
     const auto loading_deadline = clock::now() + std::chrono::seconds(60);
 
     const auto for_each_target = [&](const auto& visitor) {
-        for (int dz = -preload_radius; dz <= preload_radius; ++dz) {
-            for (int dx = -preload_radius; dx <= preload_radius; ++dx) {
-                visitor(ChunkCoord {center.x + dx, center.z + dz});
-            }
+        for (const auto& coord : preload_targets) {
+            visitor(coord);
         }
     };
     const auto target_ratio = [&](const auto& ready) {
@@ -4552,9 +8460,10 @@ void Game::prime_world_around(
         record_loading_step("world_pipeline_slice", step_begin);
     };
 
-    // Je ne mets d'abord en file que le voisinage indispensable. Les anneaux
-    // exterieurs reprendront apres la premiere frame jouable.
-    (void)world.update_streaming(focus, preload_radius);
+    // Je conserve des le depart le plus grand anneau contenant mes cibles. En
+    // mer, cela empeche le petit voisinage d'apparition de decharger le port
+    // que je viens de construire avant meme son premier maillage.
+    (void)world.update_streaming(focus, preload_stream_radius);
 
     WorldWorkBudget generation_budget {};
     // Je borne la generation maritime a un chunk par tranche : deux chunks
@@ -4651,11 +8560,11 @@ void Game::prime_world_around(
     meshing_budget.max_fluid_ms = 0.0;
     meshing_budget.max_lighting_ms = 1.0;
     meshing_budget.max_meshing_ms = 3.0;
-    auto meshing_ratio = preload_readiness(world, focus, preload_radius);
+    auto meshing_ratio = preload_readiness(world, preload_targets);
     while (running_ && meshing_ratio < 1.0F) {
         check_loading_deadline();
         process_world_step(meshing_budget);
-        meshing_ratio = preload_readiness(world, focus, preload_radius);
+        meshing_ratio = preload_readiness(world, preload_targets);
         update_loading_screen(
             loading_title,
             maritime ? std::string_view("CONSTRUCTION DE L'HORIZON") : std::string_view("CONSTRUCTION DU PAYSAGE"),
@@ -4690,7 +8599,7 @@ void Game::prime_world_around(
 
     if (running_) {
         // Je relance seulement maintenant le streaming large: il ne concurrence
-        // plus les neuf chunks indispensables a l'apparition du joueur.
+        // plus les chunks indispensables a l'apparition du joueur et du port.
         const auto streaming_expand_begin = clock::now();
         (void)world.update_streaming(focus);
         record_loading_step("streaming_expansion", streaming_expand_begin);
@@ -4714,6 +8623,7 @@ void Game::prepare_game_session(
     inventory_visible_ = false;
     inventory_menu_.visible = false;
     inventory_menu_.hovered_slot.reset();
+    progression_menu_.set_visible(false);
     death_screen_visible_ = false;
     death_screen_.visible = false;
     death_screen_.cause = PlayerDeathCause::None;
@@ -4727,6 +8637,16 @@ void Game::prepare_game_session(
     pending_musket_fire_press_ = false;
     musket_aim_held_ = false;
     pending_musket_reload_ = false;
+    pending_ability_slot_.reset();
+    melee_attack_cooldown_remaining_ = 0.0F;
+    wind_acceleration_remaining_ = 0.0F;
+    wind_movement_bonus_ = 0.0F;
+    wind_recovery_bonus_ = 0.0F;
+    wind_dodge_remaining_ = 0.0F;
+    wind_blade_available_ = false;
+    wind_acceleration_cast_sequence_ = 0U;
+    player_ability_effects_.clear();
+    ability_system_.reset_timing();
     sync_selected_hotbar_slot();
     set_mouse_capture(true);
     try {
@@ -4803,6 +8723,7 @@ void Game::open_main_menu(bool from_session) {
     pause_menu_.visible = false;
     inventory_visible_ = false;
     inventory_menu_.visible = false;
+    progression_menu_.set_visible(false);
     death_screen_visible_ = false;
     death_screen_.visible = false;
     super_vision_active_ = false;
@@ -4972,7 +8893,7 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
             seed,
             options_.performance.stream_radius,
             generation_profile,
-            sea_mode ? WorldGenerationVersion::SparseArchipelagoV2
+            sea_mode ? WorldGenerationVersion::LivingOceanV3
                      : WorldGenerationVersion::LegacyV1,
             options_.visual_pipeline);
         SeaAdventureSystem prepared_sea_adventure {};
@@ -5031,7 +8952,8 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         PlayerController prepared_player {};
         prepared_player.respawn(prepared_spawn);
         EnvironmentClock prepared_environment {};
-        prepared_environment.set_time_of_day(8.25F);
+        prepared_environment.set_time_of_day(
+            resolve_new_session_time_of_day(options_));
         prepared_environment.set_weather_seed(static_cast<std::uint32_t>(seed));
         prepared_environment.set_weather_time_seconds(
             options_.initial_weather_time_seconds);
@@ -5099,6 +9021,20 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         creatures_ = std::move(prepared_creatures);
         item_drops_.clear();
         progression_.reset();
+        experience_awards_.reset();
+        player_build_ = {};
+        player_ability_effects_.clear();
+        ability_system_.reset_timing();
+        for (auto& footman :
+             summoned_footmen_) {
+            footman.clear();
+        }
+        summoned_footman_ship_local_positions_
+            .fill(std::nullopt);
+        summoned_footman_far_seconds_.fill(
+            0.0F);
+        summoned_footman_cast_sequences_.fill(
+            0U);
         hotbar_ = std::move(prepared_hotbar);
         inventory_menu_ = std::move(prepared_inventory);
         player_ = std::move(prepared_player);
@@ -5473,7 +9409,76 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         prepared_item_drops.load_drops(snapshot.item_drops);
         PlayerProgression prepared_progression {};
         prepared_progression.load_state(snapshot.progression);
+        auto prepared_player_build =
+            snapshot.player_build;
+        sanitize_player_build_state(
+            prepared_player_build,
+            prepared_progression.level());
+        ExperienceAwardService
+            prepared_experience_awards {};
+        prepared_experience_awards.load_state(
+            snapshot.maritime_experience);
+        const auto prepared_ability_runtime =
+            sanitize_player_ability_runtime_save_state(
+                snapshot.player_ability_runtime);
+        PlayerAbilityEffects
+            prepared_player_ability_effects {};
+        static_cast<void>(
+            prepared_player_ability_effects
+                .load_state(
+                    prepared_ability_runtime
+                        .player_effects));
+        std::array<
+            SummonedUnitSystem,
+            kMaximumPlayerSummons>
+            prepared_summoned_footmen {};
+        std::array<
+            std::optional<glm::vec3>,
+            kMaximumPlayerSummons>
+            prepared_summoned_ship_positions {};
+        std::array<
+            float,
+            kMaximumPlayerSummons>
+            prepared_summoned_far_seconds {};
+        std::array<
+            AbilityCastSequence,
+            kMaximumPlayerSummons>
+            prepared_summoned_cast_sequences {};
+        for (std::size_t index = 0U;
+             index <
+                 prepared_summoned_footmen
+                     .size();
+             ++index) {
+            const auto& saved =
+                prepared_ability_runtime
+                    .summoned_footmen[index];
+            const auto restored =
+                prepared_summoned_footmen[index]
+                    .load_state(
+                        saved.runtime);
+            if (!restored.restored) {
+                continue;
+            }
+            prepared_summoned_ship_positions[
+                index] =
+                sea_mode
+                    ? saved.ship_local_position
+                    : std::nullopt;
+            prepared_summoned_far_seconds[index] =
+                saved.far_seconds;
+            prepared_summoned_cast_sequences[index] =
+                saved.cast_sequence;
+        }
         PlayerController prepared_player {};
+        const auto prepared_robustness =
+            player_attribute_value(
+                prepared_player_build.attributes,
+                PlayerAttribute::Robustness);
+        prepared_player.set_max_health(
+            player_base_max_health(
+                prepared_progression.level()) +
+            static_cast<float>(
+                prepared_robustness));
         prepared_player.load_state(snapshot.player_state);
         EnvironmentClock prepared_environment {};
         prepared_environment.set_time_of_day(snapshot.metadata.time_of_day);
@@ -5542,6 +9547,8 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         inventory_menu_ = std::move(prepared_inventory);
         item_drops_ = std::move(prepared_item_drops);
         progression_ = std::move(prepared_progression);
+        player_build_ =
+            std::move(prepared_player_build);
         player_ = std::move(prepared_player);
         environment_ = prepared_environment;
         creatures_ = std::move(prepared_creatures);
@@ -5559,6 +9566,46 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         session_save_state_.reset_clean();
         prepare_game_session(
             snapshot.musket_shot_sequence);
+        experience_awards_ =
+            prepared_experience_awards;
+        player_ability_effects_ =
+            std::move(
+                prepared_player_ability_effects);
+        ability_system_
+            .reserve_next_cast_sequence(
+                prepared_ability_runtime
+                    .next_cast_sequence);
+        reserve_next_summoned_unit_id(
+            prepared_ability_runtime
+                .next_summoned_unit_id);
+        summoned_footmen_ =
+            std::move(
+                prepared_summoned_footmen);
+        summoned_footman_ship_local_positions_ =
+            prepared_summoned_ship_positions;
+        summoned_footman_far_seconds_ =
+            prepared_summoned_far_seconds;
+        summoned_footman_cast_sequences_ =
+            prepared_summoned_cast_sequences;
+        wind_acceleration_remaining_ =
+            prepared_ability_runtime
+                .wind.remaining_seconds;
+        wind_movement_bonus_ =
+            prepared_ability_runtime
+                .wind.movement_bonus;
+        wind_recovery_bonus_ =
+            prepared_ability_runtime
+                .wind.recovery_bonus;
+        wind_dodge_remaining_ =
+            prepared_ability_runtime
+                .wind.dodge_remaining_seconds;
+        wind_blade_available_ =
+            prepared_ability_runtime
+                .wind.blade_armed;
+        wind_acceleration_cast_sequence_ =
+            prepared_ability_runtime
+                .wind.cast_sequence;
+        sync_selected_hotbar_slot();
         record_loading_step("saved_session_commit", commit_begin);
 
         update_loading_screen(
@@ -5616,6 +9663,85 @@ auto Game::start_smoke_session() -> bool {
 
     if (options_.smoke_session == SmokeSessionMode::SeaNew) {
         start_new_game_in_slot(kSmokeSlot, GameMode::SeaAdventure);
+    } else if (options_.smoke_session ==
+               SmokeSessionMode::SeaOpen) {
+        constexpr auto kOpenSeaRouteDistance =
+            2'048.0F;
+
+        begin_loading_screen(
+            LoadingScreenTheme::Maritime,
+            static_cast<std::uint32_t>(
+                kSmokeSeed));
+        update_loading_screen(
+            "AVENTURE EN MER",
+            "PREPARATION DE LA HAUTE MER",
+            LoadingPhase::Preparation,
+            1.0F,
+            true);
+
+        SeaAdventureSystem open_sea {};
+        open_sea.reset(kSmokeSeed);
+        auto sea_state =
+            open_sea.save_state();
+        sea_state.active = true;
+        sea_state.voyage_phase =
+            SeaVoyagePhase::Underway;
+        sea_state.voyage_phase_elapsed = 0.0F;
+        sea_state.ship_position.z =
+            kOpenSeaRouteDistance + 0.5F;
+        sea_state.route_distance =
+            kOpenSeaRouteDistance;
+        sea_state.has_stamped_ship = false;
+        open_sea.load_state(
+            sea_state,
+            kSmokeSeed);
+
+        SaveGameSnapshot fixture {};
+        fixture.metadata.exists = true;
+        fixture.metadata.seed = kSmokeSeed;
+        fixture.metadata.time_of_day =
+            options_.initial_time_of_day;
+        fixture.metadata.weather_time_seconds =
+            options_.initial_weather_time_seconds;
+        fixture.metadata.game_mode =
+            GameMode::SeaAdventure;
+        fixture.sea_adventure =
+            open_sea.save_state();
+        fixture.spawn_position =
+            open_sea.deck_spawn_position();
+        fixture.player_state.position =
+            fixture.spawn_position;
+        fixture.player_state.velocity = {};
+        fixture.player_state.fall_start_y =
+            fixture.spawn_position.y;
+        fixture.player_state.on_ground = true;
+        fixture.hotbar =
+            make_default_hotbar_state();
+        fixture.inventory =
+            make_default_inventory_menu_state();
+        normalize_inventory_state(
+            fixture.inventory,
+            fixture.hotbar);
+
+        WorldSavePlan fixture_plan {};
+        fixture_plan.seed = kSmokeSeed;
+        fixture_plan.generation_profile =
+            WorldGenerationProfile::OceanAdventure;
+        fixture_plan.generation_version =
+            WorldGenerationVersion::LivingOceanV3;
+
+        // Je passe par une vraie sauvegarde V3 afin que la haute mer suive
+        // exactement le chargement, le streaming et le rendu d'une partie.
+        write_save_slot(
+            save_root_directory_,
+            kSmokeSlot,
+            fixture,
+            fixture_plan);
+        refresh_save_slots();
+        if (!load_game_from_slot(
+                kSmokeSlot)) {
+            return false;
+        }
     } else if (options_.smoke_session == SmokeSessionMode::SeaLegacy) {
         begin_loading_screen(LoadingScreenTheme::Maritime, static_cast<std::uint32_t>(kSmokeSeed));
         update_loading_screen(
@@ -5732,21 +9858,40 @@ auto Game::start_smoke_session() -> bool {
             port_layout.stone_quay.min_x,
             port_layout.stone_quay.surface_y,
             0));
-        // Je verrouille ici les trois invariants propres a une nouvelle mer :
-        // revision V2, navire encore amarre et port effectivement applique.
-        if (world_.generation_version() != WorldGenerationVersion::SparseArchipelagoV2 ||
+        // Je verrouille ici les trois invariants propres à une nouvelle mer :
+        // révision V3, navire encore amarré et port effectivement appliqué.
+        if (world_.generation_version() != WorldGenerationVersion::LivingOceanV3 ||
             sea_adventure_.save_state().voyage_phase != SeaVoyagePhase::Moored ||
             !gangway_ready || !quay_ready) {
-            throw std::runtime_error("New maritime smoke did not start moored in its V2 harbor");
+            throw std::runtime_error("New maritime smoke did not start moored in its V3 harbor");
+        }
+    } else if (
+        options_.smoke_session ==
+        SmokeSessionMode::SeaOpen) {
+        const auto& sea_state =
+            sea_adventure_.save_state();
+        const auto player_on_ship =
+            sea_adventure_
+                .hud_state(player_)
+                .on_ship;
+        if (world_.generation_version() !=
+                WorldGenerationVersion::
+                    LivingOceanV3 ||
+            sea_state.voyage_phase !=
+                SeaVoyagePhase::Underway ||
+            sea_state.ship_position.z <
+                2'000.0F ||
+            !player_on_ship) {
+            throw std::runtime_error(
+                "Open-sea smoke did not start underway on its V3 route");
         }
     }
-    const auto smoke_preload_radius = std::min(
-        std::max(options_.performance.spawn_preload_radius, 1),
-        std::max(world_.stream_radius(), 0));
-    if (preload_readiness(world_, player_.position(), smoke_preload_radius) < 1.0F) {
+    const auto smoke_preload_targets =
+        initial_preload_targets(world_, player_.position());
+    if (preload_readiness(world_, smoke_preload_targets) < 1.0F) {
         throw std::runtime_error("Maritime smoke loading entered gameplay before CPU chunks were ready");
     }
-    if (preload_gpu_readiness(world_, player_.position(), smoke_preload_radius) < 1.0F) {
+    if (preload_gpu_readiness(world_, smoke_preload_targets) < 1.0F) {
         throw std::runtime_error("Maritime smoke loading entered gameplay before GPU chunks were ready");
     }
     if (!renderer_.ship_mesh_ready(sea_adventure_.ship_render_state())) {
@@ -5977,7 +10122,7 @@ void Game::update_smoke_ship_camera() {
         camera_focus = to_world({
             0.0F,
             4.8F,
-            blueprint.anchors.galley.z,
+            local_center.z,
         });
         break;
 
@@ -6052,56 +10197,130 @@ void Game::update_smoke_ship_camera() {
                 -3.0F,
             });
         camera_focus = to_world(
-            blueprint.anchors.galley +
+            blueprint.anchors.crew_quarters +
             glm::vec3 {
                 0.15F,
                 1.0F,
-                5.0F,
-            });
-        break;
-
-    case SmokeShipView::CaptainCabin:
-        camera_position = to_world({
-            -0.40F,
-            1.01F,
-            -32.30F,
-        });
-        camera_focus = to_world(
-            blueprint.anchors.captain_cabin +
-            glm::vec3 {
-                0.0F,
-                1.10F,
-                1.5F,
-            });
-        break;
-
-    case SmokeShipView::CargoHold:
-        camera_position = to_world(
-            blueprint.anchors.cargo_hold +
-            glm::vec3 {
-                0.0F,
-                0.0F,
-                -7.0F,
-            });
-        camera_focus = to_world(
-            blueprint.anchors.cargo_hold +
-            glm::vec3 {
-                0.0F,
-                1.10F,
                 6.0F,
             });
         break;
 
-    case SmokeShipView::CrewDeck:
+    case SmokeShipView::CaptainCabin:
+        // Je cadre le lit depuis tribord pour contrôler en une image sa
+        // literie, le tapis et la fermeture du bordé arrière.
         camera_position = to_world({
-            7.0F,
-            4.90F,
-            -27.0F,
+            4.20F,
+            1.01F,
+            -31.60F,
         });
         camera_focus = to_world({
-            -0.5F,
-            5.35F,
-            -28.0F,
+            -4.50F,
+            1.80F,
+            -30.30F,
+        });
+        break;
+
+    case SmokeShipView::CargoHold:
+        // Je place ce contrôle dans l'axe exact où une rupture de bouchain ou
+        // une fin de plancher révélerait la mer derrière les dernières caisses.
+        // Je reste dans l'allée pour ne pas cadrer le quartier-maître de trop près.
+        camera_position = to_world({
+            0.25F,
+            -4.99F,
+            15.80F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            -4.00F,
+            22.50F,
+        });
+        break;
+
+    case SmokeShipView::CrewDeck:
+        // Je photographie les modules depuis leur porte avant : l'allée reste
+        // entièrement visible et aucun marin au repos ne masque l'objectif.
+        camera_position = to_world({
+            0.25F,
+            -1.99F,
+            -10.70F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            -0.62F,
+            -17.40F,
+        });
+        break;
+
+    case SmokeShipView::Infirmary:
+        // Je cadre toute l'infirmerie depuis sa porte, avant les rideaux, pour
+        // contrôler simultanément les deux lits et l'étanchéité du bordé.
+        camera_position = to_world({
+            0.25F,
+            -1.99F,
+            -19.70F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            -0.80F,
+            -26.20F,
+        });
+        break;
+
+    case SmokeShipView::Mess:
+        // Je cadre simultanément les pieds des tables et le passage vers les
+        // pompes pour repérer les volumes pleins ou les collisions parasites.
+        camera_position = to_world({
+            0.0F,
+            -4.99F,
+            -8.5F,
+        });
+        camera_focus = to_world({
+            3.20F,
+            -3.88F,
+            -1.0F,
+        });
+        break;
+
+    case SmokeShipView::GunDeck:
+        camera_position = to_world({
+            0.0F,
+            1.01F,
+            -17.0F,
+        });
+        camera_focus = to_world({
+            5.40F,
+            2.12F,
+            -8.0F,
+        });
+        break;
+
+    case SmokeShipView::Underwater:
+        // Je place cette capture sous la flottaison, hors de la coque, pour
+        // contrôler simultanément le fond, la brume et la silhouette du navire.
+        camera_position = to_world({
+            extent.x * 1.15F,
+            -15.0F,
+            local_center.z - 2.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            -20.0F,
+            local_center.z + 18.0F,
+        });
+        break;
+
+    case SmokeShipView::Wake:
+        // Je décale la caméra derrière bâbord pour laisser visibles l'écume de
+        // poupe et les deux rubans, sans que la coque ou le HUD les recouvrent.
+        camera_position = to_world({
+            -extent.x * 0.52F,
+            2.4F,
+            blueprint.bounds.min.z - 23.0F,
+        });
+        camera_focus = to_world({
+            0.0F,
+            0.25F,
+            blueprint.bounds.min.z + 1.5F,
         });
         break;
 
@@ -6150,8 +10369,11 @@ void Game::update_smoke_ship_camera() {
     camera_state.fly_mode = true;
     camera_state.on_ground = false;
     camera_state.dead = false;
-    camera_state.head_underwater = false;
-    camera_state.swimming = false;
+    const auto underwater_view =
+        options_.smoke_ship_view ==
+        SmokeShipView::Underwater;
+    camera_state.head_underwater = underwater_view;
+    camera_state.swimming = underwater_view;
     preview_player_.load_state(
         camera_state);
 }
@@ -6278,6 +10500,12 @@ auto Game::make_performance_sample(const FramePerformanceStats& frame_stats) con
     sample.gpu_world_ms = frame_stats.gpu_world_ms;
     sample.gpu_sky_ms = frame_stats.gpu_sky_ms;
     sample.gpu_water_ms = frame_stats.gpu_water_ms;
+    sample.gpu_water_resolve_ms =
+        frame_stats.gpu_water_resolve_ms;
+    sample.gpu_water_surface_ms =
+        frame_stats.gpu_water_surface_ms;
+    sample.gpu_transparent_weather_ms =
+        frame_stats.gpu_transparent_weather_ms;
     sample.gpu_entities_ms = frame_stats.gpu_entities_ms;
     sample.gpu_post_process_ms = frame_stats.gpu_post_process_ms;
     sample.gpu_hud_ms = frame_stats.gpu_hud_ms;
@@ -6715,6 +10943,9 @@ auto Game::make_audit_frame_sample(const FramePerformanceStats& frame_stats) con
         break;
     case UiScreen::Inventory:
         sample.ui_screen = "inventory";
+        break;
+    case UiScreen::Progression:
+        sample.ui_screen = "progression";
         break;
     case UiScreen::Pause:
         sample.ui_screen = "pause";

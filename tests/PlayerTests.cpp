@@ -231,13 +231,24 @@ auto find_unloaded_generated_face_block(const World& world, int world_x) -> std:
 
 TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(player_experience_for_next_level(1U) == 100ULL);
-    CHECK(player_experience_for_next_level(2U) == 150ULL);
-    CHECK(player_experience_for_next_level(3U) == 225ULL);
+    CHECK(player_experience_for_next_level(2U) == 117ULL);
+    CHECK(player_experience_for_next_level(3U) == 136ULL);
+    CHECK(player_cumulative_experience_for_level(50U) == 61740ULL);
+    CHECK(player_cumulative_experience_for_level(100U) == 406065ULL);
 
-    const auto level_30_experience = player_experience_for_next_level(30U);
-    CHECK(player_experience_for_next_level(31U) == level_30_experience + (level_30_experience + 1ULL) / 2ULL);
+    CHECK(player_experience_for_next_level(30U) == 1405ULL);
+    CHECK(player_experience_for_next_level(31U) == 1480ULL);
+    CHECK(player_experience_for_next_level(99U) == 11272ULL);
     CHECK(player_experience_for_next_level(99U) < std::numeric_limits<std::uint64_t>::max());
     CHECK(player_experience_for_next_level(100U) == 0ULL);
+    CHECK(player_skill_points_earned(1U) == 1U);
+    CHECK(player_skill_points_earned(100U) == 100U);
+    CHECK(player_attribute_points_earned(4U) == 0U);
+    CHECK(player_attribute_points_earned(5U) == 1U);
+    CHECK(player_attribute_points_earned(100U) == 20U);
+    CHECK(player_mastery_points_earned(59U) == 0U);
+    CHECK(player_mastery_points_earned(60U) == 1U);
+    CHECK(player_mastery_points_earned(100U) == 5U);
 
     PlayerProgression progression {};
     CHECK(progression.level() == 1U);
@@ -264,22 +275,22 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(gain.levels_gained == 1U);
     CHECK(progression.level() == 2U);
     CHECK(progression.experience() == 0ULL);
-    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.01F));
-    CHECK(progression.damage_resistance_percent() == doctest::Approx(1.0F));
-    CHECK(progression.apnea_resistance_percent() == doctest::Approx(1.0F));
-    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.01F));
-    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.01F));
-    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.01F));
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.0025F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(0.1F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(0.497512F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.0025F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.001F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.002F));
     CHECK_FALSE(progression.has_super_vision_power());
     CHECK_FALSE(progression.has_flight_power());
 
     progression.load_state({31U, 0ULL});
-    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.30F));
-    CHECK(progression.damage_resistance_percent() == doctest::Approx(30.0F));
-    CHECK(progression.apnea_resistance_percent() == doctest::Approx(30.0F));
-    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.30F));
-    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.30F));
-    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.30F));
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.075F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(3.0F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(13.043478F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.075F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.03F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.06F));
     CHECK(progression.has_super_vision_power());
     CHECK_FALSE(progression.has_flight_power());
 
@@ -291,12 +302,12 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
     CHECK(progression.level() == 100U);
     CHECK(progression.experience() == 0ULL);
     CHECK(progression.experience_for_next_level() == 0ULL);
-    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.99F));
-    CHECK(progression.damage_resistance_percent() == doctest::Approx(99.0F));
-    CHECK(progression.apnea_resistance_percent() == doctest::Approx(99.0F));
-    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.99F));
-    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.99F));
-    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.99F));
+    CHECK(progression.attack_damage_multiplier() == doctest::Approx(1.2475F));
+    CHECK(progression.damage_resistance_percent() == doctest::Approx(9.9F));
+    CHECK(progression.apnea_resistance_percent() == doctest::Approx(33.11037F));
+    CHECK(progression.fall_safety_multiplier() == doctest::Approx(1.2475F));
+    CHECK(progression.movement_speed_multiplier() == doctest::Approx(1.099F));
+    CHECK(progression.block_break_speed_multiplier() == doctest::Approx(1.198F));
     CHECK(progression.has_super_vision_power());
     CHECK(progression.has_flight_power());
 
@@ -310,15 +321,16 @@ TEST_CASE("player progression thresholds bonuses and level cap stay coherent") {
 }
 
 TEST_CASE("experience reward rules stay bounded and apply the night surface bonus only on surface") {
-    CHECK(block_break_experience(to_block_id(BlockType::Stone)) == 10ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::Wood)) == 15ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::PineWood)) == 15ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::Planks)) == 15ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::CoalOre)) == 20ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::IronOre)) == 32ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::GoldOre)) == 48ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::DiamondOre)) == 72ULL);
-    CHECK(block_break_experience(to_block_id(BlockType::MetallicAlloyOre)) == 96ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Stone)) == 1ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Wood)) == 4ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::PineWood)) == 4ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Planks)) == 1ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::CoalOre)) == 8ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::IronOre)) == 14ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::GoldOre)) == 22ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::DiamondOre)) == 36ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::MetallicAlloyOre)) == 50ULL);
+    CHECK(block_break_experience(to_block_id(BlockType::Stone), true) == 0ULL);
     CHECK(block_break_experience(to_block_id(BlockType::MetallicAlloyOre)) >
           block_break_experience(to_block_id(BlockType::DiamondOre)));
     CHECK(block_break_experience(to_block_id(BlockType::DiamondOre)) >
@@ -329,19 +341,38 @@ TEST_CASE("experience reward rules stay bounded and apply the night surface bonu
           block_break_experience(to_block_id(BlockType::CoalOre)));
     CHECK(block_break_experience(to_block_id(BlockType::Air)) == 0ULL);
 
-    const auto kill_reward = creature_kill_experience(CreatureSpecies::Villager, {2.5F, 13.001F, -4.5F}, 42U);
-    CHECK(kill_reward >= 1ULL);
-    CHECK(kill_reward <= 100ULL);
-    CHECK(creature_kill_experience(CreatureSpecies::Villager, {2.5F, 13.001F, -4.5F}, 42U) == kill_reward);
+    CHECK(creature_kill_experience(CreatureSpecies::Villager, {2.5F, 13.001F, -4.5F}, 42U) == 0ULL);
+    CHECK(creature_kill_experience(CreatureSpecies::Pig, {2.5F, 13.001F, -4.5F}, 42U) == 2ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile1) == 15ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile2) == 30ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile3) == 55ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile4) == 95ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile5) == 160ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile6) == 240ULL);
+    CHECK(creature_threat_experience(CreatureThreatTier::Hostile3, true) == 137ULL);
+    CHECK(boss_experience(100ULL) == 500ULL);
+    CHECK(boss_experience(5000ULL) == 3000ULL);
+    CHECK(boss_experience(0ULL) == 0ULL);
 
-    const auto day_cycle = EnvironmentClock::classify_creature_cycle(12.0F);
-    const auto night_cycle = EnvironmentClock::classify_creature_cycle(23.0F);
-    CHECK(experience_multiplier_for_activity(day_cycle, 12, 13) == 1U);
-    CHECK(experience_multiplier_for_activity(night_cycle, 12, 13) == 2U);
-    CHECK(experience_multiplier_for_activity(night_cycle, 12, 8) == 1U);
-    CHECK(experience_multiplier_for_activity(night_cycle, std::nullopt, 13) == 1U);
-    CHECK(multiply_experience(15ULL, experience_multiplier_for_activity(night_cycle, 12, 13)) == 30ULL);
-    CHECK(multiply_experience(std::numeric_limits<std::uint64_t>::max(), 2U) == std::numeric_limits<std::uint64_t>::max());
+    ExperienceAwardContext context {
+        .reason = ExperienceReason::Combat,
+        .hostile_target = true,
+        .at_surface = true,
+        .surface_water_context = true,
+        .phase = CreaturePhase::Night,
+    };
+    CHECK(apply_experience_modifiers(55ULL, context) == 68ULL);
+    context.surface_water_context = false;
+    CHECK(apply_experience_modifiers(55ULL, context) == 55ULL);
+    context.at_surface = false;
+    context.surface_water_context = true;
+    context.hostile_target = false;
+    CHECK(apply_experience_modifiers(55ULL, context) == 55ULL);
+    context.hostile_target = true;
+    context.reason = ExperienceReason::Harvest;
+    CHECK(apply_experience_modifiers(55ULL, context) == 55ULL);
+    CHECK(multiply_experience_ratio(std::numeric_limits<std::uint64_t>::max(), 5U, 4U) ==
+          std::numeric_limits<std::uint64_t>::max());
 }
 
 TEST_CASE("player controller sanitizes non finite loaded state before gameplay math") {
@@ -983,7 +1014,7 @@ TEST_CASE("platform translation moves the player without resetting gameplay stat
     CHECK(player.state().fall_start_y == doctest::Approx(10.5F));
 }
 
-TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explorable levels") {
+TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with three explorable decks") {
     const auto& blueprint = amelie_ship_blueprint();
     REQUIRE_FALSE(blueprint.parts.empty());
     CHECK(blueprint.name == std::string_view {"L'Am\xC3\xA9lie"});
@@ -1017,7 +1048,7 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
             [](const ShipPart& part) {
                 return
                     part.shape == ShipPartShape::Segment &&
-                    part.material == ShipMaterial::SolidGold &&
+                    part.material == ShipMaterial::CleanBeam &&
                     part.thickness >= 0.40F &&
                     std::abs(
                         part.local_end.x -
@@ -1120,7 +1151,7 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
             std::max(
                 std::abs(part.local_start.x),
                 std::abs(part.local_end.x)) <=
-            1.80F);
+            1.90F);
     }
 
     CHECK(forward_lantern_count == 2);
@@ -1240,11 +1271,11 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
         const auto feet = origin + anchor;
         const auto support = ship.support_height(feet);
         REQUIRE(support.has_value());
-        CHECK(*support == doctest::Approx(origin.y + 1.0F));
+        CHECK(*support == doctest::Approx(feet.y - 0.01F));
         CHECK(feet.y == doctest::Approx(*support + 0.01F));
         CHECK_FALSE(ship.intersects_aabb(
-            feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
-            feet + glm::vec3 {0.30F, 1.80F, 0.30F}));
+            feet + glm::vec3 {-0.34F, 0.0F, -0.34F},
+            feet + glm::vec3 {0.34F, 1.88F, 0.34F}));
     }
 
     const auto main_deck_feet = origin + anchors.safe_spawn;
@@ -1258,8 +1289,8 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
     REQUIRE(exact_main_deck_support.has_value());
     CHECK(*exact_main_deck_support == doctest::Approx(*main_deck_support));
     CHECK_FALSE(ship.intersects_aabb(
-        main_deck_feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
-        main_deck_feet + glm::vec3 {0.30F, 1.80F, 0.30F}));
+        main_deck_feet + glm::vec3 {-0.34F, 0.0F, -0.34F},
+        main_deck_feet + glm::vec3 {0.34F, 1.88F, 0.34F}));
 
     const std::array<glm::vec3, 3> upper_anchors {{
         anchors.helm,
@@ -1272,8 +1303,8 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
         REQUIRE(support.has_value());
         CHECK(feet.y == doctest::Approx(*support + 0.01F));
         CHECK_FALSE(ship.intersects_aabb(
-            feet + glm::vec3 {-0.30F, 0.0F, -0.30F},
-            feet + glm::vec3 {0.30F, 1.80F, 0.30F}));
+            feet + glm::vec3 {-0.34F, 0.0F, -0.34F},
+            feet + glm::vec3 {0.34F, 1.88F, 0.34F}));
     }
 
     const auto glass_window = std::find_if(
@@ -1298,7 +1329,7 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
         });
     REQUIRE(forward_deck_at_bow != blueprint.parts.end());
     CHECK(std::max(std::abs(forward_deck_at_bow->local_start.x),
-                   std::abs(forward_deck_at_bow->local_end.x)) <= 1.60F);
+                   std::abs(forward_deck_at_bow->local_end.x)) <= 2.00F);
     for (const auto& part : blueprint.parts) {
         const auto min_z = std::min(part.local_start.z, part.local_end.z);
         const auto max_z = std::max(part.local_start.z, part.local_end.z);
@@ -1317,8 +1348,8 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
         anchors.cargo_hold,
     }};
     for (const auto& anchor : safe_interior_anchors) {
-        const auto occupant_min = anchor + glm::vec3 {-0.30F, 0.0F, -0.30F};
-        const auto occupant_max = anchor + glm::vec3 {0.30F, 1.80F, 0.30F};
+        const auto occupant_min = anchor + glm::vec3 {-0.34F, 0.0F, -0.34F};
+        const auto occupant_max = anchor + glm::vec3 {0.34F, 1.88F, 0.34F};
         for (const auto& part : blueprint.parts) {
             if (part.material != ShipMaterial::Lantern) {
                 continue;
@@ -1348,6 +1379,144 @@ TEST_CASE("L'Amelie blueprint exposes a coherent three mast ship with two explor
     CHECK_FALSE(ship.intersects_aabb(collidable_center, collidable_center));
 }
 
+TEST_CASE("les barrots de l'Amelie encadrent les quatre tremies sans traverser les escaliers") {
+    struct StairwellClearance {
+        glm::vec3 min;
+        glm::vec3 max;
+        std::size_t expected_beam_rows;
+    };
+
+    constexpr std::array<StairwellClearance, 4> clearances {{
+        {
+            {-1.22F, 1.00F, -15.0F},
+            {1.22F, 4.00F, -9.0F},
+            1U,
+        },
+        {
+            {-1.22F, 1.00F, 8.0F},
+            {1.22F, 4.00F, 14.0F},
+            2U,
+        },
+        {
+            {-3.45F, -2.00F, -4.0F},
+            {-1.05F, 1.00F, 2.0F},
+            1U,
+        },
+        {
+            {1.05F, -5.00F, 8.0F},
+            {3.45F, -2.00F, 14.0F},
+            1U,
+        },
+    }};
+    constexpr auto epsilon =
+        0.001F;
+    const auto& parts =
+        amelie_ship_blueprint().parts;
+
+    for (std::size_t stair_index = 0;
+         stair_index < clearances.size();
+         ++stair_index) {
+        const auto& clearance =
+            clearances[stair_index];
+        auto left_frame_piece_count =
+            std::size_t {0};
+        auto right_frame_piece_count =
+            std::size_t {0};
+        auto transverse_piece_count =
+            std::size_t {0};
+
+        for (const auto& part : parts) {
+            if (part.shape !=
+                    ShipPartShape::Box ||
+                part.material !=
+                    ShipMaterial::CleanBeam) {
+                continue;
+            }
+
+            const auto part_min =
+                glm::min(
+                    part.local_start,
+                    part.local_end);
+            const auto part_max =
+                glm::max(
+                    part.local_start,
+                    part.local_end);
+            const auto extent =
+                part_max -
+                part_min;
+            const auto is_transverse_beam =
+                extent.x >= 1.50F &&
+                extent.y <= 0.30F &&
+                extent.z <= 0.30F;
+            const auto overlaps_y =
+                part_min.y <
+                    clearance.max.y -
+                        epsilon &&
+                part_max.y >
+                    clearance.min.y +
+                        epsilon;
+            const auto overlaps_z =
+                part_min.z <
+                    clearance.max.z -
+                        epsilon &&
+                part_max.z >
+                    clearance.min.z +
+                        epsilon;
+            if (!is_transverse_beam ||
+                !overlaps_y ||
+                !overlaps_z) {
+                continue;
+            }
+
+            ++transverse_piece_count;
+            CAPTURE(stair_index);
+            CAPTURE(part_min.x);
+            CAPTURE(part_max.x);
+            CAPTURE(part_min.y);
+            CAPTURE(part_max.y);
+            CAPTURE(part_min.z);
+            CAPTURE(part_max.z);
+
+            // Je garde une échappée entièrement libre au-dessus des marches :
+            // un simple contact avec la joue est permis, jamais une traversée.
+            const auto overlaps_x =
+                part_min.x <
+                    clearance.max.x -
+                        epsilon &&
+                part_max.x >
+                    clearance.min.x +
+                        epsilon;
+            CHECK_FALSE(overlaps_x);
+            CHECK_FALSE(part.collidable);
+            CHECK_FALSE(part.supports_player);
+
+            if (std::abs(
+                    part_max.x -
+                    clearance.min.x) <=
+                epsilon) {
+                ++left_frame_piece_count;
+            }
+            if (std::abs(
+                    part_min.x -
+                    clearance.max.x) <=
+                epsilon) {
+                ++right_frame_piece_count;
+            }
+        }
+
+        REQUIRE(
+            transverse_piece_count >=
+            clearance.expected_beam_rows *
+                2U);
+        CHECK(
+            left_frame_piece_count ==
+            clearance.expected_beam_rows);
+        CHECK(
+            right_frame_piece_count ==
+            clearance.expected_beam_rows);
+    }
+}
+
 TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabited hull") {
     const auto& blueprint =
         amelie_ship_blueprint();
@@ -1356,13 +1525,13 @@ TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabit
 
     CHECK(
         profile.half_width_at(0.0F) ==
-        doctest::Approx(8.60F));
+        doctest::Approx(8.75F));
     CHECK(
         profile.half_width_at(profile.stern_z) ==
-        doctest::Approx(6.35F));
+        doctest::Approx(6.75F));
     CHECK(
         profile.half_width_at(profile.bow_z) ==
-        doctest::Approx(1.10F));
+        doctest::Approx(1.40F));
     CHECK(
         profile.half_width_at(-17.5F) >
         profile.half_width_at(profile.stern_z));
@@ -1442,8 +1611,8 @@ TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabit
         anchors.helm,
         {0.0F, profile.main_deck_top_y, profile.stern_z + 0.25F},
         {0.0F, profile.main_deck_top_y, profile.bow_z - 0.25F},
-        {-8.92F, 1.25F, -7.50F},
-        {8.92F, 1.25F, -7.50F},
+        {-9.02F, 1.25F, -7.50F},
+        {9.02F, 1.25F, -7.50F},
     }};
     for (const auto& point : exposed_weather_points) {
         CAPTURE(point.x);
@@ -1454,7 +1623,7 @@ TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabit
                 point));
     }
 
-    const glm::vec3 exterior_hull_skin {
+    const glm::vec3 inhabited_hull_skin {
         profile.half_width_at(0.0F) -
             0.10F,
         1.50F,
@@ -1462,16 +1631,16 @@ TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabit
     };
     CHECK(
         profile.excludes_ocean_local(
-            exterior_hull_skin));
-    CHECK_FALSE(
+            inhabited_hull_skin));
+    CHECK(
         profile.shelters_from_weather_local(
-            exterior_hull_skin));
+            inhabited_hull_skin));
     CHECK_FALSE(
         profile.excludes_ocean_local(
-            {8.92F, 1.25F, -7.50F}));
+            {9.02F, 1.25F, -7.50F}));
     CHECK_FALSE(
         profile.shelters_from_weather_local(
-            {8.92F, 1.25F, -7.50F}));
+            {9.02F, 1.25F, -7.50F}));
     const auto middle_boundary =
         profile.half_width_at(0.0F) -
         profile.middle_width_inset;
@@ -1513,7 +1682,7 @@ TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabit
     CHECK(
         profile.excludes_ocean_local(
             {0.0F, 0.0F, 0.0F}));
-    CHECK_FALSE(
+    CHECK(
         profile.shelters_from_weather_local(
             {0.0F, 0.0F, 0.0F}));
     CHECK_FALSE(
@@ -1542,15 +1711,15 @@ TEST_CASE("Amelie protection profile keeps ocean and weather outside the inhabit
                 world_anchor));
     }
 
-    const auto exterior_hull_world =
+    const auto inhabited_hull_world =
         ship.local_to_world_point(
-            exterior_hull_skin);
+            inhabited_hull_skin);
     CHECK(
         ship.excludes_ocean_at(
-            exterior_hull_world));
-    CHECK_FALSE(
+            inhabited_hull_world));
+    CHECK(
         ship.is_weather_sheltered_at(
-            exterior_hull_world));
+            inhabited_hull_world));
 
     constexpr auto nan =
         std::numeric_limits<float>::quiet_NaN();
@@ -1719,8 +1888,8 @@ TEST_CASE("L'Amelie exposes two mirrored boarding nets without changing ship col
         CHECK(net.material == ShipMaterial::Rope);
         CHECK_FALSE(net.collidable);
         CHECK_FALSE(net.supports_player);
-        CHECK(std::min(net.local_start.x, net.local_end.x) == doctest::Approx(side * 8.92F));
-        CHECK(std::max(net.local_start.x, net.local_end.x) == doctest::Approx(side * 8.92F));
+        CHECK(std::min(net.local_start.x, net.local_end.x) == doctest::Approx(side * 9.02F));
+        CHECK(std::max(net.local_start.x, net.local_end.x) == doctest::Approx(side * 9.02F));
         CHECK(std::min(net.local_start.y, net.local_end.y) == doctest::Approx(-1.30F));
         CHECK(std::max(net.local_start.y, net.local_end.y) == doctest::Approx(4.48F));
         CHECK(std::min(net.local_start.z, net.local_end.z) == doctest::Approx(-9.0F));
@@ -1775,14 +1944,14 @@ TEST_CASE("L'Amelie exposes two mirrored boarding nets without changing ship col
             feet + glm::vec3 {0.30F, 1.80F, 0.30F});
         REQUIRE(contact.has_value());
         CHECK(contact->outward_normal.x == doctest::Approx(side));
-        CHECK(contact->deck_exit.x == doctest::Approx(origin.x + side * 7.45F));
+        CHECK(contact->deck_exit.x == doctest::Approx(origin.x + side * 7.58F));
         CHECK(contact->deck_exit.y == doctest::Approx(origin.y + 4.01F));
         CHECK(contact->deck_exit.z == doctest::Approx(origin.z - 7.5F));
         const auto exit_support = ship.support_height(contact->deck_exit);
         REQUIRE(exit_support.has_value());
         CHECK(contact->deck_exit.y == doctest::Approx(*exit_support + 0.01F));
 
-        const auto net_center = origin + glm::vec3 {side * 8.92F, 2.0F, -7.5F};
+        const auto net_center = origin + glm::vec3 {side * 9.02F, 2.0F, -7.5F};
         CHECK_FALSE(ship.intersects_aabb(
             net_center - glm::vec3 {0.02F},
             net_center + glm::vec3 {0.02F}));
@@ -1822,7 +1991,9 @@ TEST_CASE("loaded Amelie occupants are reconciled only when the new layout requi
     const auto& ship = sea_adventure.ship_entity();
     const auto origin = ship.world_origin();
 
-    const auto embedded_in_galley = origin + glm::vec3 {-3.0F, 1.01F, 5.0F};
+    // Je place l'ancien occupant dans le nouveau fourneau de la cale afin de
+    // vérifier sa relocalisation sur un point sûr du même aménagement.
+    const auto embedded_in_galley = origin + glm::vec3 {-3.80F, -4.99F, -18.35F};
     REQUIRE(ship.intersects_aabb(
         embedded_in_galley + glm::vec3 {-0.30F, 0.0F, -0.30F},
         embedded_in_galley + glm::vec3 {0.30F, 1.80F, 0.30F}));
@@ -1854,7 +2025,9 @@ TEST_CASE("loaded Amelie occupants are reconciled only when the new layout requi
     CHECK_FALSE(legacy_result.relocated);
     CHECK(legacy_result.position == supported_legacy_deck);
 
-    const auto swimmer = origin + glm::vec3 {0.0F, 0.50F, 0.0F};
+    // Je place le nageur sous la quille refondue, hors des trois ponts
+    // habitables, afin qu'une migration ne le téléporte jamais à bord.
+    const auto swimmer = origin + glm::vec3 {0.0F, -6.50F, 0.0F};
     const auto swimmer_result = reconcile_loaded_ship_occupant(ship, swimmer, 0.30F, 1.80F, true);
     CHECK_FALSE(swimmer_result.relocated);
     CHECK(swimmer_result.position == swimmer);
@@ -2820,6 +2993,348 @@ TEST_CASE("sea adventure moving hull pushes a player without leaving an overlap"
     CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
 }
 
+TEST_CASE("dynamic ship rails carry the player and release controls after roll penetration") {
+    constexpr float step_seconds =
+        1.0F / 60.0F;
+    World world(
+        5542,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+    const auto& blueprint =
+        amelie_ship_blueprint();
+
+    for (const auto side :
+         {-1.0F, 1.0F}) {
+        CAPTURE(side);
+        ShipEntity ship {};
+        ship.synchronize_motion_history();
+
+        const auto rail =
+            std::find_if(
+                blueprint.parts.begin(),
+                blueprint.parts.end(),
+                [side](const ShipPart& part) {
+                    const auto center_x =
+                        (part.local_start.x +
+                         part.local_end.x) *
+                        0.5F;
+                    return
+                        part.material ==
+                            ShipMaterial::CleanBeam &&
+                        part.collidable &&
+                        !part.supports_player &&
+                        side * center_x >
+                            7.0F &&
+                        std::abs(
+                            part.local_start.y -
+                            4.46F) <
+                            0.001F &&
+                        std::abs(
+                            part.local_end.y -
+                            4.66F) <
+                            0.001F &&
+                        part.local_start.z <=
+                            0.5F &&
+                        part.local_end.z >=
+                            0.5F;
+                });
+        REQUIRE(
+            rail !=
+            blueprint.parts.end());
+
+        const auto rail_center_x =
+            (rail->local_start.x +
+             rail->local_end.x) *
+            0.5F;
+        PlayerController player(
+            ship.local_to_world_point({
+                rail_center_x,
+                rail->local_end.y +
+                    0.69F,
+                0.5F,
+            }));
+
+        for (int frame = 0;
+             frame < 90 &&
+             !player.state().on_ground;
+             ++frame) {
+            player.update(
+                PlayerInput {},
+                step_seconds,
+                world,
+                &ship);
+        }
+
+        REQUIRE(
+            player.state().on_ground);
+        const auto rail_support =
+            ship.support_height(
+                player.position());
+        REQUIRE(
+            rail_support.has_value());
+        CHECK(
+            player.position().y ==
+            doctest::Approx(
+                *rail_support)
+                .epsilon(0.002F));
+        REQUIRE_FALSE(
+            player.overlaps_dynamic_obstacle(
+                ship));
+
+        PlayerController jumping_player(
+            player.position());
+        jumping_player.update(
+            PlayerInput {},
+            step_seconds,
+            world,
+            &ship);
+        REQUIRE(
+            jumping_player.state().on_ground);
+        PlayerInput jump {};
+        jump.jump =
+            true;
+        jumping_player.update(
+            jump,
+            step_seconds,
+            world,
+            &ship);
+        CHECK_FALSE(
+            jumping_player.state().on_ground);
+        CHECK(
+            jumping_player.state().velocity.y >
+            0.0F);
+
+        const auto before_roll =
+            player.position();
+        ship.begin_motion_step();
+        ship.set_position(
+            ship.position() +
+            glm::vec3 {
+                0.0F,
+                0.0F,
+                0.02F,
+            });
+        ship.set_ocean_pose(
+            0.0F,
+            0.0F,
+            side *
+                glm::radians(
+                    8.0F));
+        player.translate_platform_delta(
+            ship.motion_delta_at(
+                before_roll));
+
+        // Je reproduis ici la pose qui bloquait les commandes : le point des
+        // pieds suit bien le navire, mais l'AABB du joueur reste verticale.
+        REQUIRE(
+            player.overlaps_dynamic_obstacle(
+                ship));
+        const auto trapped_position =
+            player.position();
+
+        PlayerController recovered_jumper {};
+        recovered_jumper.load_state(
+            player.state());
+        PlayerInput recovered_jump {};
+        recovered_jump.jump =
+            true;
+        recovered_jumper.update(
+            recovered_jump,
+            step_seconds,
+            world,
+            &ship);
+        CHECK_FALSE(
+            recovered_jumper.overlaps_dynamic_obstacle(
+                ship));
+        CHECK_FALSE(
+            recovered_jumper.state().on_ground);
+        CHECK(
+            recovered_jumper.state().velocity.y >
+            0.0F);
+
+        PlayerInput escape {};
+        escape.move_right =
+            side;
+        auto recovered =
+            false;
+        for (int frame = 0;
+             frame < 60;
+             ++frame) {
+            player.update(
+                escape,
+                step_seconds,
+                world,
+                &ship);
+            CHECK(
+                std::isfinite(
+                    player.position().x));
+            CHECK(
+                std::isfinite(
+                    player.position().y));
+            CHECK(
+                std::isfinite(
+                    player.position().z));
+            CHECK(
+                std::isfinite(
+                    player.state().velocity.x));
+            CHECK(
+                std::isfinite(
+                    player.state().velocity.y));
+            CHECK(
+                std::isfinite(
+                    player.state().velocity.z));
+            recovered =
+                recovered ||
+                !player.overlaps_dynamic_obstacle(
+                    ship);
+        }
+
+        REQUIRE(recovered);
+        CHECK_FALSE(
+            player.overlaps_dynamic_obstacle(
+                ship));
+        CHECK(
+            side *
+                (player.position().x -
+                 trapped_position.x) >
+            0.35F);
+    }
+}
+
+TEST_CASE("sea adventure keeps rail passengers aboard without local sliding") {
+    constexpr float step_seconds =
+        1.0F / 60.0F;
+    const auto& blueprint =
+        amelie_ship_blueprint();
+
+    for (const auto side :
+         {-1.0F, 1.0F}) {
+        CAPTURE(side);
+        const auto world_seed =
+            side < 0.0F
+                ? 5543
+                : 5544;
+        World world(
+            world_seed,
+            1,
+            WorldGenerationProfile::OceanAdventure);
+        SeaAdventureSystem sea_adventure {};
+        sea_adventure.reset(
+            world.seed());
+        place_sea_adventure_underway(
+            sea_adventure,
+            world.seed());
+        const auto& ship =
+            sea_adventure.ship_entity();
+
+        const auto rail =
+            std::find_if(
+                blueprint.parts.begin(),
+                blueprint.parts.end(),
+                [side](const ShipPart& part) {
+                    const auto center_x =
+                        (part.local_start.x +
+                         part.local_end.x) *
+                        0.5F;
+                    return
+                        part.material ==
+                            ShipMaterial::CleanBeam &&
+                        part.collidable &&
+                        !part.supports_player &&
+                        side * center_x >
+                            7.0F &&
+                        std::abs(
+                            part.local_start.y -
+                            4.46F) <
+                            0.001F &&
+                        std::abs(
+                            part.local_end.y -
+                            4.66F) <
+                            0.001F &&
+                        part.local_start.z <=
+                            0.5F &&
+                        part.local_end.z >=
+                            0.5F;
+                });
+        REQUIRE(
+            rail !=
+            blueprint.parts.end());
+
+        const glm::vec3 initial_local {
+            (rail->local_start.x +
+             rail->local_end.x) *
+                0.5F,
+            rail->local_end.y +
+                0.001F,
+            0.5F,
+        };
+        PlayerController player(
+            ship.local_to_world_point(
+                initial_local));
+        player.update(
+            PlayerInput {},
+            step_seconds,
+            world,
+            &ship);
+        REQUIRE(
+            player.state().on_ground);
+
+        EnvironmentState environment {};
+        environment.wind_strength =
+            1.0F;
+        environment.precipitation_intensity =
+            1.0F;
+        environment.storm_intensity =
+            1.0F;
+        environment.violent_storm_intensity =
+            1.0F;
+
+        for (int frame = 0;
+             frame < 180;
+             ++frame) {
+            CAPTURE(frame);
+            environment.weather_time_seconds =
+                static_cast<float>(frame) *
+                step_seconds;
+            player.update(
+                PlayerInput {},
+                step_seconds,
+                world,
+                &ship);
+            const auto result =
+                sea_adventure.update(
+                    world,
+                    player,
+                    environment,
+                    step_seconds,
+                    false);
+            const auto current_local =
+                ship.world_to_local_point(
+                    player.position());
+
+            REQUIRE(
+                result.ship_moved_player);
+            REQUIRE(
+                result.on_ship);
+            REQUIRE(
+                player.state().on_ground);
+            CHECK_FALSE(
+                player.overlaps_dynamic_obstacle(
+                    ship));
+            CHECK(
+                current_local.x ==
+                doctest::Approx(
+                    initial_local.x)
+                    .epsilon(0.002F));
+            CHECK(
+                current_local.z ==
+                doctest::Approx(
+                    initial_local.z)
+                    .epsilon(0.002F));
+        }
+    }
+}
+
 TEST_CASE("sea adventure ship entity moves without rewriting world chunks") {
     EnvironmentState environment {};
     environment.wind_strength = 0.35F;
@@ -3611,7 +4126,7 @@ TEST_CASE("player climbs both Amelie boarding nets from the water without jumpin
 
         REQUIRE(grabbed_net);
         REQUIRE(reached_deck);
-        CHECK(player.position().x == doctest::Approx(origin.x + side * 7.45F).epsilon(0.001F));
+        CHECK(player.position().x == doctest::Approx(origin.x + side * 7.58F).epsilon(0.001F));
         CHECK(player.position().z == doctest::Approx(origin.z - 7.50F).epsilon(0.001F));
         CHECK(player.position().y == doctest::Approx(origin.y + 4.001F).epsilon(0.02F));
         CHECK(player.state().health == doctest::Approx(player.max_health()));
@@ -3886,7 +4401,7 @@ TEST_CASE("climber follows a moving Amelie without becoming on ship before the d
         CHECK_FALSE(player.is_climbing_dynamic_obstacle());
         const auto expected_exit =
             ship.local_to_world_point({
-                side * 7.45F,
+                side * 7.58F,
                 4.01F,
                 -7.50F,
             });
@@ -3949,7 +4464,7 @@ TEST_CASE("player walks up and down an Amelie half step without losing deck cont
     CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
 }
 
-TEST_CASE("player traverses both complete Amelie staircases in both directions") {
+TEST_CASE("player traverses all four complete Amelie staircases in both directions") {
     World world(5523, 1, WorldGenerationProfile::OceanAdventure);
     SeaAdventureSystem sea_adventure {};
     sea_adventure.reset(world.seed());
@@ -3988,9 +4503,49 @@ TEST_CASE("player traverses both complete Amelie staircases in both directions")
         return position.y <= origin.y + 1.05F && position.z <= origin.z + 7.75F;
     }));
     CHECK(fore_player.state().on_ground);
+
+    PlayerController crew_player(
+        origin +
+        glm::vec3 {
+            -2.25F,
+            -1.999F,
+            -4.50F,
+        });
+    REQUIRE(walk_until(crew_player, -1.0F, [&](const glm::vec3& position) {
+        return
+            position.y >= origin.y + 1.0F &&
+            position.z >= origin.z + 1.25F;
+    }));
+    REQUIRE(crew_player.state().on_ground);
+    REQUIRE(walk_until(crew_player, 1.0F, [&](const glm::vec3& position) {
+        return
+            position.y <= origin.y - 1.95F &&
+            position.z <= origin.z - 4.25F;
+    }));
+    CHECK(crew_player.state().on_ground);
+
+    PlayerController hold_player(
+        origin +
+        glm::vec3 {
+            2.25F,
+            -4.999F,
+            7.50F,
+        });
+    REQUIRE(walk_until(hold_player, -1.0F, [&](const glm::vec3& position) {
+        return
+            position.y >= origin.y - 2.0F &&
+            position.z >= origin.z + 14.25F;
+    }));
+    REQUIRE(hold_player.state().on_ground);
+    REQUIRE(walk_until(hold_player, 1.0F, [&](const glm::vec3& position) {
+        return
+            position.y <= origin.y - 4.95F &&
+            position.z <= origin.z + 7.75F;
+    }));
+    CHECK(hold_player.state().on_ground);
 }
 
-TEST_CASE("Amelie lower deck compartments stay connected in both directions") {
+TEST_CASE("Amelie gun and hold deck compartments stay connected in both directions") {
     World world(5525, 1, WorldGenerationProfile::OceanAdventure);
     SeaAdventureSystem sea_adventure {};
     sea_adventure.reset(world.seed());
@@ -3999,12 +4554,13 @@ TEST_CASE("Amelie lower deck compartments stay connected in both directions") {
 
     const auto travel_until = [&](PlayerController& player,
                                   const PlayerInput& input,
+                                  float expected_local_y,
                                   const auto& reached) {
-        for (int frame = 0; frame < 360; ++frame) {
+        for (int frame = 0; frame < 480; ++frame) {
             player.update(input, 1.0F / 60.0F, world, &ship);
             CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
-            CHECK(player.position().y > origin.y + 0.95F);
-            CHECK(player.position().y < origin.y + 1.10F);
+            CHECK(player.position().y > origin.y + expected_local_y - 0.06F);
+            CHECK(player.position().y < origin.y + expected_local_y + 0.06F);
             CHECK(player.state().on_ground);
             CHECK_FALSE(player.state().head_underwater);
             if (reached(player.position())) {
@@ -4023,47 +4579,69 @@ TEST_CASE("Amelie lower deck compartments stay connected in both directions") {
     PlayerInput towards_port {};
     towards_port.move_right = -1.0F;
 
-    // Je passe a cote de l'escalier avant, je rejoins la cale centrale, puis
-    // je reproduis exactement le trajet inverse sans escalader ni tomber.
-    PlayerController cargo_player(origin + glm::vec3 {1.55F, 1.001F, 9.0F});
-    REQUIRE(travel_until(cargo_player, towards_bow, [&](const glm::vec3& position) {
-        return position.z >= origin.z + 14.65F;
+    // Je traverse la cale par sa porte centrale, entre les rangées de caisses,
+    // je contourne le mât de misaine, puis je rejoue le trajet inverse.
+    PlayerController cargo_player(origin + glm::vec3 {0.0F, -4.99F, 7.50F});
+    REQUIRE(travel_until(cargo_player, towards_bow, -4.99F, [&](const glm::vec3& position) {
+        return position.z >= origin.z + 16.00F;
     }));
-    REQUIRE(travel_until(cargo_player, towards_port, [&](const glm::vec3& position) {
-        return position.x <= origin.x + 0.05F;
+    REQUIRE(travel_until(cargo_player, towards_port, -4.99F, [&](const glm::vec3& position) {
+        return position.x <= origin.x - 1.15F;
     }));
-    REQUIRE(travel_until(cargo_player, towards_bow, [&](const glm::vec3& position) {
+    REQUIRE(travel_until(cargo_player, towards_bow, -4.99F, [&](const glm::vec3& position) {
         return position.z >= origin.z + 19.0F;
     }));
-    REQUIRE(travel_until(cargo_player, towards_stern, [&](const glm::vec3& position) {
-        return position.z <= origin.z + 14.70F;
+    REQUIRE(travel_until(cargo_player, towards_starboard, -4.99F, [&](const glm::vec3& position) {
+        return position.x >= origin.x;
     }));
-    REQUIRE(travel_until(cargo_player, towards_starboard, [&](const glm::vec3& position) {
-        return position.x >= origin.x + 1.50F;
+    REQUIRE(travel_until(cargo_player, towards_bow, -4.99F, [&](const glm::vec3& position) {
+        return position.z >= origin.z + 22.0F;
     }));
-    REQUIRE(travel_until(cargo_player, towards_stern, [&](const glm::vec3& position) {
-        return position.z <= origin.z + 9.0F;
+    REQUIRE(travel_until(cargo_player, towards_stern, -4.99F, [&](const glm::vec3& position) {
+        return position.z <= origin.z + 19.0F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_port, -4.99F, [&](const glm::vec3& position) {
+        return position.x <= origin.x - 1.15F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_stern, -4.99F, [&](const glm::vec3& position) {
+        return position.z <= origin.z + 16.00F;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_starboard, -4.99F, [&](const glm::vec3& position) {
+        return position.x >= origin.x;
+    }));
+    REQUIRE(travel_until(cargo_player, towards_stern, -4.99F, [&](const glm::vec3& position) {
+        return position.z <= origin.z + 7.50F;
     }));
 
-    // Je valide aussi le contournement de l'escalier arriere et la porte de
-    // cabine, afin que les deux extremites du pont inferieur restent reliees.
+    // Je valide séparément le passage de service du réfectoire vers la cuisine,
+    // qui contourne la grande table et franchit la cloison arrière de la cale.
+    PlayerController galley_player(origin + glm::vec3 {3.05F, -4.99F, 3.0F});
+    REQUIRE(travel_until(galley_player, towards_stern, -4.99F, [&](const glm::vec3& position) {
+        return position.z <= origin.z - 16.0F;
+    }));
+    REQUIRE(travel_until(galley_player, towards_bow, -4.99F, [&](const glm::vec3& position) {
+        return position.z >= origin.z + 3.0F;
+    }));
+
+    // Je conserve enfin la couverture du pont-batterie, de l'escalier arrière
+    // jusqu'à la porte de la cabine du capitaine.
     PlayerController cabin_player(origin + glm::vec3 {1.60F, 1.001F, -8.5F});
-    REQUIRE(travel_until(cabin_player, towards_stern, [&](const glm::vec3& position) {
+    REQUIRE(travel_until(cabin_player, towards_stern, 1.0F, [&](const glm::vec3& position) {
         return position.z <= origin.z - 15.65F;
     }));
-    REQUIRE(travel_until(cabin_player, towards_port, [&](const glm::vec3& position) {
-        return position.x <= origin.x + 0.05F;
+    REQUIRE(travel_until(cabin_player, towards_port, 1.0F, [&](const glm::vec3& position) {
+        return position.x <= origin.x - 1.0F;
     }));
-    REQUIRE(travel_until(cabin_player, towards_stern, [&](const glm::vec3& position) {
+    REQUIRE(travel_until(cabin_player, towards_stern, 1.0F, [&](const glm::vec3& position) {
         return position.z <= origin.z - 22.0F;
     }));
-    REQUIRE(travel_until(cabin_player, towards_bow, [&](const glm::vec3& position) {
+    REQUIRE(travel_until(cabin_player, towards_bow, 1.0F, [&](const glm::vec3& position) {
         return position.z >= origin.z - 15.65F;
     }));
-    REQUIRE(travel_until(cabin_player, towards_starboard, [&](const glm::vec3& position) {
+    REQUIRE(travel_until(cabin_player, towards_starboard, 1.0F, [&](const glm::vec3& position) {
         return position.x >= origin.x + 1.55F;
     }));
-    REQUIRE(travel_until(cabin_player, towards_bow, [&](const glm::vec3& position) {
+    REQUIRE(travel_until(cabin_player, towards_bow, 1.0F, [&](const glm::vec3& position) {
         return position.z >= origin.z - 8.5F;
     }));
 }
@@ -4095,6 +4673,220 @@ TEST_CASE("Amelie deck equipment exposes stable dynamic support") {
     CHECK(player.state().on_ground);
     CHECK(player.position().y == doctest::Approx(capstan_top.y));
     CHECK_FALSE(player.overlaps_dynamic_obstacle(ship));
+}
+
+TEST_CASE("une couchette mobile porte puis libère immédiatement le joueur") {
+    constexpr auto step_seconds =
+        1.0F / 60.0F;
+    World world(
+        5'548,
+        1,
+        WorldGenerationProfile::OceanAdventure);
+    SeaAdventureSystem sea_adventure {};
+    sea_adventure.reset(world.seed());
+    place_sea_adventure_underway(
+        sea_adventure,
+        world.seed());
+    const auto& ship =
+        sea_adventure.ship_entity();
+    const auto& parts =
+        amelie_ship_blueprint().parts;
+
+    const auto bunk_core =
+        std::ranges::find_if(
+            parts,
+            [](const ShipPart& part) {
+                const auto minimum =
+                    glm::min(
+                        part.local_start,
+                        part.local_end);
+                const auto maximum =
+                    glm::max(
+                        part.local_start,
+                        part.local_end);
+                return
+                    part.shape ==
+                        ShipPartShape::Box &&
+                    part.material ==
+                        ShipMaterial::OiledOak &&
+                    part.collidable &&
+                    minimum.x >
+                        0.0F &&
+                    std::abs(
+                        minimum.y +
+                        1.94F) <
+                        0.001F &&
+                    std::abs(
+                        maximum.y +
+                        1.72F) <
+                        0.001F &&
+                    std::abs(
+                        minimum.z +
+                        18.35F) <
+                        0.001F;
+            });
+    REQUIRE(bunk_core != parts.end());
+
+    const auto minimum =
+        glm::min(
+            bunk_core->local_start,
+            bunk_core->local_end);
+    const auto maximum =
+        glm::max(
+            bunk_core->local_start,
+            bunk_core->local_end);
+
+    // Je vérifie d'abord l'approche latérale : le joueur doit buter proprement
+    // sur l'unique noyau du meuble sans le pénétrer ni perdre ses commandes.
+    constexpr auto player_half_width =
+        0.30F;
+    const glm::vec3 approach_local {
+        minimum.x -
+            player_half_width -
+            0.08F,
+        -1.99F,
+        (minimum.z + maximum.z) *
+            0.5F,
+    };
+    PlayerController approach_player(
+        ship.local_to_world_point(
+            approach_local));
+    for (int frame = 0;
+         frame < 8;
+         ++frame) {
+        approach_player.update(
+            PlayerInput {},
+            step_seconds,
+            world,
+            &ship);
+    }
+    PlayerInput approach_input {};
+    approach_input.move_right = 1.0F;
+    for (int frame = 0;
+         frame < 45;
+         ++frame) {
+        approach_player.update(
+            approach_input,
+            step_seconds,
+            world,
+            &ship);
+        CHECK_FALSE(
+            approach_player.overlaps_dynamic_obstacle(
+                ship));
+    }
+    const auto blocked_local =
+        ship.world_to_local_point(
+            approach_player.position());
+    CHECK(
+        blocked_local.x <=
+        minimum.x -
+            player_half_width +
+            0.015F);
+
+    const glm::vec3 initial_local {
+        (minimum.x + maximum.x) *
+            0.5F,
+        maximum.y + 0.001F,
+        (minimum.z + maximum.z) *
+            0.5F,
+    };
+    PlayerController player(
+        ship.local_to_world_point(
+            initial_local));
+    for (int frame = 0;
+         frame < 8;
+         ++frame) {
+        player.update(
+            PlayerInput {},
+            step_seconds,
+            world,
+            &ship);
+    }
+    REQUIRE(player.state().on_ground);
+
+    EnvironmentState environment {};
+    environment.wind_strength = 1.0F;
+    environment.storm_intensity = 0.85F;
+    environment.violent_storm_intensity = 0.70F;
+    for (int frame = 0;
+         frame < 90;
+         ++frame) {
+        environment.weather_time_seconds =
+            static_cast<float>(frame) *
+            step_seconds;
+        player.update(
+            PlayerInput {},
+            step_seconds,
+            world,
+            &ship);
+        const auto result =
+            sea_adventure.update(
+                world,
+                player,
+                environment,
+                step_seconds,
+                false);
+        REQUIRE(result.ship_moved_player);
+        REQUIRE(result.on_ship);
+        CHECK_FALSE(
+            player.overlaps_dynamic_obstacle(
+                ship));
+    }
+
+    PlayerInput exit_input {};
+    exit_input.move_right = -1.0F;
+    exit_input.jump = true;
+    player.update(
+        exit_input,
+        step_seconds,
+        world,
+        &ship);
+    REQUIRE_FALSE(player.state().on_ground);
+    exit_input.jump = false;
+
+    auto reached_aisle = false;
+    for (int frame = 0;
+         frame < 180;
+         ++frame) {
+        environment.weather_time_seconds +=
+            step_seconds;
+        player.update(
+            exit_input,
+            step_seconds,
+            world,
+            &ship);
+        (void)sea_adventure.update(
+            world,
+            player,
+            environment,
+            step_seconds,
+            false);
+        CHECK_FALSE(
+            player.overlaps_dynamic_obstacle(
+                ship));
+        const auto local_position =
+            ship.world_to_local_point(
+                player.position());
+        if (local_position.x <
+                minimum.x -
+                    0.70F &&
+            player.state().on_ground) {
+            reached_aisle = true;
+            break;
+        }
+    }
+
+    REQUIRE(reached_aisle);
+    const auto final_local =
+        ship.world_to_local_point(
+            player.position());
+    CHECK(final_local.x < minimum.x - 0.70F);
+    CHECK(
+        std::abs(
+            final_local.y +
+            1.99F) <
+        0.025F);
+    CHECK(player.state().on_ground);
 }
 
 TEST_CASE("sea adventure reserves save-safe space ahead of Amelie") {
@@ -5029,6 +5821,47 @@ TEST_CASE("external zombie damage reuses invulnerability and death handling") {
 
     CHECK(player.state().dead);
     CHECK(player.state().death_cause == PlayerDeathCause::Zombie);
+}
+
+TEST_CASE("external damage report distinguishes resistance and invulnerability") {
+    World world(1540, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.001F, 0.5F});
+    player.set_damage_resistance_percent(25.0F);
+
+    const auto applied =
+        player.apply_external_damage_report(
+            8.0F,
+            PlayerDeathCause::Zombie);
+    CHECK(applied.requested_damage == doctest::Approx(8.0F));
+    CHECK(applied.damage_after_resistance == doctest::Approx(6.0F));
+    CHECK(applied.health_damage == doctest::Approx(6.0F));
+    CHECK_FALSE(applied.blocked_by_invulnerability);
+    CHECK_FALSE(applied.killed);
+    CHECK(applied.applied());
+
+    const auto blocked =
+        player.apply_external_damage_report(
+            8.0F,
+            PlayerDeathCause::Zombie);
+    CHECK(blocked.requested_damage == doctest::Approx(8.0F));
+    CHECK(blocked.damage_after_resistance == doctest::Approx(0.0F));
+    CHECK(blocked.health_damage == doctest::Approx(0.0F));
+    CHECK(blocked.blocked_by_invulnerability);
+    CHECK_FALSE(blocked.applied());
+
+    player.update(
+        PlayerInput {},
+        0.60F,
+        world);
+    const auto invalid =
+        player.apply_external_damage_report(
+            std::numeric_limits<float>::quiet_NaN(),
+            PlayerDeathCause::Zombie);
+    CHECK(invalid.requested_damage == doctest::Approx(0.0F));
+    CHECK_FALSE(invalid.applied());
 }
 
 TEST_CASE("equipped resistance reduces external survival damage") {

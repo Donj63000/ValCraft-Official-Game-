@@ -146,6 +146,11 @@ auto sample_old_guard_pose(const OldGuardRenderInstance& guard) noexcept
                   kOldGuardBayonetHitTime / kOldGuardBayonetSeconds)
             : 0.0F;
     const auto body_advance = bayonet_lunge * 0.24F;
+    pose.body_offset_local = {
+        body_advance,
+        locomotion.pelvis_offset_y,
+        0.0F,
+    };
 
     const auto local_pelvis =
         glm::vec3 {-0.02F + body_advance, 0.80F + locomotion.pelvis_offset_y, 0.0F};
@@ -198,7 +203,7 @@ auto sample_old_guard_pose(const OldGuardRenderInstance& guard) noexcept
             glm::vec3 {
                 body_advance,
                 1.37F + locomotion.pelvis_offset_y,
-                side * 0.225F,
+                side * 0.180F,
             });
     }
 

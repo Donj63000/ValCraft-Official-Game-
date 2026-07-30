@@ -22,6 +22,9 @@ enum class OldGuardReloadStage : std::uint8_t {
 
 struct OldGuardPose {
     glm::mat4 body_root {1.0F};
+    // Je partage ce décalage entre les sockets et toute la géométrie du haut
+    // du corps afin que l'estoc et le pas ne puissent jamais désassembler l'habit.
+    glm::vec3 body_offset_local {0.0F};
     glm::mat4 musket_transform {1.0F};
     std::array<glm::vec3, 2> shoulders {};
     std::array<glm::vec3, 2> elbows {};

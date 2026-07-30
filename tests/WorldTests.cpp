@@ -347,7 +347,7 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
     CHECK(resolve_world_generation_version(WorldGenerationProfile::Continental) ==
           WorldGenerationVersion::LegacyV1);
     CHECK(resolve_world_generation_version(WorldGenerationProfile::OceanAdventure) ==
-          WorldGenerationVersion::SparseArchipelagoV2);
+          WorldGenerationVersion::LivingOceanV3);
 
     constexpr auto seed = 424242;
     WorldGenerator latest(
@@ -362,10 +362,15 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
         seed,
         WorldGenerationProfile::OceanAdventure,
         WorldGenerationVersion::SparseArchipelagoV2);
+    WorldGenerator living(
+        seed,
+        WorldGenerationProfile::OceanAdventure,
+        WorldGenerationVersion::LivingOceanV3);
 
-    CHECK(latest.generation_version() == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(latest.generation_version() == WorldGenerationVersion::LivingOceanV3);
     CHECK(legacy.generation_version() == WorldGenerationVersion::LegacyV1);
     CHECK(sparse.generation_version() == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(living.generation_version() == WorldGenerationVersion::LivingOceanV3);
 
     auto found_distinct_column = false;
     for (int world_z = 480; world_z <= 720 && !found_distinct_column; world_z += 8) {
@@ -383,15 +388,269 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
     CHECK(found_distinct_column);
 
     World ocean_world(seed, 0, WorldGenerationProfile::OceanAdventure);
-    CHECK(ocean_world.generation_version() == WorldGenerationVersion::SparseArchipelagoV2);
+    CHECK(ocean_world.generation_version() == WorldGenerationVersion::LivingOceanV3);
     CHECK(ocean_world.capture_save_plan().generation_version ==
-          WorldGenerationVersion::SparseArchipelagoV2);
+          WorldGenerationVersion::LivingOceanV3);
     CHECK_THROWS_AS(
         WorldGenerator(
             seed,
             WorldGenerationProfile::Continental,
             WorldGenerationVersion::SparseArchipelagoV2),
         std::invalid_argument);
+    CHECK_THROWS_AS(
+        WorldGenerator(
+            seed,
+            WorldGenerationProfile::Continental,
+            WorldGenerationVersion::LivingOceanV3),
+        std::invalid_argument);
+}
+
+TEST_CASE("living ocean V3 deepens and strengthens the relief of the guaranteed open-water route") {
+    constexpr std::array<int, 4> seeds {{17, 424242, -9081, 1337}};
+    auto v2_height_sum = std::int64_t {0};
+    auto v3_height_sum = std::int64_t {0};
+    auto v2_variation_sum = std::int64_t {0};
+    auto v3_variation_sum = std::int64_t {0};
+    auto sample_count = std::int64_t {0};
+    auto strictly_deeper_count = std::int64_t {0};
+    auto v2_minimum = std::numeric_limits<int>::max();
+    auto v2_maximum = std::numeric_limits<int>::min();
+    auto v3_minimum = std::numeric_limits<int>::max();
+    auto v3_maximum = std::numeric_limits<int>::min();
+
+    for (const auto seed : seeds) {
+        WorldGenerator sparse(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::SparseArchipelagoV2);
+        WorldGenerator living(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LivingOceanV3);
+        WorldGenerator living_repeat(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LivingOceanV3);
+
+        for (int world_x = -kOceanNavigationCorridorHalfWidth;
+             world_x <= kOceanNavigationCorridorHalfWidth;
+             world_x += 4) {
+            auto previous_v2_height = 0;
+            auto previous_v3_height = 0;
+            auto has_previous_height = false;
+            for (int world_z = kOceanNavigationCorridorStartZ;
+                 world_z <= 4096;
+                 world_z += 16) {
+                const auto v2 = sparse.sample_surface(world_x, world_z);
+                const auto v3 = living.sample_surface(world_x, world_z);
+                const auto repeated = living_repeat.sample_surface(world_x, world_z);
+
+                CAPTURE(seed);
+                CAPTURE(world_x);
+                CAPTURE(world_z);
+                CHECK(v2.surface_height < kSeaLevel);
+                CHECK(v3.surface_height < kSeaLevel);
+                CHECK(v2.water_level == kSeaLevel);
+                CHECK(v3.water_level == kSeaLevel);
+                CHECK(v3.surface_height >= kLivingOceanMinimumSeabedY);
+                CHECK(v3.surface_height <= kLivingOceanMaximumDeepSeabedY);
+
+                // Je compare deux générateurs indépendants afin de verrouiller
+                // la graine, les matériaux et l'eau du nouveau fond marin.
+                CHECK(repeated.biome == v3.biome);
+                CHECK(repeated.surface_height == v3.surface_height);
+                CHECK(repeated.water_level == v3.water_level);
+                CHECK(repeated.surface_block == v3.surface_block);
+
+                v2_height_sum += v2.surface_height;
+                v3_height_sum += v3.surface_height;
+                ++sample_count;
+                strictly_deeper_count += v3.surface_height < v2.surface_height ? 1 : 0;
+                v2_minimum = std::min(v2_minimum, v2.surface_height);
+                v2_maximum = std::max(v2_maximum, v2.surface_height);
+                v3_minimum = std::min(v3_minimum, v3.surface_height);
+                v3_maximum = std::max(v3_maximum, v3.surface_height);
+                if (has_previous_height) {
+                    v2_variation_sum += std::abs(v2.surface_height - previous_v2_height);
+                    v3_variation_sum += std::abs(v3.surface_height - previous_v3_height);
+                }
+                previous_v2_height = v2.surface_height;
+                previous_v3_height = v3.surface_height;
+                has_previous_height = true;
+            }
+        }
+    }
+
+    REQUIRE(sample_count > 0);
+    CAPTURE(sample_count);
+    CAPTURE(v2_height_sum);
+    CAPTURE(v3_height_sum);
+    CAPTURE(strictly_deeper_count);
+    CAPTURE(v2_minimum);
+    CAPTURE(v2_maximum);
+    CAPTURE(v3_minimum);
+    CAPTURE(v3_maximum);
+    CAPTURE(v2_variation_sum);
+    CAPTURE(v3_variation_sum);
+    CHECK(v3_height_sum + sample_count * 6 <= v2_height_sum);
+    CHECK(strictly_deeper_count * 100 >= sample_count * 70);
+    CHECK(v3_minimum + 8 <= v2_minimum);
+    CHECK(v3_maximum - v3_minimum >= v2_maximum - v2_minimum + 6);
+    CHECK(v3_variation_sum > v2_variation_sum);
+}
+
+TEST_CASE("living ocean V3 keeps seabed materials deterministic for extreme seeds") {
+    constexpr std::array<int, 2> seeds {{
+        (std::numeric_limits<int>::min)(),
+        (std::numeric_limits<int>::max)(),
+    }};
+    constexpr std::array<std::array<int, 2>, 4> columns {{
+        {{96, 640}},
+        {{-112, 1024}},
+        {{384, 2048}},
+        {{-512, 3072}},
+    }};
+
+    for (const auto seed : seeds) {
+        WorldGenerator first(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LivingOceanV3);
+        WorldGenerator replay(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LivingOceanV3);
+
+        for (const auto& column : columns) {
+            // Je couvre ici les deux bornes de la graine sans addition signée :
+            // le relief et sa matière doivent rester strictement rejouables.
+            const auto expected =
+                first.sample_surface(column[0], column[1]);
+            const auto repeated =
+                replay.sample_surface(column[0], column[1]);
+            CAPTURE(seed);
+            CAPTURE(column[0]);
+            CAPTURE(column[1]);
+            CHECK(expected.surface_height == repeated.surface_height);
+            CHECK(expected.surface_block == repeated.surface_block);
+            CHECK(expected.water_level == repeated.water_level);
+            CHECK(
+                first.sample_block(
+                    column[0],
+                    expected.surface_height - 1,
+                    column[1]) ==
+                replay.sample_block(
+                    column[0],
+                    repeated.surface_height - 1,
+                    column[1]));
+        }
+    }
+}
+
+TEST_CASE("living ocean V3 keeps open water submerged and preserves islands outside the navigation blend") {
+    constexpr std::array<int, 3> seeds {{17, 424242, -9081}};
+    for (const auto seed : seeds) {
+        WorldGenerator sparse(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::SparseArchipelagoV2);
+        WorldGenerator living(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LivingOceanV3);
+        auto emerged_columns = 0;
+        auto submerged_columns = 0;
+        auto preserved_island_columns = 0;
+
+        for (int world_z = -512; world_z <= 4096; world_z += 16) {
+            for (int world_x = -1024; world_x <= 1024; world_x += 16) {
+                const auto v2 = sparse.sample_surface(world_x, world_z);
+                const auto v3 = living.sample_surface(world_x, world_z);
+                const auto v2_emerged = v2.water_level <= v2.surface_height;
+                const auto v3_emerged = v3.water_level <= v3.surface_height;
+                const auto inside_navigation_blend =
+                    world_z >= kOceanNavigationCorridorStartZ &&
+                    std::abs(static_cast<std::int64_t>(world_x)) <
+                        kOceanNavigationTransitionOuterHalfWidth;
+
+                CAPTURE(seed);
+                CAPTURE(world_x);
+                CAPTURE(world_z);
+                if (v2_emerged) {
+                    ++emerged_columns;
+                    if (!inside_navigation_blend) {
+                        // Je verrouille les iles hors du chenal, tandis que
+                        // son raccord peut volontairement noyer leurs berges.
+                        ++preserved_island_columns;
+                        CHECK(v3_emerged);
+                        CHECK(v3.surface_height == v2.surface_height);
+                    }
+                } else {
+                    ++submerged_columns;
+                    CHECK_FALSE(v3_emerged);
+                    CHECK(v3.surface_height < kSeaLevel);
+                    CHECK(v3.water_level == kSeaLevel);
+                    CHECK(living.sample_water_state(
+                              world_x,
+                              v3.surface_height + 1,
+                              world_z) != 0);
+                }
+            }
+        }
+
+        CAPTURE(seed);
+        CHECK(emerged_columns > 0);
+        CHECK(submerged_columns > emerged_columns);
+        CHECK(preserved_island_columns > 0);
+    }
+}
+
+TEST_CASE("living ocean V3 preserves the starting port basin exactly as V2") {
+    constexpr std::array<int, 3> seeds {{17, 424242, -9081}};
+    for (const auto seed : seeds) {
+        WorldGenerator sparse(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::SparseArchipelagoV2);
+        WorldGenerator living(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::LivingOceanV3);
+
+        for (int world_z = kStartingPortBasinMinZ;
+             world_z <= kStartingPortBasinMaxZ;
+             ++world_z) {
+            for (int world_x = kStartingPortBasinMinX;
+                 world_x <= kStartingPortBasinMaxX;
+                 ++world_x) {
+                const auto v2 = sparse.sample_surface(world_x, world_z);
+                const auto v3 = living.sample_surface(world_x, world_z);
+                CAPTURE(seed);
+                CAPTURE(world_x);
+                CAPTURE(world_z);
+                REQUIRE(is_starting_port_basin_column(world_x, world_z));
+                CHECK(v3.biome == v2.biome);
+                CHECK(v3.surface_height == v2.surface_height);
+                CHECK(v3.water_level == v2.water_level);
+                CHECK(v3.surface_block == v2.surface_block);
+
+                // Je vérifie aussi la matière et l'eau de part et d'autre du
+                // fond afin que l'égalité ne soit pas seulement descriptive.
+                const std::array<int, 4> sample_heights {{
+                    std::max(kWorldMinY, v2.surface_height - 1),
+                    v2.surface_height,
+                    v2.surface_height + 1,
+                    kSeaLevel,
+                }};
+                for (const auto y : sample_heights) {
+                    CHECK(living.sample_block(world_x, y, world_z) ==
+                          sparse.sample_block(world_x, y, world_z));
+                    CHECK(living.sample_water_state(world_x, y, world_z) ==
+                          sparse.sample_water_state(world_x, y, world_z));
+                }
+            }
+        }
+    }
 }
 
 TEST_CASE("legacy ocean generation V1 keeps its exact historical output") {
@@ -1019,6 +1278,179 @@ TEST_CASE("modified chunks survive unload and reload within the same session") {
     CHECK(world.get_block(target.x, target.y, target.z) == replacement_block);
 }
 
+TEST_CASE("player placement provenance is explicit and remains sticky after destruction") {
+    constexpr int seed = 12401;
+    constexpr BlockCoord target {3, kWorldMaxY, 4};
+    World world(seed, 0, WorldGenerationProfile::OceanAdventure);
+    const auto generated =
+        world.peek_block_or_generated(
+            target.x,
+            target.y,
+            target.z);
+    const auto replacement =
+        replacement_block_for(
+            generated);
+
+    CHECK_FALSE(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+
+    // Je vérifie qu'une écriture générateur/admin ne devient jamais un
+    // placement joueur par accident.
+    world.set_block(
+        target.x,
+        target.y,
+        target.z,
+        replacement);
+    CHECK_FALSE(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+    world.set_block(
+        target.x,
+        target.y,
+        target.z,
+        generated);
+    CHECK_FALSE(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+
+    CHECK(
+        world.set_player_block(
+            target.x,
+            target.y,
+            target.z,
+            replacement));
+    CHECK(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+
+    CHECK(
+        world.restore_generated_cell(
+            target.x,
+            target.y,
+            target.z));
+    CHECK(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+    CHECK(
+        world.get_block(
+            target.x,
+            target.y,
+            target.z) == generated);
+
+    world.set_block(
+        target.x,
+        target.y,
+        target.z,
+        replacement);
+    world.set_block(
+        target.x,
+        target.y,
+        target.z,
+        generated);
+    CHECK(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+    CHECK_FALSE(
+        world.set_player_block(
+            target.x,
+            target.y,
+            target.z,
+            generated));
+    CHECK_FALSE(
+        world.set_player_block(
+            target.x,
+            -1,
+            target.z,
+            replacement));
+    CHECK_FALSE(
+        world.was_player_placed(
+            target.x,
+            -1,
+            target.z));
+}
+
+TEST_CASE("player placement provenance survives chunk unload and reload") {
+    constexpr int seed = 12402;
+    const ChunkCoord origin {0, 0};
+    constexpr BlockCoord target {5, kWorldMaxY, 6};
+    World world(seed, 0, WorldGenerationProfile::OceanAdventure);
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+    const auto generated =
+        world.peek_block_or_generated(
+            target.x,
+            target.y,
+            target.z);
+    REQUIRE(
+        world.set_player_block(
+            target.x,
+            target.y,
+            target.z,
+            replacement_block_for(generated)));
+    REQUIRE(
+        world.restore_generated_cell(
+            target.x,
+            target.y,
+            target.z));
+    REQUIRE(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+
+    // Je force ici un override composé uniquement du masque persistant : la
+    // valeur du bloc est redevenue strictement identique au générateur.
+    const auto plan_before_unload =
+        world.capture_save_plan();
+    REQUIRE(plan_before_unload.chunks.size() == 1U);
+    CHECK(plan_before_unload.chunks.front().sparse_cells.empty());
+    CHECK_FALSE(plan_before_unload.chunks.front().dense());
+
+    world.update_streaming(
+        {
+            static_cast<float>(kChunkSizeX * 3) + 0.5F,
+            70.0F,
+            0.5F,
+        });
+    test::flush_pending_work(world);
+
+    CHECK(world.find_chunk(origin) == nullptr);
+    CHECK(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+
+    world.update_streaming({0.5F, 70.0F, 0.5F});
+    test::flush_pending_work(world);
+
+    REQUIRE(world.find_chunk(origin) != nullptr);
+    CHECK(
+        world.get_block(
+            target.x,
+            target.y,
+            target.z) == generated);
+    CHECK(
+        world.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+}
+
 TEST_CASE("restoring a block to its generated value clears the chunk override before unload") {
     std::array<BlockId, kChunkVolume> generator_blocks {};
     const ChunkCoord origin {0, 0};
@@ -1101,6 +1533,111 @@ TEST_CASE("world chunk snapshots round-trip modified chunks into a fresh world")
     CHECK(restored_world.get_block(first_target.x, first_target.y, first_target.z) == first_replacement);
     CHECK(restored_world.get_block(second_target.x, second_target.y, second_target.z) == second_replacement);
     CHECK(restored_world.modified_chunk_snapshots().size() == 2);
+}
+
+TEST_CASE("player placement mask round-trips through snapshots and sparse save plans") {
+    constexpr int seed = 24681;
+    constexpr BlockCoord target {3, 91, 4};
+    constexpr auto local_index =
+        static_cast<std::size_t>(
+            (target.y * kChunkSizeZ + target.z) *
+                kChunkSizeX +
+            target.x);
+    constexpr auto expected_byte = local_index / 8U;
+    constexpr auto expected_bit =
+        static_cast<std::uint8_t>(
+            1U << (local_index % 8U));
+
+    World source(seed, 0, WorldGenerationProfile::OceanAdventure);
+    const auto generated =
+        source.peek_block_or_generated(
+            target.x,
+            target.y,
+            target.z);
+    REQUIRE(
+        source.set_player_block(
+            target.x,
+            target.y,
+            target.z,
+            replacement_block_for(generated)));
+    REQUIRE(
+        source.restore_generated_cell(
+            target.x,
+            target.y,
+            target.z));
+
+    const auto snapshots =
+        source.modified_chunk_snapshots();
+    REQUIRE(snapshots.size() == 1U);
+    CHECK(
+        (snapshots.front().player_placed_mask[expected_byte] &
+         expected_bit) != 0U);
+
+    World snapshot_restored(
+        seed,
+        0,
+        WorldGenerationProfile::OceanAdventure);
+    snapshot_restored.replace_chunk_snapshots(
+        snapshots);
+    CHECK(
+        snapshot_restored.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+    CHECK(
+        snapshot_restored.peek_block_or_generated(
+            target.x,
+            target.y,
+            target.z) == generated);
+
+    auto plan =
+        source.capture_save_plan();
+    REQUIRE(plan.chunks.size() == 1U);
+    REQUIRE(plan.chunks.front().sparse_cells.empty());
+    REQUIRE_FALSE(plan.chunks.front().dense());
+    CHECK(
+        (plan.chunks.front().player_placed_mask[expected_byte] &
+         expected_bit) != 0U);
+
+    World plan_restored(
+        seed,
+        0,
+        WorldGenerationProfile::OceanAdventure);
+    plan_restored.begin_restore_save_plan(
+        std::move(plan));
+    REQUIRE(plan_restored.has_pending_save_restore());
+    const auto stats =
+        plan_restored.process_save_restore(
+            1U,
+            std::numeric_limits<double>::infinity());
+
+    CHECK(stats.processed_cells == 1U);
+    CHECK(stats.completed_chunks == 1U);
+    CHECK(stats.pending_cells == 0U);
+    CHECK_FALSE(plan_restored.has_pending_save_restore());
+    CHECK(plan_restored.chunk_records().empty());
+    CHECK(
+        plan_restored.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
+    CHECK(
+        plan_restored.peek_block_or_generated(
+            target.x,
+            target.y,
+            target.z) == generated);
+
+    plan_restored.ensure_chunk_loaded({0, 0});
+    CHECK(
+        plan_restored.get_block(
+            target.x,
+            target.y,
+            target.z) == generated);
+    CHECK(
+        plan_restored.was_player_placed(
+            target.x,
+            target.y,
+            target.z));
 }
 
 TEST_CASE("starting village generator builds a playable procedural spawn hub") {
@@ -1483,7 +2020,7 @@ TEST_CASE("legacy block atlas exposes a transparent wood and steel musket silhou
             steel +=
                 maximum_channel -
                         minimum_channel <
-                    34U
+                    34
                     ? 1U
                     : 0U;
         }

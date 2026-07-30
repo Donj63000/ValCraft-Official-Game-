@@ -204,6 +204,7 @@ add_library(valcraft_core
     src/app/SaveGame.cpp
     src/app/SmokeCamera.cpp
     src/app/TerrainEditStress.cpp
+    src/app/ProgressionMenu.cpp
     src/audio/ProceduralMusic.cpp
     src/audio/ProceduralSfx.cpp
     src/creatures/CrewAnimation.cpp
@@ -224,7 +225,23 @@ add_library(valcraft_core
     src/gameplay/PlayerMusket.cpp
     src/gameplay/PlayerMusketEffects.cpp
     src/gameplay/PlayerProgression.cpp
+    src/gameplay/progression/AbilityCatalog.cpp
+    src/gameplay/progression/AbilityEvents.cpp
+    src/gameplay/progression/AbilitySystem.cpp
+    src/gameplay/progression/BuilderAbilityGeometry.cpp
+    src/gameplay/progression/BuilderAbilityRuntime.cpp
+    src/gameplay/progression/CommanderAbilityEffects.cpp
+    src/gameplay/progression/KnightAdvancedAbilitySystem.cpp
+    src/gameplay/progression/NinjaAbilityEffects.cpp
+    src/gameplay/progression/PlayerBuildState.cpp
+    src/gameplay/progression/PlayerAbilityEffects.cpp
+    src/gameplay/progression/ProgressionCurve.cpp
+    src/gameplay/progression/StatusEffectSystem.cpp
+    src/gameplay/progression/SummonedUnitSystem.cpp
+    src/gameplay/progression/VanguardTargeting.cpp
+    src/gameplay/progression/WorldEditTransaction.cpp
     src/gameplay/SeaAdventure.cpp
+    src/gameplay/SeaAdventureLighting.cpp
     src/gameplay/ShipCrew.cpp
     src/gameplay/StartingPort.cpp
     src/gameplay/StartingVillage.cpp
@@ -234,8 +251,12 @@ add_library(valcraft_core
     src/render/ArchitecturalFixtureMesh.cpp
     src/render/ArchitecturalMesher.cpp
     src/render/ItemDropGeometry.cpp
+    src/render/MarineDecor.cpp
+    src/render/MarineVisualMesh.cpp
     src/render/ModelIconAtlas.cpp
     src/render/MsdfFontAtlas.cpp
+    src/render/OceanLifeField.cpp
+    src/render/SeaHorizon.cpp
     src/render/ShadowCascades.cpp
     src/render/StylizedPrimitives.cpp
     src/render/StylizedShipMesh.cpp
@@ -342,7 +363,12 @@ add_executable(valcraft_tests
     tests/ArchitecturalMesherTests.cpp
     tests/PerformanceReportV3Tests.cpp
     tests/TerrainEditStressTests.cpp
+    tests/OceanLifeFieldTests.cpp
     tests/RenderTests.cpp
+    tests/OceanVisualShaderTests.cpp
+    tests/SeaHorizonTests.cpp
+    tests/MarineDecorTests.cpp
+    tests/MarineVisualMeshTests.cpp
     tests/ModelIconAtlasTests.cpp
     tests/MsdfFontAtlasTests.cpp
     tests/ShadowCascadeTests.cpp
@@ -357,6 +383,8 @@ add_executable(valcraft_tests
     tests/VisualVegetationTests.cpp
     tests/VisualVegetationMeshTests.cpp
     tests/WaterVertexTests.cpp
+    tests/AmelieInteriorRefitTests.cpp
+    tests/ShipInteriorLightingTests.cpp
     tests/ShipCrewTests.cpp
     tests/StartingPortTests.cpp
     tests/WorldSchedulingTests.cpp
@@ -366,6 +394,20 @@ add_executable(valcraft_tests
     tests/PlayerTests.cpp
     tests/PlayerMusketTests.cpp
     tests/PlayerMusketEffectsTests.cpp
+    tests/AbilityEventTests.cpp
+    tests/BuilderAbilityGeometryTests.cpp
+    tests/BuilderAbilityRuntimeTests.cpp
+    tests/CommanderAbilityEffectsTests.cpp
+    tests/KnightAdvancedAbilitySystemTests.cpp
+    tests/NinjaAbilityEffectsTests.cpp
+    tests/PlayerAbilityEffectsTests.cpp
+    tests/ProgressionAbilityTests.cpp
+    tests/ProgressionCoreTests.cpp
+    tests/ProgressionMenuTests.cpp
+    tests/StatusEffectSystemTests.cpp
+    tests/SummonedUnitSystemTests.cpp
+    tests/VanguardTargetingTests.cpp
+    tests/WorldEditTransactionTests.cpp
     tests/MusketCombatTests.cpp
     tests/MusketHudTests.cpp
     tests/PrecipitationTests.cpp
@@ -630,6 +672,54 @@ if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
             TIMEOUT 60
             RESOURCE_LOCK valcraft_gpu
     )
+
+    function(valcraft_add_ocean_gpu_smoke
+             test_name
+             ship_view
+             time_of_day
+             capture_name)
+        add_test(
+            NAME ${test_name}
+            COMMAND $<TARGET_FILE:ValCraft>
+                --smoke-test
+                --smoke-session=sea-open
+                --smoke-ship-view=${ship_view}
+                --visual-pipeline=modern
+                --initial-time=${time_of_day}
+                --initial-weather-time=0
+                --smoke-frames=240
+                --window-width=1280
+                --window-height=720
+                --hidden-window
+                --fixed-render-quality
+                --capture-frame=${CMAKE_BINARY_DIR}/artifacts/ocean/${capture_name}.bmp
+        )
+        set_tests_properties(
+            ${test_name}
+            PROPERTIES
+                LABELS "gpu;integration;ocean;capture"
+                TIMEOUT 90
+                RESOURCE_LOCK valcraft_gpu
+        )
+    endfunction()
+
+    # Je verrouille les trois vues qui couvrent la continuité de l'horizon,
+    # le sillage au soleil rasant et le volume sous-marin moderne.
+    valcraft_add_ocean_gpu_smoke(
+        valcraft_ocean_clear_horizon_smoke
+        stern
+        10.5
+        clear-horizon)
+    valcraft_add_ocean_gpu_smoke(
+        valcraft_ocean_sunset_wake_smoke
+        wake
+        18.5
+        sunset-wake)
+    valcraft_add_ocean_gpu_smoke(
+        valcraft_ocean_underwater_smoke
+        underwater
+        10.5
+        underwater)
 
     function(valcraft_add_tempest_gpu_smoke test_name ship_view weather_time capture_name)
         add_test(

@@ -2,6 +2,7 @@
 
 #include "app/CommandConsole.h"
 #include "app/ConfirmDialog.h"
+#include "app/ConstructionPlanEditor.h"
 #include "app/DeathScreen.h"
 #include "app/Hotbar.h"
 #include "app/InventoryMenu.h"
@@ -9,6 +10,8 @@
 #include "app/MainMenu.h"
 #include "app/OptionsMenu.h"
 #include "app/PauseMenu.h"
+#include "app/ProgressionMenu.h"
+#include "app/ProgressionMenuLayout.h"
 #include "app/SaveSlotMenu.h"
 #include "creatures/CreatureGeometry.h"
 #include "creatures/CreatureTypes.h"
@@ -19,7 +22,10 @@
 #include "gameplay/PlayerProgression.h"
 #include "player/PlayerGeometry.h"
 #include "render/ItemDropGeometry.h"
+#include "render/MarineVisualMesh.h"
+#include "render/OceanVisuals.h"
 #include "render/RendererQuality.h"
+#include "render/SeaHorizon.h"
 #include "render/ShadowCulling.h"
 #include "render/StylizedShipMesh.h"
 #include "render/VisualEntityPrimitives.h"
@@ -98,25 +104,30 @@ public:
         std::uint64_t geometry_revision,
         std::size_t part_count,
         std::uint8_t visual_variant = 0U) noexcept {
-        geometry_revision_ = geometry_revision;
-        part_count_ = part_count;
-        visual_variant_ = visual_variant;
+        const auto index =
+            static_cast<std::size_t>(visual_variant);
+        if (index >= geometry_revisions_.size()) {
+            return;
+        }
+        geometry_revisions_[index] = geometry_revision;
+        part_counts_[index] = part_count;
     }
 
     void reset() noexcept {
-        geometry_revision_ = 0U;
-        part_count_ = 0U;
-        visual_variant_ = 0U;
+        geometry_revisions_.fill(0U);
+        part_counts_.fill(0U);
     }
 
     [[nodiscard]] auto matches(
         std::uint64_t geometry_revision,
         std::size_t part_count,
         std::uint8_t visual_variant = 0U) const noexcept -> bool {
+        const auto index =
+            static_cast<std::size_t>(visual_variant);
         return geometry_revision != 0U && part_count > 0U &&
-               geometry_revision_ == geometry_revision &&
-               part_count_ == part_count &&
-               visual_variant_ == visual_variant;
+               index < geometry_revisions_.size() &&
+               geometry_revisions_[index] == geometry_revision &&
+               part_counts_[index] == part_count;
     }
 
     [[nodiscard]] auto ready(std::uint64_t geometry_revision,
@@ -130,11 +141,11 @@ public:
     }
 
 private:
-    // Je cle le cache sur la revision immuable du plan, pas sur l'adresse
-    // accidentelle d'un span qui pourrait etre reutilisee apres un rechargement.
-    std::uint64_t geometry_revision_ = 0U;
-    std::size_t part_count_ = 0U;
-    std::uint8_t visual_variant_ = 0U;
+    // Je conserve les variantes Legacy, Near et Far dans des cases distinctes :
+    // mémoriser un LOD moderne ne doit jamais invalider l'autre.
+    static constexpr std::size_t kVisualVariantCount = 3U;
+    std::array<std::uint64_t, kVisualVariantCount> geometry_revisions_ {};
+    std::array<std::size_t, kVisualVariantCount> part_counts_ {};
 };
 
 struct RendererOptions {
@@ -160,6 +171,11 @@ struct RendererGpuTimings {
     std::uint64_t source_frame = 0;
     std::uint32_t latency_frames = 0;
     bool valid = false;
+    // Je conserve les champs historiques à leur position et j'ajoute le
+    // découpage maritime en fin de structure pour garder l'évolution append-only.
+    double water_resolve_ms = 0.0;
+    double water_surface_ms = 0.0;
+    double transparent_weather_ms = 0.0;
 
     [[nodiscard]] auto total_ms() const noexcept -> double {
         return shadow_ms + opaque_ms + sky_ms + entities_ms + water_ms + post_process_ms + ui_ms;
@@ -194,6 +210,114 @@ struct GameplayHudAnnouncementView {
     float normalized_time = 1.0F;
     bool visible = false;
 };
+
+struct AbilityFeedbackAssetView {
+    std::string_view visual_id {
+        kGenericAbilityVisualId};
+    std::string_view sfx_id {
+        kGenericAbilitySfxId};
+
+    auto operator==(const AbilityFeedbackAssetView&) const
+        -> bool = default;
+};
+
+// Je transporte ici uniquement l'état éphémère que le build ne peut pas
+// déduire : le renderer reste ainsi indépendant des systèmes de simulation.
+struct ProgressionRuntimeHudView {
+    bool visible = true;
+    std::uint64_t aggregated_experience_gain = 0ULL;
+    AbilityId focused_ability = AbilityId::None;
+    float active_duration_remaining = 0.0F;
+    bool wind_blade_armed = false;
+    bool wind_dodge_ready = false;
+    bool iron_guard_active = false;
+    std::uint8_t active_footmen = 0U;
+    ProgressionMenuPage menu_page =
+        ProgressionMenuPage::Ability;
+    std::string_view visual_id {};
+    std::string_view sfx_id {};
+
+    auto operator==(const ProgressionRuntimeHudView&) const
+        -> bool = default;
+};
+
+struct ProgressionExperienceHudSnapshot {
+    std::uint32_t level = 1U;
+    std::uint64_t current_experience = 0ULL;
+    std::uint64_t next_level_experience = 0ULL;
+    std::uint64_t aggregated_experience_gain = 0ULL;
+    bool maximum_level = false;
+    float progress_ratio = 0.0F;
+
+    auto operator==(const ProgressionExperienceHudSnapshot&) const
+        -> bool = default;
+};
+
+struct ProgressionAbilityHudSnapshot {
+    bool visible = false;
+    AbilityId ability = AbilityId::None;
+    std::string_view display_name {};
+    float current_energy = 0.0F;
+    float maximum_energy = 0.0F;
+    float energy_cost = 0.0F;
+    bool energy_insufficient = false;
+    float global_cooldown_remaining = 0.0F;
+    float cooldown_remaining = 0.0F;
+    std::uint8_t charges = 0U;
+    std::uint8_t maximum_charges = 0U;
+    float active_duration_remaining = 0.0F;
+    bool wind_blade_armed = false;
+    bool wind_dodge_ready = false;
+    bool iron_guard_active = false;
+    std::uint8_t active_footmen = 0U;
+    AbilityFeedbackAssetView feedback_assets {};
+
+    auto operator==(const ProgressionAbilityHudSnapshot&) const
+        -> bool = default;
+};
+
+struct ProgressionAbilityHudLayout {
+    ProgressionMenuRect panel {};
+    ProgressionMenuRect energy {};
+    ProgressionMenuRect ability {};
+    ProgressionMenuRect timers {};
+    ProgressionMenuRect effects {};
+
+    [[nodiscard]] constexpr auto valid() const noexcept -> bool {
+        return !panel.empty() &&
+               progression_menu_rect_contains(
+                   panel,
+                   energy) &&
+               progression_menu_rect_contains(
+                   panel,
+                   ability) &&
+               progression_menu_rect_contains(
+                   panel,
+                   timers) &&
+               progression_menu_rect_contains(
+                   panel,
+                   effects);
+    }
+};
+
+[[nodiscard]] auto resolve_ability_feedback_assets(
+    AbilityId ability,
+    std::string_view visual_id,
+    std::string_view sfx_id) noexcept -> AbilityFeedbackAssetView;
+
+[[nodiscard]] auto make_progression_experience_hud_snapshot(
+    const PlayerProgressionState& progression,
+    std::uint64_t aggregated_experience_gain = 0ULL) noexcept
+    -> ProgressionExperienceHudSnapshot;
+
+[[nodiscard]] auto make_progression_ability_hud_snapshot(
+    const PlayerBuildState& build,
+    const ProgressionRuntimeHudView& runtime) noexcept
+    -> ProgressionAbilityHudSnapshot;
+
+[[nodiscard]] auto make_progression_ability_hud_layout(
+    int viewport_width,
+    int viewport_height) noexcept -> ProgressionAbilityHudLayout;
 
 struct MaritimeHudView {
     bool visible = false;
@@ -252,6 +376,12 @@ public:
 
     auto initialize(const RendererOptions& options = {}) -> bool;
     void shutdown();
+    void set_progression_hud(
+        const ProgressionMenuViewModel& menu,
+        const PlayerBuildState& build,
+        const ProgressionRuntimeHudView& runtime = {},
+        const ConstructionPlanEditorViewModel& construction_plan = {})
+        noexcept;
     void render_frame(World& world,
                       const PlayerController& player,
                       const PlayerMusketView& player_musket,
@@ -315,6 +445,10 @@ public:
     void reset_world_resources();
     auto prepare_ship_mesh(const ShipRenderState& ship) -> bool;
     auto upload_prepared_ship_mesh(const ShipRenderState& ship, const ChunkMeshData& mesh) -> bool;
+    auto upload_prepared_ship_mesh(
+        const ShipRenderState& ship,
+        const ChunkMeshData& near_mesh,
+        const ChunkMeshData& far_mesh) -> bool;
     [[nodiscard]] auto ship_mesh_ready(const ShipRenderState& ship) const noexcept -> bool;
     [[nodiscard]] auto world_mesh_uploaded(const ChunkCoord& coord, std::uint64_t revision) const noexcept -> bool;
     void submit_cpu_frame_time_sample(double active_frame_time_ms) noexcept;
@@ -333,6 +467,9 @@ private:
         Water,
         PostProcess,
         Ui,
+        WaterResolve,
+        WaterSurface,
+        TransparentWeather,
         Count,
     };
 
@@ -400,6 +537,8 @@ private:
         GLint night_tint_color = -1;
         GLint daylight_factor = -1;
         GLint sun_visibility = -1;
+        GLint cloud_intensity = -1;
+        GLint overcast_intensity = -1;
         GLint precipitation_intensity = -1;
         GLint storm_intensity = -1;
         GLint lightning_intensity = -1;
@@ -414,12 +553,68 @@ private:
         GLint shadow_cascade_count = -1;
         GLint shadow_split_distance = -1;
         GLint shadow_transition_width = -1;
+        GLint maritime_horizon_enabled = -1;
+        GLint maritime_detail_transition_range = -1;
+        GLint maritime_sea_level = -1;
+        GLint maritime_submersion_active = -1;
+        GLint time_seconds = -1;
     };
 
     struct ModernTerrainShadowUniformLocations {
         GLint model = -1;
         GLint light_view_projection = -1;
         GLint material_albedo = -1;
+    };
+
+    struct ModernShipUniformLocations {
+        GLint model = -1;
+        GLint view_projection = -1;
+        GLint light_view_projection = -1;
+        GLint light_view_projection_far = -1;
+        GLint camera_position = -1;
+        GLint camera_local_position = -1;
+        GLint camera_forward = -1;
+        GLint sun_direction = -1;
+        GLint sun_color = -1;
+        GLint ambient_color = -1;
+        GLint fog_color = -1;
+        GLint distant_fog_color = -1;
+        GLint night_tint_color = -1;
+        GLint daylight_factor = -1;
+        GLint sun_visibility = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint exterior_light_activation = -1;
+        GLint exterior_light_radiance = -1;
+        GLint lightning_intensity = -1;
+        GLint material_detail_scale = -1;
+        GLint shadows_enabled = -1;
+        GLint material_albedo = -1;
+        GLint material_normal_height = -1;
+        GLint material_orm_emission = -1;
+        GLint shadow_map = -1;
+        GLint shadow_map_far = -1;
+        GLint shadow_cascade_count = -1;
+        GLint shadow_split_distance = -1;
+        GLint shadow_transition_width = -1;
+        GLint time_seconds = -1;
+        GLint wind_strength = -1;
+        GLint material_layers = -1;
+        GLint light_count = -1;
+        GLint light_position_radius = -1;
+        GLint light_color_intensity = -1;
+        GLint light_zone_min_spill = -1;
+        GLint light_zone_max_seed = -1;
+        GLint light_doorways = -1;
+    };
+
+    struct ModernShipShadowUniformLocations {
+        GLint model = -1;
+        GLint light_view_projection = -1;
+        GLint material_albedo = -1;
+        GLint material_layers = -1;
+        GLint time_seconds = -1;
+        GLint wind_strength = -1;
     };
 
     struct WorldUniformLocations {
@@ -456,6 +651,10 @@ private:
         GLint ocean_severity = -1;
         GLint ocean_tempest_factor = -1;
         GLint ocean_open_sea = -1;
+        GLint maritime_horizon_enabled = -1;
+        GLint maritime_water_blend_range = -1;
+        GLint maritime_far_fog_range = -1;
+        GLint maritime_sea_level = -1;
         GLint atlas = -1;
         GLint shadow_map = -1;
         GLint shadow_map_far = -1;
@@ -467,6 +666,61 @@ private:
         GLint inverse_view_projection = -1;
         GLint shadows_enabled = -1;
         GLint super_vision_strength = -1;
+        GLint ship_protection_enabled = -1;
+        GLint ship_inverse_model = -1;
+        GLint ship_bounds_min = -1;
+        GLint ship_bounds_max = -1;
+        GLint ship_profile_longitudinal = -1;
+        GLint ship_profile_taper = -1;
+        GLint ship_profile_heights = -1;
+        GLint ship_profile_widths = -1;
+        GLint ship_sheltered_floor = -1;
+    };
+
+    struct ModernWaterUniformLocations {
+        GLint model = -1;
+        GLint view_projection = -1;
+        GLint inverse_view_projection = -1;
+        GLint camera_position = -1;
+        GLint sun_direction = -1;
+        GLint sun_color = -1;
+        GLint moon_disk_color = -1;
+        GLint ambient_color = -1;
+        GLint fog_color = -1;
+        GLint distant_fog_color = -1;
+        GLint horizon_glow_color = -1;
+        GLint night_tint_color = -1;
+        GLint sky_zenith_color = -1;
+        GLint sky_horizon_color = -1;
+        GLint daylight_factor = -1;
+        GLint sun_visibility = -1;
+        GLint cloud_intensity = -1;
+        GLint overcast_intensity = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
+        GLint ocean_waves = -1;
+        GLint ocean_wave_phases = -1;
+        GLint ocean_wave_count = -1;
+        GLint ocean_foam_threshold = -1;
+        GLint ocean_detail_strength = -1;
+        GLint ocean_detail_phase = -1;
+        GLint water_animation_time = -1;
+        GLint ocean_severity = -1;
+        GLint ocean_tempest_factor = -1;
+        GLint ocean_open_sea = -1;
+        GLint water_surface_detail = -1;
+        GLint water_detail_samples = -1;
+        GLint has_water_material = -1;
+        GLint water_normal_layer = -1;
+        GLint scene_color = -1;
+        GLint scene_depth = -1;
+        GLint material_normal_height = -1;
+        GLint maritime_horizon_enabled = -1;
+        GLint maritime_water_blend_range = -1;
+        GLint maritime_far_fog_range = -1;
+        GLint maritime_sea_level = -1;
+        GLint ship_speed = -1;
         GLint ship_protection_enabled = -1;
         GLint ship_inverse_model = -1;
         GLint ship_bounds_min = -1;
@@ -516,6 +770,36 @@ private:
         GLint cloud_steps = -1;
         GLint cloud_detail = -1;
         GLint accent_atlas = -1;
+        GLint maritime_horizon_enabled = -1;
+        GLint maritime_camera_position = -1;
+        GLint maritime_sea_level = -1;
+        GLint maritime_submersion_active = -1;
+        GLint ocean_horizon_waves = -1;
+        GLint ocean_horizon_wave_phases = -1;
+        GLint ocean_horizon_severity = -1;
+        GLint ocean_horizon_tempest_factor = -1;
+        GLint ocean_horizon_sun_color = -1;
+        GLint maritime_far_fog_range = -1;
+        GLint fog_color = -1;
+        GLint distant_fog_color = -1;
+    };
+
+    struct SeaHorizonUniformLocations {
+        GLint view_projection = -1;
+        GLint camera_position = -1;
+        GLint sun_direction = -1;
+        GLint sun_color = -1;
+        GLint ambient_color = -1;
+        GLint fog_color = -1;
+        GLint distant_fog_color = -1;
+        GLint daylight_factor = -1;
+        GLint precipitation_intensity = -1;
+        GLint storm_intensity = -1;
+        GLint lightning_intensity = -1;
+        GLint far_fog_range = -1;
+        GLint sea_level = -1;
+        GLint detail_transition_range = -1;
+        GLint transition_pass = -1;
     };
 
     struct PostProcessUniformLocations {
@@ -536,6 +820,13 @@ private:
         GLint storm_intensity = -1;
         GLint lightning_intensity = -1;
         GLint weather_exposure = -1;
+        GLint projection_far_distance = -1;
+        GLint maritime_submerged = -1;
+        GLint maritime_submersion_depth = -1;
+        GLint maritime_submersion_blend = -1;
+        GLint water_surface_detail = -1;
+        GLint time_seconds = -1;
+        GLint daylight_factor = -1;
     };
 
     struct PrecipitationUniformLocations {
@@ -627,6 +918,7 @@ private:
         GLint time_of_day = -1;
         GLint player_light_strength = -1;
         GLint super_vision_strength = -1;
+        GLint local_light_radiance = -1;
         GLint modern_pipeline = -1;
     };
 
@@ -664,7 +956,11 @@ private:
         int air_steps = 0;
         int damage_flash_step = 0;
         std::uint32_t player_level = 1U;
+        std::uint64_t current_experience = 0ULL;
+        std::uint64_t next_level_experience = 0ULL;
+        std::uint64_t experience_gain = 0ULL;
         int level_progress_step = 0;
+        bool maximum_level = false;
         bool air_visible = false;
         bool underwater = false;
 
@@ -811,6 +1107,29 @@ private:
     void create_item_drop_geometry();
     void create_precipitation_geometry();
     void create_old_guard_effect_geometry();
+    void create_sea_horizon_geometry();
+    void destroy_sea_horizon_geometry();
+    void sync_sea_horizon_terrain(
+        const World& world,
+        const glm::vec3& focus,
+        float detailed_draw_distance);
+    void upload_sea_horizon_uniforms(
+        const glm::mat4& view_projection,
+        const glm::vec3& camera_position,
+        const EnvironmentState& environment,
+        const SeaHorizonFogRange& fog_range);
+    void draw_sea_horizon_terrain(
+        const glm::mat4& view_projection,
+        const glm::vec3& camera_position,
+        const EnvironmentState& environment,
+        const SeaHorizonFogRange& fog_range);
+    void sync_marine_visuals(
+        const World& world,
+        std::span<const ChunkCoord> visible_chunks,
+        const glm::vec3& camera_position,
+        const ShipRenderState& ship,
+        RendererQuality quality,
+        float absolute_time_seconds);
     void create_screen_quad_geometry();
     void create_crosshair_geometry();
     void upload_block_break_overlay_mesh(
@@ -824,12 +1143,20 @@ private:
     void ensure_water_scene_targets(int width, int height);
     void destroy_water_scene_targets();
     void draw_sky(const glm::mat4& inverse_view_projection,
+                  const glm::vec3& camera_position,
                   const EnvironmentState& environment,
-                  const RendererQualitySettings& quality_settings);
+                  const RendererQualitySettings& quality_settings,
+                  bool maritime_horizon_enabled,
+                  const MaritimeSubmersionState& maritime_submersion,
+                  const OceanState& ocean,
+                  std::span<const glm::vec4> ocean_wave_uniforms,
+                  std::span<const glm::vec2> ocean_phase_uniforms);
     void run_post_process(const EnvironmentState& environment,
                           float weather_exposure,
+                          const MaritimeSubmersionState& submersion,
                           int width,
                           int height,
+                          float projection_far_distance,
                           bool optional_effects_enabled);
     void run_menu_background_pass(
         int width,
@@ -878,6 +1205,8 @@ private:
         bool viewmodel_overlay = false,
         const PlayerViewModelPose* viewmodel_pose = nullptr);
     void upload_world_ship_protection(const ShipRenderState& ship);
+    void upload_modern_water_ship_protection(
+        const ShipRenderState& ship);
     void upload_precipitation_ship_protection(const ShipRenderState& ship);
     void draw_creature_shadows(std::span<const CreatureRenderInstance> creatures,
                                std::span<const CrewRenderInstance> crew,
@@ -887,6 +1216,7 @@ private:
     void prepare_visual_entity_batches(
         std::span<const CreaturePartInstance> parts,
         VisualEntityContext context,
+        std::span<const VisualEntityContext> per_part_contexts,
         const glm::vec3& focus,
         bool simplified_shadow,
         bool viewmodel);
@@ -925,6 +1255,15 @@ private:
     void draw_inventory_menu(const InventoryMenuState& inventory_menu, const HotbarState& hotbar, int width, int height);
     void draw_death_screen(const DeathScreenState& death_screen, int width, int height);
     void draw_pause_menu(const PauseMenuState& pause_menu, int width, int height);
+    void draw_progression_menu(
+        const ProgressionMenuViewModel& menu,
+        const PlayerBuildState& build,
+        int width,
+        int height);
+    void draw_progression_ability_hud(
+        const PlayerBuildState& build,
+        int width,
+        int height);
     void draw_main_menu(const MainMenuState& main_menu, int width, int height);
     void draw_save_slot_menu(const SaveSlotMenuState& save_slot_menu, int width, int height);
     void draw_options_menu(const OptionsMenuState& options_menu, int width, int height);
@@ -948,9 +1287,12 @@ private:
     [[nodiscard]] auto estimate_gpu_texture_bytes() const noexcept -> std::uint64_t;
 
     GLuint world_program_ = 0;
+    GLuint modern_water_program_ = 0;
     GLuint modern_terrain_program_ = 0;
     GLuint modern_architecture_program_ = 0;
     GLuint modern_terrain_shadow_program_ = 0;
+    GLuint modern_ship_program_ = 0;
+    GLuint modern_ship_shadow_program_ = 0;
     GLuint creature_program_ = 0;
     GLuint creature_shadow_program_ = 0;
     GLuint item_drop_program_ = 0;
@@ -960,6 +1302,7 @@ private:
     GLuint hud_program_ = 0;
     GLuint crosshair_program_ = 0;
     GLuint sky_program_ = 0;
+    GLuint sea_horizon_program_ = 0;
     GLuint post_process_program_ = 0;
     GLuint glow_extract_program_ = 0;
     GLuint glow_blur_program_ = 0;
@@ -1007,24 +1350,35 @@ private:
     GLuint old_guard_effect_vao_ = 0;
     GLuint old_guard_effect_vbo_ = 0;
     GLuint old_guard_effect_instance_vbo_ = 0;
+    GLuint sea_horizon_terrain_vao_ = 0;
+    GLuint sea_horizon_terrain_vbo_ = 0;
+    GLuint sea_horizon_terrain_ebo_ = 0;
     GLuint hud_vao_ = 0;
     GLuint hud_vbo_ = 0;
     GLuint crosshair_vao_ = 0;
     GLuint crosshair_vbo_ = 0;
-    GpuMesh ship_gpu_mesh_ {};
+    // Je garde un buffer par LOD moderne. Le pipeline Legacy n'utilise que la
+    // case Near et ne paie donc aucune seconde allocation.
+    std::array<GpuMesh, kStylizedShipLodCount> ship_gpu_meshes_ {};
+    GpuMesh marine_decor_gpu_mesh_ {};
+    GpuMesh ocean_life_gpu_mesh_ {};
     RendererOptions options_ {};
     RendererQualitySettings active_quality_settings_ {};
     RendererAdaptiveQualityController adaptive_quality_controller_ {};
     WorldUniformLocations world_uniforms_ {};
+    ModernWaterUniformLocations modern_water_uniforms_ {};
     ModernTerrainUniformLocations modern_terrain_uniforms_ {};
     ModernTerrainUniformLocations modern_architecture_uniforms_ {};
     ModernTerrainShadowUniformLocations modern_terrain_shadow_uniforms_ {};
+    ModernShipUniformLocations modern_ship_uniforms_ {};
+    ModernShipShadowUniformLocations modern_ship_shadow_uniforms_ {};
     CreatureUniformLocations creature_uniforms_ {};
     GLint creature_shadow_light_view_projection_ = -1;
     WorldUniformLocations item_drop_uniforms_ {};
     ShadowUniformLocations shadow_uniforms_ {};
     HudUniformLocations hud_uniforms_ {};
     SkyUniformLocations sky_uniforms_ {};
+    SeaHorizonUniformLocations sea_horizon_uniforms_ {};
     PostProcessUniformLocations post_process_uniforms_ {};
     PrecipitationUniformLocations precipitation_uniforms_ {};
     OldGuardEffectUniformLocations old_guard_effect_uniforms_ {};
@@ -1049,13 +1403,54 @@ private:
     GLsizei item_drop_template_index_count_ = 0;
     GLsizeiptr precipitation_instance_buffer_bytes_ = 0;
     GLsizeiptr old_guard_effect_instance_buffer_bytes_ = 0;
+    GLsizeiptr sea_horizon_terrain_vertex_buffer_bytes_ = 0;
+    GLsizeiptr sea_horizon_terrain_index_buffer_bytes_ = 0;
     GLsizeiptr hud_vertex_buffer_bytes_ = 0;
+    GLsizei sea_horizon_terrain_index_count_ = 0;
+    GLsizei sea_horizon_terrain_transition_index_count_ = 0;
+    SeaHorizonSnappedCenter sea_horizon_terrain_center_ {};
+    int sea_horizon_world_seed_ = 0;
+    WorldGenerationVersion sea_horizon_generation_version_ =
+        WorldGenerationVersion::LegacyV1;
+    bool sea_horizon_terrain_cache_valid_ = false;
+    SeaHorizonTerrainMesh sea_horizon_terrain_mesh_cache_ {};
+    SeaHorizonDetailTransitionRange sea_horizon_detail_transition_range_ {};
+    std::vector<ChunkCoord> sea_horizon_detailed_chunks_cache_ {};
+    std::vector<ChunkCoord> sea_horizon_detailed_chunks_scratch_ {};
+    std::vector<std::uint32_t> sea_horizon_filtered_indices_scratch_ {};
+    std::vector<std::uint32_t> sea_horizon_transition_indices_scratch_ {};
+    std::unordered_map<
+        ChunkCoord,
+        std::vector<MarineDecorInstance>,
+        ChunkCoordHash>
+        marine_decor_cache_ {};
+    std::vector<MarineDecorInstance>
+        marine_decor_instances_scratch_ {};
+    std::vector<ChunkCoord>
+        marine_visible_chunks_scratch_ {};
+    std::vector<ChunkCoord>
+        marine_requested_chunks_scratch_ {};
+    OrganicTerrainMesh marine_decor_mesh_scratch_ {};
+    OrganicTerrainMesh ocean_life_mesh_scratch_ {};
+    OceanLifeField ocean_life_field_ {};
+    int marine_cache_world_seed_ = 0;
+    WorldGenerationVersion marine_cache_generation_version_ =
+        WorldGenerationVersion::LegacyV1;
+    std::uint64_t marine_visible_signature_ = 0U;
+    int marine_focus_cell_x_ = 0;
+    int marine_focus_cell_z_ = 0;
+    RendererQuality marine_cache_quality_ =
+        RendererQuality::High;
+    bool marine_visual_cache_valid_ = false;
     RendererFrameStats last_frame_stats_ {};
     std::vector<ItemDropGpuInstance> item_drop_instances_scratch_ {};
     PrecipitationField precipitation_field_ {};
     std::vector<PrecipitationGpuInstance> precipitation_instances_scratch_ {};
     std::vector<OldGuardEffectGpuInstance> old_guard_effect_instances_scratch_ {};
     std::vector<CreaturePartInstance> creature_parts_scratch_ {};
+    // Je conserve le contexte en parallèle des pièces : les animaux et les
+    // humains peuvent partager le même buffer sans partager leur anatomie.
+    std::vector<VisualEntityContext> creature_part_contexts_scratch_ {};
     std::array<
         std::vector<CreaturePartInstance>,
         kVisualEntityPrimitiveTypeCount * kVisualEntityPrimitiveLodCount>
@@ -1076,6 +1471,13 @@ private:
     HudGeometryCache<InventoryHudCacheKey> inventory_cache_ {};
     HudGeometryCache<DeathHudCacheKey> death_cache_ {};
     HudGeometryCache<PauseHudCacheKey> pause_cache_ {};
+    ProgressionMenuViewModel
+        progression_menu_view_ {};
+    PlayerBuildState progression_build_view_ {};
+    ProgressionRuntimeHudView
+        progression_runtime_hud_view_ {};
+    ConstructionPlanEditorViewModel
+        construction_plan_view_ {};
     HudGeometryCache<MainMenuHudCacheKey> main_menu_cache_ {};
     HudGeometryCache<SaveSlotHudCacheKey> save_slot_cache_ {};
     HudGeometryCache<OptionsHudCacheKey> options_cache_ {};

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <string_view>
 
 namespace valcraft {
@@ -15,6 +16,7 @@ uniform mat4 u_model;
 uniform mat4 u_view_projection;
 uniform mat4 u_light_view_projection;
 uniform vec3 u_camera_position;
+uniform float u_time_seconds;
 
 out vec3 v_world_position;
 out vec3 v_normal;
@@ -30,7 +32,27 @@ flat out uint v_secondary_block;
 flat out uint v_surface_flags;
 
 void main() {
-    vec4 world_position = u_model * vec4(a_position, 1.0);
+    vec3 animated_position = a_position;
+    if ((a_surface_flags & 64u) != 0u) {
+        // Je fixe la base par le V canonique et je laisse seulement la cime
+        // suivre deux houles lentes. Le décor reste ainsi soudé au fond.
+        float flexibility =
+            smoothstep(
+                0.02,
+                0.98,
+                float(a_material_ao.z) / 255.0);
+        float phase =
+            dot(a_position.xz, vec2(0.31, 0.23)) +
+            u_time_seconds * 0.72;
+        vec2 drift = vec2(
+            sin(phase) + sin(phase * 1.71 + 0.8) * 0.28,
+            cos(phase * 0.83 + 0.4) * 0.72);
+        animated_position.xz +=
+            drift * (0.055 * flexibility);
+    }
+
+    vec4 world_position =
+        u_model * vec4(animated_position, 1.0);
     mat3 normal_matrix = transpose(inverse(mat3(u_model)));
     v_world_position = world_position.xyz;
     v_normal = normalize(normal_matrix * a_normal);
@@ -106,7 +128,7 @@ void main() {
 }
 )";
 
-inline constexpr std::string_view kModernTerrainFragmentShaderSource = R"(#version 330 core
+inline constexpr auto* kModernTerrainFragmentShaderSourcePart1 = R"(#version 330 core
 in vec3 v_world_position;
 in vec3 v_normal;
 in vec4 v_light_position;
@@ -136,6 +158,8 @@ uniform vec3 u_distant_fog_color;
 uniform vec3 u_night_tint_color;
 uniform float u_daylight_factor;
 uniform float u_sun_visibility;
+uniform float u_cloud_intensity;
+uniform float u_overcast_intensity;
 uniform float u_precipitation_intensity;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
@@ -145,12 +169,18 @@ uniform int u_shadows_enabled;
 uniform int u_shadow_cascade_count;
 uniform float u_shadow_split_distance;
 uniform float u_shadow_transition_width;
+uniform int u_maritime_horizon_enabled;
+uniform vec2 u_maritime_detail_transition_range;
+uniform float u_maritime_sea_level;
+uniform int u_maritime_submersion_active;
+uniform float u_time_seconds;
 
 out vec4 frag_color;
 
 const float k_full_material_detail_threshold = 0.999;
 const float k_normal_mapping_detail_threshold = 0.50;
 const float k_quantized_material_blend_epsilon = 1.0 / 255.0;
+const float k_submerged_caustic_max_energy = 0.085;
 
 float saturate(float value) {
     return clamp(value, 0.0, 1.0);
@@ -173,6 +203,9 @@ vec3 safe_normalize(vec3 value, vec3 fallback) {
 }
 
 float material_layer(uint block_id) {
+    if ((v_surface_flags & 32u) != 0u) {
+        return float(clamp(block_id, 1u, 53u) - 1u);
+    }
     if (block_id >= 1u && block_id <= 20u) {
         return float(block_id - 1u);
     }
@@ -187,6 +220,9 @@ float material_layer(uint block_id) {
 }
 
 float material_scale(uint block_id) {
+    if ((v_surface_flags & 32u) != 0u) {
+        return 1.0;
+    }
     // Je garde le detail sous la taille d'une cellule logique : les grandes
     // nappes floues ne doivent jamais redessiner les anciennes marches voxel.
     if (block_id == 1u) return 1.10;
@@ -200,6 +236,9 @@ float material_scale(uint block_id) {
 }
 
 float material_normal_strength(uint block_id) {
+    if ((v_surface_flags & 32u) != 0u) {
+        return 0.055;
+    }
     // Je garde les sols souples volontairement subtils : leur relief de hauteur
     // contient des motifs directionnels qui ne doivent jamais devenir des stries.
     if (block_id == 1u) return 0.045;
@@ -409,7 +448,9 @@ float shadow_visibility(vec3 normal) {
         blend);
 }
 
-)" R"(
+)";
+
+inline constexpr auto* kModernTerrainFragmentShaderSourcePart2 = R"(
 float distribution_ggx(vec3 normal, vec3 halfway, float roughness) {
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
@@ -468,19 +509,99 @@ vec3 detail_normal(
         geometric_normal);
 }
 
+float submerged_caustic_envelope(
+    float water_depth,
+    float daylight) {
+    float safe_depth = max(water_depth, 0.0);
+    float water_column_entry =
+        smoothstep(0.10, 0.75, safe_depth);
+    float depth_attenuation =
+        1.0 - smoothstep(10.0, 36.0, safe_depth);
+    float night_attenuation =
+        mix(0.025, 1.0, saturate(daylight));
+    float storm_attenuation =
+        mix(1.0, 0.24, saturate(u_storm_intensity));
+    float cloud_cover =
+        saturate(
+            max(
+                u_cloud_intensity * 0.82,
+                u_overcast_intensity));
+    float cloud_attenuation =
+        mix(1.0, 0.28, cloud_cover);
+    float sky_transmission =
+        mix(0.45, 1.0, saturate(u_sun_visibility));
+    float quality_progress =
+        smoothstep(
+            k_normal_mapping_detail_threshold,
+            k_full_material_detail_threshold,
+            saturate(u_material_detail_scale));
+    float quality_attenuation =
+        mix(0.62, 1.0, quality_progress);
+    return saturate(
+        water_column_entry *
+        depth_attenuation *
+        night_attenuation *
+        storm_attenuation *
+        cloud_attenuation *
+        sky_transmission *
+        quality_attenuation);
+}
+
 void main() {
+    float maritime_horizon_haze = 0.0;
+    if (u_maritime_horizon_enabled != 0 &&
+        v_world_position.y >=
+            u_maritime_sea_level +
+                0.25 &&
+        u_maritime_detail_transition_range.y >
+            u_maritime_detail_transition_range.x) {
+        // Je garde toujours le vrai relief opaque. Le proxy reste une
+        // sous-couche : je masque seulement son raccord par une brume légère,
+        // sans jamais découper l'île, ses arbres ou sa silhouette.
+        float horizontal_distance =
+            length(
+                v_world_position.xz -
+                u_camera_position.xz);
+        maritime_horizon_haze =
+            smoothstep(
+                u_maritime_detail_transition_range.x,
+                u_maritime_detail_transition_range.y,
+                horizontal_distance);
+    }
+
     vec3 geometric_normal = safe_normalize(v_normal, vec3(0.0, 1.0, 0.0));
     bool cutout_surface = (v_surface_flags & 1u) != 0u;
     bool architectural_surface = (v_surface_flags & 2u) != 0u;
     bool transparent_surface = (v_surface_flags & 4u) != 0u;
     bool silhouette_bevel = (v_surface_flags & 8u) != 0u;
+    bool direct_material = (v_surface_flags & 32u) != 0u;
+    bool underwater_sway = (v_surface_flags & 64u) != 0u;
+    bool marine_fish = (v_surface_flags & 128u) != 0u;
+    bool marine_surface =
+        direct_material &&
+        v_primary_block >= 47u &&
+        v_primary_block <= 53u;
+    bool submerged_surface =
+        u_maritime_horizon_enabled != 0 &&
+        !architectural_surface &&
+        v_world_position.y <
+            u_maritime_sea_level - 0.05;
+    float water_depth =
+        submerged_surface
+            ? max(
+                  u_maritime_sea_level -
+                      v_world_position.y,
+                  0.0)
+            : 0.0;
     bool geological_surface =
         (v_surface_flags & 16u) != 0u &&
         is_geological_block(v_primary_block);
     bool vegetation_surface =
+        underwater_sway ||
         is_vegetation_block(v_primary_block) ||
         is_vegetation_block(v_secondary_block);
     bool translucent_foliage =
+        underwater_sway ||
         is_translucent_foliage(v_primary_block) ||
         is_translucent_foliage(v_secondary_block);
     vec3 weights = triplanar_weights(geometric_normal);
@@ -564,6 +685,30 @@ void main() {
     vec4 secondary_orm = secondary_sample.orm;
     vec3 albedo = mix(primary_albedo.rgb, secondary_albedo.rgb, blend);
     vec4 orm = mix(primary_orm, secondary_orm, blend);
+    if (marine_fish) {
+        float palette_index =
+            floor(saturate(v_block_light) * 3.0 + 0.5);
+        vec3 palette_tint =
+            palette_index < 0.5
+                ? vec3(0.72, 1.04, 1.08)
+                : (palette_index < 1.5
+                       ? vec3(1.04, 1.00, 0.82)
+                       : (palette_index < 2.5
+                              ? vec3(1.08, 0.76, 0.62)
+                              : vec3(0.76, 0.84, 1.12)));
+        albedo *= palette_tint;
+    }
+    if (submerged_surface) {
+        float depth_tint =
+            smoothstep(2.0, 36.0, water_depth) *
+            smoothstep(0.02, 0.30, saturate(v_sky_light));
+        float depth_tint_strength =
+            marine_surface ? 0.42 : 0.30;
+        albedo *= mix(
+            vec3(0.98, 1.02, 1.01),
+            vec3(0.62, 0.84, 0.88),
+            depth_tint * depth_tint_strength);
+    }
     if (geological_surface && v_primary_block == 1u) {
         // La terre est la transition perceptive entre végétation et roche. Je
         // la dérive analytiquement de la paire existante afin de garder deux
@@ -581,7 +726,9 @@ void main() {
     if (cutout_surface && coverage < 0.46) {
         discard;
     }
+)";
 
+inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
     // Je désactive entièrement les lectures de normales en Low. En Medium et
     // High, je garde le relief existant mais je n'échantillonne qu'une seule
     // couche lorsque le fast path matériau a déjà établi un poids extrême.
@@ -717,8 +864,10 @@ void main() {
                   mix(0.38, 1.0, visibility) *
                   u_sun_visibility * daylight;
     }
-    vec3 torch = vec3(1.18, 0.63, 0.25) * saturate(v_block_light) *
-                 (albedo * 0.72 + vec3(0.18));
+    vec3 torch = marine_fish
+        ? vec3(0.0)
+        : vec3(1.18, 0.63, 0.25) * saturate(v_block_light) *
+              (albedo * 0.72 + vec3(0.18));
     float rim = pow(1.0 - ndotv, 2.6);
     float rim_strength = geological_surface
         ? (0.006 + 0.018 * daylight)
@@ -732,6 +881,48 @@ void main() {
         rim_light += u_sun_color * rim * 0.045 * daylight;
     }
     vec3 color = ambient + bounce + direct + torch + rim_light;
+    if (submerged_surface &&
+        u_material_detail_scale >=
+            k_normal_mapping_detail_threshold &&
+        u_storm_intensity < 0.82) {
+        // Je reserve les caustiques aux surfaces ouvertes sur la colonne d'eau.
+        // La lumiere du ciel les annule dans les grottes et la qualite Low
+        // evite entierement leurs oscillations. Sous une forte tempete, je les
+        // supprime : le couvert nuageux les rend imperceptibles et j'epargne
+        // les fonctions trigonometriques sur tout le fond visible.
+        float caustic_a =
+            sin(
+                v_world_position.x * 0.72 +
+                v_world_position.z * 0.43 +
+                u_time_seconds * 0.82);
+        float caustic_b =
+            sin(
+                v_world_position.x * -0.37 +
+                v_world_position.z * 0.81 -
+                u_time_seconds * 0.61);
+        float caustic_pattern =
+            smoothstep(
+                0.58,
+                1.55,
+                clamp(
+                    caustic_a + caustic_b,
+                    -2.0,
+                    2.0));
+        float caustic =
+            clamp(
+                caustic_pattern *
+                    submerged_caustic_envelope(
+                        water_depth,
+                        daylight) *
+                    saturate(v_sky_light) *
+                    (marine_fish ? 0.035 : 0.085),
+                0.0,
+                k_submerged_caustic_max_energy);
+        color +=
+            albedo *
+            vec3(0.42, 0.72, 0.68) *
+            caustic;
+    }
     color += albedo * emission * vec3(1.35, 0.74, 0.28);
     color = mix(color, color * vec3(0.69, 0.77, 0.86), wetness * 0.22);
     color += albedo * vec3(0.64, 0.74, 1.0) *
@@ -759,8 +950,53 @@ void main() {
     float weather_fog = 1.0 + saturate(u_precipitation_intensity) * 0.40 +
                         saturate(u_storm_intensity) * 0.36;
     float fog = 1.0 - exp(-v_distance * v_distance * 0.000008 * weather_fog);
+    fog = max(fog, maritime_horizon_haze * 0.08);
     float horizon = smoothstep(0.0, 1.0, 1.0 - abs(normalize(v_world_position - u_camera_position).y));
     vec3 atmospheric_color = mix(u_fog_color, u_distant_fog_color, saturate(fog + horizon * 0.08));
+    bool underwater_volume =
+        u_maritime_horizon_enabled != 0 &&
+        u_maritime_submersion_active != 0 &&
+        v_world_position.y < u_maritime_sea_level + 0.25;
+    if (underwater_volume) {
+        // Je termine le vrai fond marin dans un volume coloré avant sa limite
+        // de streaming. Aucun proxy grossier ni bord de chunk ne peut émerger.
+        float underwater_fog_end =
+            u_material_detail_scale <
+                    k_normal_mapping_detail_threshold
+                ? 24.0
+                : 40.0;
+        float underwater_fog_start =
+            max(
+                underwater_fog_end - 24.0,
+                0.0);
+        float underwater_distance =
+            length(
+                v_world_position.xz -
+                    u_camera_position.xz);
+        float underwater_terminal_fog =
+            smoothstep(
+                underwater_fog_start,
+                underwater_fog_end,
+                underwater_distance);
+        fog =
+            max(
+                fog,
+                underwater_terminal_fog);
+        vec3 deep_water =
+            vec3(0.012, 0.060, 0.085);
+        vec3 lit_water =
+            vec3(0.025, 0.112, 0.140);
+        atmospheric_color =
+            mix(
+                deep_water,
+                lit_water,
+                daylight * 0.42);
+        atmospheric_color =
+            mix(
+                atmospheric_color,
+                deep_water,
+                saturate(u_storm_intensity) * 0.24);
+    }
     color = mix(color, atmospheric_color, saturate(fog));
     float output_alpha = 1.0;
     if (transparent_surface) {
@@ -770,6 +1006,24 @@ void main() {
     frag_color = vec4(max(color, vec3(0.0)), output_alpha);
 }
 )";
+
+inline const std::string kModernTerrainFragmentShaderSource = [] {
+    std::string source;
+    source.reserve(
+        std::char_traits<char>::length(
+            kModernTerrainFragmentShaderSourcePart1) +
+        std::char_traits<char>::length(
+            kModernTerrainFragmentShaderSourcePart2) +
+        std::char_traits<char>::length(
+            kModernTerrainFragmentShaderSourcePart3));
+    source +=
+        kModernTerrainFragmentShaderSourcePart1;
+    source +=
+        kModernTerrainFragmentShaderSourcePart2;
+    source +=
+        kModernTerrainFragmentShaderSourcePart3;
+    return source;
+}();
 
 inline constexpr std::string_view kModernTerrainShadowVertexShaderSource = R"(#version 330 core
 layout(location = 0) in vec3 a_position;

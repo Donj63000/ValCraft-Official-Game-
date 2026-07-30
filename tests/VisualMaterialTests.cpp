@@ -20,12 +20,37 @@
 namespace valcraft {
 namespace {
 
-constexpr std::uint64_t kExpectedMaterialPackChecksum = 0x1E684B7F8A55B223ULL;
+constexpr std::uint64_t kExpectedMaterialPackChecksum = 0xDF9527D7F9BAEEC0ULL;
 
 struct MaterialColorStatistics {
     std::array<double, 3> average {};
     double axis_ratio = 1.0;
 };
+
+struct MaterialChannelStatistics {
+    std::uint8_t minimum = 255U;
+    std::uint8_t maximum = 0U;
+    double average = 0.0;
+};
+
+[[nodiscard]] auto material_channel_statistics(
+    std::span<const std::uint8_t> texels,
+    std::size_t channel) -> MaterialChannelStatistics {
+    if (channel >= 4U || texels.empty() || texels.size() % 4U != 0U) {
+        return {};
+    }
+
+    auto sum = std::uint64_t {0U};
+    MaterialChannelStatistics result {};
+    for (std::size_t offset = channel; offset < texels.size(); offset += 4U) {
+        result.minimum = std::min(result.minimum, texels[offset]);
+        result.maximum = std::max(result.maximum, texels[offset]);
+        sum += texels[offset];
+    }
+    result.average =
+        static_cast<double>(sum) / static_cast<double>(texels.size() / 4U);
+    return result;
+}
 
 [[nodiscard]] auto material_color_statistics(
     std::span<const std::uint8_t> albedo,
@@ -249,6 +274,125 @@ TEST_CASE("les définitions des matériaux gardent des couches et des noms uniqu
     }
 }
 
+TEST_CASE("les matériaux du navire prolongent le catalogue sans renuméroter l'existant") {
+    CHECK(static_cast<std::uint16_t>(VisualMaterialId::ToolWoodSteel) == 31U);
+    CHECK(static_cast<std::uint16_t>(VisualMaterialId::Count) == 54U);
+
+    struct ExpectedShipMaterial {
+        VisualMaterialId id = VisualMaterialId::None;
+        std::uint16_t numeric_id = 0U;
+        std::string_view name {};
+    };
+    constexpr std::array expected {
+        ExpectedShipMaterial {VisualMaterialId::ShipDarkHull, 32U, "ship_dark_hull"},
+        ExpectedShipMaterial {VisualMaterialId::ShipDeckOak, 33U, "ship_deck_oak"},
+        ExpectedShipMaterial {VisualMaterialId::ShipOiledOak, 34U, "ship_oiled_oak"},
+        ExpectedShipMaterial {VisualMaterialId::ShipLinen, 35U, "ship_linen"},
+        ExpectedShipMaterial {VisualMaterialId::ShipRope, 36U, "ship_rope"},
+        ExpectedShipMaterial {VisualMaterialId::ShipIron, 37U, "ship_iron"},
+        ExpectedShipMaterial {VisualMaterialId::ShipPatinatedBrass, 38U, "ship_patinated_brass"},
+        ExpectedShipMaterial {VisualMaterialId::ShipLantern, 39U, "ship_lantern"},
+        ExpectedShipMaterial {VisualMaterialId::ShipGlass, 40U, "ship_glass"},
+        ExpectedShipMaterial {VisualMaterialId::ShipNavyTextile, 41U, "ship_navy_textile"},
+        ExpectedShipMaterial {VisualMaterialId::ShipGold, 42U, "ship_gold"},
+        ExpectedShipMaterial {VisualMaterialId::ShipBurgundyTextile, 43U, "ship_burgundy_textile"},
+        ExpectedShipMaterial {VisualMaterialId::ShipLeather, 44U, "ship_leather"},
+        ExpectedShipMaterial {VisualMaterialId::ShipPaper, 45U, "ship_paper"},
+        ExpectedShipMaterial {VisualMaterialId::ShipCeramic, 46U, "ship_ceramic"},
+    };
+
+    for (const auto& material : expected) {
+        CAPTURE(material.name);
+        CHECK(static_cast<std::uint16_t>(material.id) == material.numeric_id);
+        const auto& definition = visual_material_definition(material.id);
+        CHECK(definition.id == material.id);
+        CHECK(definition.name == material.name);
+        CHECK(definition.pack_layer == material.numeric_id - 1U);
+        CHECK_FALSE(definition.alpha_tested);
+    }
+
+    CHECK(visual_material_definition(VisualMaterialId::ShipLantern).emissive);
+    CHECK(visual_material_definition(VisualMaterialId::ShipLinen).two_sided);
+    CHECK(visual_material_definition(VisualMaterialId::ShipNavyTextile).two_sided);
+    CHECK(visual_material_definition(VisualMaterialId::ShipBurgundyTextile).two_sided);
+    CHECK(visual_material_definition(VisualMaterialId::ShipPaper).two_sided);
+}
+
+TEST_CASE("les materiaux marins restent append-only et visuels") {
+    struct ExpectedMarineMaterial {
+        VisualMaterialId id = VisualMaterialId::None;
+        std::uint16_t numeric_id = 0U;
+        std::string_view name {};
+        bool alpha_tested = false;
+    };
+    constexpr std::array expected {
+        ExpectedMarineMaterial {
+            VisualMaterialId::MarineSeagrass,
+            47U,
+            "marine_seagrass",
+            true,
+        },
+        ExpectedMarineMaterial {
+            VisualMaterialId::MarineKelp,
+            48U,
+            "marine_kelp",
+            true,
+        },
+        ExpectedMarineMaterial {
+            VisualMaterialId::CoralWarm,
+            49U,
+            "coral_warm",
+            false,
+        },
+        ExpectedMarineMaterial {
+            VisualMaterialId::CoralLagoon,
+            50U,
+            "coral_lagoon",
+            false,
+        },
+        ExpectedMarineMaterial {
+            VisualMaterialId::CoralFan,
+            51U,
+            "coral_fan",
+            true,
+        },
+        ExpectedMarineMaterial {
+            VisualMaterialId::ReefFish,
+            52U,
+            "reef_fish",
+            true,
+        },
+        ExpectedMarineMaterial {
+            VisualMaterialId::MarineShell,
+            53U,
+            "marine_shell",
+            false,
+        },
+    };
+
+    for (const auto& material : expected) {
+        CAPTURE(material.name);
+        CHECK(
+            static_cast<std::uint16_t>(
+                material.id) ==
+            material.numeric_id);
+        CHECK(
+            direct_visual_material_token(
+                material.id) ==
+            material.numeric_id);
+        const auto& definition =
+            visual_material_definition(
+                material.id);
+        CHECK(definition.name == material.name);
+        CHECK(
+            definition.pack_layer ==
+            material.numeric_id - 1U);
+        CHECK(
+            definition.alpha_tested ==
+            material.alpha_tested);
+    }
+}
+
 TEST_CASE("le pack procédural versionné se charge avec tous ses mipmaps") {
     const auto pack_path = find_material_pack();
     REQUIRE_FALSE(pack_path.empty());
@@ -320,6 +464,138 @@ TEST_CASE("le pack procédural versionné se charge avec tous ses mipmaps") {
                   VisualMaterialId::MeadowGrass,
                   static_cast<VisualMaterialTexture>(255U),
                   0U).empty());
+}
+
+TEST_CASE("les couches du navire correspondent exactement au catalogue moderne") {
+    const auto loaded = load_visual_material_pack(find_material_pack());
+    REQUIRE_MESSAGE(loaded, loaded.message);
+    REQUIRE(loaded.pack.has_value());
+
+    for (std::uint16_t numeric_id = 32U; numeric_id <= 46U; ++numeric_id) {
+        const auto material_id = static_cast<VisualMaterialId>(numeric_id);
+        const auto& definition = visual_material_definition(material_id);
+        REQUIRE(definition.pack_layer < loaded.pack->layers.size());
+        const auto& layer = loaded.pack->layers[definition.pack_layer];
+        CAPTURE(numeric_id);
+        CAPTURE(definition.name);
+        CHECK(layer.material_id == material_id);
+        CHECK(layer.surface_class == definition.surface_class);
+        CHECK(layer.name_hash == visual_material_name_hash(definition.name));
+    }
+}
+
+TEST_CASE("les matériaux du navire fournissent des cartes PBR distinctes et valides") {
+    const auto loaded = load_visual_material_pack(find_material_pack());
+    REQUIRE_MESSAGE(loaded, loaded.message);
+    REQUIRE(loaded.pack.has_value());
+
+    std::set<std::uint64_t> albedo_checksums;
+    std::set<std::uint64_t> normal_checksums;
+    std::set<std::uint64_t> orm_checksums;
+    for (std::uint16_t numeric_id = 32U; numeric_id <= 46U; ++numeric_id) {
+        const auto material_id = static_cast<VisualMaterialId>(numeric_id);
+        const auto albedo = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::Albedo,
+            0U);
+        const auto normal_height = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::NormalHeight,
+            0U);
+        const auto orm_emission = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::OrmEmission,
+            0U);
+        CAPTURE(numeric_id);
+        REQUIRE(albedo.size() == 128U * 128U * 4U);
+        REQUIRE(normal_height.size() == albedo.size());
+        REQUIRE(orm_emission.size() == albedo.size());
+        CHECK(albedo_checksums.insert(byte_checksum(albedo)).second);
+        CHECK(normal_checksums.insert(byte_checksum(normal_height)).second);
+        CHECK(orm_checksums.insert(byte_checksum(orm_emission)).second);
+
+        const auto normal_z = material_channel_statistics(normal_height, 2U);
+        const auto height = material_channel_statistics(normal_height, 3U);
+        const auto occlusion = material_channel_statistics(orm_emission, 0U);
+        CHECK(normal_z.minimum >= 128U);
+        CHECK(height.maximum > height.minimum);
+        CHECK(occlusion.minimum >= 128U);
+    }
+
+    // Je vérifie les réponses physiques par famille plutôt qu'une couleur
+    // exacte : la palette peut évoluer sans rendre le bois métallique.
+    for (const auto material_id : {
+             VisualMaterialId::ShipIron,
+             VisualMaterialId::ShipPatinatedBrass,
+             VisualMaterialId::ShipGold,
+         }) {
+        const auto orm = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::OrmEmission,
+            0U);
+        CHECK(material_channel_statistics(orm, 2U).average >= 140.0);
+    }
+    for (const auto material_id : {
+             VisualMaterialId::ShipDarkHull,
+             VisualMaterialId::ShipDeckOak,
+             VisualMaterialId::ShipOiledOak,
+             VisualMaterialId::ShipLinen,
+             VisualMaterialId::ShipRope,
+             VisualMaterialId::ShipGlass,
+             VisualMaterialId::ShipNavyTextile,
+             VisualMaterialId::ShipBurgundyTextile,
+             VisualMaterialId::ShipLeather,
+             VisualMaterialId::ShipPaper,
+             VisualMaterialId::ShipCeramic,
+         }) {
+        const auto orm = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::OrmEmission,
+            0U);
+        CHECK(material_channel_statistics(orm, 2U).maximum == 0U);
+        CHECK(material_channel_statistics(orm, 3U).maximum == 0U);
+    }
+
+    const auto lantern_orm = loaded.pack->texels_for(
+        VisualMaterialId::ShipLantern,
+        VisualMaterialTexture::OrmEmission,
+        0U);
+    CHECK(material_channel_statistics(lantern_orm, 3U).average >= 150.0);
+    CHECK(material_channel_statistics(lantern_orm, 3U).maximum >= 220U);
+
+    const auto glass_albedo = loaded.pack->texels_for(
+        VisualMaterialId::ShipGlass,
+        VisualMaterialTexture::Albedo,
+        0U);
+    const auto glass_alpha = material_channel_statistics(glass_albedo, 3U);
+    CHECK(glass_alpha.minimum > 0U);
+    CHECK(glass_alpha.maximum < 128U);
+
+    const auto linen = material_color_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::ShipLinen,
+            VisualMaterialTexture::Albedo,
+            0U),
+        128U,
+        128U);
+    const auto navy = material_color_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::ShipNavyTextile,
+            VisualMaterialTexture::Albedo,
+            0U),
+        128U,
+        128U);
+    const auto burgundy = material_color_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::ShipBurgundyTextile,
+            VisualMaterialTexture::Albedo,
+            0U),
+        128U,
+        128U);
+    CHECK(linen.average[0] > 180.0);
+    CHECK(linen.average[1] > 165.0);
+    CHECK(navy.average[2] > navy.average[0]);
+    CHECK(burgundy.average[0] > burgundy.average[2]);
 }
 
 TEST_CASE("les matériaux découpés conservent une couverture alpha exploitable") {
@@ -608,6 +884,67 @@ TEST_CASE("le shader terrain conserve les vegetaux et les creux lisibles") {
     CHECK(source.find("readability_floor") !=
           std::string_view::npos);
     CHECK(source.find("mix(0.38, 1.0, visibility)") !=
+          std::string_view::npos);
+}
+
+TEST_CASE("le shader terrain eclaire tout fond marin sans contaminer les surfaces seches") {
+    const std::string_view source = kModernTerrainFragmentShaderSource;
+
+    // Je verrouille une condition geometrique commune au sol, aux roches et au
+    // decor marin, tout en excluant les pieces architecturales sous la coque.
+    CHECK(source.find("bool submerged_surface =") !=
+          std::string_view::npos);
+    CHECK(source.find("u_maritime_horizon_enabled != 0") !=
+          std::string_view::npos);
+    CHECK(source.find("!architectural_surface") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "u_maritime_sea_level - 0.05") !=
+          std::string_view::npos);
+    CHECK(source.find("if (submerged_surface)") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "smoothstep(0.02, 0.30, saturate(v_sky_light))") !=
+          std::string_view::npos);
+    CHECK(source.find("if (marine_surface) {") ==
+          std::string_view::npos);
+
+    // Je garde l'energie finie et monotone : la profondeur, la nuit, la
+    // tempete et une qualite reduite ne peuvent qu'attenuer les caustiques.
+    CHECK(source.find("float submerged_caustic_envelope(") !=
+          std::string_view::npos);
+    CHECK(source.find("smoothstep(0.10, 0.75, safe_depth)") !=
+          std::string_view::npos);
+    CHECK(source.find("1.0 - smoothstep(10.0, 36.0, safe_depth)") !=
+          std::string_view::npos);
+    CHECK(source.find("mix(0.025, 1.0, saturate(daylight))") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "mix(1.0, 0.24, saturate(u_storm_intensity))") !=
+          std::string_view::npos);
+    CHECK(source.find("uniform float u_cloud_intensity;") !=
+          std::string_view::npos);
+    CHECK(source.find("uniform float u_overcast_intensity;") !=
+          std::string_view::npos);
+    CHECK(source.find("float cloud_attenuation") !=
+          std::string_view::npos);
+    CHECK(source.find("mix(1.0, 0.28, cloud_cover)") !=
+          std::string_view::npos);
+    CHECK(source.find("float quality_attenuation") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "k_submerged_caustic_max_energy = 0.085") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "u_material_detail_scale >=\n"
+              "            k_normal_mapping_detail_threshold") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "u_storm_intensity < 0.82") !=
+          std::string_view::npos);
+    CHECK(source.find(
+              "0.0,\n"
+              "                k_submerged_caustic_max_energy") !=
           std::string_view::npos);
 }
 

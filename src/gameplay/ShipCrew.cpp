@@ -211,6 +211,12 @@ auto station_yaw(ShipCrewStation station) noexcept -> float {
     case ShipCrewStation::ForeStairsTop:
     case ShipCrewStation::ForeStairsMid:
     case ShipCrewStation::ForeStairsBottom:
+    case ShipCrewStation::CrewStairsTop:
+    case ShipCrewStation::CrewStairsMid:
+    case ShipCrewStation::CrewStairsBottom:
+    case ShipCrewStation::HoldStairsTop:
+    case ShipCrewStation::HoldStairsMid:
+    case ShipCrewStation::HoldStairsBottom:
         // Ces postes regardent vers la poupe (-Z).
         return 0.5F * kPi;
     case ShipCrewStation::PortFishing:
@@ -247,6 +253,11 @@ auto station_yaw(ShipCrewStation station) noexcept -> float {
     case ShipCrewStation::ForeLowerPortA:
     case ShipCrewStation::ForeLowerPortB:
     case ShipCrewStation::WaterStillApproach:
+    case ShipCrewStation::CrewHoldApproach:
+    case ShipCrewStation::HoldBypassA:
+    case ShipCrewStation::HoldBypassB:
+    case ShipCrewStation::CrewHoldExit:
+    case ShipCrewStation::HoldMessApproach:
     case ShipCrewStation::Count:
     default:
         return -0.5F * kPi;
@@ -771,13 +782,158 @@ auto find_crew_ray_hit(const ShipEntity& ship,
     };
 }
 
-auto cargo_light(const glm::vec3& local_position, std::span<const glm::vec3> lanterns) noexcept -> float {
-    auto light = 0.10F;
-    for (const auto& lantern : lanterns) {
-        const auto distance = glm::length(local_position - lantern);
-        light = std::max(light, std::clamp(1.0F - distance / 8.0F, 0.0F, 1.0F));
+auto cargo_light(
+    const glm::vec3& local_position,
+    std::span<const ShipInteriorLight> interior_lights,
+    std::span<const ShipPart> parts,
+    float time_seconds) noexcept -> float {
+
+    const auto segment_intersects =
+        [](const glm::vec3& start,
+           const glm::vec3& end,
+           const glm::vec3& minimum,
+           const glm::vec3& maximum) noexcept {
+            const auto direction =
+                end -
+                start;
+            auto minimum_amount =
+                0.035F;
+            auto maximum_amount =
+                0.965F;
+            for (int axis = 0;
+                 axis < 3;
+                 ++axis) {
+                if (std::abs(
+                        direction[axis]) <=
+                    1.0e-4F) {
+                    if (start[axis] <
+                            minimum[axis] ||
+                        start[axis] >
+                            maximum[axis]) {
+                        return false;
+                    }
+                    continue;
+                }
+                const auto inverse =
+                    1.0F /
+                    direction[axis];
+                auto first =
+                    (minimum[axis] -
+                     start[axis]) *
+                    inverse;
+                auto second =
+                    (maximum[axis] -
+                     start[axis]) *
+                    inverse;
+                if (first > second) {
+                    std::swap(
+                        first,
+                        second);
+                }
+                minimum_amount =
+                    std::max(
+                        minimum_amount,
+                        first);
+                maximum_amount =
+                    std::min(
+                        maximum_amount,
+                        second);
+                if (maximum_amount <
+                    minimum_amount) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+    auto light = 0.04F;
+    for (const auto& interior_light :
+         interior_lights) {
+        const auto attenuation =
+            ship_interior_light_attenuation(
+                interior_light,
+                local_position,
+                time_seconds);
+        if (attenuation <= 0.0F) {
+            continue;
+        }
+        const auto blocked =
+            std::ranges::any_of(
+                parts,
+                [&](const ShipPart& part) {
+                    if (!part.collidable ||
+                        (part.shape !=
+                             ShipPartShape::Box &&
+                         part.shape !=
+                             ShipPartShape::Slab &&
+                         part.shape !=
+                             ShipPartShape::Stair &&
+                         part.shape !=
+                             ShipPartShape::ChamferedBox)) {
+                        return false;
+                    }
+                    const auto minimum =
+                        glm::min(
+                            part.local_start,
+                            part.local_end);
+                    const auto maximum =
+                        glm::max(
+                            part.local_start,
+                            part.local_end);
+                    const auto extent =
+                        maximum -
+                        minimum;
+                    const auto transverse =
+                        extent.z <= 0.30F &&
+                        extent.y >= 0.45F &&
+                        extent.x >= 0.40F;
+                    const auto longitudinal =
+                        extent.x <= 0.30F &&
+                        extent.y >= 0.45F &&
+                        extent.z >= 0.40F;
+                    return
+                           (transverse ||
+                            longitudinal) &&
+                           segment_intersects(
+                               interior_light.local_position,
+                               local_position,
+                               minimum,
+                               maximum);
+                });
+        if (blocked) {
+            continue;
+        }
+        light = std::max(
+            light,
+            attenuation *
+                (11.5F / 15.0F));
     }
-    return light;
+    return std::clamp(
+        light,
+        0.04F,
+        11.5F / 15.0F);
+}
+
+auto exterior_crew_light(
+    const glm::vec3& local_position,
+    std::span<const ShipExteriorLight> exterior_lights,
+    const EnvironmentState& environment) noexcept -> float {
+
+    // Je partage strictement l'activation jour, nuit et tempête du pont afin
+    // que le marin et les planches sous ses pieds reçoivent le même fanal.
+    const auto activation =
+        ship_exterior_light_activation(
+            environment.daylight_factor,
+            environment.storm_intensity,
+            environment.cloud_intensity,
+            environment.overcast_intensity);
+    return std::clamp(
+        ship_exterior_light_level(
+            exterior_lights,
+            local_position) *
+            activation,
+        0.0F,
+        1.0F);
 }
 
 } // namespace
@@ -870,6 +1026,17 @@ auto ship_crew_station_label(ShipCrewStation station) noexcept -> std::string_vi
     case ShipCrewStation::ForeLowerPortA:
     case ShipCrewStation::ForeLowerPortB:
     case ShipCrewStation::WaterStillApproach:
+    case ShipCrewStation::CrewStairsTop:
+    case ShipCrewStation::CrewStairsMid:
+    case ShipCrewStation::CrewStairsBottom:
+    case ShipCrewStation::HoldStairsTop:
+    case ShipCrewStation::HoldStairsMid:
+    case ShipCrewStation::HoldStairsBottom:
+    case ShipCrewStation::CrewHoldApproach:
+    case ShipCrewStation::HoldBypassA:
+    case ShipCrewStation::HoldBypassB:
+    case ShipCrewStation::CrewHoldExit:
+    case ShipCrewStation::HoldMessApproach:
         return "PASSAGE DU NAVIRE";
     case ShipCrewStation::Count:
     default:
@@ -890,7 +1057,10 @@ auto sanitize_ship_crew_save_state(const ShipCrewSaveState& state) noexcept -> S
         member.role = kCanonicalRoles[index];
         member.local_position = finite_vec3_or(member.local_position, {});
         member.local_position.x = std::clamp(member.local_position.x, -20.0F, 20.0F);
-        member.local_position.y = std::clamp(member.local_position.y, -1.0F, 10.0F);
+        // Je tiens compte de la nouvelle cale situee a y=-5. Je n'utilise plus
+        // une borne a -1 qui remonterait artificiellement les marins au
+        // chargement d'une sauvegarde.
+        member.local_position.y = std::clamp(member.local_position.y, -6.25F, 10.0F);
         member.local_position.z = std::clamp(member.local_position.z, -50.0F, 50.0F);
         member.yaw_radians = normalized_angle(member.yaw_radians);
         member.animation_time = std::clamp(finite_or(member.animation_time, 0.0F), 0.0F, 86'400.0F);
@@ -1989,8 +2159,19 @@ void ShipCrewSystem::rebuild_render_instances(const ShipEntity& ship, const Envi
         render.knockout_amount = member.recovery_timer > 0.0F || member.health <= 0.0F ? 1.0F : 0.0F;
         render.daylight_factor = std::clamp(finite_or(environment.daylight_factor, 1.0F), 0.0F, 1.0F);
         render.sky_light = exterior ? 1.0F : 0.16F;
-        render.local_light = exterior ? 0.0F : cargo_light(member.local_position + visual_offset,
-                                                           blueprint.interior_lanterns);
+        render.local_light =
+            exterior
+                ? exterior_crew_light(
+                      member.local_position +
+                          visual_offset,
+                      blueprint.exterior_lanterns,
+                      environment)
+                : cargo_light(
+                      member.local_position +
+                          visual_offset,
+                      blueprint.interior_lanterns,
+                      blueprint.parts,
+                      environment.weather_time_seconds);
         render.precipitation_exposure = exterior ? 1.0F : 0.0F;
     }
 }

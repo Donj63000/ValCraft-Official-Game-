@@ -13,6 +13,30 @@ enum class StylizedShipLod : std::uint8_t {
     Near,
 };
 
+inline constexpr std::size_t kStylizedShipLodCount = 2U;
+
+[[nodiscard]] constexpr auto stylized_ship_lod_index(
+    StylizedShipLod lod) noexcept -> std::size_t {
+    return static_cast<std::size_t>(lod);
+}
+
+[[nodiscard]] constexpr auto stylized_ship_shadow_lod(
+    int cascade_index,
+    StylizedShipLod active_lod,
+    bool far_lod_ready,
+    bool preserve_near_details) noexcept
+    -> StylizedShipLod {
+
+    // Je conserve le mobilier et les sabords détaillés dans la cascade proche
+    // quand je me trouve sous les ponts. À l'extérieur, la silhouette Far
+    // suffit pour les deux cascades et évite de reprojeter tout l'intérieur.
+    return far_lod_ready &&
+                   (!preserve_near_details ||
+                    cascade_index > 0)
+               ? StylizedShipLod::Far
+               : active_lod;
+}
+
 struct StylizedShipCacheKey {
     std::uint64_t geometry_revision = 0U;
     StylizedShipLod lod = StylizedShipLod::Near;

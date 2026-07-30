@@ -9,6 +9,12 @@
 
 namespace valcraft {
 
+inline constexpr std::uint16_t kTerrainSurfaceFlagCutout = 1U << 0U;
+inline constexpr std::uint16_t kTerrainSurfaceFlagGeologicalBlend = 1U << 4U;
+inline constexpr std::uint16_t kTerrainSurfaceFlagDirectMaterial = 1U << 5U;
+inline constexpr std::uint16_t kTerrainSurfaceFlagUnderwaterSway = 1U << 6U;
+inline constexpr std::uint16_t kTerrainSurfaceFlagMarineFish = 1U << 7U;
+
 struct TerrainVertex {
     float x = 0.0F;
     float y = 0.0F;

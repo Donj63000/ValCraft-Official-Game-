@@ -50,12 +50,15 @@ enum class StartupUiOverlay {
     None = 0,
     Inventory = 1,
     Pause = 2,
+    Progression = 3,
+    ConstructionPlan = 4,
 };
 
 enum class SmokeSessionMode {
     Menu = 0,
     SeaNew = 1,
     SeaLegacy = 2,
+    SeaOpen = 3,
 };
 
 enum class SmokeShipView {
@@ -69,6 +72,11 @@ enum class SmokeShipView {
     CaptainCabin = 7,
     CargoHold = 8,
     CrewDeck = 9,
+    Infirmary = 10,
+    Mess = 11,
+    GunDeck = 12,
+    Underwater = 13,
+    Wake = 14,
 };
 
 struct GameOptions {
@@ -81,14 +89,30 @@ struct GameOptions {
     int window_height = 900;
     bool freeze_time = false;
     float initial_time_of_day = 8.0F;
+    // Je distingue l'heure par défaut d'un override réellement fourni en CLI.
+    bool initial_time_explicitly_set = false;
     float initial_weather_time_seconds = 0.0F;
     StartupUiOverlay startup_ui_overlay = StartupUiOverlay::None;
     std::string frame_capture_path {};
-    VisualPipeline visual_pipeline = VisualPipeline::LegacyVoxel;
+    // Je démarre désormais sur le rendu moderne demandé ; le pipeline 16×16
+    // reste disponible explicitement avec --visual-pipeline=legacy.
+    VisualPipeline visual_pipeline = VisualPipeline::ModernStylized;
     PerformanceOptions performance {};
     AuditOptions audit {};
     std::vector<std::string> raw_arguments {};
 };
+
+// Je réserve l'override horaire au smoke maritime déterministe afin qu'une
+// nouvelle partie interactive conserve son départ historique à 8 h 15.
+[[nodiscard]] constexpr auto resolve_new_session_time_of_day(
+    const GameOptions& options) noexcept -> float {
+    if (options.smoke_test &&
+        options.smoke_session == SmokeSessionMode::SeaNew &&
+        options.initial_time_explicitly_set) {
+        return options.initial_time_of_day;
+    }
+    return 8.25F;
+}
 
 struct GameOptionParseResult {
     bool ok = false;

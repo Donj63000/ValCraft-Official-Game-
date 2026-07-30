@@ -435,4 +435,97 @@ TEST_CASE("deux mondes identiques produisent la même progression de remeshing")
           (*second_meshes)[section_for_y(edited_y)]);
 }
 
+TEST_CASE("la premiere publication moderne termine un chunk avant le suivant") {
+    constexpr ChunkCoord first {0, 0};
+    constexpr ChunkCoord second {2, 0};
+    constexpr auto section_index = kChunkSectionCount - 1U;
+    World world(
+        91'342,
+        0,
+        WorldGenerationProfile::Continental,
+        WorldGenerationVersion::Latest,
+        VisualPipeline::ModernStylized);
+
+    // Je prepare les deux premieres publications dans un ordre volontairement
+    // stable, avec un halo disjoint et une seule section vide a mailler.
+    test::make_chunk_empty(world, first);
+    world.rebuild_lighting();
+    auto* first_chunk = world.find_chunk(first);
+    REQUIRE(first_chunk != nullptr);
+    first_chunk->clear_dirty();
+    first_chunk->mark_section_dirty(section_index);
+
+    test::make_chunk_empty(world, second);
+    world.rebuild_lighting();
+    auto* second_chunk = world.find_chunk(second);
+    REQUIRE(second_chunk != nullptr);
+    second_chunk->clear_dirty();
+    second_chunk->mark_section_dirty(section_index);
+
+    REQUIRE(world.mesh_revision(first) == 0U);
+    REQUIRE(world.mesh_revision(second) == 0U);
+    REQUIRE(world.pending_mesh_count() == 2U);
+
+    const auto budget = one_slice_budget();
+    for (std::size_t slice = 0U;
+         slice < kModernVisualRemeshSlicesPerSection;
+         ++slice) {
+        const auto stats = world.process_pending_work(budget);
+        const auto first_status =
+            world.visual_remesh_status(first);
+        const auto second_status =
+            world.visual_remesh_status(second);
+
+        CAPTURE(slice);
+        CHECK(stats.mesh_sections_processed == 1U);
+        CHECK(world.mesh_revision(second) == 0U);
+        CHECK_FALSE(second_status.active);
+        if (slice + 1U < kModernVisualRemeshSlicesPerSection) {
+            CHECK(stats.meshed_chunks == 0U);
+            REQUIRE(first_status.active);
+            CHECK(first_status.completed_slices == slice + 1U);
+            CHECK(first_status.total_slices ==
+                  kModernVisualRemeshSlicesPerSection);
+            CHECK(world.mesh_revision(first) == 0U);
+            CHECK(world.consume_pending_gpu_uploads(8U).empty());
+        } else {
+            CHECK(stats.meshed_chunks == 1U);
+            CHECK_FALSE(first_status.active);
+            CHECK(world.mesh_revision(first) == 1U);
+            const auto uploads =
+                world.consume_pending_gpu_uploads(8U);
+            REQUIRE(uploads.size() == 1U);
+            CHECK(uploads.front() == first);
+        }
+    }
+
+    for (std::size_t slice = 0U;
+         slice < kModernVisualRemeshSlicesPerSection;
+         ++slice) {
+        const auto stats = world.process_pending_work(budget);
+        const auto second_status =
+            world.visual_remesh_status(second);
+
+        CAPTURE(slice);
+        CHECK(stats.mesh_sections_processed == 1U);
+        CHECK(world.mesh_revision(first) == 1U);
+        if (slice + 1U < kModernVisualRemeshSlicesPerSection) {
+            CHECK(stats.meshed_chunks == 0U);
+            REQUIRE(second_status.active);
+            CHECK(second_status.completed_slices == slice + 1U);
+            CHECK(world.mesh_revision(second) == 0U);
+        } else {
+            CHECK(stats.meshed_chunks == 1U);
+            CHECK_FALSE(second_status.active);
+            CHECK(world.mesh_revision(second) == 1U);
+            const auto uploads =
+                world.consume_pending_gpu_uploads(8U);
+            REQUIRE(uploads.size() == 1U);
+            CHECK(uploads.front() == second);
+        }
+    }
+
+    CHECK(world.pending_mesh_count() == 0U);
+}
+
 } // namespace valcraft

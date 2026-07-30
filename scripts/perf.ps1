@@ -15,6 +15,7 @@ param(
     [string[]]$Scenarios = @(
         "baseline",
         "world_stress",
+        "sea-open",
         "sea_tempest",
         "terrain_edit_stress",
         "port_dense"
@@ -186,6 +187,15 @@ function Get-ScenarioDefinition {
         $arguments += "--smoke-ship-view=deck"
         $arguments += "--initial-weather-time=2760"
     }
+    "sea-open" {
+        # Je mesure une vraie session V3 déjà en route, assez loin du port pour
+        # isoler l'eau, l'horizon et le sillage sans chargement de quai.
+        $arguments += "--stream-radius=5"
+        $arguments += "--smoke-session=sea-open"
+        $arguments += "--smoke-ship-view=stern"
+        $arguments += "--initial-time=10.5"
+        $arguments += "--initial-weather-time=0"
+    }
     "terrain_edit_stress" {
         # Le jeu reconnait ce libelle et rejoue une suite deterministe de
         # poses/casses aux frontieres afin de mesurer le remeshing organique.
@@ -271,6 +281,45 @@ function Test-MaterialPackChecksum {
            $Checksum -ne "0x0000000000000000"
 }
 
+function Get-WaterSurfaceP95 {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Report
+    )
+
+    if ($null -eq $Report.summary) {
+        return 0.0
+    }
+
+    # Je prefere la passe de surface moderne. Je ne replie sur l'ancien
+    # agregat que lorsque le champ append-only est absent du rapport.
+    $surfaceProperty =
+        $Report.summary.PSObject.Properties["gpu_water_surface_ms"]
+    if ($null -ne $surfaceProperty -and
+        $null -ne $surfaceProperty.Value) {
+        $p95Property =
+            $surfaceProperty.Value.PSObject.Properties["p95"]
+        if ($null -ne $p95Property -and
+            $null -ne $p95Property.Value) {
+            return [double]$p95Property.Value
+        }
+    }
+
+    $legacyProperty =
+        $Report.summary.PSObject.Properties["gpu_water_ms"]
+    if ($null -eq $legacyProperty -or
+        $null -eq $legacyProperty.Value) {
+        return 0.0
+    }
+    $legacyP95 =
+        $legacyProperty.Value.PSObject.Properties["p95"]
+    if ($null -eq $legacyP95 -or
+        $null -eq $legacyP95.Value) {
+        return 0.0
+    }
+    return [double]$legacyP95.Value
+}
+
 function Assert-ScenarioReport {
     param(
         [Parameter(Mandatory)]
@@ -345,6 +394,10 @@ function Assert-ScenarioReport {
     if ([int]$Report.summary.gpu_timing_samples -le 0 -or
         [double]$Report.summary.gpu_frame_ms.p95 -le 0.0) {
         throw "Perf scenario '$ScenarioName' did not produce valid GPU timing samples."
+    }
+    if ($ScenarioName -in @("sea-open", "sea_tempest", "port_dense") -and
+        (Get-WaterSurfaceP95 -Report $Report) -le 0.0) {
+        throw "Perf scenario '$ScenarioName' did not produce a valid water GPU timing."
     }
     if ([double]$Report.summary.process_private_bytes.max -le 0.0 -or
         [double]$Report.summary.process_working_set_bytes.max -le 0.0 -or
@@ -443,6 +496,7 @@ function Get-ScenarioThreshold {
         return @{
             P95 = 13.0
             GpuP95 = 9.0
+            WaterP95 = 2.0
             PrivateBytes = 671088640.0
             TextureBytes = 134217728.0
             BufferBytes = 33554432.0
@@ -455,6 +509,20 @@ function Get-ScenarioThreshold {
         return @{
             P95 = 13.0
             GpuP95 = 9.0
+            WaterP95 = 2.0
+            PrivateBytes = 671088640.0
+            TextureBytes = 134217728.0
+            BufferBytes = 33554432.0
+            DrawCalls = 100
+            Triangles = 350000
+            MaximumLongLagFrames = 2
+        }
+    }
+    "sea-open" {
+        return @{
+            P95 = 13.0
+            GpuP95 = 9.0
+            WaterP95 = 2.0
             PrivateBytes = 671088640.0
             TextureBytes = 134217728.0
             BufferBytes = 33554432.0
@@ -500,6 +568,11 @@ function Assert-ScenarioThreshold {
     }
     if ([double]$Summary.gpu_frame_p95 -gt [double]$threshold.GpuP95) {
         throw "Perf scenario '$($Summary.scenario)' exceeded GPU p95 threshold: $($Summary.gpu_frame_p95) ms > $($threshold.GpuP95) ms."
+    }
+    if ($threshold.ContainsKey("WaterP95") -and
+        [double]$Summary.gpu_water_p95 -gt
+            [double]$threshold.WaterP95) {
+        throw "Perf scenario '$($Summary.scenario)' exceeded water GPU p95 threshold: $($Summary.gpu_water_p95) ms > $($threshold.WaterP95) ms."
     }
     if ([int]$Summary.lag_frames_33_3 -gt [int]$threshold.MaximumLongLagFrames) {
         throw "Perf scenario '$($Summary.scenario)' produced too many frames above 33.3 ms."
@@ -556,6 +629,7 @@ function Assert-NoBaselineRegression {
         @{ Metric = "frame_avg"; Mad = "frame_avg_mad"; Percent = 3.0 },
         @{ Metric = "frame_p95"; Mad = "frame_p95_mad"; Percent = 3.0 },
         @{ Metric = "gpu_frame_p95"; Mad = "gpu_frame_p95_mad"; Percent = 3.0 },
+        @{ Metric = "gpu_water_p95"; Mad = "gpu_water_p95_mad"; Percent = 8.0 },
         @{ Metric = "frame_p99"; Mad = "frame_p99_mad"; Percent = 5.0 },
         @{ Metric = "meshing_p95"; Mad = "meshing_p95_mad"; Percent = 5.0 },
         @{ Metric = "upload_p95"; Mad = "upload_p95_mad"; Percent = 5.0 }
@@ -652,10 +726,51 @@ function Invoke-PerfScriptSelfTest {
     if (@($definition.Arguments) -notcontains "--visual-pipeline=modern") {
         throw "Perf self-test: modern visual pipeline argument is missing."
     }
+    $openSeaDefinition =
+        Get-ScenarioDefinition `
+            -Name "sea-open" `
+            -SmokeFrames 24 `
+            -WarmupFrames 8 `
+            -Width 1920 `
+            -Height 1080 `
+            -OutputPath "perf-self-test-sea-open.json" `
+            -AuditRoot "perf-self-test"
+    if (@($openSeaDefinition.Arguments) -notcontains
+            "--smoke-session=sea-open" -or
+        @($openSeaDefinition.Arguments) -notcontains
+            "--smoke-ship-view=stern") {
+        throw "Perf self-test: sea-open is not an underway stern fixture."
+    }
+    $openSeaThreshold =
+        Get-ScenarioThreshold `
+            -ScenarioName "sea-open"
+    if ([double]$openSeaThreshold.WaterP95 -ne 2.0) {
+        throw "Perf self-test: sea-open water p95 target is not 2.0 ms."
+    }
+    if ((Get-MedianAbsoluteDeviation -Values @(1.0, 1.5, 2.0)) -ne 0.5) {
+        throw "Perf self-test: median absolute deviation is inconsistent."
+    }
     if (-not (Test-MaterialPackChecksum -Checksum "0x0123456789abcdef") -or
         (Test-MaterialPackChecksum -Checksum "0x0000000000000000") -or
         (Test-MaterialPackChecksum -Checksum "invalid")) {
         throw "Perf self-test: material pack checksum validation is inconsistent."
+    }
+    $splitWaterReport = [PSCustomObject]@{
+        summary = [PSCustomObject]@{
+            gpu_water_surface_ms = [PSCustomObject]@{ p95 = 1.25 }
+            gpu_water_ms = [PSCustomObject]@{ p95 = 4.50 }
+        }
+    }
+    if ((Get-WaterSurfaceP95 -Report $splitWaterReport) -ne 1.25) {
+        throw "Perf self-test: split water surface timing was not preferred."
+    }
+    $legacyWaterReport = [PSCustomObject]@{
+        summary = [PSCustomObject]@{
+            gpu_water_ms = [PSCustomObject]@{ p95 = 1.75 }
+        }
+    }
+    if ((Get-WaterSurfaceP95 -Report $legacyWaterReport) -ne 1.75) {
+        throw "Perf self-test: legacy water timing fallback is inconsistent."
     }
 
     $current = [PSCustomObject]@{
@@ -663,6 +778,8 @@ function Invoke-PerfScriptSelfTest {
         frame_avg = 10.1
         frame_p95 = 11.1
         gpu_frame_p95 = 4.1
+        gpu_water_p95 = 1.05
+        gpu_water_p95_mad = 0.01
         frame_p99 = 12.1
         meshing_p95 = 1.0
         upload_p95 = 1.0
@@ -682,6 +799,15 @@ function Invoke-PerfScriptSelfTest {
     Assert-NoBaselineRegression `
         -Current $current `
         -Baseline $schema2Scenario `
+        -FallbackAllowedPercent 8.0
+    $waterBaseline = [PSCustomObject]@{
+        scenario = "baseline"
+        gpu_water_p95 = 1.0
+        gpu_water_p95_mad = 0.01
+    }
+    Assert-NoBaselineRegression `
+        -Current $current `
+        -Baseline $waterBaseline `
         -FallbackAllowedPercent 8.0
 
     $schema2Suite = [PSCustomObject]@{
@@ -821,6 +947,7 @@ foreach ($scenarioName in $Scenarios) {
             frame_p99 = [double]$report.summary.frame_total_ms.p99
             frame_max = [double]$report.summary.frame_total_ms.max
             gpu_frame_p95 = [double]$report.summary.gpu_frame_ms.p95
+            gpu_water_p95 = Get-WaterSurfaceP95 -Report $report
             meshing_p95 = [double]$report.summary.meshing_ms.p95
             upload_p95 = [double]$report.summary.upload_ms.p95
             private_bytes_peak = [double]$report.summary.process_private_bytes.max
@@ -865,6 +992,7 @@ foreach ($scenarioName in $Scenarios) {
         frame_p99 = Get-Median -Values @($runs.frame_p99)
         frame_max = [double]($runs.frame_max | Measure-Object -Maximum).Maximum
         gpu_frame_p95 = Get-Median -Values @($runs.gpu_frame_p95)
+        gpu_water_p95 = Get-Median -Values @($runs.gpu_water_p95)
         meshing_p95 = Get-Median -Values @($runs.meshing_p95)
         upload_p95 = Get-Median -Values @($runs.upload_p95)
         private_bytes_peak = [double]($runs.private_bytes_peak | Measure-Object -Maximum).Maximum
@@ -881,6 +1009,7 @@ foreach ($scenarioName in $Scenarios) {
         frame_p95_mad = Get-MedianAbsoluteDeviation -Values @($runs.frame_p95)
         frame_p99_mad = Get-MedianAbsoluteDeviation -Values @($runs.frame_p99)
         gpu_frame_p95_mad = Get-MedianAbsoluteDeviation -Values @($runs.gpu_frame_p95)
+        gpu_water_p95_mad = Get-MedianAbsoluteDeviation -Values @($runs.gpu_water_p95)
         meshing_p95_mad = Get-MedianAbsoluteDeviation -Values @($runs.meshing_p95)
         upload_p95_mad = Get-MedianAbsoluteDeviation -Values @($runs.upload_p95)
         platform = [string]$runs[0].platform
@@ -969,7 +1098,7 @@ if (-not [string]::IsNullOrWhiteSpace($BaselinePath)) {
 Write-Host "==> Performance suite summary"
 $scenarioSummaries |
     Sort-Object scenario |
-    Format-Table scenario, frame_avg, frame_p95, frame_p99, gpu_frame_p95, meshing_p95, upload_p95, private_bytes_peak, lag_frames_33_3 -AutoSize |
+    Format-Table scenario, frame_avg, frame_p95, frame_p99, gpu_frame_p95, gpu_water_p95, meshing_p95, upload_p95, private_bytes_peak, lag_frames_33_3 -AutoSize |
     Out-String |
     Write-Host
 

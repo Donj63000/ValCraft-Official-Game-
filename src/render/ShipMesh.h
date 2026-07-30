@@ -19,6 +19,11 @@
 
 namespace valcraft {
 
+enum class ShipMeshLightingModel : std::uint8_t {
+    RoomAware = 0,
+    LegacyHistorical,
+};
+
 namespace ship_mesh_detail {
 
 constexpr float kGeometryEpsilon = 1.0e-4F;
@@ -126,6 +131,25 @@ struct MaterialVisual {
         atlas_material = ShipAtlasMaterial::SolidGold;
         break;
 
+    case ShipMaterial::OiledOak:
+        atlas_material = ShipAtlasMaterial::CleanBeam;
+        break;
+
+    case ShipMaterial::Linen:
+    case ShipMaterial::Paper:
+    case ShipMaterial::Ceramic:
+        atlas_material = ShipAtlasMaterial::CreamCanvas;
+        break;
+
+    case ShipMaterial::BurgundyTextile:
+    case ShipMaterial::NavyTextile:
+        atlas_material = ShipAtlasMaterial::BlackCanvas;
+        break;
+
+    case ShipMaterial::Leather:
+        atlas_material = ShipAtlasMaterial::DarkHull;
+        break;
+
     case ShipMaterial::Glass:
         // Le verre a déjà été traité au début de la fonction.
         break;
@@ -147,7 +171,8 @@ struct MaterialVisual {
 
     return shape == ShipPartShape::Box ||
            shape == ShipPartShape::Slab ||
-           shape == ShipPartShape::Stair;
+           shape == ShipPartShape::Stair ||
+           shape == ShipPartShape::ChamferedBox;
 }
 
 [[nodiscard]] constexpr auto is_canvas_material(
@@ -156,7 +181,10 @@ struct MaterialVisual {
     // Les deux toiles partagent la même géométrie souple, tout en gardant
     // chacune une texture indépendante.
     return material == ShipMaterial::CreamCanvas ||
-           material == ShipMaterial::BlackCanvas;
+           material == ShipMaterial::BlackCanvas ||
+           material == ShipMaterial::Linen ||
+           material == ShipMaterial::BurgundyTextile ||
+           material == ShipMaterial::NavyTextile;
 }
 
 [[nodiscard]] inline auto is_sky_occluder(
@@ -197,7 +225,9 @@ struct MaterialVisual {
         bounds.max += glm::vec3 {padding};
         return bounds;
     }
-    if (part.shape != ShipPartShape::Panel) {
+    if (part.shape != ShipPartShape::Panel &&
+        part.shape != ShipPartShape::DrapedPanel &&
+        part.shape != ShipPartShape::Opening) {
         return bounds;
     }
 
@@ -221,7 +251,10 @@ struct LightingContext {
     std::vector<LocalBounds> part_bounds {};
     std::unordered_map<BlockCoord, std::vector<std::uint32_t>, BlockCoordHash> volume_cells {};
     std::unordered_map<BlockCoord, std::vector<std::uint32_t>, BlockCoordHash> sky_columns {};
-    std::vector<glm::vec3> lanterns {};
+    std::vector<glm::vec3> legacy_lanterns {};
+    std::vector<ShipInteriorLight> interior_lights {};
+    std::vector<LocalBounds> light_occluders {};
+    bool legacy_historical = false;
 
     [[nodiscard]] auto sky_light(const glm::vec3& point) const noexcept -> float {
         const auto column = sky_columns.find({
@@ -251,15 +284,122 @@ struct LightingContext {
 
     [[nodiscard]] auto block_light(const glm::vec3& point) const noexcept -> float {
         auto light = 0.0F;
-        const auto point_below_main_deck = point.y < 3.0F;
-        for (const auto& lantern : lanterns) {
-            if ((lantern.y < 3.0F) != point_below_main_deck) {
+        if (legacy_historical) {
+            // Je conserve exactement l'éclairage de sommets historique lorsque
+            // le pipeline Legacy ne fournit pas les nouvelles lumières de pièce.
+            const auto point_below_main_deck =
+                point.y < 3.0F;
+            for (const auto& lantern :
+                 legacy_lanterns) {
+                if ((lantern.y < 3.0F) !=
+                    point_below_main_deck) {
+                    continue;
+                }
+                const auto distance =
+                    glm::length(
+                        point -
+                        lantern);
+                light =
+                    std::max(
+                        light,
+                        (1.0F -
+                         distance /
+                             7.0F) *
+                            (10.0F /
+                             15.0F));
+            }
+            return std::clamp(
+                light,
+                0.0F,
+                10.0F / 15.0F);
+        }
+
+        const auto segment_intersects =
+            [](const glm::vec3& start,
+               const glm::vec3& end,
+               const LocalBounds& bounds) noexcept {
+                const auto direction =
+                    end -
+                    start;
+                auto minimum_amount =
+                    0.035F;
+                auto maximum_amount =
+                    0.965F;
+                for (int axis = 0;
+                     axis < 3;
+                     ++axis) {
+                    if (std::abs(
+                            direction[axis]) <=
+                        kGeometryEpsilon) {
+                        if (start[axis] <
+                                bounds.min[axis] ||
+                            start[axis] >
+                                bounds.max[axis]) {
+                            return false;
+                        }
+                        continue;
+                    }
+                    const auto inverse =
+                        1.0F /
+                        direction[axis];
+                    auto first =
+                        (bounds.min[axis] -
+                         start[axis]) *
+                        inverse;
+                    auto second =
+                        (bounds.max[axis] -
+                         start[axis]) *
+                        inverse;
+                    if (first > second) {
+                        std::swap(
+                            first,
+                            second);
+                    }
+                    minimum_amount =
+                        std::max(
+                            minimum_amount,
+                            first);
+                    maximum_amount =
+                        std::min(
+                            maximum_amount,
+                            second);
+                    if (maximum_amount <
+                        minimum_amount) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+        for (const auto& interior_light : interior_lights) {
+            const auto attenuation =
+                ship_interior_light_attenuation(
+                    interior_light,
+                    point);
+            if (attenuation <= 0.0F) {
                 continue;
             }
-            const auto distance = glm::length(point - lantern);
-            light = std::max(light, (1.0F - distance / 7.0F) * (10.0F / 15.0F));
+            const auto occluded =
+                std::ranges::any_of(
+                    light_occluders,
+                    [&](const LocalBounds& bounds) {
+                        return segment_intersects(
+                            interior_light.local_position,
+                            point,
+                            bounds);
+                    });
+            if (occluded) {
+                continue;
+            }
+            light = std::max(
+                light,
+                attenuation *
+                    (11.5F / 15.0F));
         }
-        return std::clamp(light, 0.0F, 10.0F / 15.0F);
+        return std::clamp(
+            light,
+            0.0F,
+            11.5F / 15.0F);
     }
 
     [[nodiscard]] auto ambient_occlusion(const glm::vec3& point,
@@ -276,12 +416,33 @@ struct LightingContext {
     }
 };
 
-[[nodiscard]] inline auto make_lighting_context(std::span<const ShipPart> parts) -> LightingContext {
+[[nodiscard]] inline auto make_lighting_context(
+    std::span<const ShipPart> parts,
+    std::span<const ShipInteriorLight> interior_lights = {},
+    ShipMeshLightingModel lighting_model =
+        ShipMeshLightingModel::RoomAware) -> LightingContext {
+
     LightingContext context;
+    context.legacy_historical =
+        lighting_model ==
+        ShipMeshLightingModel::LegacyHistorical;
     context.part_bounds.resize(parts.size());
     context.volume_cells.reserve(parts.size() * 8U);
     context.sky_columns.reserve(parts.size() * 4U);
-    context.lanterns.reserve(16U);
+    context.legacy_lanterns.reserve(16U);
+    context.interior_lights.reserve(kMaximumShipInteriorLights);
+    context.light_occluders.reserve(96U);
+    const auto light_count =
+        std::min(
+            interior_lights.size(),
+            kMaximumShipInteriorLights);
+    if (!context.legacy_historical &&
+        light_count > 0U) {
+        context.interior_lights.assign(
+            interior_lights.begin(),
+            interior_lights.begin() +
+                static_cast<std::ptrdiff_t>(light_count));
+    }
     for (std::size_t index = 0; index < parts.size(); ++index) {
         const auto& part = parts[index];
         const auto bounds = render_bounds(part);
@@ -303,8 +464,73 @@ struct LightingContext {
                 }
             }
         }
-        if (part.material == ShipMaterial::Lantern && valid_bounds(bounds)) {
-            context.lanterns.push_back((bounds.min + bounds.max) * 0.5F);
+        if (context.legacy_historical &&
+            part.material ==
+                ShipMaterial::Lantern &&
+            valid_bounds(bounds)) {
+            context.legacy_lanterns.push_back(
+                (bounds.min +
+                 bounds.max) *
+                0.5F);
+        } else if (
+            !context.legacy_historical &&
+            interior_lights.empty() &&
+            part.material ==
+                ShipMaterial::Lantern &&
+            valid_bounds(bounds) &&
+            context.interior_lights.size() <
+                kMaximumShipInteriorLights) {
+
+            const auto position =
+                (bounds.min +
+                 bounds.max) *
+                0.5F;
+            auto minimum_y = -6.0F;
+            auto maximum_y = -2.14F;
+            if (position.y >= 3.72F) {
+                minimum_y = 3.72F;
+                maximum_y = 24.0F;
+            } else if (
+                position.y >= 0.86F) {
+                minimum_y = 0.86F;
+                maximum_y = 3.72F;
+            } else if (
+                position.y >= -2.14F) {
+                minimum_y = -2.14F;
+                maximum_y = 0.86F;
+            }
+            context.interior_lights.push_back({
+                position,
+                {1.0F, 0.68F, 0.38F},
+                6.0F,
+                1.0F,
+                static_cast<float>(
+                    context.interior_lights.size()) *
+                    0.173F,
+                {-64.0F, minimum_y, -64.0F},
+                {64.0F, maximum_y, 64.0F},
+                0.0F,
+            });
+        }
+        const auto extent =
+            bounds.max -
+            bounds.min;
+        const auto transverse_bulkhead =
+            extent.z <= 0.30F &&
+            extent.y >= 0.45F &&
+            extent.x >= 0.40F;
+        const auto longitudinal_bulkhead =
+            extent.x <= 0.30F &&
+            extent.y >= 0.45F &&
+            extent.z >= 0.40F;
+        if (!context.legacy_historical &&
+            part.collidable &&
+            is_volume_shape(part.shape) &&
+            valid_bounds(bounds) &&
+            (transverse_bulkhead ||
+             longitudinal_bulkhead)) {
+            context.light_occluders.push_back(
+                bounds);
         }
     }
     return context;
@@ -784,7 +1010,11 @@ inline void append_wheel(ChunkMeshData& mesh,
 
 } // namespace ship_mesh_detail
 
-[[nodiscard]] inline auto build_ship_mesh_data(std::span<const ShipPart> parts) -> ChunkMeshData {
+[[nodiscard]] inline auto build_ship_mesh_data(
+    std::span<const ShipPart> parts,
+    std::span<const ShipInteriorLight> interior_lights = {},
+    ShipMeshLightingModel lighting_model =
+        ShipMeshLightingModel::RoomAware) -> ChunkMeshData {
     ChunkMeshData mesh {};
     if (parts.empty()) {
         return mesh;
@@ -794,7 +1024,11 @@ inline void append_wheel(ChunkMeshData& mesh,
     // gardent le culling des jonctions ainsi que l'eclairage sous le budget de chargement.
     mesh.vertices.reserve(parts.size() * 28U);
     mesh.indices.reserve(parts.size() * 42U);
-    const auto lighting = ship_mesh_detail::make_lighting_context(parts);
+    const auto lighting =
+        ship_mesh_detail::make_lighting_context(
+            parts,
+            interior_lights,
+            lighting_model);
     for (std::size_t index = 0; index < parts.size(); ++index) {
         const auto& part = parts[index];
         switch (part.shape) {
@@ -808,6 +1042,10 @@ inline void append_wheel(ChunkMeshData& mesh,
                 lighting,
                 index,
                 true);
+            break;
+        case ShipPartShape::ChamferedBox:
+            // Je laisse le Legacy afficher uniquement les noyaux Box historiques.
+            // Cette enveloppe décorative appartient au pipeline moderne.
             break;
         case ShipPartShape::Panel:
             if (ship_mesh_detail::is_canvas_material(part.material)) {
@@ -825,6 +1063,9 @@ inline void append_wheel(ChunkMeshData& mesh,
                     index,
                     false);
             }
+            break;
+        case ShipPartShape::DrapedPanel:
+            // Je réserve également le panneau drapé au pipeline moderne.
             break;
         case ShipPartShape::Segment:
             ship_mesh_detail::append_segment(
@@ -844,6 +1085,9 @@ inline void append_wheel(ChunkMeshData& mesh,
             break;
         case ShipPartShape::Glyph:
             ship_mesh_detail::append_glyph(mesh, part, lighting, index);
+            break;
+        case ShipPartShape::Opening:
+            // Je conserve ce marqueur dans le blueprint, jamais dans le mesh.
             break;
         }
     }

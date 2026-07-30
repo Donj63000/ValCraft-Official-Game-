@@ -1,12 +1,15 @@
 #include "app/GameBranding.h"
 #include "render/Renderer.h"
 #include "gameplay/SeaAdventure.h"
+#include "gameplay/progression/AbilitySystem.h"
 #include "render/ItemDropGeometry.h"
 #include "render/ModelIconAtlas.h"
 #include "render/ModernHudStyle.h"
 #include "render/MusketHudLayout.h"
 #include "render/ModernTerrainShaderSource.h"
+#include "render/ModernWaterShaderSource.h"
 #include "render/MsdfFontAtlas.h"
+#include "render/OceanVisuals.h"
 #include "render/SceneSamplerBindings.h"
 #include "render/ShipMesh.h"
 #include "render/ShipProtectionShaderSource.h"
@@ -44,6 +47,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace valcraft {
@@ -81,6 +85,44 @@ constexpr std::size_t kMaxGpuMeshEventsPerFrame = 8;
 constexpr double kMaxGpuMeshSyncMsPerFrame = 1.0;
 constexpr GLenum kTextureMaxAnisotropyExt = 0x84FE;
 constexpr GLenum kMaxTextureMaxAnisotropyExt = 0x84FF;
+
+[[nodiscard]] auto exterior_lantern_radiance(
+    std::span<const ShipExteriorLight> lights,
+    float scale) noexcept -> glm::vec3 {
+
+    constexpr auto fallback_color =
+        glm::vec3 {
+            1.00F,
+            0.62F,
+            0.30F,
+        };
+    auto color =
+        lights.empty()
+            ? fallback_color
+            : lights.front().color;
+    for (auto axis = 0;
+         axis < 3;
+         ++axis) {
+        if (!std::isfinite(
+                color[axis])) {
+            color[axis] =
+                fallback_color[axis];
+        }
+    }
+    // Je tire la radiance des mêmes données que les fanaux : leur couleur
+    // visuelle, le pont et les uniformes des soldats ne peuvent plus diverger.
+    return glm::clamp(
+               color,
+               glm::vec3 {0.0F},
+               glm::vec3 {1.0F}) *
+           std::clamp(
+               scale,
+               0.0F,
+               4.0F);
+}
+
+[[nodiscard]] constexpr auto modern_ship_material_layers() noexcept
+    -> std::array<float, 18>;
 
 // Je garde les métriques CPU près des générateurs de géométrie HUD : le
 // renderer OpenGL reste l'unique propriétaire de la texture correspondante.
@@ -3302,8 +3344,347 @@ void build_organic_block_break_overlay_mesh_data_into(
 
 } // namespace
 
+auto resolve_ability_feedback_assets(
+    AbilityId ability,
+    std::string_view visual_id,
+    std::string_view sfx_id) noexcept -> AbilityFeedbackAssetView {
+    const auto resolved_visual =
+        visual_id.empty()
+            ? resolved_ability_visual_id(
+                  ability)
+            : visual_id;
+    const auto resolved_sfx =
+        sfx_id.empty()
+            ? resolved_ability_sfx_id(
+                  ability)
+            : sfx_id;
+    return {
+        resolved_visual.empty()
+            ? kGenericAbilityVisualId
+            : resolved_visual,
+        resolved_sfx.empty()
+            ? kGenericAbilitySfxId
+            : resolved_sfx,
+    };
+}
+
+auto make_progression_experience_hud_snapshot(
+    const PlayerProgressionState& progression,
+    std::uint64_t aggregated_experience_gain) noexcept
+    -> ProgressionExperienceHudSnapshot {
+    const auto normalized =
+        sanitize_player_progression_state(
+            progression);
+    const auto threshold =
+        player_experience_for_next_level(
+            normalized.level);
+    const auto maximum_level =
+        normalized.level >=
+        kPlayerProgressionMaxLevel ||
+        threshold == 0ULL;
+    const auto ratio =
+        maximum_level
+            ? 1.0F
+            : std::clamp(
+                  static_cast<float>(
+                      normalized.experience) /
+                      static_cast<float>(
+                          std::max(
+                              threshold,
+                              1ULL)),
+                  0.0F,
+                  1.0F);
+    return {
+        normalized.level,
+        normalized.experience,
+        maximum_level ? 0ULL : threshold,
+        aggregated_experience_gain,
+        maximum_level,
+        ratio,
+    };
+}
+
+auto make_progression_ability_hud_snapshot(
+    const PlayerBuildState& build,
+    const ProgressionRuntimeHudView& runtime) noexcept
+    -> ProgressionAbilityHudSnapshot {
+    ProgressionAbilityHudSnapshot snapshot {};
+    snapshot.visible =
+        runtime.visible;
+    const auto energy =
+        player_ability_energy_parameters(
+            build);
+    snapshot.maximum_energy =
+        std::isfinite(
+            energy.maximum_energy)
+            ? std::max(
+                  energy.maximum_energy,
+                  1.0F)
+            : kPlayerBaseMaximumValEnergy;
+    snapshot.current_energy =
+        std::isfinite(
+            build.val_energy)
+            ? std::clamp(
+                  build.val_energy,
+                  0.0F,
+                  snapshot.maximum_energy)
+            : 0.0F;
+    snapshot.global_cooldown_remaining =
+        std::isfinite(
+            build.global_cooldown_remaining)
+            ? std::max(
+                  build.global_cooldown_remaining,
+                  0.0F)
+            : 0.0F;
+    snapshot.active_duration_remaining =
+        std::isfinite(
+            runtime.active_duration_remaining)
+            ? std::clamp(
+                  runtime.active_duration_remaining,
+                  0.0F,
+                  86'400.0F)
+            : 0.0F;
+    snapshot.wind_blade_armed =
+        runtime.wind_blade_armed;
+    snapshot.wind_dodge_ready =
+        runtime.wind_dodge_ready;
+    snapshot.iron_guard_active =
+        runtime.iron_guard_active;
+    snapshot.active_footmen =
+        std::min<std::uint8_t>(
+            runtime.active_footmen,
+            8U);
+
+    auto focused =
+        ability_id_is_valid(
+            runtime.focused_ability)
+            ? runtime.focused_ability
+            : AbilityId::None;
+    if (!ability_id_is_valid(
+            focused)) {
+        for (const auto equipped :
+             build.equipped_abilities) {
+            if (ability_id_is_valid(
+                    equipped)) {
+                focused =
+                    equipped;
+                break;
+            }
+        }
+    }
+    snapshot.ability =
+        focused;
+    snapshot.feedback_assets =
+        resolve_ability_feedback_assets(
+            focused,
+            runtime.visual_id,
+            runtime.sfx_id);
+    if (!ability_id_is_valid(
+            focused)) {
+        snapshot.display_name =
+            "AUCUN SORT";
+        return snapshot;
+    }
+
+    snapshot.display_name =
+        progression_ability_display_name(
+            focused);
+    const auto rank =
+        player_ability_rank(
+            build,
+            focused);
+    const auto effective_rank =
+        std::max<std::uint8_t>(
+            rank,
+            1U);
+    if (const auto* rank_definition =
+            ability_rank_definition(
+                focused,
+                effective_rank);
+        rank_definition != nullptr) {
+        snapshot.energy_cost =
+            std::isfinite(
+                rank_definition
+                    ->energy_cost)
+                ? std::max(
+                      rank_definition
+                          ->energy_cost,
+                      0.0F)
+                : 0.0F;
+    }
+    snapshot.energy_insufficient =
+        snapshot.current_energy +
+                1.0e-4F <
+            snapshot.energy_cost;
+    const auto index =
+        ability_index(
+            focused);
+    snapshot.cooldown_remaining =
+        index <
+                build.cooldowns_remaining
+                    .size() &&
+            std::isfinite(
+                build.cooldowns_remaining[
+                    index])
+            ? std::max(
+                  build.cooldowns_remaining[
+                      index],
+                  0.0F)
+            : 0.0F;
+    const auto* definition =
+        ability_definition(
+            focused);
+    snapshot.maximum_charges =
+        definition != nullptr
+            ? definition
+                  ->maximum_charges
+            : 0U;
+    snapshot.charges =
+        index <
+                build.charges.size()
+            ? std::min(
+                  build.charges[index],
+                  snapshot.maximum_charges)
+            : 0U;
+    return snapshot;
+}
+
+auto make_progression_ability_hud_layout(
+    int viewport_width,
+    int viewport_height) noexcept -> ProgressionAbilityHudLayout {
+    ProgressionAbilityHudLayout layout {};
+    if (viewport_width <= 0 ||
+        viewport_height <= 0) {
+        return layout;
+    }
+    const auto width =
+        static_cast<float>(
+            viewport_width);
+    const auto height =
+        static_cast<float>(
+            viewport_height);
+    const auto safe_margin =
+        std::clamp(
+            std::min(
+                width,
+                height) *
+                0.025F,
+            8.0F,
+            24.0F);
+    const auto panel_width =
+        std::min(
+            std::clamp(
+                width * 0.44F,
+                272.0F,
+                440.0F),
+            width -
+                safe_margin * 2.0F);
+    const auto panel_height =
+        std::min(
+            126.0F,
+            height -
+                safe_margin * 2.0F);
+    const auto preferred_y =
+        safe_margin +
+        std::clamp(
+            height * 0.085F,
+            54.0F,
+            82.0F);
+    const auto panel_y =
+        std::min(
+            preferred_y,
+            height -
+                safe_margin -
+                panel_height);
+    layout.panel = {
+        width -
+            safe_margin -
+            panel_width,
+        std::max(
+            safe_margin,
+            panel_y),
+        panel_width,
+        panel_height,
+    };
+    const auto inset = 12.0F;
+    const auto row_width =
+        std::max(
+            0.0F,
+            panel_width -
+                inset * 2.0F);
+    layout.energy = {
+        layout.panel.x + inset,
+        layout.panel.y + 10.0F,
+        row_width,
+        12.0F,
+    };
+    layout.ability = {
+        layout.panel.x + inset,
+        layout.energy.bottom() + 7.0F,
+        row_width,
+        20.0F,
+    };
+    layout.timers = {
+        layout.panel.x + inset,
+        layout.ability.bottom() + 5.0F,
+        row_width,
+        20.0F,
+    };
+    layout.effects = {
+        layout.panel.x + inset,
+        layout.timers.bottom() + 5.0F,
+        row_width,
+        std::max(
+            0.0F,
+            layout.panel.bottom() -
+                inset -
+                layout.timers.bottom() -
+                5.0F),
+    };
+    return layout;
+}
+
 Renderer::~Renderer() {
     shutdown();
+}
+
+void Renderer::set_progression_hud(
+    const ProgressionMenuViewModel& menu,
+    const PlayerBuildState& build,
+    const ProgressionRuntimeHudView& runtime,
+    const ConstructionPlanEditorViewModel& construction_plan)
+    noexcept {
+    progression_menu_view_ = menu;
+    progression_build_view_ = build;
+    progression_runtime_hud_view_ =
+        runtime;
+    progression_runtime_hud_view_
+        .active_footmen =
+        std::min<std::uint8_t>(
+            runtime.active_footmen,
+            8U);
+    progression_runtime_hud_view_
+        .active_duration_remaining =
+        std::isfinite(
+            runtime.active_duration_remaining)
+            ? std::clamp(
+                  runtime.active_duration_remaining,
+                  0.0F,
+                  86'400.0F)
+            : 0.0F;
+    const auto feedback =
+        resolve_ability_feedback_assets(
+            runtime.focused_ability,
+            runtime.visual_id,
+            runtime.sfx_id);
+    progression_runtime_hud_view_
+        .visual_id =
+        feedback.visual_id;
+    progression_runtime_hud_view_
+        .sfx_id =
+        feedback.sfx_id;
+    construction_plan_view_ =
+        construction_plan;
 }
 
 auto Renderer::initialize(const RendererOptions& options) -> bool {
@@ -3420,7 +3801,9 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
 
                 // Je force aussi le navire a changer de representation : sa
                 // revision logique ne varie pas lors d'un basculement visuel.
-                destroy_gpu_mesh(ship_gpu_mesh_);
+                for (auto& ship_gpu_mesh : ship_gpu_meshes_) {
+                    destroy_gpu_mesh(ship_gpu_mesh);
+                }
                 ship_mesh_cache_.reset();
                 active_ship_lod_ = StylizedShipLod::Near;
             }
@@ -3471,6 +3854,7 @@ auto Renderer::initialize(const RendererOptions& options) -> bool {
         create_item_drop_geometry();
         create_precipitation_geometry();
         create_old_guard_effect_geometry();
+        create_sea_horizon_geometry();
         create_hud_geometry();
         create_screen_quad_geometry();
         create_crosshair_geometry();
@@ -3493,7 +3877,10 @@ void Renderer::shutdown() {
     if (gl_api_ready_) {
         destroy_gpu_timers();
         reset_world_resources();
-        destroy_gpu_mesh(ship_gpu_mesh_);
+        for (auto& ship_gpu_mesh : ship_gpu_meshes_) {
+            destroy_gpu_mesh(ship_gpu_mesh);
+        }
+        destroy_sea_horizon_geometry();
 
         destroy_water_scene_targets();
         destroy_post_process_targets();
@@ -3587,6 +3974,9 @@ void Renderer::shutdown() {
         if (world_program_ != 0) {
             glDeleteProgram(world_program_);
         }
+        if (modern_water_program_ != 0) {
+            glDeleteProgram(modern_water_program_);
+        }
         if (modern_terrain_program_ != 0) {
             glDeleteProgram(modern_terrain_program_);
         }
@@ -3595,6 +3985,12 @@ void Renderer::shutdown() {
         }
         if (modern_terrain_shadow_program_ != 0) {
             glDeleteProgram(modern_terrain_shadow_program_);
+        }
+        if (modern_ship_program_ != 0) {
+            glDeleteProgram(modern_ship_program_);
+        }
+        if (modern_ship_shadow_program_ != 0) {
+            glDeleteProgram(modern_ship_shadow_program_);
         }
         if (item_drop_program_ != 0) {
             glDeleteProgram(item_drop_program_);
@@ -3623,6 +4019,9 @@ void Renderer::shutdown() {
         if (sky_program_ != 0) {
             glDeleteProgram(sky_program_);
         }
+        if (sea_horizon_program_ != 0) {
+            glDeleteProgram(sea_horizon_program_);
+        }
         if (post_process_program_ != 0) {
             glDeleteProgram(post_process_program_);
         }
@@ -3640,12 +4039,19 @@ void Renderer::shutdown() {
     gpu_meshes_.clear();
     world_resource_reset_queue_.clear();
     block_break_overlay_mesh_ = {};
-    ship_gpu_mesh_ = {};
+    ship_gpu_meshes_ = {};
+    marine_decor_gpu_mesh_ = {};
+    ocean_life_gpu_mesh_ = {};
     visible_chunks_cache_.clear();
     shadow_chunks_cache_.clear();
     visible_creatures_cache_.clear();
     visible_crew_cache_.clear();
     visible_old_guard_cache_.clear();
+    creature_parts_scratch_.clear();
+    creature_part_contexts_scratch_.clear();
+    for (auto& batch : visual_entity_batches_) {
+        batch.clear();
+    }
     screen_quad_vao_ = 0;
     crosshair_vbo_ = 0;
     crosshair_vao_ = 0;
@@ -3686,9 +4092,12 @@ void Renderer::shutdown() {
     old_guard_effect_vbo_ = 0;
     old_guard_effect_instance_vbo_ = 0;
     world_program_ = 0;
+    modern_water_program_ = 0;
     modern_terrain_program_ = 0;
     modern_architecture_program_ = 0;
     modern_terrain_shadow_program_ = 0;
+    modern_ship_program_ = 0;
+    modern_ship_shadow_program_ = 0;
     item_drop_program_ = 0;
     precipitation_program_ = 0;
     old_guard_effect_program_ = 0;
@@ -3698,20 +4107,25 @@ void Renderer::shutdown() {
     hud_program_ = 0;
     crosshair_program_ = 0;
     sky_program_ = 0;
+    sea_horizon_program_ = 0;
     post_process_program_ = 0;
     glow_extract_program_ = 0;
     glow_blur_program_ = 0;
     menu_background_program_ = 0;
     world_uniforms_ = {};
+    modern_water_uniforms_ = {};
     modern_terrain_uniforms_ = {};
     modern_architecture_uniforms_ = {};
     modern_terrain_shadow_uniforms_ = {};
+    modern_ship_uniforms_ = {};
+    modern_ship_shadow_uniforms_ = {};
     creature_uniforms_ = {};
     creature_shadow_light_view_projection_ = -1;
     item_drop_uniforms_ = {};
     shadow_uniforms_ = {};
     hud_uniforms_ = {};
     sky_uniforms_ = {};
+    sea_horizon_uniforms_ = {};
     post_process_uniforms_ = {};
     precipitation_uniforms_ = {};
     old_guard_effect_uniforms_ = {};
@@ -3926,6 +4340,14 @@ void Renderer::render_frame(World& world,
         OceanSimulation::evaluate(
             environment,
             ocean_profile);
+    const auto maritime_horizon_enabled =
+        options_.visual_pipeline ==
+            VisualPipeline::ModernStylized &&
+        world.generation_profile() ==
+            WorldGenerationProfile::OceanAdventure;
+    const auto maritime_fog_range =
+        sea_horizon_fog_range(
+            environment.storm_intensity);
 
     std::array<glm::vec4, kOceanMaxWaveCount>
         ocean_wave_uniforms {};
@@ -3980,6 +4402,16 @@ void Renderer::render_frame(World& world,
         }
         ensure_ship_mesh(ship, active_ship_lod_);
     }
+    const auto& active_ship_gpu_mesh =
+        ship_gpu_meshes_[
+            stylized_ship_lod_index(
+                active_ship_lod_)];
+    const auto far_ship_shadow_ready =
+        options_.visual_pipeline ==
+            VisualPipeline::ModernStylized &&
+        ship_mesh_ready(
+            ship,
+            StylizedShipLod::Far);
     sync_gpu_meshes(world, frame_stats, kMaxGpuMeshEventsPerFrame, kMaxGpuMeshSyncMsPerFrame);
     frame_stats.upload_ms = std::chrono::duration<double, std::milli>(clock::now() - upload_start).count();
 
@@ -3994,12 +4426,16 @@ void Renderer::render_frame(World& world,
     const auto world_fov =
         player_musket_world_fov(
             musket_aim_ratio);
+    const auto projection_far_distance =
+        maritime_horizon_enabled
+            ? kSeaHorizonProjectionFarPlane
+            : 320.0F;
     const auto projection =
         glm::perspective(
             glm::radians(world_fov),
             aspect,
             0.1F,
-            320.0F);
+            projection_far_distance);
     const auto base_viewmodel_fov =
         glm::clamp(
             options_.viewmodel_fov_degrees,
@@ -4023,6 +4459,37 @@ void Renderer::render_frame(World& world,
     const auto inverse_sky_view_projection = glm::inverse(projection * sky_view);
     const auto frustum_planes = extract_frustum_planes(view_projection);
     const auto eye = player.eye_position();
+    auto camera_excluded_from_ocean = false;
+    if (ship_protection_is_renderable(ship)) {
+        const auto local_eye =
+            glm::vec3 {
+                glm::inverse(ship.model_matrix) *
+                glm::vec4 {eye, 1.0F},
+            };
+        camera_excluded_from_ocean =
+            ship.blueprint->protection_profile
+                .excludes_ocean_local(local_eye);
+    }
+    const auto sampled_ocean_surface =
+        static_cast<float>(kSeaLevel + 1) +
+        OceanSimulation::sample(
+            ocean,
+            glm::vec2 {eye.x, eye.z},
+            kOceanBuoyancyWaveCount)
+            .height;
+    // Je calcule une seule fois l'etat reel de la camera. Le ciel, le terrain
+    // et le post-traitement suivent ainsi la meme vague et les memes volumes
+    // etanches du navire.
+    const auto maritime_submersion =
+        resolve_maritime_submersion_state(
+            options_.visual_pipeline ==
+                VisualPipeline::ModernStylized,
+            world.generation_profile() ==
+                WorldGenerationProfile::OceanAdventure,
+            player.state().head_underwater &&
+                !camera_excluded_from_ocean,
+            eye.y,
+            sampled_ocean_surface);
     auto camera_forward = player.look_direction();
     if (glm::dot(camera_forward, camera_forward) > 1.0e-6F) {
         camera_forward = glm::normalize(camera_forward);
@@ -4050,6 +4517,21 @@ void Renderer::render_frame(World& world,
             streamed_draw_distance,
             quality_settings.terrain_lod_distance);
     const auto draw_distance_sq = draw_distance * draw_distance;
+    if (maritime_horizon_enabled) {
+        const auto horizon_sync_start =
+            clock::now();
+        sync_sea_horizon_terrain(
+            world,
+            eye,
+            draw_distance);
+        frame_stats.upload_ms +=
+            std::chrono::duration<
+                double,
+                std::milli>(
+                clock::now() -
+                horizon_sync_start)
+                .count();
+    }
     constexpr float kBackCullStartDistance = 20.0F;
     constexpr float kBackCullStartDistanceSq = kBackCullStartDistance * kBackCullStartDistance;
     const auto sun_visible = environment.sun_direction.y > 0.0F;
@@ -4276,12 +4758,38 @@ void Renderer::render_frame(World& world,
             eye,
             draw_distance_sq,
             shadow_context,
-            ship_gpu_mesh_.opaque_index_count > 0);
+            active_ship_gpu_mesh.opaque_index_count > 0);
     }
+    const auto preserve_near_ship_shadow_details =
+        options_.visual_pipeline ==
+                VisualPipeline::ModernStylized &&
+        ship_protection_is_renderable(ship) &&
+        ship.blueprint->protection_profile
+            .shelters_from_weather_local(
+                glm::vec3 {
+                    glm::inverse(ship.model_matrix) *
+                    glm::vec4 {eye, 1.0F},
+                });
     std::sort(visible_chunks.begin(), visible_chunks.end(), [](const VisibleChunk& lhs, const VisibleChunk& rhs) {
         return lhs.distance_squared < rhs.distance_squared;
     });
     frame_stats.visible_chunks = visible_chunks.size();
+
+    marine_requested_chunks_scratch_.clear();
+    marine_requested_chunks_scratch_.reserve(
+        visible_chunks.size());
+    for (const auto& visible_chunk :
+         visible_chunks) {
+        marine_requested_chunks_scratch_.push_back(
+            visible_chunk.coord);
+    }
+    sync_marine_visuals(
+        world,
+        marine_requested_chunks_scratch_,
+        eye,
+        ship,
+        quality_settings.resolved_quality,
+        environment.weather_time_seconds);
 
     if (shadow_context.enabled) {
         const auto shadow_start = clock::now();
@@ -4442,16 +4950,86 @@ void Renderer::render_frame(World& world,
                 cascade_shadow_context.focus,
                 cascade_shadow_context.max_distance_sq);
         if (ship_visible_in_cascade) {
-            glUniformMatrix4fv(
-                shadow_uniforms_.model,
-                1,
-                GL_FALSE,
-                glm::value_ptr(
-                    ship.model_matrix));
-            glBindVertexArray(ship_gpu_mesh_.vao);
-            glDrawElements(GL_TRIANGLES, ship_gpu_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
-            record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
-            glUniformMatrix4fv(shadow_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
+            const auto cascade_ship_lod =
+                options_.visual_pipeline ==
+                        VisualPipeline::ModernStylized
+                    ? stylized_ship_shadow_lod(
+                          cascade_index,
+                          active_ship_lod_,
+                          far_ship_shadow_ready,
+                          preserve_near_ship_shadow_details)
+                    : StylizedShipLod::Near;
+            const auto& cascade_ship_gpu_mesh =
+                ship_gpu_meshes_[
+                    stylized_ship_lod_index(
+                        cascade_ship_lod)];
+            const auto modern_ship_shadow =
+                options_.visual_pipeline ==
+                    VisualPipeline::ModernStylized &&
+                modern_ship_shadow_program_ != 0U &&
+                modern_material_albedo_texture_ != 0U;
+            if (modern_ship_shadow) {
+                const auto material_layers =
+                    modern_ship_material_layers();
+                glUseProgram(
+                    modern_ship_shadow_program_);
+                glUniformMatrix4fv(
+                    modern_ship_shadow_uniforms_.model,
+                    1,
+                    GL_FALSE,
+                    glm::value_ptr(
+                        ship.model_matrix));
+                glUniformMatrix4fv(
+                    modern_ship_shadow_uniforms_.light_view_projection,
+                    1,
+                    GL_FALSE,
+                    glm::value_ptr(
+                        cascade_light_view_projection));
+                glUniform1i(
+                    modern_ship_shadow_uniforms_.material_albedo,
+                    4);
+                glUniform1fv(
+                    modern_ship_shadow_uniforms_.material_layers,
+                    static_cast<GLsizei>(
+                        material_layers.size()),
+                    material_layers.data());
+                glUniform1f(
+                    modern_ship_shadow_uniforms_.time_seconds,
+                    environment.weather_time_seconds);
+                glUniform1f(
+                    modern_ship_shadow_uniforms_.wind_strength,
+                    environment.wind_strength);
+                glActiveTexture(
+                    GL_TEXTURE4);
+                glBindTexture(
+                    GL_TEXTURE_2D_ARRAY,
+                    modern_material_albedo_texture_);
+            } else {
+                glUseProgram(
+                    shadow_program_);
+                glUniformMatrix4fv(
+                    shadow_uniforms_.model,
+                    1,
+                    GL_FALSE,
+                    glm::value_ptr(
+                        ship.model_matrix));
+            }
+            glBindVertexArray(cascade_ship_gpu_mesh.vao);
+            glDrawElements(
+                GL_TRIANGLES,
+                cascade_ship_gpu_mesh.opaque_index_count,
+                GL_UNSIGNED_INT,
+                nullptr);
+            record_triangle_draw(
+                cascade_ship_gpu_mesh.opaque_index_count);
+            if (!modern_ship_shadow) {
+                glUniformMatrix4fv(
+                    shadow_uniforms_.model,
+                    1,
+                    GL_FALSE,
+                    glm::value_ptr(
+                        identity_model));
+            }
         }
         draw_creature_shadows(
             creatures,
@@ -4530,6 +5108,14 @@ void Renderer::render_frame(World& world,
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     begin_gpu_pass(GpuTimedPass::Opaque);
 
+    if (maritime_horizon_enabled) {
+        draw_sea_horizon_terrain(
+            view_projection,
+            eye,
+            environment,
+            maritime_fog_range);
+    }
+
     glUseProgram(world_program_);
     upload_world_ship_protection(ship);
     glUniform4fv(
@@ -4580,7 +5166,102 @@ void Renderer::render_frame(World& world,
         ocean_profile == OceanSurfaceProfile::OpenSea
             ? 1.0F
             : 0.0F);
-
+    constexpr auto water_coverage_side =
+        kSeaHorizonWaterCoverageScanRadius *
+            2 +
+        1;
+    std::array<
+        ChunkCoord,
+        static_cast<std::size_t>(
+            water_coverage_side *
+            water_coverage_side)>
+        uploaded_water_chunks {};
+    auto uploaded_water_chunk_count =
+        std::size_t {0U};
+    auto water_coverage_radius = 0;
+    if (std::isfinite(eye.x) &&
+        std::isfinite(eye.z) &&
+        eye.x >=
+            static_cast<float>(
+                std::numeric_limits<int>::lowest()) &&
+        eye.x <=
+            static_cast<float>(
+                std::numeric_limits<int>::max()) &&
+        eye.z >=
+            static_cast<float>(
+                std::numeric_limits<int>::lowest()) &&
+        eye.z <=
+            static_cast<float>(
+                std::numeric_limits<int>::max())) {
+        const auto camera_chunk =
+            world.world_to_chunk(
+                static_cast<int>(
+                    std::floor(
+                        eye.x)),
+                static_cast<int>(
+                    std::floor(
+                        eye.z)));
+        water_coverage_radius =
+            std::min(
+                active_stream_radius + 1,
+                kSeaHorizonWaterCoverageScanRadius);
+        // Je mesure les anneaux réellement publiés sur le GPU. Pendant un
+        // chargement progressif, le raccord se replie donc avant le premier
+        // chunk absent au lieu d'en révéler le bord.
+        for (auto dz = -water_coverage_radius;
+             dz <= water_coverage_radius;
+             ++dz) {
+            for (auto dx = -water_coverage_radius;
+                 dx <= water_coverage_radius;
+                 ++dx) {
+                const ChunkCoord candidate {
+                    camera_chunk.x + dx,
+                    camera_chunk.z + dz,
+                };
+                const auto mesh =
+                    gpu_meshes_.find(
+                        candidate);
+                if (mesh ==
+                        gpu_meshes_.end() ||
+                    mesh->second.revision ==
+                        0U) {
+                    continue;
+                }
+                uploaded_water_chunks[
+                    uploaded_water_chunk_count++] =
+                    candidate;
+            }
+        }
+    }
+    const auto uploaded_water_coverage =
+        sea_horizon_contiguous_chunk_coverage_distance(
+            eye,
+            std::span<const ChunkCoord> {
+                uploaded_water_chunks.data(),
+                uploaded_water_chunk_count,
+            },
+            water_coverage_radius);
+    const auto maritime_water_blend_range =
+        sea_horizon_water_blend_range(
+            draw_distance,
+            uploaded_water_coverage);
+    glUniform1i(
+        world_uniforms_.maritime_horizon_enabled,
+        maritime_horizon_enabled
+            ? 1
+            : 0);
+    glUniform2f(
+        world_uniforms_.maritime_water_blend_range,
+        maritime_water_blend_range.start_distance,
+        maritime_water_blend_range.end_distance);
+    glUniform2f(
+        world_uniforms_.maritime_far_fog_range,
+        maritime_fog_range.start_distance,
+        maritime_fog_range.end_distance);
+    glUniform1f(
+        world_uniforms_.maritime_sea_level,
+        static_cast<float>(
+            kSeaLevel + 1));
     glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
     glUniformMatrix4fv(world_uniforms_.view_projection, 1, GL_FALSE, glm::value_ptr(view_projection));
     glUniformMatrix4fv(world_uniforms_.light_view_projection, 1, GL_FALSE, glm::value_ptr(light_view_projection));
@@ -4722,6 +5403,12 @@ void Renderer::render_frame(World& world,
                 uniforms.sun_visibility,
                 sun_visible ? 1.0F : 0.0F);
             glUniform1f(
+                uniforms.cloud_intensity,
+                environment.cloud_intensity);
+            glUniform1f(
+                uniforms.overcast_intensity,
+                environment.overcast_intensity);
+            glUniform1f(
                 uniforms.precipitation_intensity,
                 environment.precipitation_intensity);
             glUniform1f(uniforms.storm_intensity, environment.storm_intensity);
@@ -4749,6 +5436,23 @@ void Renderer::render_frame(World& world,
             glUniform1f(
                 uniforms.shadow_transition_width,
                 shadow_transition_width);
+            glUniform1i(
+                uniforms.maritime_horizon_enabled,
+                0);
+            glUniform2f(
+                uniforms.maritime_detail_transition_range,
+                0.0F,
+                0.0F);
+            glUniform1f(
+                uniforms.maritime_sea_level,
+                static_cast<float>(
+                    kSeaLevel + 1));
+            glUniform1i(
+                uniforms.maritime_submersion_active,
+                maritime_submersion.active ? 1 : 0);
+            glUniform1f(
+                uniforms.time_seconds,
+                environment.weather_time_seconds);
 
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, shadow_map_);
@@ -4834,6 +5538,12 @@ void Renderer::render_frame(World& world,
             modern_terrain_uniforms_.sun_visibility,
             sun_visible ? 1.0F : 0.0F);
         glUniform1f(
+            modern_terrain_uniforms_.cloud_intensity,
+            environment.cloud_intensity);
+        glUniform1f(
+            modern_terrain_uniforms_.overcast_intensity,
+            environment.overcast_intensity);
+        glUniform1f(
             modern_terrain_uniforms_.precipitation_intensity,
             environment.precipitation_intensity);
         glUniform1f(
@@ -4865,6 +5575,25 @@ void Renderer::render_frame(World& world,
         glUniform1f(
             modern_terrain_uniforms_.shadow_transition_width,
             shadow_transition_width);
+        glUniform1i(
+            modern_terrain_uniforms_.maritime_horizon_enabled,
+            maritime_horizon_enabled
+                ? 1
+                : 0);
+        glUniform2f(
+            modern_terrain_uniforms_.maritime_detail_transition_range,
+            sea_horizon_detail_transition_range_.start_distance,
+            sea_horizon_detail_transition_range_.end_distance);
+        glUniform1f(
+            modern_terrain_uniforms_.maritime_sea_level,
+            static_cast<float>(
+                kSeaLevel + 1));
+        glUniform1i(
+            modern_terrain_uniforms_.maritime_submersion_active,
+            maritime_submersion.active ? 1 : 0);
+        glUniform1f(
+            modern_terrain_uniforms_.time_seconds,
+            environment.weather_time_seconds);
 
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, shadow_map_);
@@ -4919,20 +5648,365 @@ void Renderer::render_frame(World& world,
             }
         }
 
+        if (marine_decor_gpu_mesh_.terrain_index_count > 0 ||
+            ocean_life_gpu_mesh_.terrain_index_count > 0) {
+            bind_modern_surface_program(
+                modern_terrain_program_,
+                modern_terrain_uniforms_,
+                5.5F);
+            glDisable(GL_CULL_FACE);
+            const std::array<const GpuMesh*, 2U>
+                marine_meshes {{
+                    &marine_decor_gpu_mesh_,
+                    &ocean_life_gpu_mesh_,
+                }};
+            for (const auto* marine_mesh :
+                 marine_meshes) {
+                if (marine_mesh->terrain_index_count <= 0) {
+                    continue;
+                }
+                glBindVertexArray(
+                    marine_mesh->terrain_vao);
+                glDrawElements(
+                    GL_TRIANGLES,
+                    marine_mesh->terrain_index_count,
+                    GL_UNSIGNED_INT,
+                    nullptr);
+                record_triangle_draw(
+                    marine_mesh->terrain_index_count);
+            }
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+        }
+
         // Je restaure le programme du monde pour le navire et l'eau.
         glUseProgram(world_program_);
     }
     if (ship_visibility.camera) {
+        const auto modern_ship_render =
+            options_.visual_pipeline ==
+                VisualPipeline::ModernStylized &&
+            modern_ship_program_ != 0U &&
+            modern_material_albedo_texture_ != 0U &&
+            modern_material_normal_height_texture_ != 0U &&
+            modern_material_orm_emission_texture_ != 0U;
+        if (modern_ship_render) {
+            const auto material_layers =
+                modern_ship_material_layers();
+            std::array<
+                glm::vec4,
+                kMaximumShipInteriorLights>
+                light_position_radius {};
+            std::array<
+                glm::vec4,
+                kMaximumShipInteriorLights>
+                light_color_intensity {};
+            std::array<
+                glm::vec4,
+                kMaximumShipInteriorLights>
+                light_zone_min_spill {};
+            std::array<
+                glm::vec4,
+                kMaximumShipInteriorLights>
+                light_zone_max_seed {};
+            std::array<
+                glm::vec4,
+                kMaximumShipInteriorLights>
+                light_doorways {};
+            const auto interior_lights =
+                ship.blueprint != nullptr
+                    ? ship.blueprint->interior_lanterns
+                    : std::span<const ShipInteriorLight> {};
+            const auto exterior_lights =
+                ship.blueprint != nullptr
+                    ? ship.blueprint->exterior_lanterns
+                    : std::span<const ShipExteriorLight> {};
+            const auto exterior_light_radiance =
+                exterior_lantern_radiance(
+                    exterior_lights,
+                    1.18F);
+            const auto light_count =
+                std::min(
+                    interior_lights.size(),
+                    kMaximumShipInteriorLights);
+            for (std::size_t index = 0U;
+                 index < light_count;
+                 ++index) {
+                const auto& light =
+                    interior_lights[index];
+                light_position_radius[index] = {
+                    light.local_position,
+                    std::max(
+                        light.radius,
+                        0.01F),
+                };
+                light_color_intensity[index] = {
+                    glm::max(
+                        light.color,
+                        glm::vec3 {0.0F}),
+                    std::max(
+                        light.intensity,
+                        0.0F),
+                };
+                light_zone_min_spill[index] = {
+                    glm::min(
+                        light.zone_min,
+                        light.zone_max),
+                    std::max(
+                        light.zone_spill,
+                        0.001F),
+                };
+                light_zone_max_seed[index] = {
+                    glm::max(
+                        light.zone_min,
+                        light.zone_max),
+                    light.flicker_seed,
+                };
+                light_doorways[index] = {
+                    light.minimum_z_door,
+                    light.maximum_z_door,
+                };
+            }
+
+            glUseProgram(
+                modern_ship_program_);
+            const auto camera_local_position =
+                glm::vec3 {
+                    glm::inverse(
+                        ship.model_matrix) *
+                    glm::vec4 {
+                        eye,
+                        1.0F,
+                    },
+                };
+            glUniformMatrix4fv(
+                modern_ship_uniforms_.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(
+                    ship.model_matrix));
+            glUniformMatrix4fv(
+                modern_ship_uniforms_.view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(
+                    view_projection));
+            glUniformMatrix4fv(
+                modern_ship_uniforms_.light_view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(
+                    light_view_projection));
+            glUniformMatrix4fv(
+                modern_ship_uniforms_.light_view_projection_far,
+                1,
+                GL_FALSE,
+                glm::value_ptr(
+                    light_view_projection_far));
+            glUniform3fv(
+                modern_ship_uniforms_.camera_position,
+                1,
+                glm::value_ptr(
+                    eye));
+            glUniform3fv(
+                modern_ship_uniforms_.camera_local_position,
+                1,
+                glm::value_ptr(
+                    camera_local_position));
+            glUniform3fv(
+                modern_ship_uniforms_.camera_forward,
+                1,
+                glm::value_ptr(
+                    camera_forward));
+            glUniform3fv(
+                modern_ship_uniforms_.sun_direction,
+                1,
+                glm::value_ptr(
+                    environment.sun_direction));
+            glUniform3fv(
+                modern_ship_uniforms_.sun_color,
+                1,
+                glm::value_ptr(
+                    environment.sun_color));
+            glUniform3fv(
+                modern_ship_uniforms_.ambient_color,
+                1,
+                glm::value_ptr(
+                    environment.ambient_color));
+            glUniform3fv(
+                modern_ship_uniforms_.fog_color,
+                1,
+                glm::value_ptr(
+                    environment.fog_color));
+            glUniform3fv(
+                modern_ship_uniforms_.distant_fog_color,
+                1,
+                glm::value_ptr(
+                    environment.distant_fog_color));
+            glUniform3fv(
+                modern_ship_uniforms_.night_tint_color,
+                1,
+                glm::value_ptr(
+                    environment.night_tint_color));
+            glUniform1f(
+                modern_ship_uniforms_.daylight_factor,
+                environment.daylight_factor);
+            glUniform1f(
+                modern_ship_uniforms_.sun_visibility,
+                sun_visible
+                    ? 1.0F
+                    : 0.0F);
+            glUniform1f(
+                modern_ship_uniforms_.precipitation_intensity,
+                environment.precipitation_intensity);
+            glUniform1f(
+                modern_ship_uniforms_.storm_intensity,
+                environment.storm_intensity);
+            glUniform1f(
+                modern_ship_uniforms_.exterior_light_activation,
+                ship_exterior_light_activation(
+                    environment.daylight_factor,
+                    environment.storm_intensity,
+                    environment.cloud_intensity,
+                    environment.overcast_intensity));
+            glUniform3fv(
+                modern_ship_uniforms_.exterior_light_radiance,
+                1,
+                glm::value_ptr(
+                    exterior_light_radiance));
+            glUniform1f(
+                modern_ship_uniforms_.lightning_intensity,
+                environment.lightning_intensity);
+            glUniform1f(
+                modern_ship_uniforms_.material_detail_scale,
+                quality_settings.material_detail_scale);
+            glUniform1i(
+                modern_ship_uniforms_.shadows_enabled,
+                options_.shadows_enabled
+                    ? 1
+                    : 0);
+            glUniform1i(
+                modern_ship_uniforms_.material_albedo,
+                4);
+            glUniform1i(
+                modern_ship_uniforms_.material_normal_height,
+                5);
+            glUniform1i(
+                modern_ship_uniforms_.material_orm_emission,
+                6);
+            glUniform1i(
+                modern_ship_uniforms_.shadow_map,
+                1);
+            glUniform1i(
+                modern_ship_uniforms_.shadow_map_far,
+                7);
+            glUniform1i(
+                modern_ship_uniforms_.shadow_cascade_count,
+                shadow_cascade_count);
+            glUniform1f(
+                modern_ship_uniforms_.shadow_split_distance,
+                shadow_split_distance);
+            glUniform1f(
+                modern_ship_uniforms_.shadow_transition_width,
+                shadow_transition_width);
+            glUniform1f(
+                modern_ship_uniforms_.time_seconds,
+                environment.weather_time_seconds);
+            glUniform1f(
+                modern_ship_uniforms_.wind_strength,
+                environment.wind_strength);
+            glUniform1fv(
+                modern_ship_uniforms_.material_layers,
+                static_cast<GLsizei>(
+                    material_layers.size()),
+                material_layers.data());
+            glUniform1i(
+                modern_ship_uniforms_.light_count,
+                static_cast<GLint>(
+                    light_count));
+            if (light_count > 0U) {
+                glUniform4fv(
+                    modern_ship_uniforms_.light_position_radius,
+                    static_cast<GLsizei>(
+                        light_count),
+                    glm::value_ptr(
+                        light_position_radius[0]));
+                glUniform4fv(
+                    modern_ship_uniforms_.light_color_intensity,
+                    static_cast<GLsizei>(
+                        light_count),
+                    glm::value_ptr(
+                        light_color_intensity[0]));
+                glUniform4fv(
+                    modern_ship_uniforms_.light_zone_min_spill,
+                    static_cast<GLsizei>(
+                        light_count),
+                    glm::value_ptr(
+                        light_zone_min_spill[0]));
+                glUniform4fv(
+                    modern_ship_uniforms_.light_zone_max_seed,
+                    static_cast<GLsizei>(
+                        light_count),
+                    glm::value_ptr(
+                        light_zone_max_seed[0]));
+                glUniform4fv(
+                    modern_ship_uniforms_.light_doorways,
+                    static_cast<GLsizei>(
+                        light_count),
+                    glm::value_ptr(
+                        light_doorways[0]));
+            }
+            glActiveTexture(
+                GL_TEXTURE1);
+            glBindTexture(
+                GL_TEXTURE_2D,
+                shadow_map_);
+            glActiveTexture(
+                GL_TEXTURE7);
+            glBindTexture(
+                GL_TEXTURE_2D,
+                shadow_map_far_);
+            glActiveTexture(
+                GL_TEXTURE4);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_albedo_texture_);
+            glActiveTexture(
+                GL_TEXTURE5);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_normal_height_texture_);
+            glActiveTexture(
+                GL_TEXTURE6);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                modern_material_orm_emission_texture_);
+        } else {
+            glUseProgram(
+                world_program_);
+            glUniformMatrix4fv(
+                world_uniforms_.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(
+                    ship.model_matrix));
+        }
+        glBindVertexArray(active_ship_gpu_mesh.vao);
+        glDrawElements(
+            GL_TRIANGLES,
+            active_ship_gpu_mesh.opaque_index_count,
+            GL_UNSIGNED_INT,
+            nullptr);
+        record_triangle_draw(
+            active_ship_gpu_mesh.opaque_index_count);
+        glUseProgram(
+            world_program_);
         glUniformMatrix4fv(
             world_uniforms_.model,
             1,
             GL_FALSE,
             glm::value_ptr(
-                ship.model_matrix));
-        glBindVertexArray(ship_gpu_mesh_.vao);
-        glDrawElements(GL_TRIANGLES, ship_gpu_mesh_.opaque_index_count, GL_UNSIGNED_INT, nullptr);
-        record_triangle_draw(ship_gpu_mesh_.opaque_index_count);
-        glUniformMatrix4fv(world_uniforms_.model, 1, GL_FALSE, glm::value_ptr(identity_model));
+                identity_model));
     }
     end_gpu_pass(GpuTimedPass::Opaque);
 
@@ -4968,11 +6042,21 @@ void Renderer::render_frame(World& world,
     end_gpu_pass(GpuTimedPass::Entities);
 
     begin_gpu_pass(GpuTimedPass::Sky);
-    draw_sky(inverse_sky_view_projection, environment, quality_settings);
+    draw_sky(
+        inverse_sky_view_projection,
+        eye,
+        environment,
+        quality_settings,
+        maritime_horizon_enabled,
+        maritime_submersion,
+        ocean,
+        ocean_wave_uniforms,
+        ocean_phase_uniforms);
     end_gpu_pass(GpuTimedPass::Sky);
 
-    begin_gpu_pass(GpuTimedPass::Water);
     if (has_visible_water) {
+        begin_gpu_pass(
+            GpuTimedPass::WaterResolve);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, water_scene_framebuffer_);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, final_target_framebuffer);
         glBlitFramebuffer(
@@ -4986,14 +6070,11 @@ void Renderer::render_frame(World& world,
             render_height,
             GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
             GL_NEAREST);
+        end_gpu_pass(
+            GpuTimedPass::WaterResolve);
 
         glBindFramebuffer(GL_FRAMEBUFFER, final_target_framebuffer);
         glViewport(0, 0, render_width, render_height);
-        glUseProgram(world_program_);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, atlas_texture_);
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, shadow_map_);
         const auto water_scene_bindings = select_scene_sampler_bindings(
             true,
             scene_fallback_color_texture_,
@@ -5004,6 +6085,202 @@ void Renderer::render_frame(World& world,
         glBindTexture(GL_TEXTURE_2D, water_scene_bindings.color_texture);
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, water_scene_bindings.depth_texture);
+        begin_gpu_pass(
+            GpuTimedPass::WaterSurface);
+        const auto modern_water_enabled =
+            options_.visual_pipeline ==
+                VisualPipeline::ModernStylized &&
+            maritime_horizon_enabled &&
+            modern_water_program_ != 0;
+        if (modern_water_enabled) {
+            glUseProgram(
+                modern_water_program_);
+            glUniformMatrix4fv(
+                modern_water_uniforms_.model,
+                1,
+                GL_FALSE,
+                glm::value_ptr(identity_model));
+            glUniformMatrix4fv(
+                modern_water_uniforms_.view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(view_projection));
+            glUniformMatrix4fv(
+                modern_water_uniforms_.inverse_view_projection,
+                1,
+                GL_FALSE,
+                glm::value_ptr(inverse_view_projection));
+            glUniform3fv(
+                modern_water_uniforms_.camera_position,
+                1,
+                glm::value_ptr(eye));
+            glUniform3fv(
+                modern_water_uniforms_.sun_direction,
+                1,
+                glm::value_ptr(environment.sun_direction));
+            glUniform3fv(
+                modern_water_uniforms_.sun_color,
+                1,
+                glm::value_ptr(environment.sun_color));
+            glUniform3fv(
+                modern_water_uniforms_.moon_disk_color,
+                1,
+                glm::value_ptr(environment.moon_disk_color));
+            glUniform3fv(
+                modern_water_uniforms_.ambient_color,
+                1,
+                glm::value_ptr(environment.ambient_color));
+            glUniform3fv(
+                modern_water_uniforms_.fog_color,
+                1,
+                glm::value_ptr(environment.fog_color));
+            glUniform3fv(
+                modern_water_uniforms_.distant_fog_color,
+                1,
+                glm::value_ptr(environment.distant_fog_color));
+            glUniform3fv(
+                modern_water_uniforms_.horizon_glow_color,
+                1,
+                glm::value_ptr(environment.horizon_glow_color));
+            glUniform3fv(
+                modern_water_uniforms_.night_tint_color,
+                1,
+                glm::value_ptr(environment.night_tint_color));
+            glUniform3fv(
+                modern_water_uniforms_.sky_zenith_color,
+                1,
+                glm::value_ptr(environment.sky_zenith_color));
+            glUniform3fv(
+                modern_water_uniforms_.sky_horizon_color,
+                1,
+                glm::value_ptr(environment.sky_horizon_color));
+            glUniform1f(
+                modern_water_uniforms_.daylight_factor,
+                environment.daylight_factor);
+            glUniform1f(
+                modern_water_uniforms_.sun_visibility,
+                sun_visible ? 1.0F : 0.0F);
+            glUniform1f(
+                modern_water_uniforms_.cloud_intensity,
+                environment.cloud_intensity);
+            glUniform1f(
+                modern_water_uniforms_.overcast_intensity,
+                environment.overcast_intensity);
+            glUniform1f(
+                modern_water_uniforms_.precipitation_intensity,
+                environment.precipitation_intensity);
+            glUniform1f(
+                modern_water_uniforms_.storm_intensity,
+                environment.storm_intensity);
+            glUniform1f(
+                modern_water_uniforms_.lightning_intensity,
+                environment.lightning_intensity);
+            glUniform4fv(
+                modern_water_uniforms_.ocean_waves,
+                static_cast<GLsizei>(
+                    ocean_wave_uniforms.size()),
+                glm::value_ptr(
+                    ocean_wave_uniforms.front()));
+            glUniform2fv(
+                modern_water_uniforms_.ocean_wave_phases,
+                static_cast<GLsizei>(
+                    ocean_phase_uniforms.size()),
+                glm::value_ptr(
+                    ocean_phase_uniforms.front()));
+            glUniform1i(
+                modern_water_uniforms_.ocean_wave_count,
+                std::clamp(
+                    quality_settings.ocean_wave_count,
+                    1,
+                    static_cast<int>(
+                        kOceanMaxWaveCount)));
+            glUniform1f(
+                modern_water_uniforms_.ocean_foam_threshold,
+                ocean.foam_threshold);
+            glUniform1f(
+                modern_water_uniforms_.ocean_detail_strength,
+                ocean.detail_strength *
+                    quality_settings.ocean_detail_scale);
+            glUniform1f(
+                modern_water_uniforms_.ocean_detail_phase,
+                ocean.detail_phase);
+            glUniform1f(
+                modern_water_uniforms_.water_animation_time,
+                environment.weather_time_seconds);
+            glUniform1f(
+                modern_water_uniforms_.ocean_severity,
+                ocean.severity);
+            glUniform1f(
+                modern_water_uniforms_.ocean_tempest_factor,
+                ocean.tempest_factor);
+            glUniform1f(
+                modern_water_uniforms_.ocean_open_sea,
+                ocean_profile ==
+                        OceanSurfaceProfile::OpenSea
+                    ? 1.0F
+                    : 0.0F);
+            glUniform1f(
+                modern_water_uniforms_.water_surface_detail,
+                quality_settings.water_surface_detail);
+            glUniform1i(
+                modern_water_uniforms_.water_detail_samples,
+                water_detail_sample_count(
+                    quality_settings.water_surface_detail));
+            constexpr auto clear_water_definition =
+                visual_material_definition(
+                    VisualMaterialId::ClearWater);
+            const auto has_water_material =
+                modern_material_normal_height_texture_ != 0 &&
+                clear_water_definition.pack_layer !=
+                    kInvalidVisualMaterialLayer &&
+                clear_water_definition.pack_layer <
+                    material_pack_layers_;
+            glUniform1i(
+                modern_water_uniforms_.has_water_material,
+                has_water_material ? 1 : 0);
+            glUniform1f(
+                modern_water_uniforms_.water_normal_layer,
+                static_cast<float>(
+                    clear_water_definition.pack_layer));
+            glUniform1i(
+                modern_water_uniforms_.scene_color,
+                2);
+            glUniform1i(
+                modern_water_uniforms_.scene_depth,
+                3);
+            glUniform1i(
+                modern_water_uniforms_.material_normal_height,
+                5);
+            glUniform1i(
+                modern_water_uniforms_.maritime_horizon_enabled,
+                maritime_horizon_enabled ? 1 : 0);
+            glUniform2f(
+                modern_water_uniforms_.maritime_water_blend_range,
+                maritime_water_blend_range.start_distance,
+                maritime_water_blend_range.end_distance);
+            glUniform2f(
+                modern_water_uniforms_.maritime_far_fog_range,
+                maritime_fog_range.start_distance,
+                maritime_fog_range.end_distance);
+            glUniform1f(
+                modern_water_uniforms_.maritime_sea_level,
+                static_cast<float>(
+                    kSeaLevel + 1));
+            upload_modern_water_ship_protection(
+                ship);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(
+                GL_TEXTURE_2D_ARRAY,
+                has_water_material
+                    ? modern_material_normal_height_texture_
+                    : 0U);
+        } else {
+            glUseProgram(world_program_);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, shadow_map_);
+        }
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
         glDisable(GL_CULL_FACE);
@@ -5024,7 +6301,12 @@ void Renderer::render_frame(World& world,
 
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
+        end_gpu_pass(
+            GpuTimedPass::WaterSurface);
     }
+
+    begin_gpu_pass(
+        GpuTimedPass::TransparentWeather);
 
     // Le verre est composé après l'eau. Il n'écrit volontairement pas dans le
     // depth buffer ; lorsqu'il était dessiné avant l'eau, l'écriture de
@@ -5100,7 +6382,8 @@ void Renderer::render_frame(World& world,
         view_projection,
         inverse_view,
         eye);
-    end_gpu_pass(GpuTimedPass::Water);
+    end_gpu_pass(
+        GpuTimedPass::TransparentWeather);
 
     draw_block_break_overlay(world, player);
 
@@ -5136,7 +6419,6 @@ void Renderer::render_frame(World& world,
             camera_weather_exposure = 0.0F;
         }
     }
-
     begin_gpu_pass(GpuTimedPass::PostProcess);
     if (menu_preview_visible) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -5150,8 +6432,10 @@ void Renderer::render_frame(World& world,
         run_post_process(
             environment,
             camera_weather_exposure,
+            maritime_submersion,
             render_width,
             render_height,
+            projection_far_distance,
             optional_post_process_enabled);
     } else if (has_visible_water) {
         // Le pipeline Legacy conserve son comportement historique. Le pipeline
@@ -5186,12 +6470,22 @@ void Renderer::render_frame(World& world,
         draw_options_menu(options_menu, width, height);
     } else if (death_screen.visible) {
         draw_death_screen(death_screen, width, height);
+    } else if (progression_menu_view_.visible) {
+        draw_progression_menu(
+            progression_menu_view_,
+            progression_build_view_,
+            width,
+            height);
     } else if (pause_menu.visible) {
         draw_pause_menu(pause_menu, width, height);
     } else if (inventory_menu.visible) {
         draw_inventory_menu(inventory_menu, hotbar, width, height);
     } else {
         draw_hotbar(player, hotbar, progression, environment, width, height);
+        draw_progression_ability_hud(
+            progression_build_view_,
+            width,
+            height);
         draw_maritime_hud(maritime_hud, width, height);
         if (player_musket.active) {
             draw_musket_hud(
@@ -5756,9 +7050,29 @@ void Renderer::begin_gpu_frame(RendererFrameStats& frame_stats) {
             case GpuTimedPass::Ui:
                 resolved.ui_ms = elapsed_ms;
                 break;
+            case GpuTimedPass::WaterResolve:
+                resolved.water_resolve_ms =
+                    elapsed_ms;
+                break;
+            case GpuTimedPass::WaterSurface:
+                resolved.water_surface_ms =
+                    elapsed_ms;
+                break;
+            case GpuTimedPass::TransparentWeather:
+                resolved.transparent_weather_ms =
+                    elapsed_ms;
+                break;
             case GpuTimedPass::Count:
                 break;
             }
+        }
+        if (resolved.water_resolve_ms > 0.0 ||
+            resolved.water_surface_ms > 0.0 ||
+            resolved.transparent_weather_ms > 0.0) {
+            resolved.water_ms =
+                resolved.water_resolve_ms +
+                resolved.water_surface_ms +
+                resolved.transparent_weather_ms;
         }
 
         if (!last_gpu_timings_.valid || resolved.source_frame >= last_gpu_timings_.source_frame) {
@@ -5854,7 +7168,11 @@ auto Renderer::estimate_gpu_buffer_bytes() const noexcept -> std::uint64_t {
         add_mesh(mesh);
     }
     add_mesh(block_break_overlay_mesh_);
-    add_mesh(ship_gpu_mesh_);
+    for (const auto& ship_gpu_mesh : ship_gpu_meshes_) {
+        add_mesh(ship_gpu_mesh);
+    }
+    add_mesh(marine_decor_gpu_mesh_);
+    add_mesh(ocean_life_gpu_mesh_);
 
     if (creature_vbo_ != 0) {
         total += static_cast<std::uint64_t>(
@@ -5896,6 +7214,20 @@ auto Renderer::estimate_gpu_buffer_bytes() const noexcept -> std::uint64_t {
             std::max<GLsizeiptr>(
                 old_guard_effect_instance_buffer_bytes_,
                 0));
+    }
+    if (sea_horizon_terrain_vbo_ != 0U) {
+        total +=
+            static_cast<std::uint64_t>(
+                std::max<GLsizeiptr>(
+                    sea_horizon_terrain_vertex_buffer_bytes_,
+                    0));
+    }
+    if (sea_horizon_terrain_ebo_ != 0U) {
+        total +=
+            static_cast<std::uint64_t>(
+                std::max<GLsizeiptr>(
+                    sea_horizon_terrain_index_buffer_bytes_,
+                    0));
     }
     if (hud_vbo_ != 0) {
         total += static_cast<std::uint64_t>(std::max<GLsizeiptr>(hud_vertex_buffer_bytes_, 0));
@@ -6044,7 +7376,23 @@ void Renderer::begin_world_resource_reset() {
                                        block_break_overlay_mesh_.revision != 0U ||
                                        block_break_overlay_mesh_.opaque_index_count > 0 ||
                                        block_break_overlay_mesh_.water_index_count > 0;
-    const auto required_queue_capacity = gpu_meshes_.size() + (overlay_has_resources ? 1U : 0U);
+    const auto terrain_mesh_has_resources =
+        [](const GpuMesh& mesh) noexcept {
+            return mesh.terrain_vao != 0U ||
+                   mesh.terrain_vbo != 0U ||
+                   mesh.terrain_ebo != 0U;
+        };
+    const auto marine_decor_has_resources =
+        terrain_mesh_has_resources(
+            marine_decor_gpu_mesh_);
+    const auto ocean_life_has_resources =
+        terrain_mesh_has_resources(
+            ocean_life_gpu_mesh_);
+    const auto required_queue_capacity =
+        gpu_meshes_.size() +
+        (overlay_has_resources ? 1U : 0U) +
+        (marine_decor_has_resources ? 1U : 0U) +
+        (ocean_life_has_resources ? 1U : 0U);
     world_resource_reset_queue_.clear();
     if (world_resource_reset_queue_.capacity() < required_queue_capacity) {
         world_resource_reset_queue_.reserve(required_queue_capacity);
@@ -6078,6 +7426,25 @@ void Renderer::begin_world_resource_reset() {
         world_resource_reset_queue_.push_back(block_break_overlay_mesh_);
     }
     block_break_overlay_mesh_ = {};
+    if (marine_decor_has_resources) {
+        world_resource_reset_queue_.push_back(
+            marine_decor_gpu_mesh_);
+    }
+    if (ocean_life_has_resources) {
+        world_resource_reset_queue_.push_back(
+            ocean_life_gpu_mesh_);
+    }
+    marine_decor_gpu_mesh_ = {};
+    ocean_life_gpu_mesh_ = {};
+    marine_decor_cache_.clear();
+    marine_decor_instances_scratch_.clear();
+    marine_visible_chunks_scratch_.clear();
+    marine_requested_chunks_scratch_.clear();
+    marine_decor_mesh_scratch_ = {};
+    ocean_life_mesh_scratch_ = {};
+    ocean_life_field_.clear();
+    marine_visual_cache_valid_ = false;
+    marine_visible_signature_ = 0U;
     world_resource_reset_progress_.begin(world_resource_reset_queue_.size(), false);
 }
 
@@ -6667,6 +8034,38 @@ namespace {
     return lod == StylizedShipLod::Near ? 1U : 2U;
 }
 
+[[nodiscard]] constexpr auto modern_ship_material_layers() noexcept
+    -> std::array<float, 18> {
+
+    const auto layer =
+        [](VisualMaterialId material) constexpr {
+            return static_cast<float>(
+                visual_material_definition(
+                    material)
+                    .pack_layer);
+        };
+    return {{
+        layer(VisualMaterialId::ShipDarkHull),
+        layer(VisualMaterialId::ShipDeckOak),
+        layer(VisualMaterialId::ShipOiledOak),
+        layer(VisualMaterialId::ShipLinen),
+        layer(VisualMaterialId::ShipRope),
+        layer(VisualMaterialId::ShipIron),
+        layer(VisualMaterialId::ShipPatinatedBrass),
+        layer(VisualMaterialId::ShipLantern),
+        layer(VisualMaterialId::ShipGlass),
+        layer(VisualMaterialId::ShipNavyTextile),
+        layer(VisualMaterialId::ShipGold),
+        layer(VisualMaterialId::ShipOiledOak),
+        layer(VisualMaterialId::ShipLinen),
+        layer(VisualMaterialId::ShipBurgundyTextile),
+        layer(VisualMaterialId::ShipNavyTextile),
+        layer(VisualMaterialId::ShipLeather),
+        layer(VisualMaterialId::ShipPaper),
+        layer(VisualMaterialId::ShipCeramic),
+    }};
+}
+
 } // namespace
 
 void Renderer::ensure_ship_mesh(
@@ -6676,35 +8075,73 @@ void Renderer::ensure_ship_mesh(
     if (!ship.visible || ship.parts.empty() || ship.geometry_revision == 0U) {
         return;
     }
-    if (ship_mesh_ready(ship, lod)) {
-        return;
-    }
 
     if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
-        const auto stylized_mesh = build_stylized_ship_mesh(ship, lod);
-        if (stylized_mesh.empty()) {
+        if (ship_mesh_ready(ship)) {
             return;
         }
-        const ChunkBounds local_bounds {
-            stylized_mesh.metrics.bounds.min,
-            stylized_mesh.metrics.bounds.max,
-            (stylized_mesh.metrics.bounds.min +
-             stylized_mesh.metrics.bounds.max) *
-                0.5F,
-        };
-        upload_mesh_data(
-            ship_gpu_mesh_,
-            stylized_mesh.mesh,
-            ship.geometry_revision,
-            local_bounds);
-        ship_mesh_cache_.remember(
-            ship.geometry_revision,
-            ship.parts.size(),
-            ship_visual_variant(options_.visual_pipeline, lod));
+
+        // Je prépare le LOD demandé en premier puis son voisin dans un buffer
+        // distinct. Une fois ce préchauffage terminé, franchir un seuil ne
+        // déclenche plus ni génération CPU ni upload OpenGL.
+        const std::array<StylizedShipLod, kStylizedShipLodCount>
+            lods {{
+                lod,
+                lod == StylizedShipLod::Near
+                    ? StylizedShipLod::Far
+                    : StylizedShipLod::Near,
+            }};
+        for (const auto candidate_lod : lods) {
+            if (ship_mesh_ready(ship, candidate_lod)) {
+                continue;
+            }
+            const auto stylized_mesh =
+                build_stylized_ship_mesh(
+                    ship,
+                    candidate_lod);
+            if (stylized_mesh.empty()) {
+                return;
+            }
+            const ChunkBounds local_bounds {
+                stylized_mesh.metrics.bounds.min,
+                stylized_mesh.metrics.bounds.max,
+                (stylized_mesh.metrics.bounds.min +
+                 stylized_mesh.metrics.bounds.max) *
+                    0.5F,
+            };
+            upload_mesh_data(
+                ship_gpu_meshes_[
+                    stylized_ship_lod_index(
+                        candidate_lod)],
+                stylized_mesh.mesh,
+                ship.geometry_revision,
+                local_bounds);
+            ship_mesh_cache_.remember(
+                ship.geometry_revision,
+                ship.parts.size(),
+                ship_visual_variant(
+                    options_.visual_pipeline,
+                    candidate_lod));
+        }
         return;
     }
 
-    const auto legacy_mesh = build_ship_mesh_data(ship.parts);
+    if (ship_mesh_ready(ship, StylizedShipLod::Near)) {
+        return;
+    }
+    const auto legacy_parts =
+        ship.blueprint != nullptr &&
+                !ship.blueprint->legacy_visual_parts.empty()
+            ? ship.blueprint->legacy_visual_parts
+            : ship.parts;
+    // Je reconstruis le pipeline Legacy depuis sa photographie historique :
+    // les meubles modernes ne peuvent ainsi modifier ni sa géométrie ni son atlas.
+    const auto legacy_mesh =
+        build_ship_mesh_data(
+            legacy_parts,
+            {},
+            ShipMeshLightingModel::
+                LegacyHistorical);
     (void)upload_prepared_ship_mesh(ship, legacy_mesh);
 }
 
@@ -6724,13 +8161,76 @@ auto Renderer::upload_prepared_ship_mesh(const ShipRenderState& ship, const Chun
         ship.local_bounds.max,
         (ship.local_bounds.min + ship.local_bounds.max) * 0.5F,
     };
-    upload_mesh_data(ship_gpu_mesh_, mesh, ship.geometry_revision, local_bounds);
+    upload_mesh_data(
+        ship_gpu_meshes_[
+            stylized_ship_lod_index(
+                StylizedShipLod::Near)],
+        mesh,
+        ship.geometry_revision,
+        local_bounds);
     active_ship_lod_ = StylizedShipLod::Near;
     ship_mesh_cache_.remember(
         ship.geometry_revision,
         ship.parts.size(),
         ship_visual_variant(options_.visual_pipeline, active_ship_lod_));
     return ship_mesh_ready(ship, active_ship_lod_);
+}
+
+auto Renderer::upload_prepared_ship_mesh(
+    const ShipRenderState& ship,
+    const ChunkMeshData& near_mesh,
+    const ChunkMeshData& far_mesh) -> bool {
+
+    if (!initialized_ ||
+        options_.visual_pipeline != VisualPipeline::ModernStylized ||
+        !ship.visible ||
+        ship.parts.empty() ||
+        ship.geometry_revision == 0U ||
+        near_mesh.vertices.empty() ||
+        near_mesh.indices.empty() ||
+        far_mesh.vertices.empty() ||
+        far_mesh.indices.empty()) {
+        return false;
+    }
+    if (ship_mesh_ready(ship)) {
+        return true;
+    }
+
+    // Je réalise les deux uploads pendant le chargement, exclusivement sur le
+    // thread OpenGL. Les seuils de distance ne feront ensuite que sélectionner
+    // l'un des deux VAO déjà résidents.
+    const ChunkBounds local_bounds {
+        ship.local_bounds.min,
+        ship.local_bounds.max,
+        (ship.local_bounds.min + ship.local_bounds.max) * 0.5F,
+    };
+    const std::array<
+        std::pair<StylizedShipLod, const ChunkMeshData*>,
+        kStylizedShipLodCount>
+        prepared_lods {{
+            {StylizedShipLod::Near, &near_mesh},
+            {StylizedShipLod::Far, &far_mesh},
+        }};
+    for (const auto& [lod, prepared_mesh] : prepared_lods) {
+        if (ship_mesh_ready(ship, lod)) {
+            continue;
+        }
+        upload_mesh_data(
+            ship_gpu_meshes_[
+                stylized_ship_lod_index(
+                    lod)],
+            *prepared_mesh,
+            ship.geometry_revision,
+            local_bounds);
+        ship_mesh_cache_.remember(
+            ship.geometry_revision,
+            ship.parts.size(),
+            ship_visual_variant(
+                options_.visual_pipeline,
+                lod));
+    }
+    active_ship_lod_ = StylizedShipLod::Near;
+    return ship_mesh_ready(ship);
 }
 
 auto Renderer::prepare_ship_mesh(const ShipRenderState& ship) -> bool {
@@ -6742,18 +8242,37 @@ auto Renderer::prepare_ship_mesh(const ShipRenderState& ship) -> bool {
 }
 
 auto Renderer::ship_mesh_ready(const ShipRenderState& ship) const noexcept -> bool {
-    return ship_mesh_ready(ship, StylizedShipLod::Near);
+    if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
+        return ship_mesh_ready(
+                   ship,
+                   StylizedShipLod::Near) &&
+               ship_mesh_ready(
+                   ship,
+                   StylizedShipLod::Far);
+    }
+    return ship_mesh_ready(
+        ship,
+        StylizedShipLod::Near);
 }
 
 auto Renderer::ship_mesh_ready(
     const ShipRenderState& ship,
     StylizedShipLod lod) const noexcept -> bool {
 
-    const auto gpu_ready = ship_gpu_mesh_.vao != 0U &&
-                           ship_gpu_mesh_.vbo != 0U &&
-                           ship_gpu_mesh_.ebo != 0U &&
-                           ship_gpu_mesh_.opaque_index_count > 0 &&
-                           ship_gpu_mesh_.revision == ship.geometry_revision;
+    const auto resident_lod =
+        options_.visual_pipeline ==
+                VisualPipeline::ModernStylized
+            ? lod
+            : StylizedShipLod::Near;
+    const auto& ship_gpu_mesh =
+        ship_gpu_meshes_[
+            stylized_ship_lod_index(
+                resident_lod)];
+    const auto gpu_ready = ship_gpu_mesh.vao != 0U &&
+                           ship_gpu_mesh.vbo != 0U &&
+                           ship_gpu_mesh.ebo != 0U &&
+                           ship_gpu_mesh.opaque_index_count > 0 &&
+                           ship_gpu_mesh.revision == ship.geometry_revision;
     return ship_mesh_cache_.ready(
         ship.geometry_revision,
         ship.parts.size(),
@@ -6958,6 +8477,70 @@ void Renderer::upload_world_ship_protection(const ShipRenderState& ship) {
     glUniform1f(
         world_uniforms_.ship_sheltered_floor,
         profile.sheltered_floor_y);
+}
+
+void Renderer::upload_modern_water_ship_protection(
+    const ShipRenderState& ship) {
+    const auto enabled =
+        ship_protection_is_renderable(ship);
+    glUniform1i(
+        modern_water_uniforms_.ship_protection_enabled,
+        enabled ? 1 : 0);
+    glUniform1f(
+        modern_water_uniforms_.ship_speed,
+        enabled
+            ? sanitized_ship_speed(
+                  glm::length(
+                      glm::vec2 {
+                          ship.linear_velocity.x,
+                          ship.linear_velocity.z,
+                      }))
+            : 0.0F);
+    if (!enabled) {
+        return;
+    }
+
+    const auto inverse_model =
+        glm::inverse(ship.model_matrix);
+    const auto& profile =
+        ship.blueprint->protection_profile;
+    glUniformMatrix4fv(
+        modern_water_uniforms_.ship_inverse_model,
+        1,
+        GL_FALSE,
+        glm::value_ptr(inverse_model));
+    glUniform3fv(
+        modern_water_uniforms_.ship_bounds_min,
+        1,
+        glm::value_ptr(ship.world_bounds.min));
+    glUniform3fv(
+        modern_water_uniforms_.ship_bounds_max,
+        1,
+        glm::value_ptr(ship.world_bounds.max));
+    glUniform4f(
+        modern_water_uniforms_.ship_profile_longitudinal,
+        profile.stern_z,
+        profile.bow_z,
+        profile.maximum_half_width,
+        profile.boundary_margin);
+    glUniform4f(
+        modern_water_uniforms_.ship_profile_taper,
+        profile.stern_width_loss,
+        profile.bow_width_loss,
+        profile.stern_taper_exponent,
+        profile.bow_taper_exponent);
+    glUniform4f(
+        modern_water_uniforms_.ship_profile_heights,
+        profile.lower_hull_min_y,
+        profile.middle_hull_min_y,
+        profile.upper_hull_min_y,
+        profile.main_deck_top_y);
+    glUniform4f(
+        modern_water_uniforms_.ship_profile_widths,
+        profile.lower_width_inset,
+        profile.middle_width_inset,
+        profile.lower_minimum_half_width,
+        profile.middle_minimum_half_width);
 }
 
 void Renderer::upload_precipitation_ship_protection(
@@ -7384,7 +8967,7 @@ void main() {
 }
 )";
 
-static constexpr auto* world_fragment_shader = R"(#version 330 core
+static constexpr auto* world_fragment_shader_part1 = R"(#version 330 core
 in vec2 v_uv;
 in vec3 v_normal;
 in float v_face_shade;
@@ -7405,6 +8988,10 @@ uniform float u_ocean_detail_phase;
 uniform float u_ocean_severity;
 uniform float u_ocean_tempest_factor;
 uniform float u_ocean_open_sea;
+uniform int u_maritime_horizon_enabled;
+uniform vec2 u_maritime_water_blend_range;
+uniform vec2 u_maritime_far_fog_range;
+uniform float u_maritime_sea_level;
 
 uniform sampler2D u_atlas;
 uniform sampler2D u_shadow_map;
@@ -7638,8 +9225,9 @@ float ordered_alpha_threshold(vec2 pixel_position) {
     ivec2 cell = ivec2(mod(floor(pixel_position), 4.0));
     return (pattern[cell.x + cell.y * 4] + 0.5) / 16.0;
 }
-)" R"(
+)";
 
+static constexpr auto* world_fragment_shader_part2 = R"(
 void main() {
     float water_mask = material_mask(v_material_class, 6.0);
     if (water_mask > 0.5 &&
@@ -7959,7 +9547,9 @@ void main() {
         lit_color += water_volume_color * shimmer * (0.018 + 0.025 * daylight) * water_surface_mask;
         output_alpha = 1.0;
     }
+)";
 
+static constexpr auto* world_fragment_shader_part3 = R"(
     float wetness = clamp(u_precipitation_intensity, 0.0, 1.0) *
                     sky_light *
                     weather_exposure *
@@ -7980,10 +9570,23 @@ void main() {
     lit_color += vec3(0.05, 0.13, 0.16) * super_vision * (0.50 + 0.50 * sky_light);
 
     vec3 view_ray = normalize(v_world_position - u_camera_position);
+    float fog_distance =
+        v_distance;
+    if (u_maritime_horizon_enabled != 0 &&
+        water_mask > 0.5 &&
+        u_camera_position.y >=
+            u_maritime_sea_level) {
+        // Je calcule la distance sur le fragment lui-même : l'interpolation
+        // par sommet dessinait sinon les deux triangles des grands quads d'eau.
+        fog_distance =
+            distance(
+                v_world_position,
+                u_camera_position);
+    }
     float weather_fog = 1.0 + clamp(u_precipitation_intensity, 0.0, 1.0) * 0.42 + clamp(u_storm_intensity, 0.0, 1.0) * 0.38;
-    float distance_fog = 1.0 - exp(-v_distance * v_distance * 0.000008 * weather_fog);
+    float distance_fog = 1.0 - exp(-fog_distance * fog_distance * 0.000008 * weather_fog);
     float height_haze = 1.0 - exp(-max(30.0 - v_world_position.y, 0.0) * u_height_fog_density);
-    height_haze *= clamp(v_distance / 140.0, 0.0, 1.0) * (0.10 + 0.18 * (1.0 - daylight));
+    height_haze *= clamp(fog_distance / 140.0, 0.0, 1.0) * (0.10 + 0.18 * (1.0 - daylight));
     float fog = clamp(distance_fog + height_haze, 0.0, 1.0);
     fog = mix(fog, fog * 0.45, super_vision);
     float sun_scatter = pow(max(dot(view_ray, sun_direction), 0.0), 6.0);
@@ -7991,9 +9594,116 @@ void main() {
     vec3 fog_color = mix(u_fog_color, u_distant_fog_color, sqrt(fog));
     fog_color += mix(u_horizon_glow_color, u_sun_color, 0.35 + 0.20 * daylight) *
                  sun_scatter * horizon * u_atmospheric_scatter_strength * (0.18 + 0.82 * daylight);
-    frag_color = vec4(mix(lit_color, fog_color, fog), output_alpha);
+    vec3 final_color = mix(lit_color, fog_color, fog);
+    if (u_maritime_horizon_enabled != 0 &&
+        water_mask > 0.5 &&
+        u_camera_position.y >=
+            u_maritime_sea_level) {
+        // Je réemploie la distance du même plan marin que le ciel analytique.
+        // La houle ne peut donc plus changer la couleur au dernier triangle et
+        // révéler la frontière diagonale du maillage d'eau détaillé.
+        float maritime_plane_distance =
+            fog_distance;
+        if (u_camera_position.y >
+            u_maritime_sea_level) {
+            float maritime_eye_height =
+                max(
+                    u_camera_position.y -
+                        u_maritime_sea_level,
+                    0.35);
+            maritime_plane_distance =
+                min(
+                    maritime_eye_height /
+                        max(
+                            -view_ray.y,
+                            0.001),
+                    4096.0);
+        }
+        float maritime_blend =
+            u_maritime_water_blend_range.y >
+                    u_maritime_water_blend_range.x
+                ? smoothstep(
+                      u_maritime_water_blend_range.x,
+                      u_maritime_water_blend_range.y,
+                      maritime_plane_distance)
+                : 1.0;
+        float maritime_storm =
+            clamp(
+                u_storm_intensity,
+                0.0,
+                1.0);
+        vec3 maritime_clear_ocean =
+            mix(
+                vec3(0.018, 0.055, 0.090),
+                vec3(0.045, 0.200, 0.310),
+                daylight);
+        vec3 maritime_ocean =
+            mix(
+                maritime_clear_ocean,
+                vec3(0.040, 0.060, 0.085),
+                maritime_storm *
+                    0.58);
+        float maritime_weather_fog =
+            1.0 +
+            clamp(
+                u_precipitation_intensity,
+                0.0,
+                1.0) *
+                0.42 +
+            maritime_storm *
+                0.38;
+        float maritime_atmospheric_fog =
+            1.0 -
+            exp(
+                -maritime_plane_distance *
+                maritime_plane_distance *
+                0.000008 *
+                maritime_weather_fog);
+        float maritime_terminal_fog =
+            smoothstep(
+                u_maritime_far_fog_range.x,
+                max(
+                    u_maritime_far_fog_range.y,
+                    u_maritime_far_fog_range.x +
+                        0.001),
+                maritime_plane_distance);
+        float maritime_fog =
+            clamp(
+                max(
+                    maritime_atmospheric_fog,
+                    maritime_terminal_fog),
+                0.0,
+                1.0);
+        vec3 maritime_haze =
+            mix(
+                u_fog_color,
+                u_distant_fog_color,
+                sqrt(
+                    maritime_fog));
+        maritime_ocean =
+            mix(
+                maritime_ocean,
+                maritime_haze,
+                maritime_fog);
+        maritime_ocean =
+            mix(
+                maritime_ocean,
+                u_distant_fog_color,
+                maritime_terminal_fog);
+        final_color =
+            mix(
+                final_color,
+                maritime_ocean,
+                maritime_blend);
+    }
+    frag_color = vec4(final_color, output_alpha);
 }
 )";
+    const std::string world_fragment_shader =
+        std::string {
+            world_fragment_shader_part1} +
+        world_fragment_shader_part2 +
+        world_fragment_shader_part3;
 
     static constexpr auto* creature_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec3 a_position;
@@ -8127,6 +9837,7 @@ uniform float u_shadow_split_distance;
 uniform float u_shadow_transition_width;
 uniform float u_player_light_strength;
 uniform float u_super_vision_strength;
+uniform vec3 u_local_light_radiance;
 uniform int u_modern_pipeline;
 
 out vec4 frag_color;
@@ -8301,7 +10012,25 @@ void main() {
     vec3 player_light =
         vec3(1.18, 0.78, 0.36) * u_player_light_strength * player_light_falloff * player_light_facing * player_light_night_boost;
     float local_light_facing = 0.62 + 0.38 * max(dot(normal, view_direction), 0.0);
-    vec3 local_light = vec3(1.16, 0.73, 0.34) * instance_block_light * local_light_facing * (0.34 + 0.42 * albedo);
+    vec3 local_light = vec3(0.0);
+    if (instance_block_light > 0.0001) {
+        // Je fais rebondir la lumière chaude sur la couleur propre du
+        // vêtement : le bleu, le rouge et le bordeaux restent distincts sous
+        // un même fanal. Je n'évalue la racine que pour un sujet éclairé.
+        vec3 modern_local_albedo =
+            min(
+                mix(albedo, sqrt(max(albedo, vec3(0.0))), 0.32) * 1.25,
+                vec3(1.0));
+        vec3 local_light_albedo =
+            u_modern_pipeline != 0
+                ? modern_local_albedo
+                : 0.34 + 0.42 * albedo;
+        local_light =
+            u_local_light_radiance *
+            instance_block_light *
+            local_light_facing *
+            local_light_albedo;
+    }
 
     float rim = pow(1.0 - max(dot(view_direction, normal), 0.0), 2.45);
     vec3 rim_light = mix(vec3(0.12, 0.10, 0.08), vec3(0.34, 0.50, 0.60), 1.0 - sky_mix);
@@ -8474,6 +10203,1099 @@ void main() {
 }
 )";
 
+    static constexpr auto* modern_ship_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in vec3 a_normal;
+layout(location = 3) in float a_face_shade;
+layout(location = 4) in float a_ao;
+layout(location = 5) in float a_sky_light;
+layout(location = 6) in float a_block_light;
+layout(location = 7) in float a_ship_material;
+layout(location = 8) in float a_wave_weight;
+
+uniform mat4 u_model;
+uniform mat4 u_view_projection;
+uniform mat4 u_light_view_projection;
+uniform vec3 u_camera_position;
+uniform float u_time_seconds;
+uniform float u_wind_strength;
+uniform float u_exterior_light_activation;
+
+out vec2 v_uv;
+out vec3 v_local_position;
+out vec3 v_world_position;
+out vec3 v_local_normal;
+out vec3 v_world_normal;
+out vec4 v_light_position;
+out float v_distance;
+out float v_face_shade;
+out float v_ao;
+out float v_sky_light;
+out float v_block_light;
+flat out int v_ship_material;
+
+vec3 sail_offset(vec3 local_position, int material_id, float weight) {
+    if (material_id != 9 || weight <= 0.0) {
+        return vec3(0.0);
+    }
+    float wind = clamp(u_wind_strength, 0.0, 1.0);
+    float flexibility = clamp(weight, 0.0, 1.0);
+    vec2 wind_direction = normalize(vec2(0.82, 0.57));
+    vec2 transverse = vec2(-wind_direction.y, wind_direction.x);
+    float phase =
+        dot(local_position.xz, vec2(0.17, 0.11)) +
+        local_position.y * 0.19 +
+        u_time_seconds * 1.24;
+    float billow = sin(phase) + sin(phase * 2.13 + 0.7) * 0.28;
+    float flutter = sin(phase * 3.71 - local_position.y * 0.31);
+    float amplitude = flexibility * (0.014 + wind * 0.082);
+    vec2 horizontal =
+        wind_direction * billow * amplitude +
+        transverse * flutter * amplitude * 0.24;
+    return vec3(
+        horizontal.x,
+        flutter * amplitude * 0.055,
+        horizontal.y);
+}
+
+void main() {
+    int material_id = int(floor(a_ship_material + 0.5));
+    vec3 local_position =
+        a_position +
+        sail_offset(
+            a_position,
+            material_id,
+            a_wave_weight);
+    vec4 world_position =
+        u_model *
+        vec4(local_position, 1.0);
+    mat3 normal_matrix =
+        transpose(
+            inverse(
+                mat3(u_model)));
+
+    v_uv = a_uv;
+    v_local_position = local_position;
+    v_world_position = world_position.xyz;
+    v_local_normal = normalize(a_normal);
+    v_world_normal =
+        normalize(
+            normal_matrix *
+            a_normal);
+    v_light_position =
+        u_light_view_projection *
+        world_position;
+    v_distance =
+        distance(
+            world_position.xyz,
+            u_camera_position);
+    v_face_shade = a_face_shade;
+    v_ao = a_ao;
+    v_sky_light = a_sky_light;
+    // Je déplace l'activation uniforme et l'exclusion du fanal au sommet :
+    // l'interpolation conserve la même courbe et allège chaque fragment.
+    float exterior_orientation =
+        0.40 +
+        0.60 *
+            smoothstep(
+                -0.20,
+                0.85,
+                a_normal.y);
+    v_block_light =
+        material_id != 7
+            ? a_block_light *
+                  u_exterior_light_activation *
+                  exterior_orientation
+            : 0.0;
+    v_ship_material = material_id;
+    gl_Position =
+        u_view_projection *
+        world_position;
+}
+)";
+
+    static constexpr auto* modern_ship_fragment_shader_part1 = R"(#version 330 core
+in vec2 v_uv;
+in vec3 v_local_position;
+in vec3 v_world_position;
+in vec3 v_local_normal;
+in vec3 v_world_normal;
+in vec4 v_light_position;
+in float v_distance;
+in float v_face_shade;
+in float v_ao;
+in float v_sky_light;
+in float v_block_light;
+flat in int v_ship_material;
+
+uniform sampler2DArray u_material_albedo;
+uniform sampler2DArray u_material_normal_height;
+uniform sampler2DArray u_material_orm_emission;
+uniform sampler2D u_shadow_map;
+uniform sampler2D u_shadow_map_far;
+uniform mat4 u_model;
+uniform mat4 u_light_view_projection_far;
+uniform vec3 u_camera_position;
+uniform vec3 u_camera_local_position;
+uniform vec3 u_camera_forward;
+uniform vec3 u_sun_direction;
+uniform vec3 u_sun_color;
+uniform vec3 u_ambient_color;
+uniform vec3 u_fog_color;
+uniform vec3 u_distant_fog_color;
+uniform vec3 u_night_tint_color;
+uniform float u_daylight_factor;
+uniform float u_sun_visibility;
+uniform float u_precipitation_intensity;
+uniform float u_storm_intensity;
+uniform float u_lightning_intensity;
+uniform vec3 u_exterior_light_radiance;
+uniform float u_material_detail_scale;
+uniform int u_shadows_enabled;
+uniform int u_shadow_cascade_count;
+uniform float u_shadow_split_distance;
+uniform float u_shadow_transition_width;
+uniform float u_time_seconds;
+uniform float u_material_layers[18];
+uniform int u_light_count;
+uniform vec4 u_light_position_radius[24];
+uniform vec4 u_light_color_intensity[24];
+uniform vec4 u_light_zone_min_spill[24];
+uniform vec4 u_light_zone_max_seed[24];
+uniform vec4 u_light_doorways[24];
+
+out vec4 frag_color;
+
+float saturate(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+
+vec3 safe_normalize(vec3 value, vec3 fallback) {
+    float length_squared = dot(value, value);
+    if (!(length_squared > 0.00000001) ||
+        any(isnan(value)) ||
+        any(isinf(value))) {
+        return fallback;
+    }
+    return value * inversesqrt(length_squared);
+}
+
+float material_scale(int material_id) {
+    if (material_id == 4) return 1.45;
+    if (material_id == 5 || material_id == 6 || material_id == 10) return 1.08;
+    if (material_id == 3 || material_id == 9 ||
+        material_id == 12 || material_id == 13 || material_id == 14) return 0.88;
+    if (material_id == 16) return 1.20;
+    if (material_id == 17) return 1.05;
+    return 0.70;
+}
+
+float normal_strength(int material_id) {
+    if (material_id == 3 || material_id == 9 ||
+        material_id == 12 || material_id == 13 || material_id == 14 ||
+        material_id == 16) return 0.34;
+    if (material_id == 5 || material_id == 6 || material_id == 10) return 0.58;
+    if (material_id == 8 || material_id == 17) return 0.18;
+    return 0.72;
+}
+
+float amelie_interior_half_width(vec3 local_position) {
+    bool bow_side =
+        local_position.z >= 0.0;
+    float extent =
+        bow_side
+            ? 36.50
+            : 35.50;
+    float width_loss =
+        bow_side
+            ? 7.35
+            : 2.00;
+    float exponent =
+        bow_side
+            ? 1.65
+            : 1.35;
+    float progression =
+        clamp(
+            abs(local_position.z) /
+                extent,
+            0.0,
+            1.0);
+    float outer_half_width =
+        max(
+            8.75 - width_loss,
+            8.75 -
+                width_loss *
+                    pow(
+                        progression,
+                        exponent));
+    float band_half_width =
+        outer_half_width;
+    if (local_position.y < -4.05) {
+        band_half_width =
+            max(
+                1.00,
+                outer_half_width -
+                    2.25);
+    } else if (
+        local_position.y < -1.05) {
+        band_half_width =
+            max(
+                1.25,
+                outer_half_width -
+                    1.05);
+    }
+    float wall_thickness =
+        min(
+            0.44,
+            max(
+                0.22,
+                band_half_width *
+                    0.36));
+    return
+        max(
+            0.48,
+            band_half_width -
+                wall_thickness);
+}
+
+float amelie_interior_mask(vec3 local_position) {
+    if (local_position.z < -35.50 ||
+        local_position.z > 36.50 ||
+        local_position.y < -5.08 ||
+        local_position.y > 3.70) {
+        return 0.0;
+    }
+    // Je reproduis ici l'enveloppe utilisée pour poser le mobilier : une
+    // lanterne ne peut donc jamais éclairer la face extérieure du bordé.
+    return
+        1.0 -
+        step(
+            amelie_interior_half_width(
+                local_position) +
+                0.06,
+            abs(
+                local_position.x));
+}
+
+float ordered_alpha_threshold(vec2 pixel_position) {
+    const float pattern[16] = float[](
+         0.0,  8.0,  2.0, 10.0,
+        12.0,  4.0, 14.0,  6.0,
+         3.0, 11.0,  1.0,  9.0,
+        15.0,  7.0, 13.0,  5.0);
+    ivec2 cell =
+        ivec2(
+            mod(
+                floor(pixel_position),
+                4.0));
+    return
+        (pattern[cell.x + cell.y * 4] + 0.5) /
+        16.0;
+}
+
+mat3 cotangent_frame(vec3 normal, vec3 position, vec2 uv) {
+    vec3 dp1 = dFdx(position);
+    vec3 dp2 = dFdy(position);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2_perpendicular = cross(dp2, normal);
+    vec3 dp1_perpendicular = cross(normal, dp1);
+    vec3 tangent =
+        dp2_perpendicular * duv1.x +
+        dp1_perpendicular * duv2.x;
+    vec3 bitangent =
+        dp2_perpendicular * duv1.y +
+        dp1_perpendicular * duv2.y;
+    float inverse_maximum =
+        inversesqrt(
+            max(
+                max(
+                    dot(tangent, tangent),
+                    dot(bitangent, bitangent)),
+                0.00000001));
+    return mat3(
+        tangent * inverse_maximum,
+        bitangent * inverse_maximum,
+        normal);
+}
+
+float shadow_sample(
+    vec3 projected,
+    vec2 offset,
+    vec2 texel,
+    float bias,
+    bool far_cascade) {
+    float depth =
+        far_cascade
+            ? texture(
+                  u_shadow_map_far,
+                  projected.xy +
+                      offset *
+                          texel).r
+            : texture(
+                  u_shadow_map,
+                  projected.xy +
+                      offset *
+                          texel).r;
+    return
+        projected.z - bias <= depth
+            ? 1.0
+            : 0.0;
+}
+
+float shadow_for_cascade(vec3 normal, bool far_cascade) {
+    vec4 light_position =
+        far_cascade
+            ? u_light_view_projection_far *
+                  vec4(v_world_position, 1.0)
+            : v_light_position;
+    vec3 projected =
+        light_position.xyz /
+        max(light_position.w, 0.0001);
+    projected =
+        projected * 0.5 +
+        0.5;
+    if (projected.z < 0.0 || projected.z > 1.0 ||
+        any(lessThan(projected.xy, vec2(0.0))) ||
+        any(greaterThan(projected.xy, vec2(1.0)))) {
+        return 1.0;
+    }
+    vec2 texel =
+        far_cascade
+            ? 1.0 /
+                  vec2(
+                      textureSize(
+                          u_shadow_map_far,
+                          0))
+            : 1.0 /
+                  vec2(
+                      textureSize(
+                          u_shadow_map,
+                          0));
+    float ndotl =
+        max(
+            dot(
+                normal,
+                normalize(
+                    u_sun_direction)),
+            0.0);
+    float bias =
+        max(
+            0.00062 *
+                (1.0 - ndotl),
+            0.00010) *
+        (far_cascade ? 1.35 : 1.0);
+    float visibility =
+        shadow_sample(projected, vec2(0.0), texel, bias, far_cascade) *
+        0.36;
+    visibility +=
+        shadow_sample(projected, vec2(1.0, 0.0), texel, bias, far_cascade) *
+        0.16;
+    visibility +=
+        shadow_sample(projected, vec2(-1.0, 0.0), texel, bias, far_cascade) *
+        0.16;
+    visibility +=
+        shadow_sample(projected, vec2(0.0, 1.0), texel, bias, far_cascade) *
+        0.16;
+    visibility +=
+        shadow_sample(projected, vec2(0.0, -1.0), texel, bias, far_cascade) *
+        0.16;
+    return visibility;
+}
+
+float shadow_visibility(vec3 normal) {
+    if (u_shadows_enabled == 0 ||
+        u_sun_visibility < 0.5) {
+        return 1.0;
+    }
+    if (u_shadow_cascade_count <= 1) {
+        return shadow_for_cascade(normal, false);
+    }
+    float view_depth =
+        max(
+            dot(
+                v_world_position -
+                    u_camera_position,
+                u_camera_forward),
+            0.0);
+    float half_width =
+        max(
+            u_shadow_transition_width,
+            0.0) *
+        0.5;
+    if (half_width <= 0.0001) {
+        return shadow_for_cascade(
+            normal,
+            view_depth >
+                u_shadow_split_distance);
+    }
+    float blend =
+        smoothstep(
+            u_shadow_split_distance -
+                half_width,
+            u_shadow_split_distance +
+                half_width,
+            view_depth);
+    return mix(
+        shadow_for_cascade(normal, false),
+        shadow_for_cascade(normal, true),
+        blend);
+}
+)";
+
+    static constexpr auto* modern_ship_fragment_shader_part2 = R"(
+void main() {
+    int material_id =
+        clamp(
+            v_ship_material,
+            0,
+            17);
+    float layer =
+        u_material_layers[material_id];
+    vec2 uv =
+        v_uv *
+        material_scale(material_id);
+    vec4 albedo_sample =
+        texture(
+            u_material_albedo,
+            vec3(uv, layer));
+    if (material_id == 8 &&
+        albedo_sample.a <
+            ordered_alpha_threshold(
+                gl_FragCoord.xy)) {
+        discard;
+    }
+    vec4 normal_height =
+        texture(
+            u_material_normal_height,
+            vec3(uv, layer));
+    vec4 orm =
+        texture(
+            u_material_orm_emission,
+            vec3(uv, layer));
+
+    vec3 geometric_normal =
+        safe_normalize(
+            v_world_normal,
+            vec3(0.0, 1.0, 0.0));
+    vec3 tangent_normal =
+        normal_height.xyz *
+            2.0 -
+        1.0;
+    tangent_normal.xy *=
+        normal_strength(material_id) *
+        clamp(
+            u_material_detail_scale,
+            0.0,
+            1.0);
+    tangent_normal =
+        safe_normalize(
+            tangent_normal,
+            vec3(0.0, 0.0, 1.0));
+    vec3 normal =
+        safe_normalize(
+            cotangent_frame(
+                geometric_normal,
+                v_world_position,
+                uv) *
+                tangent_normal,
+            geometric_normal);
+
+    vec3 albedo =
+        albedo_sample.rgb;
+    vec3 soft_bounce_albedo =
+        sqrt(
+            max(
+                albedo,
+                vec3(0.0)));
+    float occlusion =
+        mix(
+            0.26,
+            1.0,
+            saturate(
+                orm.r *
+                v_ao));
+    float roughness =
+        clamp(
+            orm.g,
+            0.08,
+            1.0);
+    float metallic =
+        saturate(
+            orm.b);
+    float emission =
+        saturate(
+            orm.a);
+    vec3 view_direction =
+        safe_normalize(
+            u_camera_position -
+                v_world_position,
+            geometric_normal);
+    vec3 sun_direction =
+        safe_normalize(
+            u_sun_direction,
+            vec3(0.0, 1.0, 0.0));
+    float daylight =
+        saturate(
+            u_daylight_factor);
+    float sky =
+        saturate(
+            v_sky_light);
+    float exposed_deck =
+        material_id == 1
+            ? smoothstep(
+                  0.78,
+                  0.98,
+                  sky)
+            : 0.0;
+    float wetness =
+        saturate(
+            u_precipitation_intensity) *
+        sky *
+        smoothstep(
+            -0.15,
+            0.85,
+            normal.y);
+    // Je réduis la rugosité du bois réellement mouillé avant de calculer les
+    // reflets. Le pont conserve ainsi sa matière sans rester artificiellement
+    // mat sous la pluie.
+    roughness =
+        mix(
+            roughness,
+            min(
+                roughness,
+                0.50),
+            wetness *
+                exposed_deck);
+    float enclosure =
+        1.0 -
+        smoothstep(
+            0.12,
+            0.58,
+            sky);
+    float ndotl =
+        max(
+            dot(normal, sun_direction),
+            0.0);
+    float shadow =
+        shadow_visibility(normal);
+    vec3 f0 =
+        mix(
+            vec3(0.04),
+            albedo,
+            metallic);
+    vec3 half_vector =
+        safe_normalize(
+            view_direction +
+                sun_direction,
+            normal);
+    float sun_specular =
+        pow(
+            max(
+                dot(normal, half_vector),
+                0.0),
+            mix(
+                10.0,
+                96.0,
+                1.0 - roughness));
+    vec3 ambient =
+        u_ambient_color *
+        albedo *
+        mix(
+            0.16,
+            0.72,
+            daylight) *
+        mix(
+            0.32,
+            1.0,
+            sky) *
+        occlusion;
+    vec3 enclosed_bounce =
+        soft_bounce_albedo *
+        mix(
+            vec3(0.055, 0.035, 0.022),
+            vec3(0.240, 0.140, 0.070),
+            daylight) *
+        enclosure *
+        mix(
+            0.55,
+            1.0,
+            occlusion);
+    vec3 color =
+        ambient +
+        enclosed_bounce +
+        (
+            albedo *
+                (1.0 - metallic) *
+                ndotl +
+            f0 *
+                sun_specular *
+                ndotl
+        ) *
+            u_sun_color *
+            shadow *
+            u_sun_visibility *
+            daylight *
+            mix(
+                0.10,
+                1.0,
+                smoothstep(
+                    0.12,
+                    0.80,
+                    sky));
+
+    float interior_hull_mask =
+        amelie_interior_mask(
+            v_local_position);
+    float room_enclosure = 0.0;
+    if (interior_hull_mask > 0.0) {
+        vec3 local_normal =
+            safe_normalize(
+                transpose(
+                    mat3(u_model)) *
+                    normal,
+                v_local_normal);
+        for (int index = 0;
+             index < 24;
+             ++index) {
+        if (index >= u_light_count) {
+            break;
+        }
+        vec4 position_radius =
+            u_light_position_radius[index];
+        vec4 color_intensity =
+            u_light_color_intensity[index];
+        vec4 zone_min_spill =
+            u_light_zone_min_spill[index];
+        vec4 zone_max_seed =
+            u_light_zone_max_seed[index];
+        vec4 doorways =
+            u_light_doorways[index];
+        float spill =
+            max(
+                zone_min_spill.w,
+                0.001);
+        if (v_local_position.x <
+                zone_min_spill.x ||
+            v_local_position.x >
+                zone_max_seed.x ||
+            v_local_position.y <
+                zone_min_spill.y ||
+            v_local_position.y >
+                zone_max_seed.y) {
+            continue;
+        }
+        float outside_distance =
+            0.0;
+        vec2 doorway =
+            vec2(0.0);
+        if (v_local_position.z <
+                zone_min_spill.z) {
+            outside_distance =
+                zone_min_spill.z -
+                v_local_position.z;
+            doorway =
+                doorways.xy;
+        } else if (
+            v_local_position.z >
+                zone_max_seed.z) {
+            outside_distance =
+                v_local_position.z -
+                zone_max_seed.z;
+            doorway =
+                doorways.zw;
+        }
+        if (outside_distance > spill ||
+            (outside_distance > 0.0 &&
+             (doorway.y <= 0.0 ||
+              abs(
+                  v_local_position.x -
+                  doorway.x) >
+                  doorway.y))) {
+            continue;
+        }
+        float zone_weight =
+            outside_distance > 0.0
+                ? 1.0 -
+                      smoothstep(
+                          0.0,
+                          spill,
+                          outside_distance)
+                : 1.0;
+        if (zone_weight <= 0.0001) {
+            continue;
+        }
+        // Je considère la pièce comme fermée dès que le fragment appartient à
+        // la zone de sa lanterne. Les bordés intérieurs touchent aussi la face
+        // extérieure de la coque : leur seule valeur de ciel ne suffit donc pas
+        // à les distinguer d'une ouverture.
+        room_enclosure =
+            max(
+                room_enclosure,
+                zone_weight);
+        vec3 to_light =
+            position_radius.xyz -
+            v_local_position;
+        float distance_to_light =
+            length(to_light);
+        float radius =
+            max(
+                position_radius.w,
+                0.01);
+        if (distance_to_light >= radius) {
+            continue;
+        }
+        float remaining =
+            saturate(
+                1.0 -
+                distance_to_light /
+                    radius);
+        float radial =
+            remaining *
+            remaining *
+            (3.0 -
+             2.0 *
+                 remaining);
+        float flicker_wave =
+            sin(
+                u_time_seconds *
+                    6.7 +
+                zone_max_seed.w *
+                    17.0) *
+                0.028 +
+            sin(
+                u_time_seconds *
+                    13.1 +
+                zone_max_seed.w *
+                    31.0) *
+                0.012;
+        float flicker =
+            1.0 +
+            flicker_wave;
+        vec3 light_direction =
+            distance_to_light >
+                    0.0001
+                ? to_light /
+                      distance_to_light
+                : local_normal;
+        float local_ndotl =
+            max(
+                dot(
+                    local_normal,
+                    light_direction),
+                0.0);
+        vec3 local_half =
+            safe_normalize(
+                light_direction +
+                    safe_normalize(
+                        u_camera_local_position -
+                            v_local_position,
+                        local_normal),
+                local_normal);
+        float local_specular =
+            pow(
+                max(
+                    dot(
+                        local_normal,
+                        local_half),
+                    0.0),
+                mix(
+                    10.0,
+                    72.0,
+                    1.0 - roughness));
+        float energy =
+            color_intensity.w *
+            zone_weight *
+            radial *
+            flicker *
+            1.30;
+        vec3 local_diffuse_albedo =
+            mix(
+                albedo,
+                soft_bounce_albedo,
+                0.24);
+        color +=
+            color_intensity.rgb *
+            energy *
+            (
+                local_diffuse_albedo *
+                    (0.30 +
+                     local_ndotl *
+                         0.70) *
+                    (1.0 - metallic) +
+                f0 *
+                    local_specular *
+                    local_ndotl
+            );
+        }
+    }
+
+    float interior_enclosure =
+        max(
+            enclosure,
+            room_enclosure);
+    float missing_interior_fill =
+        max(
+            room_enclosure -
+                enclosure,
+            0.0);
+    // Je restitue ici la lumière indirecte du bois et des cloisons. Ce faible
+    // rebond garde les bordés brun sombre au lieu de les confondre avec un trou
+    // noir, sans éclairer la coque extérieure ni traverser les portes.
+    color +=
+        soft_bounce_albedo *
+        mix(
+            vec3(0.038, 0.032, 0.026),
+            vec3(0.125, 0.094, 0.066),
+            daylight) *
+        missing_interior_fill *
+        mix(
+            0.62,
+            1.0,
+            occlusion);
+
+    float nocturnal_deck_bounce =
+        exposed_deck *
+        (1.0 - daylight) *
+        mix(
+            0.72,
+            1.0,
+            saturate(
+                u_storm_intensity));
+    // Je garde un très faible rebond froid sur le seul chêne exposé. Il rend
+    // les lames lisibles entre deux fanaux sans éclaircir la coque, les voiles
+    // ou les ponts fermés.
+    color +=
+        soft_bounce_albedo *
+        vec3(0.026, 0.036, 0.052) *
+        nocturnal_deck_bounce *
+        occlusion;
+
+    color +=
+        albedo *
+        emission *
+        vec3(1.34, 0.70, 0.24);
+    if (material_id == 7) {
+        color +=
+            vec3(1.24, 0.58, 0.16) *
+            (0.55 +
+             emission *
+                 0.85);
+    }
+    color +=
+        albedo *
+        vec3(0.62, 0.72, 1.0) *
+        saturate(
+            u_lightning_intensity) *
+        sky *
+        0.35;
+    color +=
+        u_night_tint_color *
+        (1.0 - daylight) *
+        0.025 *
+        mix(
+            1.0,
+            0.12,
+            interior_enclosure);
+
+    color =
+        mix(
+            color,
+            color *
+                vec3(0.68, 0.75, 0.84),
+            wetness *
+                (
+                    0.12 +
+                    saturate(
+                        u_storm_intensity) *
+                        0.10
+                ));
+    // Je reçois déjà une valeur finie et bornée depuis la cuisson puis le
+    // sommet ; l'interpolation ne peut pas sortir de cet intervalle.
+    float exterior_light =
+        v_block_light;
+    if (exterior_light > 0.0001) {
+        vec3 exterior_light_albedo =
+            mix(
+                albedo,
+                soft_bounce_albedo,
+                0.30);
+        float wet_sheen = 0.0;
+        if (exposed_deck > 0.0001 &&
+            wetness > 0.0001) {
+            float grazing_base =
+                1.0 -
+                max(
+                    dot(
+                        normal,
+                        view_direction),
+                    0.0);
+            // Je développe le cube afin de ne pas payer un pow par fragment du
+            // pont pendant la tempête, sans changer la courbe du reflet.
+            float grazing =
+                grazing_base *
+                grazing_base *
+                grazing_base;
+            wet_sheen =
+                wetness *
+                (1.0 - roughness) *
+                (
+                    0.045 +
+                    grazing *
+                        0.095
+                );
+        }
+        // Je module la lumière chaude par l'albédo : le bois, les cordages et
+        // le métal gardent leur couleur propre, tandis que le fanal émissif
+        // n'est jamais éclairé une seconde fois par sa propre cuisson.
+        color +=
+            u_exterior_light_radiance *
+            exterior_light *
+            (
+                exterior_light_albedo *
+                    (1.0 - metallic) *
+                    1.08 +
+                f0 *
+                    wet_sheen
+            );
+    }
+    float fog =
+        1.0 -
+        exp(
+            -v_distance *
+             v_distance *
+             0.000008 *
+             (
+                 1.0 +
+                 saturate(
+                     u_storm_intensity) *
+                     0.38
+             ));
+    vec3 fog_color =
+        mix(
+            u_fog_color,
+            u_distant_fog_color,
+            saturate(fog));
+    frag_color =
+        vec4(
+            mix(
+                max(color, vec3(0.0)),
+                fog_color,
+                saturate(fog)),
+            1.0);
+}
+)";
+    const std::string modern_ship_fragment_shader =
+        std::string {
+            modern_ship_fragment_shader_part1} +
+        modern_ship_fragment_shader_part2;
+
+    static constexpr auto* modern_ship_shadow_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec2 a_uv;
+layout(location = 7) in float a_ship_material;
+layout(location = 8) in float a_wave_weight;
+
+uniform mat4 u_model;
+uniform mat4 u_light_view_projection;
+uniform float u_time_seconds;
+uniform float u_wind_strength;
+
+out vec2 v_uv;
+flat out int v_ship_material;
+
+vec3 sail_offset(vec3 local_position, int material_id, float weight) {
+    if (material_id != 9 || weight <= 0.0) {
+        return vec3(0.0);
+    }
+    float wind = clamp(u_wind_strength, 0.0, 1.0);
+    float flexibility = clamp(weight, 0.0, 1.0);
+    vec2 wind_direction = normalize(vec2(0.82, 0.57));
+    vec2 transverse = vec2(-wind_direction.y, wind_direction.x);
+    float phase =
+        dot(local_position.xz, vec2(0.17, 0.11)) +
+        local_position.y * 0.19 +
+        u_time_seconds * 1.24;
+    float billow = sin(phase) + sin(phase * 2.13 + 0.7) * 0.28;
+    float flutter = sin(phase * 3.71 - local_position.y * 0.31);
+    float amplitude = flexibility * (0.014 + wind * 0.082);
+    vec2 horizontal =
+        wind_direction * billow * amplitude +
+        transverse * flutter * amplitude * 0.24;
+    return vec3(
+        horizontal.x,
+        flutter * amplitude * 0.055,
+        horizontal.y);
+}
+
+void main() {
+    int material_id =
+        int(
+            floor(
+                a_ship_material +
+                0.5));
+    vec3 local_position =
+        a_position +
+        sail_offset(
+            a_position,
+            material_id,
+            a_wave_weight);
+    gl_Position =
+        u_light_view_projection *
+        u_model *
+        vec4(local_position, 1.0);
+    v_uv = a_uv;
+    v_ship_material = material_id;
+}
+)";
+
+    static constexpr auto* modern_ship_shadow_fragment_shader = R"(#version 330 core
+in vec2 v_uv;
+flat in int v_ship_material;
+
+uniform sampler2DArray u_material_albedo;
+uniform float u_material_layers[18];
+
+float ordered_alpha_threshold(vec2 pixel_position) {
+    const float pattern[16] = float[](
+         0.0,  8.0,  2.0, 10.0,
+        12.0,  4.0, 14.0,  6.0,
+         3.0, 11.0,  1.0,  9.0,
+        15.0,  7.0, 13.0,  5.0);
+    ivec2 cell =
+        ivec2(
+            mod(
+                floor(pixel_position),
+                4.0));
+    return
+        (pattern[cell.x + cell.y * 4] + 0.5) /
+        16.0;
+}
+
+void main() {
+    if (v_ship_material != 8) {
+        return;
+    }
+    int material_id =
+        clamp(
+            v_ship_material,
+            0,
+            17);
+    float alpha =
+        texture(
+            u_material_albedo,
+            vec3(
+                v_uv,
+                u_material_layers[material_id])).a;
+    if (alpha <
+        ordered_alpha_threshold(
+            gl_FragCoord.xy)) {
+        discard;
+    }
+}
+)";
+
     static constexpr auto* hud_vertex_shader = R"(#version 330 core
 layout(location = 0) in vec2 a_position;
 layout(location = 1) in vec2 a_uv;
@@ -8554,7 +11376,8 @@ void main() {
 }
 )";
 
-    static constexpr auto* sky_fragment_shader = kSkyFragmentShaderSource;
+    const auto* sky_fragment_shader =
+        kSkyFragmentShaderSource.c_str();
 
     static constexpr auto* glow_extract_fragment_shader = R"(#version 330 core
 in vec2 v_uv;
@@ -8813,6 +11636,13 @@ uniform int u_resolve_only;
 uniform float u_storm_intensity;
 uniform float u_lightning_intensity;
 uniform float u_weather_exposure;
+uniform float u_projection_far_distance;
+uniform int u_maritime_submerged;
+uniform float u_maritime_submersion_depth;
+uniform float u_maritime_submersion_blend;
+uniform float u_water_surface_detail;
+uniform float u_time_seconds;
+uniform float u_daylight_factor;
 
 out vec4 frag_color;
 
@@ -8906,7 +11736,10 @@ vec3 aces_fitted(vec3 color) {
 
 float linearize_depth(float depth_sample) {
     const float near_plane = 0.1;
-    const float far_plane = 320.0;
+    float far_plane =
+        max(
+            u_projection_far_distance,
+            near_plane + 0.001);
     float z = depth_sample * 2.0 - 1.0;
     return (2.0 * near_plane * far_plane) / max(far_plane + near_plane - z * (far_plane - near_plane), 0.0001);
 }
@@ -8926,12 +11759,158 @@ vec3 apply_palette_grade(vec3 color, float storm, float lightning) {
     return mix(color, graded, clamp(grade_strength, 0.0, 0.46));
 }
 
+vec2 maritime_distorted_uv(
+    vec2 uv,
+    vec2 texel
+) {
+    if (u_maritime_submerged == 0) {
+        return uv;
+    }
+    float detail =
+        clamp(
+            u_water_surface_detail,
+            0.0,
+            1.0);
+    float blend =
+        clamp(
+            u_maritime_submersion_blend,
+            0.0,
+            1.0);
+    vec2 shimmer =
+        vec2(
+            sin(
+                uv.y * 37.0 +
+                u_time_seconds * 1.17),
+            cos(
+                uv.x * 31.0 -
+                u_time_seconds * 0.93));
+    return
+        clamp(
+            uv +
+                shimmer *
+                    texel *
+                    detail *
+                    blend *
+                    1.35,
+            texel * 0.5,
+            vec2(1.0) - texel * 0.5);
+}
+
+vec3 apply_maritime_submersion(
+    vec3 scene,
+    vec2 scene_uv
+) {
+    if (u_maritime_submerged == 0) {
+        return scene;
+    }
+
+    float blend =
+        clamp(
+            u_maritime_submersion_blend,
+            0.0,
+            1.0);
+    float depth_sample =
+        texture(
+            u_scene_depth,
+            scene_uv)
+            .r;
+    float optical_distance =
+        depth_sample_is_usable(depth_sample)
+            ? linearize_depth(depth_sample)
+            : u_projection_far_distance * 0.12;
+    optical_distance =
+        clamp(
+            optical_distance,
+            0.0,
+            48.0);
+    vec3 absorption =
+        vec3(0.120, 0.055, 0.025);
+    float daylight =
+        clamp(
+            u_daylight_factor,
+            0.0,
+            1.0);
+    float storm =
+        clamp(
+            u_storm_intensity,
+            0.0,
+            1.0);
+    float visibility_loss =
+        mix(1.35, 1.0, daylight) *
+        mix(1.0, 1.38, storm);
+    vec3 transmittance =
+        exp(
+            -absorption *
+            optical_distance *
+            mix(0.32, 0.58, blend) *
+            visibility_loss);
+    float camera_depth =
+        clamp(
+            u_maritime_submersion_depth / 24.0,
+            0.0,
+            1.0);
+    vec3 scattering_color =
+        mix(
+            vec3(0.018, 0.125, 0.155),
+            vec3(0.010, 0.050, 0.072),
+            clamp(
+                camera_depth * 0.72 +
+                    storm * 0.52,
+                0.0,
+                1.0)) *
+        mix(0.52, 1.0, daylight);
+    vec3 submerged =
+        scene * transmittance +
+        scattering_color *
+            (vec3(1.0) - transmittance) *
+            (0.72 + 0.28 * blend);
+
+    float shaft_pattern =
+        0.5 +
+        0.5 *
+            sin(
+                scene_uv.x * 73.0 +
+                scene_uv.y * 19.0 +
+                u_time_seconds * 0.31);
+    float shaft_quality =
+        smoothstep(
+            0.84,
+            0.90,
+            clamp(
+                u_water_surface_detail,
+                0.0,
+                1.0));
+    float shaft =
+        pow(shaft_pattern, 7.0) *
+        daylight *
+        (1.0 - storm) *
+        shaft_quality *
+        exp(-camera_depth * 2.2) *
+        0.018;
+    submerged +=
+        vec3(0.20, 0.38, 0.34) *
+        shaft;
+    return
+        mix(
+            scene,
+            submerged,
+            blend);
+}
+
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(u_scene_texture, 0));
+    vec2 scene_uv =
+        maritime_distorted_uv(
+            v_uv,
+            texel);
     vec3 scene =
         u_resolve_only != 0
-            ? sample_scene(v_uv)
-            : sample_scene_fxaa(v_uv, texel);
+            ? sample_scene(scene_uv)
+            : sample_scene_fxaa(scene_uv, texel);
+    scene =
+        apply_maritime_submersion(
+            scene,
+            scene_uv);
 
     if (u_resolve_only != 0) {
         // Même lorsque les effets optionnels sont désactivés, la cible de la
@@ -9087,9 +12066,303 @@ void main() {
 }
 )";
 
+    static constexpr auto* sea_horizon_vertex_shader = R"(#version 330 core
+layout(location = 0) in vec3 a_position;
+layout(location = 1) in vec3 a_normal;
+layout(location = 2) in float a_block_id;
+
+uniform mat4 u_view_projection;
+
+out vec3 v_normal;
+out vec3 v_albedo;
+out vec3 v_world_position;
+
+vec3 surface_albedo(float block_id) {
+    if (abs(block_id - 6.0) < 0.5) {
+        return vec3(0.055, 0.20, 0.32);
+    }
+    if (abs(block_id - 4.0) < 0.5) {
+        return vec3(0.52, 0.38, 0.19);
+    }
+    if (abs(block_id - 3.0) < 0.5 ||
+        abs(block_id - 8.0) < 0.5 ||
+        abs(block_id - 10.0) < 0.5 ||
+        abs(block_id - 11.0) < 0.5) {
+        return vec3(0.27, 0.29, 0.30);
+    }
+    if (abs(block_id - 12.0) < 0.5) {
+        return vec3(0.74, 0.79, 0.82);
+    }
+    if (abs(block_id - 5.0) < 0.5 ||
+        abs(block_id - 9.0) < 0.5 ||
+        abs(block_id - 13.0) < 0.5) {
+        return vec3(0.25, 0.14, 0.065);
+    }
+    return vec3(0.18, 0.34, 0.105);
+}
+
+void main() {
+    vec4 world_position =
+        vec4(
+            a_position,
+            1.0);
+    gl_Position =
+        u_view_projection *
+        world_position;
+    v_normal =
+        normalize(
+            a_normal);
+    v_albedo =
+        surface_albedo(
+            a_block_id);
+    v_world_position =
+        world_position.xyz;
+}
+)";
+
+    static constexpr auto* sea_horizon_fragment_shader = R"(#version 330 core
+in vec3 v_normal;
+in vec3 v_albedo;
+in vec3 v_world_position;
+
+uniform vec3 u_camera_position;
+uniform vec3 u_sun_direction;
+uniform vec3 u_sun_color;
+uniform vec3 u_ambient_color;
+uniform vec3 u_fog_color;
+uniform vec3 u_distant_fog_color;
+uniform float u_daylight_factor;
+uniform float u_precipitation_intensity;
+uniform float u_storm_intensity;
+uniform float u_lightning_intensity;
+uniform vec2 u_far_fog_range;
+uniform float u_sea_level;
+uniform vec2 u_detail_transition_range;
+uniform int u_transition_pass;
+
+out vec4 frag_color;
+
+float ordered_transition_threshold(vec2 pixel_position) {
+    const float pattern[16] = float[](
+         0.0,  8.0,  2.0, 10.0,
+        12.0,  4.0, 14.0,  6.0,
+         3.0, 11.0,  1.0,  9.0,
+        15.0,  7.0, 13.0,  5.0);
+    ivec2 cell =
+        ivec2(
+            mod(
+                floor(pixel_position),
+                4.0));
+    return
+        (pattern[cell.x + cell.y * 4] +
+         0.5) /
+        16.0;
+}
+
+void main() {
+    float v_distance =
+        distance(
+            v_world_position,
+            u_camera_position);
+    float horizontal_distance =
+        length(
+            v_world_position.xz -
+            u_camera_position.xz);
+    // Sous l'eau, le vrai fond proche se fond dans son volume marin. Afficher
+    // les silhouettes émergées du proxy à travers ce volume recréerait une
+    // bande d'îles irréaliste au milieu de l'eau.
+    if (u_camera_position.y <
+        u_sea_level) {
+        discard;
+    }
+    bool submerged =
+        v_world_position.y <
+            u_sea_level - 0.25;
+    // Je ne dessine jamais de fond marin proxy. Seule la frange de plage
+    // traversant le niveau de la mer subsiste, sans plaque visible sous l'eau.
+    if (submerged) {
+        discard;
+    }
+    if (!submerged &&
+        u_transition_pass != 0) {
+        if (u_detail_transition_range.y <=
+            u_detail_transition_range.x) {
+            discard;
+        }
+        float proxy_coverage =
+            smoothstep(
+                u_detail_transition_range.x,
+                u_detail_transition_range.y,
+                horizontal_distance);
+        float dither_threshold =
+            ordered_transition_threshold(
+                gl_FragCoord.xy);
+        if (proxy_coverage <= dither_threshold) {
+            discard;
+        }
+    }
+
+    vec3 normal =
+        normalize(
+            v_normal);
+    float back_face =
+        gl_FrontFacing
+            ? 0.0
+            : 1.0;
+    normal =
+        mix(
+            normal,
+            -normal,
+            back_face);
+    vec3 sun_direction =
+        normalize(
+            u_sun_direction);
+    float daylight =
+        clamp(
+            u_daylight_factor,
+            0.0,
+            1.0);
+    float direct =
+        max(
+            dot(
+                normal,
+                sun_direction),
+            0.0) *
+        daylight;
+    float upward =
+        smoothstep(
+            -0.25,
+            1.0,
+            normal.y);
+    vec3 lighting =
+        u_ambient_color *
+            mix(
+                0.58,
+                0.94,
+                upward) +
+        u_sun_color *
+            direct *
+            0.78;
+    vec3 color =
+        v_albedo *
+        lighting;
+    if (submerged) {
+        float water_column =
+            max(
+                u_sea_level -
+                    v_world_position.y,
+                0.0);
+        color *=
+            mix(
+                vec3(0.68, 0.88, 0.90),
+                vec3(0.42, 0.68, 0.74),
+                smoothstep(
+                    3.0,
+                    30.0,
+                    water_column));
+    }
+    color *=
+        mix(
+            1.0,
+            0.46,
+            back_face);
+    color +=
+        v_albedo *
+        vec3(0.62, 0.72, 1.0) *
+        clamp(
+            u_lightning_intensity,
+            0.0,
+            1.0) *
+        0.22;
+
+    float weather_fog =
+        1.0 +
+        clamp(
+            u_precipitation_intensity,
+            0.0,
+            1.0) *
+            0.42 +
+        clamp(
+            u_storm_intensity,
+            0.0,
+            1.0) *
+            0.38;
+    float atmospheric_fog =
+        1.0 -
+        exp(
+            -v_distance *
+            v_distance *
+            0.000008 *
+            weather_fog);
+    float terminal_fog =
+        smoothstep(
+            u_far_fog_range.x,
+            max(
+                u_far_fog_range.y,
+                u_far_fog_range.x +
+                    0.001),
+            v_distance);
+    float fog =
+        clamp(
+            max(
+                atmospheric_fog,
+                terminal_fog),
+            0.0,
+            1.0);
+    if (submerged) {
+        // Je fonds le relief marin grossier bien avant son bord géométrique :
+        // aucune ligne de chunks ne peut apparaître dans l'eau profonde.
+        fog =
+            max(
+                fog,
+                smoothstep(
+                    96.0,
+                    192.0,
+                    horizontal_distance));
+    }
+    vec3 fog_color =
+        mix(
+            u_fog_color,
+            u_distant_fog_color,
+            sqrt(
+                fog));
+    if (submerged) {
+        fog_color =
+            mix(
+                vec3(0.012, 0.060, 0.085),
+                u_distant_fog_color,
+                sqrt(
+                    fog));
+    }
+    frag_color =
+        vec4(
+            mix(
+                color,
+                fog_color,
+                fog),
+            1.0);
+}
+)";
+
     world_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, world_vertex_shader),
-        compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            world_fragment_shader.c_str()));
+    modern_water_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            kModernWaterVertexShaderSource.data()),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            modern_water_fragment_shader_source().c_str()));
+    sea_horizon_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            sea_horizon_vertex_shader),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            sea_horizon_fragment_shader));
     modern_terrain_program_ = link_program(
         compile_shader(
             GL_VERTEX_SHADER,
@@ -9111,9 +12384,25 @@ void main() {
         compile_shader(
             GL_FRAGMENT_SHADER,
             kModernTerrainShadowFragmentShaderSource.data()));
+    modern_ship_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            modern_ship_vertex_shader),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            modern_ship_fragment_shader.c_str()));
+    modern_ship_shadow_program_ = link_program(
+        compile_shader(
+            GL_VERTEX_SHADER,
+            modern_ship_shadow_vertex_shader),
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            modern_ship_shadow_fragment_shader));
     item_drop_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, item_drop_vertex_shader),
-        compile_shader(GL_FRAGMENT_SHADER, world_fragment_shader));
+        compile_shader(
+            GL_FRAGMENT_SHADER,
+            world_fragment_shader.c_str()));
     precipitation_program_ = link_program(
         compile_shader(GL_VERTEX_SHADER, precipitation_vertex_shader),
         compile_shader(GL_FRAGMENT_SHADER, precipitation_fragment_shader));
@@ -9181,6 +12470,10 @@ void main() {
         glGetUniformLocation(modern_terrain_program_, "u_daylight_factor");
     modern_terrain_uniforms_.sun_visibility =
         glGetUniformLocation(modern_terrain_program_, "u_sun_visibility");
+    modern_terrain_uniforms_.cloud_intensity =
+        glGetUniformLocation(modern_terrain_program_, "u_cloud_intensity");
+    modern_terrain_uniforms_.overcast_intensity =
+        glGetUniformLocation(modern_terrain_program_, "u_overcast_intensity");
     modern_terrain_uniforms_.precipitation_intensity =
         glGetUniformLocation(modern_terrain_program_, "u_precipitation_intensity");
     modern_terrain_uniforms_.storm_intensity =
@@ -9215,6 +12508,26 @@ void main() {
         glGetUniformLocation(
             modern_terrain_program_,
             "u_shadow_transition_width");
+    modern_terrain_uniforms_.maritime_horizon_enabled =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_maritime_horizon_enabled");
+    modern_terrain_uniforms_.maritime_detail_transition_range =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_maritime_detail_transition_range");
+    modern_terrain_uniforms_.maritime_sea_level =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_maritime_sea_level");
+    modern_terrain_uniforms_.maritime_submersion_active =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_maritime_submersion_active");
+    modern_terrain_uniforms_.time_seconds =
+        glGetUniformLocation(
+            modern_terrain_program_,
+            "u_time_seconds");
 
     const auto load_modern_surface_uniforms =
         [](GLuint program, ModernTerrainUniformLocations& uniforms) {
@@ -9247,6 +12560,10 @@ void main() {
                 glGetUniformLocation(program, "u_daylight_factor");
             uniforms.sun_visibility =
                 glGetUniformLocation(program, "u_sun_visibility");
+            uniforms.cloud_intensity =
+                glGetUniformLocation(program, "u_cloud_intensity");
+            uniforms.overcast_intensity =
+                glGetUniformLocation(program, "u_overcast_intensity");
             uniforms.precipitation_intensity =
                 glGetUniformLocation(program, "u_precipitation_intensity");
             uniforms.storm_intensity =
@@ -9281,6 +12598,26 @@ void main() {
                 glGetUniformLocation(
                     program,
                     "u_shadow_transition_width");
+            uniforms.maritime_horizon_enabled =
+                glGetUniformLocation(
+                    program,
+                    "u_maritime_horizon_enabled");
+            uniforms.maritime_detail_transition_range =
+                glGetUniformLocation(
+                    program,
+                    "u_maritime_detail_transition_range");
+            uniforms.maritime_sea_level =
+                glGetUniformLocation(
+                    program,
+                    "u_maritime_sea_level");
+            uniforms.maritime_submersion_active =
+                glGetUniformLocation(
+                    program,
+                    "u_maritime_submersion_active");
+            uniforms.time_seconds =
+                glGetUniformLocation(
+                    program,
+                    "u_time_seconds");
         };
     load_modern_surface_uniforms(
         modern_architecture_program_,
@@ -9296,7 +12633,121 @@ void main() {
             modern_terrain_shadow_program_,
             "u_material_albedo");
 
-    const std::array<GLint, 31> modern_terrain_uniform_locations {{
+    const auto load_ship_uniforms =
+        [](GLuint program,
+           ModernShipUniformLocations& uniforms) {
+            uniforms.model =
+                glGetUniformLocation(program, "u_model");
+            uniforms.view_projection =
+                glGetUniformLocation(program, "u_view_projection");
+            uniforms.light_view_projection =
+                glGetUniformLocation(program, "u_light_view_projection");
+            uniforms.light_view_projection_far =
+                glGetUniformLocation(program, "u_light_view_projection_far");
+            uniforms.camera_position =
+                glGetUniformLocation(program, "u_camera_position");
+            uniforms.camera_local_position =
+                glGetUniformLocation(program, "u_camera_local_position");
+            uniforms.camera_forward =
+                glGetUniformLocation(program, "u_camera_forward");
+            uniforms.sun_direction =
+                glGetUniformLocation(program, "u_sun_direction");
+            uniforms.sun_color =
+                glGetUniformLocation(program, "u_sun_color");
+            uniforms.ambient_color =
+                glGetUniformLocation(program, "u_ambient_color");
+            uniforms.fog_color =
+                glGetUniformLocation(program, "u_fog_color");
+            uniforms.distant_fog_color =
+                glGetUniformLocation(program, "u_distant_fog_color");
+            uniforms.night_tint_color =
+                glGetUniformLocation(program, "u_night_tint_color");
+            uniforms.daylight_factor =
+                glGetUniformLocation(program, "u_daylight_factor");
+            uniforms.sun_visibility =
+                glGetUniformLocation(program, "u_sun_visibility");
+            uniforms.precipitation_intensity =
+                glGetUniformLocation(program, "u_precipitation_intensity");
+            uniforms.storm_intensity =
+                glGetUniformLocation(program, "u_storm_intensity");
+            uniforms.exterior_light_activation =
+                glGetUniformLocation(
+                    program,
+                    "u_exterior_light_activation");
+            uniforms.exterior_light_radiance =
+                glGetUniformLocation(
+                    program,
+                    "u_exterior_light_radiance");
+            uniforms.lightning_intensity =
+                glGetUniformLocation(program, "u_lightning_intensity");
+            uniforms.material_detail_scale =
+                glGetUniformLocation(program, "u_material_detail_scale");
+            uniforms.shadows_enabled =
+                glGetUniformLocation(program, "u_shadows_enabled");
+            uniforms.material_albedo =
+                glGetUniformLocation(program, "u_material_albedo");
+            uniforms.material_normal_height =
+                glGetUniformLocation(program, "u_material_normal_height");
+            uniforms.material_orm_emission =
+                glGetUniformLocation(program, "u_material_orm_emission");
+            uniforms.shadow_map =
+                glGetUniformLocation(program, "u_shadow_map");
+            uniforms.shadow_map_far =
+                glGetUniformLocation(program, "u_shadow_map_far");
+            uniforms.shadow_cascade_count =
+                glGetUniformLocation(program, "u_shadow_cascade_count");
+            uniforms.shadow_split_distance =
+                glGetUniformLocation(program, "u_shadow_split_distance");
+            uniforms.shadow_transition_width =
+                glGetUniformLocation(program, "u_shadow_transition_width");
+            uniforms.time_seconds =
+                glGetUniformLocation(program, "u_time_seconds");
+            uniforms.wind_strength =
+                glGetUniformLocation(program, "u_wind_strength");
+            uniforms.material_layers =
+                glGetUniformLocation(program, "u_material_layers[0]");
+            uniforms.light_count =
+                glGetUniformLocation(program, "u_light_count");
+            uniforms.light_position_radius =
+                glGetUniformLocation(program, "u_light_position_radius[0]");
+            uniforms.light_color_intensity =
+                glGetUniformLocation(program, "u_light_color_intensity[0]");
+            uniforms.light_zone_min_spill =
+                glGetUniformLocation(program, "u_light_zone_min_spill[0]");
+            uniforms.light_zone_max_seed =
+                glGetUniformLocation(program, "u_light_zone_max_seed[0]");
+            uniforms.light_doorways =
+                glGetUniformLocation(program, "u_light_doorways[0]");
+        };
+    load_ship_uniforms(
+        modern_ship_program_,
+        modern_ship_uniforms_);
+    modern_ship_shadow_uniforms_.model =
+        glGetUniformLocation(
+            modern_ship_shadow_program_,
+            "u_model");
+    modern_ship_shadow_uniforms_.light_view_projection =
+        glGetUniformLocation(
+            modern_ship_shadow_program_,
+            "u_light_view_projection");
+    modern_ship_shadow_uniforms_.material_albedo =
+        glGetUniformLocation(
+            modern_ship_shadow_program_,
+            "u_material_albedo");
+    modern_ship_shadow_uniforms_.material_layers =
+        glGetUniformLocation(
+            modern_ship_shadow_program_,
+            "u_material_layers[0]");
+    modern_ship_shadow_uniforms_.time_seconds =
+        glGetUniformLocation(
+            modern_ship_shadow_program_,
+            "u_time_seconds");
+    modern_ship_shadow_uniforms_.wind_strength =
+        glGetUniformLocation(
+            modern_ship_shadow_program_,
+            "u_wind_strength");
+
+    const std::array<GLint, 38> modern_terrain_uniform_locations {{
         modern_terrain_uniforms_.model,
         modern_terrain_uniforms_.view_projection,
         modern_terrain_uniforms_.light_view_projection,
@@ -9311,6 +12762,8 @@ void main() {
         modern_terrain_uniforms_.night_tint_color,
         modern_terrain_uniforms_.daylight_factor,
         modern_terrain_uniforms_.sun_visibility,
+        modern_terrain_uniforms_.cloud_intensity,
+        modern_terrain_uniforms_.overcast_intensity,
         modern_terrain_uniforms_.precipitation_intensity,
         modern_terrain_uniforms_.storm_intensity,
         modern_terrain_uniforms_.lightning_intensity,
@@ -9325,6 +12778,11 @@ void main() {
         modern_terrain_uniforms_.shadow_cascade_count,
         modern_terrain_uniforms_.shadow_split_distance,
         modern_terrain_uniforms_.shadow_transition_width,
+        modern_terrain_uniforms_.maritime_horizon_enabled,
+        modern_terrain_uniforms_.maritime_detail_transition_range,
+        modern_terrain_uniforms_.maritime_sea_level,
+        modern_terrain_uniforms_.maritime_submersion_active,
+        modern_terrain_uniforms_.time_seconds,
         modern_terrain_shadow_uniforms_.model,
         modern_terrain_shadow_uniforms_.light_view_projection,
         modern_terrain_shadow_uniforms_.material_albedo,
@@ -9339,7 +12797,7 @@ void main() {
             "Modern terrain shader is missing one or more required uniforms");
     }
 
-    const std::array<GLint, 28> modern_architecture_uniform_locations {{
+    const std::array<GLint, 35> modern_architecture_uniform_locations {{
         modern_architecture_uniforms_.model,
         modern_architecture_uniforms_.view_projection,
         modern_architecture_uniforms_.light_view_projection,
@@ -9354,6 +12812,8 @@ void main() {
         modern_architecture_uniforms_.night_tint_color,
         modern_architecture_uniforms_.daylight_factor,
         modern_architecture_uniforms_.sun_visibility,
+        modern_architecture_uniforms_.cloud_intensity,
+        modern_architecture_uniforms_.overcast_intensity,
         modern_architecture_uniforms_.precipitation_intensity,
         modern_architecture_uniforms_.storm_intensity,
         modern_architecture_uniforms_.lightning_intensity,
@@ -9368,6 +12828,11 @@ void main() {
         modern_architecture_uniforms_.shadow_cascade_count,
         modern_architecture_uniforms_.shadow_split_distance,
         modern_architecture_uniforms_.shadow_transition_width,
+        modern_architecture_uniforms_.maritime_horizon_enabled,
+        modern_architecture_uniforms_.maritime_detail_transition_range,
+        modern_architecture_uniforms_.maritime_sea_level,
+        modern_architecture_uniforms_.maritime_submersion_active,
+        modern_architecture_uniforms_.time_seconds,
     }};
     if (std::any_of(
             modern_architecture_uniform_locations.begin(),
@@ -9377,6 +12842,63 @@ void main() {
             })) {
         throw std::runtime_error(
             "Modern architecture shader is missing one or more required uniforms");
+    }
+
+    const std::array<GLint, 44> modern_ship_uniform_locations {{
+        modern_ship_uniforms_.model,
+        modern_ship_uniforms_.view_projection,
+        modern_ship_uniforms_.light_view_projection,
+        modern_ship_uniforms_.light_view_projection_far,
+        modern_ship_uniforms_.camera_position,
+        modern_ship_uniforms_.camera_local_position,
+        modern_ship_uniforms_.camera_forward,
+        modern_ship_uniforms_.sun_direction,
+        modern_ship_uniforms_.sun_color,
+        modern_ship_uniforms_.ambient_color,
+        modern_ship_uniforms_.fog_color,
+        modern_ship_uniforms_.distant_fog_color,
+        modern_ship_uniforms_.night_tint_color,
+        modern_ship_uniforms_.daylight_factor,
+        modern_ship_uniforms_.sun_visibility,
+        modern_ship_uniforms_.precipitation_intensity,
+        modern_ship_uniforms_.storm_intensity,
+        modern_ship_uniforms_.exterior_light_activation,
+        modern_ship_uniforms_.exterior_light_radiance,
+        modern_ship_uniforms_.lightning_intensity,
+        modern_ship_uniforms_.material_detail_scale,
+        modern_ship_uniforms_.shadows_enabled,
+        modern_ship_uniforms_.material_albedo,
+        modern_ship_uniforms_.material_normal_height,
+        modern_ship_uniforms_.material_orm_emission,
+        modern_ship_uniforms_.shadow_map,
+        modern_ship_uniforms_.shadow_map_far,
+        modern_ship_uniforms_.shadow_cascade_count,
+        modern_ship_uniforms_.shadow_split_distance,
+        modern_ship_uniforms_.shadow_transition_width,
+        modern_ship_uniforms_.time_seconds,
+        modern_ship_uniforms_.wind_strength,
+        modern_ship_uniforms_.material_layers,
+        modern_ship_uniforms_.light_count,
+        modern_ship_uniforms_.light_position_radius,
+        modern_ship_uniforms_.light_color_intensity,
+        modern_ship_uniforms_.light_zone_min_spill,
+        modern_ship_uniforms_.light_zone_max_seed,
+        modern_ship_uniforms_.light_doorways,
+        modern_ship_shadow_uniforms_.model,
+        modern_ship_shadow_uniforms_.light_view_projection,
+        modern_ship_shadow_uniforms_.material_albedo,
+        modern_ship_shadow_uniforms_.material_layers,
+        modern_ship_shadow_uniforms_.time_seconds,
+    }};
+    if (std::any_of(
+            modern_ship_uniform_locations.begin(),
+            modern_ship_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            }) ||
+        modern_ship_shadow_uniforms_.wind_strength < 0) {
+        throw std::runtime_error(
+            "Modern ship shader is missing one or more required uniforms");
     }
 
     world_uniforms_.model = glGetUniformLocation(world_program_, "u_model");
@@ -9451,7 +12973,27 @@ void main() {
             world_program_,
             "u_ocean_open_sea");
 
-    const std::array<GLint, 9> ocean_uniform_locations {{
+    world_uniforms_.maritime_horizon_enabled =
+        glGetUniformLocation(
+            world_program_,
+            "u_maritime_horizon_enabled");
+
+    world_uniforms_.maritime_water_blend_range =
+        glGetUniformLocation(
+            world_program_,
+            "u_maritime_water_blend_range");
+
+    world_uniforms_.maritime_far_fog_range =
+        glGetUniformLocation(
+            world_program_,
+            "u_maritime_far_fog_range");
+
+    world_uniforms_.maritime_sea_level =
+        glGetUniformLocation(
+            world_program_,
+            "u_maritime_sea_level");
+
+    const std::array<GLint, 13> ocean_uniform_locations {{
         world_uniforms_.ocean_waves,
         world_uniforms_.ocean_wave_phases,
         world_uniforms_.ocean_wave_count,
@@ -9461,6 +13003,10 @@ void main() {
         world_uniforms_.ocean_severity,
         world_uniforms_.ocean_tempest_factor,
         world_uniforms_.ocean_open_sea,
+        world_uniforms_.maritime_horizon_enabled,
+        world_uniforms_.maritime_water_blend_range,
+        world_uniforms_.maritime_far_fog_range,
+        world_uniforms_.maritime_sea_level,
     }};
     // Je refuse une initialisation partielle : un uniform optimise ou mal
     // orthographie rendrait l'ocean visuellement incoherent sans erreur OpenGL.
@@ -9473,6 +13019,95 @@ void main() {
         throw std::runtime_error(
             "Ocean shader is missing one or more required uniforms");
     }
+
+    sea_horizon_uniforms_.view_projection =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_view_projection");
+    sea_horizon_uniforms_.camera_position =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_camera_position");
+    sea_horizon_uniforms_.sun_direction =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_sun_direction");
+    sea_horizon_uniforms_.sun_color =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_sun_color");
+    sea_horizon_uniforms_.ambient_color =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_ambient_color");
+    sea_horizon_uniforms_.fog_color =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_fog_color");
+    sea_horizon_uniforms_.distant_fog_color =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_distant_fog_color");
+    sea_horizon_uniforms_.daylight_factor =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_daylight_factor");
+    sea_horizon_uniforms_.precipitation_intensity =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_precipitation_intensity");
+    sea_horizon_uniforms_.storm_intensity =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_storm_intensity");
+    sea_horizon_uniforms_.lightning_intensity =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_lightning_intensity");
+    sea_horizon_uniforms_.far_fog_range =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_far_fog_range");
+    sea_horizon_uniforms_.sea_level =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_sea_level");
+    sea_horizon_uniforms_.detail_transition_range =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_detail_transition_range");
+    sea_horizon_uniforms_.transition_pass =
+        glGetUniformLocation(
+            sea_horizon_program_,
+            "u_transition_pass");
+    const std::array<GLint, 15>
+        sea_horizon_uniform_locations {{
+            sea_horizon_uniforms_.view_projection,
+            sea_horizon_uniforms_.camera_position,
+            sea_horizon_uniforms_.sun_direction,
+            sea_horizon_uniforms_.sun_color,
+            sea_horizon_uniforms_.ambient_color,
+            sea_horizon_uniforms_.fog_color,
+            sea_horizon_uniforms_.distant_fog_color,
+            sea_horizon_uniforms_.daylight_factor,
+            sea_horizon_uniforms_.precipitation_intensity,
+            sea_horizon_uniforms_.storm_intensity,
+            sea_horizon_uniforms_.lightning_intensity,
+            sea_horizon_uniforms_.far_fog_range,
+            sea_horizon_uniforms_.sea_level,
+            sea_horizon_uniforms_.detail_transition_range,
+            sea_horizon_uniforms_.transition_pass,
+        }};
+    if (std::any_of(
+            sea_horizon_uniform_locations.begin(),
+            sea_horizon_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Sea horizon shader is missing one or more required uniforms");
+    }
+
     world_uniforms_.atlas = glGetUniformLocation(world_program_, "u_atlas");
     world_uniforms_.shadow_map = glGetUniformLocation(world_program_, "u_shadow_map");
     world_uniforms_.shadow_map_far =
@@ -9532,6 +13167,133 @@ void main() {
             })) {
         throw std::runtime_error(
             "World shader is missing one or more ship protection uniforms");
+    }
+
+    const auto modern_water_uniform =
+        [this](GLint& destination,
+               const char* name) {
+            destination =
+                glGetUniformLocation(
+                    modern_water_program_,
+                    name);
+        };
+    modern_water_uniform(modern_water_uniforms_.model, "u_model");
+    modern_water_uniform(modern_water_uniforms_.view_projection, "u_view_projection");
+    modern_water_uniform(modern_water_uniforms_.inverse_view_projection, "u_inverse_view_projection");
+    modern_water_uniform(modern_water_uniforms_.camera_position, "u_camera_position");
+    modern_water_uniform(modern_water_uniforms_.sun_direction, "u_sun_direction");
+    modern_water_uniform(modern_water_uniforms_.sun_color, "u_sun_color");
+    modern_water_uniform(modern_water_uniforms_.moon_disk_color, "u_moon_disk_color");
+    modern_water_uniform(modern_water_uniforms_.ambient_color, "u_ambient_color");
+    modern_water_uniform(modern_water_uniforms_.fog_color, "u_fog_color");
+    modern_water_uniform(modern_water_uniforms_.distant_fog_color, "u_distant_fog_color");
+    modern_water_uniform(modern_water_uniforms_.horizon_glow_color, "u_horizon_glow_color");
+    modern_water_uniform(modern_water_uniforms_.night_tint_color, "u_night_tint_color");
+    modern_water_uniform(modern_water_uniforms_.sky_zenith_color, "u_sky_zenith_color");
+    modern_water_uniform(modern_water_uniforms_.sky_horizon_color, "u_sky_horizon_color");
+    modern_water_uniform(modern_water_uniforms_.daylight_factor, "u_daylight_factor");
+    modern_water_uniform(modern_water_uniforms_.sun_visibility, "u_sun_visibility");
+    modern_water_uniform(modern_water_uniforms_.cloud_intensity, "u_cloud_intensity");
+    modern_water_uniform(modern_water_uniforms_.overcast_intensity, "u_overcast_intensity");
+    modern_water_uniform(modern_water_uniforms_.precipitation_intensity, "u_precipitation_intensity");
+    modern_water_uniform(modern_water_uniforms_.storm_intensity, "u_storm_intensity");
+    modern_water_uniform(modern_water_uniforms_.lightning_intensity, "u_lightning_intensity");
+    modern_water_uniform(modern_water_uniforms_.ocean_waves, "u_ocean_waves[0]");
+    modern_water_uniform(modern_water_uniforms_.ocean_wave_phases, "u_ocean_wave_phases[0]");
+    modern_water_uniform(modern_water_uniforms_.ocean_wave_count, "u_ocean_wave_count");
+    modern_water_uniform(modern_water_uniforms_.ocean_foam_threshold, "u_ocean_foam_threshold");
+    modern_water_uniform(modern_water_uniforms_.ocean_detail_strength, "u_ocean_detail_strength");
+    modern_water_uniform(modern_water_uniforms_.ocean_detail_phase, "u_ocean_detail_phase");
+    modern_water_uniform(modern_water_uniforms_.water_animation_time, "u_water_animation_time");
+    modern_water_uniform(modern_water_uniforms_.ocean_severity, "u_ocean_severity");
+    modern_water_uniform(modern_water_uniforms_.ocean_tempest_factor, "u_ocean_tempest_factor");
+    modern_water_uniform(modern_water_uniforms_.ocean_open_sea, "u_ocean_open_sea");
+    modern_water_uniform(modern_water_uniforms_.water_surface_detail, "u_water_surface_detail");
+    modern_water_uniform(modern_water_uniforms_.water_detail_samples, "u_water_detail_samples");
+    modern_water_uniform(modern_water_uniforms_.has_water_material, "u_has_water_material");
+    modern_water_uniform(modern_water_uniforms_.water_normal_layer, "u_water_normal_layer");
+    modern_water_uniform(modern_water_uniforms_.scene_color, "u_scene_color");
+    modern_water_uniform(modern_water_uniforms_.scene_depth, "u_scene_depth");
+    modern_water_uniform(modern_water_uniforms_.material_normal_height, "u_material_normal_height");
+    modern_water_uniform(modern_water_uniforms_.maritime_horizon_enabled, "u_maritime_horizon_enabled");
+    modern_water_uniform(modern_water_uniforms_.maritime_water_blend_range, "u_maritime_water_blend_range");
+    modern_water_uniform(modern_water_uniforms_.maritime_far_fog_range, "u_maritime_far_fog_range");
+    modern_water_uniform(modern_water_uniforms_.maritime_sea_level, "u_maritime_sea_level");
+    modern_water_uniform(modern_water_uniforms_.ship_speed, "u_ship_speed");
+    modern_water_uniform(modern_water_uniforms_.ship_protection_enabled, "u_ship_protection_enabled");
+    modern_water_uniform(modern_water_uniforms_.ship_inverse_model, "u_ship_inverse_model");
+    modern_water_uniform(modern_water_uniforms_.ship_bounds_min, "u_ship_bounds_min");
+    modern_water_uniform(modern_water_uniforms_.ship_bounds_max, "u_ship_bounds_max");
+    modern_water_uniform(modern_water_uniforms_.ship_profile_longitudinal, "u_ship_profile_longitudinal");
+    modern_water_uniform(modern_water_uniforms_.ship_profile_taper, "u_ship_profile_taper");
+    modern_water_uniform(modern_water_uniforms_.ship_profile_heights, "u_ship_profile_heights");
+    modern_water_uniform(modern_water_uniforms_.ship_profile_widths, "u_ship_profile_widths");
+    modern_water_uniform(modern_water_uniforms_.ship_sheltered_floor, "u_ship_sheltered_floor");
+
+    // Le fragment partage l'enveloppe avec la pluie, mais l'eau n'appelle pas
+    // ship_shelters_weather(). Le compilateur retire donc volontairement
+    // u_ship_sheltered_floor du programme d'eau actif.
+    const std::array modern_water_required_uniforms {
+        modern_water_uniforms_.model,
+        modern_water_uniforms_.view_projection,
+        modern_water_uniforms_.inverse_view_projection,
+        modern_water_uniforms_.camera_position,
+        modern_water_uniforms_.sun_direction,
+        modern_water_uniforms_.sun_color,
+        modern_water_uniforms_.moon_disk_color,
+        modern_water_uniforms_.ambient_color,
+        modern_water_uniforms_.fog_color,
+        modern_water_uniforms_.distant_fog_color,
+        modern_water_uniforms_.horizon_glow_color,
+        modern_water_uniforms_.night_tint_color,
+        modern_water_uniforms_.sky_zenith_color,
+        modern_water_uniforms_.sky_horizon_color,
+        modern_water_uniforms_.daylight_factor,
+        modern_water_uniforms_.sun_visibility,
+        modern_water_uniforms_.cloud_intensity,
+        modern_water_uniforms_.overcast_intensity,
+        modern_water_uniforms_.precipitation_intensity,
+        modern_water_uniforms_.storm_intensity,
+        modern_water_uniforms_.lightning_intensity,
+        modern_water_uniforms_.ocean_waves,
+        modern_water_uniforms_.ocean_wave_phases,
+        modern_water_uniforms_.ocean_wave_count,
+        modern_water_uniforms_.ocean_foam_threshold,
+        modern_water_uniforms_.ocean_detail_strength,
+        modern_water_uniforms_.ocean_detail_phase,
+        modern_water_uniforms_.water_animation_time,
+        modern_water_uniforms_.ocean_severity,
+        modern_water_uniforms_.ocean_tempest_factor,
+        modern_water_uniforms_.ocean_open_sea,
+        modern_water_uniforms_.water_surface_detail,
+        modern_water_uniforms_.water_detail_samples,
+        modern_water_uniforms_.has_water_material,
+        modern_water_uniforms_.water_normal_layer,
+        modern_water_uniforms_.scene_color,
+        modern_water_uniforms_.scene_depth,
+        modern_water_uniforms_.material_normal_height,
+        modern_water_uniforms_.maritime_horizon_enabled,
+        modern_water_uniforms_.maritime_water_blend_range,
+        modern_water_uniforms_.maritime_far_fog_range,
+        modern_water_uniforms_.maritime_sea_level,
+        modern_water_uniforms_.ship_speed,
+        modern_water_uniforms_.ship_protection_enabled,
+        modern_water_uniforms_.ship_inverse_model,
+        modern_water_uniforms_.ship_bounds_min,
+        modern_water_uniforms_.ship_bounds_max,
+        modern_water_uniforms_.ship_profile_longitudinal,
+        modern_water_uniforms_.ship_profile_taper,
+        modern_water_uniforms_.ship_profile_heights,
+        modern_water_uniforms_.ship_profile_widths,
+    };
+    if (std::any_of(
+            modern_water_required_uniforms.begin(),
+            modern_water_required_uniforms.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Modern water shader is missing one or more required uniforms");
     }
 
     item_drop_uniforms_.view_projection = glGetUniformLocation(item_drop_program_, "u_view_projection");
@@ -9693,8 +13455,16 @@ void main() {
     creature_uniforms_.time_of_day = glGetUniformLocation(creature_program_, "u_time_of_day");
     creature_uniforms_.player_light_strength = glGetUniformLocation(creature_program_, "u_player_light_strength");
     creature_uniforms_.super_vision_strength = glGetUniformLocation(creature_program_, "u_super_vision_strength");
+    creature_uniforms_.local_light_radiance =
+        glGetUniformLocation(
+            creature_program_,
+            "u_local_light_radiance");
     creature_uniforms_.modern_pipeline =
         glGetUniformLocation(creature_program_, "u_modern_pipeline");
+    if (creature_uniforms_.local_light_radiance < 0) {
+        throw std::runtime_error(
+            "Creature shader is missing the shared ship lantern color");
+    }
     creature_shadow_light_view_projection_ =
         glGetUniformLocation(creature_shadow_program_, "u_light_view_projection");
 
@@ -9767,6 +13537,78 @@ void main() {
     sky_uniforms_.cloud_steps = glGetUniformLocation(sky_program_, "u_cloud_steps");
     sky_uniforms_.cloud_detail = glGetUniformLocation(sky_program_, "u_cloud_detail");
     sky_uniforms_.accent_atlas = glGetUniformLocation(sky_program_, "u_accent_atlas");
+    sky_uniforms_.maritime_horizon_enabled =
+        glGetUniformLocation(
+            sky_program_,
+            "u_maritime_horizon_enabled");
+    sky_uniforms_.maritime_camera_position =
+        glGetUniformLocation(
+            sky_program_,
+            "u_maritime_camera_position");
+    sky_uniforms_.maritime_sea_level =
+        glGetUniformLocation(
+            sky_program_,
+            "u_maritime_sea_level");
+    sky_uniforms_.maritime_submersion_active =
+        glGetUniformLocation(
+            sky_program_,
+            "u_maritime_submersion_active");
+    sky_uniforms_.ocean_horizon_waves =
+        glGetUniformLocation(
+            sky_program_,
+            "u_ocean_horizon_waves[0]");
+    sky_uniforms_.ocean_horizon_wave_phases =
+        glGetUniformLocation(
+            sky_program_,
+            "u_ocean_horizon_wave_phases[0]");
+    sky_uniforms_.ocean_horizon_severity =
+        glGetUniformLocation(
+            sky_program_,
+            "u_ocean_horizon_severity");
+    sky_uniforms_.ocean_horizon_tempest_factor =
+        glGetUniformLocation(
+            sky_program_,
+            "u_ocean_horizon_tempest_factor");
+    sky_uniforms_.ocean_horizon_sun_color =
+        glGetUniformLocation(
+            sky_program_,
+            "u_ocean_horizon_sun_color");
+    sky_uniforms_.maritime_far_fog_range =
+        glGetUniformLocation(
+            sky_program_,
+            "u_maritime_far_fog_range");
+    sky_uniforms_.fog_color =
+        glGetUniformLocation(
+            sky_program_,
+            "u_fog_color");
+    sky_uniforms_.distant_fog_color =
+        glGetUniformLocation(
+            sky_program_,
+            "u_distant_fog_color");
+    const std::array<GLint, 12>
+        maritime_sky_uniform_locations {{
+            sky_uniforms_.maritime_horizon_enabled,
+            sky_uniforms_.maritime_camera_position,
+            sky_uniforms_.maritime_sea_level,
+            sky_uniforms_.maritime_submersion_active,
+            sky_uniforms_.ocean_horizon_waves,
+            sky_uniforms_.ocean_horizon_wave_phases,
+            sky_uniforms_.ocean_horizon_severity,
+            sky_uniforms_.ocean_horizon_tempest_factor,
+            sky_uniforms_.ocean_horizon_sun_color,
+            sky_uniforms_.maritime_far_fog_range,
+            sky_uniforms_.fog_color,
+            sky_uniforms_.distant_fog_color,
+        }};
+    if (std::any_of(
+            maritime_sky_uniform_locations.begin(),
+            maritime_sky_uniform_locations.end(),
+            [](GLint location) noexcept {
+                return location < 0;
+            })) {
+        throw std::runtime_error(
+            "Sky shader is missing one or more maritime horizon uniforms");
+    }
     glow_extract_uniforms_.scene_texture = glGetUniformLocation(glow_extract_program_, "u_scene_texture");
     glow_extract_uniforms_.threshold = glGetUniformLocation(glow_extract_program_, "u_threshold");
     glow_blur_uniforms_.source_texture = glGetUniformLocation(glow_blur_program_, "u_source_texture");
@@ -9791,10 +13633,45 @@ void main() {
     post_process_uniforms_.lightning_intensity = glGetUniformLocation(post_process_program_, "u_lightning_intensity");
     post_process_uniforms_.weather_exposure =
         glGetUniformLocation(post_process_program_, "u_weather_exposure");
+    post_process_uniforms_.projection_far_distance =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_projection_far_distance");
+    post_process_uniforms_.maritime_submerged =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_maritime_submerged");
+    post_process_uniforms_.maritime_submersion_depth =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_maritime_submersion_depth");
+    post_process_uniforms_.maritime_submersion_blend =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_maritime_submersion_blend");
+    post_process_uniforms_.water_surface_detail =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_water_surface_detail");
+    post_process_uniforms_.time_seconds =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_time_seconds");
+    post_process_uniforms_.daylight_factor =
+        glGetUniformLocation(
+            post_process_program_,
+            "u_daylight_factor");
     if (post_process_uniforms_.weather_exposure < 0 ||
+        post_process_uniforms_.projection_far_distance < 0 ||
         post_process_uniforms_.fxaa_enabled < 0 ||
         post_process_uniforms_.modern_pipeline < 0 ||
-        post_process_uniforms_.resolve_only < 0) {
+        post_process_uniforms_.resolve_only < 0 ||
+        post_process_uniforms_.maritime_submerged < 0 ||
+        post_process_uniforms_.maritime_submersion_depth < 0 ||
+        post_process_uniforms_.maritime_submersion_blend < 0 ||
+        post_process_uniforms_.water_surface_detail < 0 ||
+        post_process_uniforms_.time_seconds < 0 ||
+        post_process_uniforms_.daylight_factor < 0) {
         throw std::runtime_error(
             "Post-process shader is missing a required modern uniform");
     }
@@ -10862,6 +14739,711 @@ void Renderer::create_old_guard_effect_geometry() {
         kInitialOldGuardEffectInstanceBufferBytes;
 }
 
+void Renderer::create_sea_horizon_geometry() {
+    glGenVertexArrays(
+        1,
+        &sea_horizon_terrain_vao_);
+    glGenBuffers(
+        1,
+        &sea_horizon_terrain_vbo_);
+    glGenBuffers(
+        1,
+        &sea_horizon_terrain_ebo_);
+    glBindVertexArray(
+        sea_horizon_terrain_vao_);
+    glBindBuffer(
+        GL_ARRAY_BUFFER,
+        sea_horizon_terrain_vbo_);
+    sea_horizon_terrain_vertex_buffer_bytes_ =
+        static_cast<GLsizeiptr>(
+            kSeaHorizonMaxTerrainVertices *
+            sizeof(
+                SeaHorizonTerrainVertex));
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        sea_horizon_terrain_vertex_buffer_bytes_,
+        nullptr,
+        GL_DYNAMIC_DRAW);
+    glBindBuffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        sea_horizon_terrain_ebo_);
+    sea_horizon_terrain_index_buffer_bytes_ =
+        static_cast<GLsizeiptr>(
+            kSeaHorizonMaxTerrainTriangles *
+            3U *
+            sizeof(
+                std::uint32_t));
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        sea_horizon_terrain_index_buffer_bytes_,
+        nullptr,
+        GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(
+        0);
+    glVertexAttribPointer(
+        0,
+        3,
+        GL_FLOAT,
+        GL_FALSE,
+        sizeof(
+            SeaHorizonTerrainVertex),
+        reinterpret_cast<void*>(
+            offsetof(
+                SeaHorizonTerrainVertex,
+                x)));
+    glEnableVertexAttribArray(
+        1);
+    glVertexAttribPointer(
+        1,
+        3,
+        GL_BYTE,
+        GL_TRUE,
+        sizeof(
+            SeaHorizonTerrainVertex),
+        reinterpret_cast<void*>(
+            offsetof(
+                SeaHorizonTerrainVertex,
+                nx)));
+    glEnableVertexAttribArray(
+        2);
+    glVertexAttribPointer(
+        2,
+        1,
+        GL_UNSIGNED_BYTE,
+        GL_FALSE,
+        sizeof(
+            SeaHorizonTerrainVertex),
+        reinterpret_cast<void*>(
+            offsetof(
+                SeaHorizonTerrainVertex,
+                block_id)));
+
+    glBindVertexArray(
+        0);
+}
+
+void Renderer::destroy_sea_horizon_geometry() {
+    if (sea_horizon_terrain_ebo_ != 0U) {
+        glDeleteBuffers(
+            1,
+            &sea_horizon_terrain_ebo_);
+    }
+    if (sea_horizon_terrain_vbo_ != 0U) {
+        glDeleteBuffers(
+            1,
+            &sea_horizon_terrain_vbo_);
+    }
+    if (sea_horizon_terrain_vao_ != 0U) {
+        glDeleteVertexArrays(
+            1,
+            &sea_horizon_terrain_vao_);
+    }
+    sea_horizon_terrain_vao_ = 0U;
+    sea_horizon_terrain_vbo_ = 0U;
+    sea_horizon_terrain_ebo_ = 0U;
+    sea_horizon_terrain_vertex_buffer_bytes_ = 0;
+    sea_horizon_terrain_index_buffer_bytes_ = 0;
+    sea_horizon_terrain_index_count_ = 0;
+    sea_horizon_terrain_transition_index_count_ = 0;
+    sea_horizon_terrain_center_ = {};
+    sea_horizon_world_seed_ = 0;
+    sea_horizon_generation_version_ =
+        WorldGenerationVersion::LegacyV1;
+    sea_horizon_terrain_cache_valid_ = false;
+    sea_horizon_terrain_mesh_cache_ = {};
+    sea_horizon_detail_transition_range_ = {};
+    sea_horizon_detailed_chunks_cache_.clear();
+    sea_horizon_detailed_chunks_scratch_.clear();
+    sea_horizon_filtered_indices_scratch_.clear();
+    sea_horizon_transition_indices_scratch_.clear();
+}
+
+void Renderer::sync_sea_horizon_terrain(
+    const World& world,
+    const glm::vec3& focus,
+    float detailed_draw_distance) {
+    if (world.generation_profile() !=
+            WorldGenerationProfile::OceanAdventure ||
+        sea_horizon_terrain_vao_ == 0U) {
+        sea_horizon_terrain_index_count_ = 0;
+        sea_horizon_terrain_transition_index_count_ = 0;
+        sea_horizon_terrain_cache_valid_ = false;
+        sea_horizon_terrain_mesh_cache_ = {};
+        sea_horizon_detail_transition_range_ = {};
+        sea_horizon_detailed_chunks_cache_.clear();
+        sea_horizon_detailed_chunks_scratch_.clear();
+        sea_horizon_filtered_indices_scratch_.clear();
+        sea_horizon_transition_indices_scratch_.clear();
+        return;
+    }
+
+    sea_horizon_detail_transition_range_ =
+        sea_horizon_detail_transition_range(
+            detailed_draw_distance);
+    const auto same_world =
+        sea_horizon_terrain_cache_valid_ &&
+        world.seed() ==
+            sea_horizon_world_seed_ &&
+        world.generation_version() ==
+            sea_horizon_generation_version_;
+    const auto center =
+        same_world
+            ? sea_horizon_stable_center(
+                  sea_horizon_terrain_center_,
+                  focus)
+            : sea_horizon_snapped_center(
+                  focus);
+    const auto rebuild_mesh =
+        !same_world ||
+        center !=
+            sea_horizon_terrain_center_;
+
+    // Je sépare les chunks détaillés dans une passe de transition. Le relief
+    // grossier se dissout alors progressivement derrière leur vraie géométrie.
+    auto& detailed_chunks =
+        sea_horizon_detailed_chunks_scratch_;
+    detailed_chunks.clear();
+    detailed_chunks.reserve(
+        gpu_meshes_.size());
+    const auto safe_draw_distance =
+        std::isfinite(detailed_draw_distance)
+            ? std::max(
+                  detailed_draw_distance,
+                  0.0F)
+            : 0.0F;
+    const auto draw_distance_squared =
+        static_cast<double>(
+            safe_draw_distance) *
+        static_cast<double>(
+            safe_draw_distance);
+    const glm::vec2 safe_focus {
+        std::isfinite(focus.x)
+            ? focus.x
+            : 0.0F,
+        std::isfinite(focus.z)
+            ? focus.z
+            : 0.0F,
+    };
+    for (const auto& [coord, gpu_mesh] :
+         gpu_meshes_) {
+        // Je ne retire le proxy qu'après publication du vrai relief organique.
+        // Une eau ou une architecture déjà prête ne doit jamais faire
+        // disparaître prématurément l'île ou le fond qui se trouve derrière.
+        if (gpu_mesh.terrain_index_count <= 0) {
+            continue;
+        }
+        const auto delta_x =
+            static_cast<double>(
+                gpu_mesh.bounds.center.x -
+                safe_focus.x);
+        const auto delta_z =
+            static_cast<double>(
+                gpu_mesh.bounds.center.z -
+                safe_focus.y);
+        const auto distance_squared =
+            delta_x * delta_x +
+            delta_z * delta_z;
+        if (std::isfinite(
+                distance_squared) &&
+            distance_squared <=
+                draw_distance_squared) {
+            detailed_chunks.push_back(
+                coord);
+        }
+    }
+    std::sort(
+        detailed_chunks.begin(),
+        detailed_chunks.end(),
+        [](const ChunkCoord& left,
+           const ChunkCoord& right) noexcept {
+            return left.x < right.x ||
+                   (left.x == right.x &&
+                    left.z < right.z);
+        });
+    const auto detailed_coverage_changed =
+        detailed_chunks !=
+        sea_horizon_detailed_chunks_cache_;
+    if (!rebuild_mesh &&
+        !detailed_coverage_changed) {
+        return;
+    }
+
+    auto vertices_changed = false;
+    if (rebuild_mesh) {
+        const glm::vec3 mesh_focus {
+            static_cast<float>(center.x),
+            std::isfinite(focus.y)
+                ? focus.y
+                : 0.0F,
+            static_cast<float>(center.z),
+        };
+        sea_horizon_terrain_mesh_cache_ =
+            build_sea_horizon_terrain_mesh(
+                world,
+                mesh_focus);
+        vertices_changed = true;
+    }
+    const auto& mesh =
+        sea_horizon_terrain_mesh_cache_;
+    const auto vertices_valid =
+        mesh.vertices.size() <=
+        kSeaHorizonMaxTerrainVertices;
+    const auto indices_valid =
+        mesh.indices.size() <=
+            kSeaHorizonMaxTerrainTriangles *
+                3U &&
+        mesh.indices.size() %
+                3U ==
+            0U &&
+        std::all_of(
+            mesh.indices.begin(),
+            mesh.indices.end(),
+            [&mesh](std::uint32_t index) noexcept {
+                return index <
+                    mesh.vertices.size();
+            });
+
+    sea_horizon_terrain_center_ =
+        center;
+    sea_horizon_world_seed_ =
+        world.seed();
+    sea_horizon_generation_version_ =
+        world.generation_version();
+    sea_horizon_terrain_cache_valid_ = true;
+    sea_horizon_terrain_index_count_ = 0;
+    sea_horizon_terrain_transition_index_count_ = 0;
+    sea_horizon_detailed_chunks_cache_ =
+        detailed_chunks;
+
+    if (!vertices_valid ||
+        !indices_valid ||
+        mesh.empty()) {
+        return;
+    }
+
+    filter_sea_horizon_terrain_indices(
+        mesh,
+        sea_horizon_detailed_chunks_cache_,
+        sea_horizon_filtered_indices_scratch_,
+        sea_horizon_transition_indices_scratch_);
+    const auto filtered_index_count =
+        sea_horizon_filtered_indices_scratch_.size() +
+        sea_horizon_transition_indices_scratch_.size();
+    if (filtered_index_count >
+            kSeaHorizonMaxTerrainTriangles *
+                3U ||
+        sea_horizon_filtered_indices_scratch_.size() %
+                3U !=
+            0U ||
+        sea_horizon_transition_indices_scratch_.size() %
+                3U !=
+            0U) {
+        sea_horizon_filtered_indices_scratch_.clear();
+        sea_horizon_transition_indices_scratch_.clear();
+        return;
+    }
+
+    const auto vertex_bytes =
+        static_cast<GLsizeiptr>(
+            mesh.vertices.size() *
+            sizeof(
+                SeaHorizonTerrainVertex));
+    const auto index_bytes =
+        static_cast<GLsizeiptr>(
+            sea_horizon_filtered_indices_scratch_.size() *
+            sizeof(
+                std::uint32_t));
+    const auto transition_index_bytes =
+        static_cast<GLsizeiptr>(
+            sea_horizon_transition_indices_scratch_.size() *
+            sizeof(
+                std::uint32_t));
+    glBindVertexArray(
+        sea_horizon_terrain_vao_);
+    if (vertices_changed) {
+        glBindBuffer(
+            GL_ARRAY_BUFFER,
+            sea_horizon_terrain_vbo_);
+        glBufferSubData(
+            GL_ARRAY_BUFFER,
+            0,
+            vertex_bytes,
+            mesh.vertices.data());
+        frame_uploaded_bytes_ +=
+            static_cast<std::uint64_t>(
+                vertex_bytes);
+    }
+    glBindBuffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        sea_horizon_terrain_ebo_);
+    if (index_bytes > 0) {
+        glBufferSubData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            0,
+            index_bytes,
+            sea_horizon_filtered_indices_scratch_.data());
+    }
+    if (transition_index_bytes > 0) {
+        glBufferSubData(
+            GL_ELEMENT_ARRAY_BUFFER,
+            index_bytes,
+            transition_index_bytes,
+            sea_horizon_transition_indices_scratch_.data());
+    }
+    sea_horizon_terrain_index_count_ =
+        static_cast<GLsizei>(
+            sea_horizon_filtered_indices_scratch_.size());
+    sea_horizon_terrain_transition_index_count_ =
+        static_cast<GLsizei>(
+            sea_horizon_transition_indices_scratch_.size());
+    frame_uploaded_bytes_ +=
+        static_cast<std::uint64_t>(
+            index_bytes +
+            transition_index_bytes);
+}
+
+void Renderer::upload_sea_horizon_uniforms(
+    const glm::mat4& view_projection,
+    const glm::vec3& camera_position,
+    const EnvironmentState& environment,
+    const SeaHorizonFogRange& fog_range) {
+    glUseProgram(
+        sea_horizon_program_);
+    glUniformMatrix4fv(
+        sea_horizon_uniforms_.view_projection,
+        1,
+        GL_FALSE,
+        glm::value_ptr(
+            view_projection));
+    glUniform3fv(
+        sea_horizon_uniforms_.camera_position,
+        1,
+        glm::value_ptr(
+            camera_position));
+    glUniform3fv(
+        sea_horizon_uniforms_.sun_direction,
+        1,
+        glm::value_ptr(
+            environment.sun_direction));
+    glUniform3fv(
+        sea_horizon_uniforms_.sun_color,
+        1,
+        glm::value_ptr(
+            environment.sun_color));
+    glUniform3fv(
+        sea_horizon_uniforms_.ambient_color,
+        1,
+        glm::value_ptr(
+            environment.ambient_color));
+    glUniform3fv(
+        sea_horizon_uniforms_.fog_color,
+        1,
+        glm::value_ptr(
+            environment.fog_color));
+    glUniform3fv(
+        sea_horizon_uniforms_.distant_fog_color,
+        1,
+        glm::value_ptr(
+            environment.distant_fog_color));
+    glUniform1f(
+        sea_horizon_uniforms_.daylight_factor,
+        environment.daylight_factor);
+    glUniform1f(
+        sea_horizon_uniforms_.precipitation_intensity,
+        environment.precipitation_intensity);
+    glUniform1f(
+        sea_horizon_uniforms_.storm_intensity,
+        environment.storm_intensity);
+    glUniform1f(
+        sea_horizon_uniforms_.lightning_intensity,
+        environment.lightning_intensity);
+    glUniform2f(
+        sea_horizon_uniforms_.far_fog_range,
+        fog_range.start_distance,
+        fog_range.end_distance);
+    glUniform1f(
+        sea_horizon_uniforms_.sea_level,
+        static_cast<float>(
+            kSeaLevel + 1));
+    glUniform2f(
+        sea_horizon_uniforms_.detail_transition_range,
+        sea_horizon_detail_transition_range_.start_distance,
+        sea_horizon_detail_transition_range_.end_distance);
+}
+
+void Renderer::draw_sea_horizon_terrain(
+    const glm::mat4& view_projection,
+    const glm::vec3& camera_position,
+    const EnvironmentState& environment,
+    const SeaHorizonFogRange& fog_range) {
+    if (sea_horizon_program_ == 0U ||
+        sea_horizon_terrain_vao_ == 0U ||
+        (sea_horizon_terrain_index_count_ <= 0 &&
+         sea_horizon_terrain_transition_index_count_ <= 0)) {
+        return;
+    }
+
+    upload_sea_horizon_uniforms(
+        view_projection,
+        camera_position,
+        environment,
+        fog_range);
+
+    // Je garde le proxy legerement derriere le relief reel. Les chunks
+    // detailles le remplacent donc par le depth test, sans fondu CPU ni tri.
+    glEnable(
+        GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(
+        1.0F,
+        1.0F);
+    // Je rends les deux faces du relief très lointain : depuis le niveau de
+    // la mer, le bord supérieur d'une île haute peut être observé par dessous.
+    // Sans cette garde, son sommet disparaîtrait avant d'entrer dans les chunks.
+    glDisable(
+        GL_CULL_FACE);
+    glBindVertexArray(
+        sea_horizon_terrain_vao_);
+    if (sea_horizon_terrain_index_count_ > 0) {
+        glUniform1i(
+            sea_horizon_uniforms_.transition_pass,
+            0);
+        glDrawElements(
+            GL_TRIANGLES,
+            sea_horizon_terrain_index_count_,
+            GL_UNSIGNED_INT,
+            nullptr);
+        record_triangle_draw(
+            sea_horizon_terrain_index_count_);
+    }
+    if (sea_horizon_terrain_transition_index_count_ > 0) {
+        glUniform1i(
+            sea_horizon_uniforms_.transition_pass,
+            1);
+        const auto transition_offset =
+            static_cast<std::uintptr_t>(
+                sea_horizon_terrain_index_count_) *
+            sizeof(
+                std::uint32_t);
+        glDrawElements(
+            GL_TRIANGLES,
+            sea_horizon_terrain_transition_index_count_,
+            GL_UNSIGNED_INT,
+            reinterpret_cast<const void*>(
+                transition_offset));
+        record_triangle_draw(
+            sea_horizon_terrain_transition_index_count_);
+        glUniform1i(
+            sea_horizon_uniforms_.transition_pass,
+            0);
+    }
+    glDisable(
+        GL_POLYGON_OFFSET_FILL);
+    glEnable(
+        GL_CULL_FACE);
+    glCullFace(
+        GL_BACK);
+}
+
+void Renderer::sync_marine_visuals(
+    const World& world,
+    std::span<const ChunkCoord> visible_chunks,
+    const glm::vec3& camera_position,
+    const ShipRenderState& ship,
+    RendererQuality quality,
+    float absolute_time_seconds) {
+    const auto marine_enabled =
+        options_.visual_pipeline ==
+            VisualPipeline::ModernStylized &&
+        world.generation_profile() ==
+            WorldGenerationProfile::OceanAdventure &&
+        modern_material_albedo_texture_ != 0U;
+    if (!marine_enabled ||
+        !std::isfinite(camera_position.x) ||
+        !std::isfinite(camera_position.y) ||
+        !std::isfinite(camera_position.z) ||
+        !std::isfinite(absolute_time_seconds)) {
+        marine_decor_gpu_mesh_.terrain_index_count = 0;
+        ocean_life_gpu_mesh_.terrain_index_count = 0;
+        ocean_life_field_.clear();
+        marine_visual_cache_valid_ = false;
+        return;
+    }
+
+    const auto same_world =
+        marine_cache_world_seed_ == world.seed() &&
+        marine_cache_generation_version_ ==
+            world.generation_version();
+    if (!same_world) {
+        marine_decor_cache_.clear();
+        marine_visual_cache_valid_ = false;
+        marine_cache_world_seed_ = world.seed();
+        marine_cache_generation_version_ =
+            world.generation_version();
+    }
+
+    marine_visible_chunks_scratch_.assign(
+        visible_chunks.begin(),
+        visible_chunks.end());
+    std::sort(
+        marine_visible_chunks_scratch_.begin(),
+        marine_visible_chunks_scratch_.end(),
+        [](const ChunkCoord& left,
+           const ChunkCoord& right) noexcept {
+            return left.x < right.x ||
+                   (left.x == right.x &&
+                    left.z < right.z);
+        });
+    marine_visible_chunks_scratch_.erase(
+        std::unique(
+            marine_visible_chunks_scratch_.begin(),
+            marine_visible_chunks_scratch_.end()),
+        marine_visible_chunks_scratch_.end());
+
+    auto visible_signature =
+        std::uint64_t {14695981039346656037ULL};
+    for (const auto& coord :
+         marine_visible_chunks_scratch_) {
+        const auto packed =
+            static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(
+                    coord.x)) |
+            (static_cast<std::uint64_t>(
+                 static_cast<std::uint32_t>(
+                     coord.z))
+             << 32U);
+        visible_signature ^= packed;
+        visible_signature *=
+            1099511628211ULL;
+    }
+    visible_signature ^=
+        static_cast<std::uint64_t>(
+            marine_visible_chunks_scratch_.size());
+
+    constexpr float kMarineFocusCellSize = 4.0F;
+    const auto focus_cell_x =
+        static_cast<int>(
+            std::floor(
+                camera_position.x /
+                kMarineFocusCellSize));
+    const auto focus_cell_z =
+        static_cast<int>(
+            std::floor(
+                camera_position.z /
+                kMarineFocusCellSize));
+    const auto rebuild_decor =
+        !marine_visual_cache_valid_ ||
+        visible_signature !=
+            marine_visible_signature_ ||
+        focus_cell_x != marine_focus_cell_x_ ||
+        focus_cell_z != marine_focus_cell_z_ ||
+        quality != marine_cache_quality_;
+
+    const auto sample_surface =
+        [&world](
+            int world_x,
+            int world_z) {
+            return world.sample_generated_surface(
+                world_x,
+                world_z);
+        };
+
+    if (rebuild_decor) {
+        marine_decor_instances_scratch_.clear();
+        for (const auto& coord :
+             marine_visible_chunks_scratch_) {
+            auto iterator =
+                marine_decor_cache_.find(coord);
+            if (iterator ==
+                marine_decor_cache_.end()) {
+                iterator =
+                    marine_decor_cache_
+                        .emplace(
+                            coord,
+                            build_marine_decor(
+                                coord,
+                                world.generation_version(),
+                                world.seed(),
+                                sample_surface))
+                        .first;
+            }
+            marine_decor_instances_scratch_.insert(
+                marine_decor_instances_scratch_.end(),
+                iterator->second.begin(),
+                iterator->second.end());
+        }
+
+        marine_decor_mesh_scratch_ =
+            build_marine_decor_visual_mesh(
+                marine_decor_instances_scratch_,
+                camera_position,
+                marine_visual_budget_for_quality(
+                    quality));
+        upload_terrain_mesh_data(
+            marine_decor_gpu_mesh_,
+            marine_decor_mesh_scratch_);
+
+        marine_visible_signature_ =
+            visible_signature;
+        marine_focus_cell_x_ = focus_cell_x;
+        marine_focus_cell_z_ = focus_cell_z;
+        marine_cache_quality_ = quality;
+        marine_visual_cache_valid_ = true;
+
+        // Je borne le cache d'exploration et je ne conserve au-delà de ce
+        // seuil que les chunks encore visibles autour du joueur.
+        if (marine_decor_cache_.size() >
+            384U) {
+            for (auto iterator =
+                     marine_decor_cache_.begin();
+                 iterator !=
+                 marine_decor_cache_.end();) {
+                const auto visible =
+                    std::find(
+                        marine_visible_chunks_scratch_.begin(),
+                        marine_visible_chunks_scratch_.end(),
+                        iterator->first) !=
+                    marine_visible_chunks_scratch_.end();
+                if (!visible) {
+                    iterator =
+                        marine_decor_cache_.erase(
+                            iterator);
+                } else {
+                    ++iterator;
+                }
+            }
+        }
+    }
+
+    const auto& life_frame =
+        ocean_life_field_.sample(
+            world.generation_profile(),
+            static_cast<std::uint32_t>(
+                world.seed()),
+            camera_position,
+            absolute_time_seconds,
+            ocean_life_budget_for_quality(
+                quality),
+            make_ocean_life_surface_sampler(
+                sample_surface));
+    if (ship_protection_is_renderable(
+            ship)) {
+        ocean_life_mesh_scratch_ =
+            build_ocean_life_visual_mesh(
+                life_frame.instances,
+                glm::inverse(
+                    ship.model_matrix),
+                ship.blueprint
+                    ->protection_profile);
+    } else {
+        ocean_life_mesh_scratch_ =
+            build_ocean_life_visual_mesh(
+                life_frame.instances);
+    }
+    upload_terrain_mesh_data(
+        ocean_life_gpu_mesh_,
+        ocean_life_mesh_scratch_);
+}
+
 void Renderer::create_screen_quad_geometry() {
     glGenVertexArrays(1, &screen_quad_vao_);
 }
@@ -11171,8 +15753,17 @@ void Renderer::destroy_glow_targets() {
 }
 
 void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
+                        const glm::vec3& camera_position,
                         const EnvironmentState& environment,
-                        const RendererQualitySettings& quality_settings) {
+                        const RendererQualitySettings& quality_settings,
+                        bool maritime_horizon_enabled,
+                        const MaritimeSubmersionState&
+                            maritime_submersion,
+                        const OceanState& ocean,
+                        std::span<const glm::vec4>
+                            ocean_wave_uniforms,
+                        std::span<const glm::vec2>
+                            ocean_phase_uniforms) {
     if (sky_program_ == 0 || screen_quad_vao_ == 0 || accent_texture_ == 0) {
         return;
     }
@@ -11215,6 +15806,66 @@ void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
     glUniform1i(sky_uniforms_.cloud_steps, quality_settings.cloud_steps);
     glUniform1f(sky_uniforms_.cloud_detail, quality_settings.cloud_detail);
     glUniform1i(sky_uniforms_.accent_atlas, 0);
+    glUniform1i(
+        sky_uniforms_.maritime_horizon_enabled,
+        maritime_horizon_enabled
+            ? 1
+            : 0);
+    glUniform3fv(
+        sky_uniforms_.maritime_camera_position,
+        1,
+        glm::value_ptr(
+            camera_position));
+    glUniform1f(
+        sky_uniforms_.maritime_sea_level,
+        static_cast<float>(
+            kSeaLevel + 1));
+    glUniform1i(
+        sky_uniforms_.maritime_submersion_active,
+        maritime_submersion.active ? 1 : 0);
+    glUniform4fv(
+        sky_uniforms_.ocean_horizon_waves,
+        2,
+        glm::value_ptr(
+            ocean_wave_uniforms.front()));
+    glUniform2fv(
+        sky_uniforms_.ocean_horizon_wave_phases,
+        2,
+        glm::value_ptr(
+            ocean_phase_uniforms.front()));
+    glUniform1f(
+        sky_uniforms_.ocean_horizon_severity,
+        ocean.severity);
+    glUniform1f(
+        sky_uniforms_.ocean_horizon_tempest_factor,
+        ocean.tempest_factor);
+    const auto horizon_sun_color =
+        environment.sun_color *
+        (environment.sun_direction.y > 0.0F
+             ? 1.0F
+             : 0.0F);
+    glUniform3fv(
+        sky_uniforms_.ocean_horizon_sun_color,
+        1,
+        glm::value_ptr(
+            horizon_sun_color));
+    const auto maritime_fog_range =
+        sea_horizon_fog_range(
+            environment.storm_intensity);
+    glUniform2f(
+        sky_uniforms_.maritime_far_fog_range,
+        maritime_fog_range.start_distance,
+        maritime_fog_range.end_distance);
+    glUniform3fv(
+        sky_uniforms_.fog_color,
+        1,
+        glm::value_ptr(
+            environment.fog_color));
+    glUniform3fv(
+        sky_uniforms_.distant_fog_color,
+        1,
+        glm::value_ptr(
+            environment.distant_fog_color));
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, accent_texture_);
     glBindVertexArray(screen_quad_vao_);
@@ -11228,8 +15879,10 @@ void Renderer::draw_sky(const glm::mat4& inverse_view_projection,
 
 void Renderer::run_post_process(const EnvironmentState& environment,
                                 float weather_exposure,
+                                const MaritimeSubmersionState& submersion,
                                 int width,
                                 int height,
+                                float projection_far_distance,
                                 bool optional_effects_enabled) {
     if (post_process_program_ == 0 ||
         screen_quad_vao_ == 0 ||
@@ -11405,12 +16058,12 @@ void Renderer::run_post_process(const EnvironmentState& environment,
             : 1);
     glUniform1f(
         post_process_uniforms_.storm_intensity,
-        run_optional_effects
+        run_optional_effects || submersion.active
             ? environment.storm_intensity
             : 0.0F);
     glUniform1f(
         post_process_uniforms_.lightning_intensity,
-        run_optional_effects
+        run_optional_effects || submersion.active
             ? environment.lightning_intensity
             : 0.0F);
     glUniform1f(
@@ -11419,6 +16072,45 @@ void Renderer::run_post_process(const EnvironmentState& environment,
             std::isfinite(weather_exposure)
                 ? weather_exposure
                 : 1.0F,
+            0.0F,
+            1.0F));
+    glUniform1f(
+        post_process_uniforms_.projection_far_distance,
+        std::isfinite(projection_far_distance)
+            ? std::max(projection_far_distance, 0.101F)
+            : 320.0F);
+    glUniform1i(
+        post_process_uniforms_.maritime_submerged,
+        submersion.active ? 1 : 0);
+    glUniform1f(
+        post_process_uniforms_.maritime_submersion_depth,
+        std::isfinite(submersion.depth)
+            ? std::clamp(
+                  submersion.depth,
+                  0.0F,
+                  64.0F)
+            : 0.0F);
+    glUniform1f(
+        post_process_uniforms_.maritime_submersion_blend,
+        std::isfinite(submersion.blend)
+            ? std::clamp(
+                  submersion.blend,
+                  0.0F,
+                  1.0F)
+            : 0.0F);
+    glUniform1f(
+        post_process_uniforms_.water_surface_detail,
+        quality_settings.water_surface_detail);
+    glUniform1f(
+        post_process_uniforms_.time_seconds,
+        std::isfinite(
+            environment.weather_time_seconds)
+            ? environment.weather_time_seconds
+            : 0.0F);
+    glUniform1f(
+        post_process_uniforms_.daylight_factor,
+        std::clamp(
+            environment.daylight_factor,
             0.0F,
             1.0F));
 
@@ -12252,10 +16944,12 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
     auto& visible_crew = visible_crew_cache_;
     auto& visible_old_guard = visible_old_guard_cache_;
     auto& parts = creature_parts_scratch_;
+    auto& part_contexts = creature_part_contexts_scratch_;
     visible_creatures.clear();
     visible_crew.clear();
     visible_old_guard.clear();
     parts.clear();
+    part_contexts.clear();
     const auto safe_creature_distance =
         std::isfinite(creature_draw_distance) ? std::max(creature_draw_distance, 0.0F) : 0.0F;
     const auto safe_crew_distance =
@@ -12346,6 +17040,9 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
     if (parts.capacity() < required_part_capacity) {
         parts.reserve(required_part_capacity);
     }
+    if (part_contexts.capacity() < required_part_capacity) {
+        part_contexts.reserve(required_part_capacity);
+    }
 
     for (const auto& visible_creature : visible_creatures) {
         const auto creature_parts = build_creature_parts(*visible_creature.creature);
@@ -12354,12 +17051,26 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
         }
 
         parts.insert(parts.end(), creature_parts.begin(), creature_parts.end());
+        part_contexts.insert(
+            part_contexts.end(),
+            creature_parts.size(),
+            VisualEntityContext::Creature);
     }
     for (const auto& visible_member : visible_crew) {
+        const auto first_part = parts.size();
         append_crew_parts(parts, *visible_member.crew);
+        part_contexts.insert(
+            part_contexts.end(),
+            parts.size() - first_part,
+            VisualEntityContext::Crew);
     }
     for (const auto& visible_member : visible_old_guard) {
+        const auto first_part = parts.size();
         append_old_guard_parts(parts, *visible_member.guard);
+        part_contexts.insert(
+            part_contexts.end(),
+            parts.size() - first_part,
+            VisualEntityContext::Crew);
     }
     return parts;
 }
@@ -12367,6 +17078,7 @@ auto Renderer::collect_visible_creature_parts(std::span<const CreatureRenderInst
 void Renderer::prepare_visual_entity_batches(
     std::span<const CreaturePartInstance> parts,
     VisualEntityContext context,
+    std::span<const VisualEntityContext> per_part_contexts,
     const glm::vec3& focus,
     bool simplified_shadow,
     bool viewmodel) {
@@ -12375,30 +17087,42 @@ void Renderer::prepare_visual_entity_batches(
         batch.clear();
     }
 
-    for (const auto& part : parts) {
+    const auto has_per_part_context =
+        per_part_contexts.size() == parts.size();
+    for (std::size_t index = 0U; index < parts.size(); ++index) {
+        const auto& part = parts[index];
+        const auto part_context =
+            has_per_part_context
+                ? per_part_contexts[index]
+                : context;
         const auto classification =
-            classify_visual_entity_part(part, context);
+            classify_visual_entity_part(part, part_context);
         if (!classification.valid_transform) {
             continue;
         }
 
-        auto lod = StylizedPrimitiveLod::Low;
-        if (viewmodel) {
-            lod = StylizedPrimitiveLod::High;
-        } else if (!simplified_shadow) {
-            const glm::vec3 position {part.transform[3]};
-            const auto offset = position - focus;
-            const auto distance_squared = glm::dot(offset, offset);
-            if (std::isfinite(distance_squared) &&
-                active_quality_settings_.terrain_lod_count >= 3 &&
-                distance_squared <= 18.0F * 18.0F) {
-                lod = StylizedPrimitiveLod::High;
-            } else if (std::isfinite(distance_squared) &&
-                       active_quality_settings_.terrain_lod_count >= 2 &&
-                       distance_squared <= 56.0F * 56.0F) {
-                lod = StylizedPrimitiveLod::Medium;
-            }
+        const auto maximum_dimension = std::max({
+            classification.local_dimensions.x,
+            classification.local_dimensions.y,
+            classification.local_dimensions.z,
+        });
+        // Je retire des ombres les boutons, pupilles et petites ferrures : leur
+        // silhouette est imperceptible mais chacune coûterait une primitive.
+        if (simplified_shadow &&
+            !visual_entity_part_casts_simplified_shadow(
+                maximum_dimension)) {
+            continue;
         }
+
+        const glm::vec3 position {part.transform[3]};
+        const auto offset = position - focus;
+        const auto distance_squared = glm::dot(offset, offset);
+        const auto lod = select_visual_entity_primitive_lod(
+            distance_squared,
+            maximum_dimension,
+            active_quality_settings_.terrain_lod_count,
+            simplified_shadow,
+            viewmodel);
 
         const auto slot =
             visual_entity_batch_slot(classification.primitive, lod);
@@ -12495,6 +17219,7 @@ void Renderer::draw_creature_shadows(std::span<const CreatureRenderInstance> cre
         prepare_visual_entity_batches(
             parts,
             VisualEntityContext::Creature,
+            creature_part_contexts_scratch_,
             shadow_focus,
             true,
             false);
@@ -12581,6 +17306,7 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
         prepare_visual_entity_batches(
             parts,
             VisualEntityContext::Creature,
+            creature_part_contexts_scratch_,
             camera_position,
             false,
             false);
@@ -12656,6 +17382,15 @@ void Renderer::draw_creatures(std::span<const CreatureRenderInstance> creatures,
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glUniform1f(creature_uniforms_.player_light_strength, player_light_active ? 1.0F : 0.0F);
     glUniform1f(creature_uniforms_.super_vision_strength, std::clamp(super_vision_strength, 0.0F, 1.0F));
+    const auto local_light_radiance =
+        exterior_lantern_radiance(
+            amelie_exterior_lights(),
+            1.16F);
+    glUniform3fv(
+        creature_uniforms_.local_light_radiance,
+        1,
+        glm::value_ptr(
+            local_light_radiance));
     glUniform1i(
         creature_uniforms_.modern_pipeline,
         is_modern_visual_pipeline(options_.visual_pipeline) ? 1 : 0);
@@ -12711,6 +17446,7 @@ auto Renderer::draw_player_viewmodel(
         prepare_visual_entity_batches(
             viewmodel.parts,
             VisualEntityContext::PlayerViewModel,
+            std::span<const VisualEntityContext> {},
             camera_position,
             false,
             true);
@@ -12769,6 +17505,15 @@ auto Renderer::draw_player_viewmodel(
     glUniform1f(creature_uniforms_.time_of_day, environment.time_of_day);
     glUniform1f(creature_uniforms_.player_light_strength, 0.0F);
     glUniform1f(creature_uniforms_.super_vision_strength, 0.0F);
+    const auto local_light_radiance =
+        exterior_lantern_radiance(
+            amelie_exterior_lights(),
+            1.16F);
+    glUniform3fv(
+        creature_uniforms_.local_light_radiance,
+        1,
+        glm::value_ptr(
+            local_light_radiance));
     glUniform1i(
         creature_uniforms_.modern_pipeline,
         is_modern_visual_pipeline(options_.visual_pipeline) ? 1 : 0);
@@ -12843,16 +17588,19 @@ void Renderer::draw_hotbar(const PlayerController& player,
             glm::clamp(player_state.hurt_timer / 0.35F, 0.0F, 1.0F) * 0.32F,
             glm::clamp((max_health - player_state.health) / max_health, 0.0F, 1.0F) * 0.18F);
     const auto air_visible = player_state.head_underwater || player_state.air_seconds < max_air - 0.05F;
-    const auto normalized_progression = sanitize_player_progression_state(progression);
-    const auto experience_for_next_level = player_experience_for_next_level(normalized_progression.level);
-    const auto level_progress = experience_for_next_level == 0ULL
-                                    ? 1.0F
-                                    : std::clamp(
-                                          static_cast<float>(normalized_progression.experience) /
-                                              static_cast<float>(experience_for_next_level),
-                                          0.0F,
-                                          1.0F);
-    const auto level_progress_step = std::clamp(quantize_hud_value(level_progress, 128.0F), 0, 128);
+    const auto experience_hud =
+        make_progression_experience_hud_snapshot(
+            progression,
+            progression_runtime_hud_view_
+                .aggregated_experience_gain);
+    const auto level_progress_step =
+        std::clamp(
+            quantize_hud_value(
+                experience_hud
+                    .progress_ratio,
+                128.0F),
+            0,
+            128);
     const auto visible_level_progress = static_cast<float>(level_progress_step) / 128.0F;
     const auto hud_layout =
         build_gameplay_hud_layout(
@@ -12873,8 +17621,21 @@ void Renderer::draw_hotbar(const PlayerController& player,
     cache_key.health_steps = quantize_hud_value(player_state.health, 16.0F);
     cache_key.air_steps = quantize_hud_value(player_state.air_seconds, 64.0F);
     cache_key.damage_flash_step = quantize_hud_value(damage_flash, 128.0F);
-    cache_key.player_level = normalized_progression.level;
+    cache_key.player_level =
+        experience_hud.level;
+    cache_key.current_experience =
+        experience_hud
+            .current_experience;
+    cache_key.next_level_experience =
+        experience_hud
+            .next_level_experience;
+    cache_key.experience_gain =
+        experience_hud
+            .aggregated_experience_gain;
     cache_key.level_progress_step = level_progress_step;
+    cache_key.maximum_level =
+        experience_hud
+            .maximum_level;
     cache_key.air_visible = air_visible;
     cache_key.underwater = player_state.head_underwater;
 
@@ -12920,10 +17681,36 @@ void Renderer::draw_hotbar(const PlayerController& player,
                 centered);
         };
 
-        if (cache_key.underwater) {
-            const auto overlay_edge = std::clamp(std::min(viewport_width, viewport_height) * 0.17F, 72.0F, 180.0F);
-            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, viewport_height, {0.03F, 0.18F, 0.25F, 0.18F});
-            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, viewport_width, overlay_edge, {0.12F, 0.42F, 0.46F, 0.08F});
+        if (cache_key.underwater &&
+            options_.visual_pipeline ==
+                VisualPipeline::LegacyVoxel) {
+            // Je conserve exactement le voile historique du pipeline Legacy.
+            const auto overlay_edge =
+                std::clamp(
+                    std::min(
+                        viewport_width,
+                        viewport_height) *
+                        0.17F,
+                    72.0F,
+                    180.0F);
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                0.0F,
+                0.0F,
+                viewport_width,
+                viewport_height,
+                {0.03F, 0.18F, 0.25F, 0.18F});
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                0.0F,
+                0.0F,
+                viewport_width,
+                overlay_edge,
+                {0.12F, 0.42F, 0.46F, 0.08F});
             append_hud_rect_top_left(
                 vertices,
                 viewport_width,
@@ -12933,7 +17720,15 @@ void Renderer::draw_hotbar(const PlayerController& player,
                 viewport_width,
                 overlay_edge,
                 {0.02F, 0.09F, 0.15F, 0.16F});
-            append_hud_rect_top_left(vertices, viewport_width, viewport_height, 0.0F, 0.0F, overlay_edge, viewport_height, {0.02F, 0.11F, 0.17F, 0.10F});
+            append_hud_rect_top_left(
+                vertices,
+                viewport_width,
+                viewport_height,
+                0.0F,
+                0.0F,
+                overlay_edge,
+                viewport_height,
+                {0.02F, 0.11F, 0.17F, 0.10F});
             append_hud_rect_top_left(
                 vertices,
                 viewport_width,
@@ -13055,7 +17850,36 @@ void Renderer::draw_hotbar(const PlayerController& player,
             hud_layout.level.progress_fill_width,
             std::max(1.0F, hud_layout.level.progress_height * 0.32F),
             {1.0F, 0.96F, 0.74F, 0.24F});
-        const auto level_label = std::string("LV ") + std::to_string(normalized_progression.level);
+        auto level_label =
+            std::string("LV") +
+            std::to_string(
+                experience_hud.level);
+        if (experience_hud
+                .maximum_level) {
+            level_label +=
+                " NIVEAU MAX";
+        } else {
+            level_label +=
+                " " +
+                std::to_string(
+                    experience_hud
+                        .current_experience) +
+                "/" +
+                std::to_string(
+                    experience_hud
+                        .next_level_experience) +
+                " XP";
+        }
+        if (experience_hud
+                .aggregated_experience_gain >
+            0ULL) {
+            level_label +=
+                " +" +
+                std::to_string(
+                    experience_hud
+                        .aggregated_experience_gain) +
+                " XP";
+        }
         draw_text_bottom(
             hud_layout.level.text_center_x,
             viewport_height - hud_layout.level.text_y - hud_layout.level.text_pixel_size * 7.0F,
@@ -14767,6 +19591,1324 @@ void Renderer::draw_death_screen(const DeathScreenState& death_screen, int width
     upload_hud_vertices(vertices);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
 
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_progression_menu(
+    const ProgressionMenuViewModel& menu,
+    const PlayerBuildState& build,
+    int width,
+    int height) {
+    if (!menu.visible ||
+        width <= 0 ||
+        height <= 0 ||
+        hud_program_ == 0 ||
+        hud_vao_ == 0 ||
+        hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto viewport_width =
+        static_cast<float>(width);
+    const auto viewport_height =
+        static_cast<float>(height);
+    const auto menu_page =
+        construction_plan_view_.active
+            ? ProgressionMenuPage::
+                  ConstructionPlan
+            : progression_runtime_hud_view_
+                  .menu_page;
+    const auto layout =
+        make_progression_menu_layout(
+            width,
+            height,
+            menu_page);
+    if (!layout.valid()) {
+        return;
+    }
+    auto vertices =
+        std::vector<HudVertex> {};
+    vertices.reserve(32'768U);
+    const auto draw_text =
+        [&](float x,
+            float y,
+            float pixel_size,
+            std::string_view text,
+            const HudColor& color,
+            bool centered = false) {
+            append_pixel_text(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x + pixel_size,
+                y + pixel_size,
+                pixel_size,
+                text,
+                {0.0F, 0.0F, 0.0F, 0.62F},
+                centered);
+            append_pixel_text(
+                vertices,
+                viewport_width,
+                viewport_height,
+                x,
+                y,
+                pixel_size,
+                text,
+                color,
+                centered);
+        };
+
+    const auto panel_width =
+        layout.panel.width;
+    const auto panel_height =
+        layout.panel.height;
+    const auto panel_x =
+        layout.panel.x;
+    const auto panel_y =
+        layout.panel.y;
+    const auto accent =
+        HudColor {
+            0.96F,
+            0.70F,
+            0.26F,
+            1.0F,
+        };
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        0.0F,
+        0.0F,
+        viewport_width,
+        viewport_height,
+        {0.01F, 0.02F, 0.03F, 0.76F});
+    append_hud_shadow_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        24.0F,
+        {0.0F, 0.0F, 0.0F, 0.42F});
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        panel_x,
+        panel_y,
+        panel_width,
+        panel_height,
+        5.0F,
+        make_stone_panel_palette(),
+        false);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.navigation.x,
+        layout.navigation.bottom() -
+            3.0F,
+        layout.navigation.width,
+        3.0F,
+        hud_with_alpha(
+            accent,
+            0.64F));
+
+    draw_text(
+        layout.title.x +
+            layout.title.width * 0.5F,
+        layout.title.y,
+        layout.mode ==
+                ProgressionMenuLayoutMode::
+                    CompactPages
+            ? 3.0F
+            : 5.0F,
+        "PROGRESSION DU PERSONNAGE",
+        {0.99F, 0.96F, 0.86F, 1.0F},
+        true);
+    const auto level_line =
+        std::string("NIVEAU ") +
+        std::to_string(menu.level) +
+        "   UTILISABLES " +
+        std::to_string(
+            menu.budget.spendable_skill_points) +
+        "   RESERVE " +
+        std::to_string(
+            menu.budget.reserved_skill_points) +
+        "   ATTRIBUTS " +
+        std::to_string(
+            menu.budget.available_attribute_points) +
+        "   MAITRISES " +
+        std::to_string(
+            menu.budget.available_mastery_points);
+    draw_text(
+        layout.summary.x +
+            layout.summary.width * 0.5F,
+        layout.summary.y,
+        layout.mode ==
+                ProgressionMenuLayoutMode::
+                    CompactPages
+            ? 1.7F
+            : 2.5F,
+        level_line,
+        {0.74F, 0.82F, 0.90F, 0.96F},
+        true);
+
+    if (layout.mode ==
+        ProgressionMenuLayoutMode::
+            CompactPages) {
+        constexpr std::array<
+            std::string_view,
+            4U>
+            kPageLabels {{
+                "SORT",
+                "ATTRIBUTS",
+                "SLOTS",
+                "PLAN 3D",
+            }};
+        const auto selected_page =
+            std::min<std::size_t>(
+                static_cast<std::size_t>(
+                    menu_page),
+                kPageLabels.size() -
+                    1U);
+        const auto navigation_cell_width =
+            layout.navigation.width /
+            static_cast<float>(
+                kPageLabels.size());
+        for (std::size_t index = 0U;
+             index < kPageLabels.size();
+             ++index) {
+            draw_text(
+                layout.navigation.x +
+                    navigation_cell_width *
+                        (static_cast<float>(
+                             index) +
+                         0.5F),
+                layout.navigation.y +
+                    4.0F,
+                1.7F,
+                kPageLabels[index],
+                index == selected_page
+                    ? accent
+                    : HudColor {
+                          0.66F,
+                          0.72F,
+                          0.80F,
+                          0.92F,
+                      },
+                true);
+        }
+
+        const auto content_x =
+            layout.primary_content.x +
+            4.0F;
+        auto content_y =
+            layout.primary_content.y +
+            4.0F;
+        const auto content_step =
+            std::clamp(
+                layout.primary_content
+                        .height /
+                    9.5F,
+                17.0F,
+                23.0F);
+        const auto regular =
+            HudColor {
+                0.84F,
+                0.88F,
+                0.94F,
+                0.98F,
+            };
+        if (menu_page ==
+            ProgressionMenuPage::
+                Attributes) {
+            draw_text(
+                content_x,
+                content_y,
+                2.3F,
+                "ATTRIBUTS",
+                accent);
+            content_y +=
+                content_step;
+            for (const auto& attribute :
+                 menu.attributes) {
+                draw_text(
+                    content_x,
+                    content_y,
+                    2.0F,
+                    std::string(
+                        attribute.name) +
+                        "  " +
+                        std::to_string(
+                            attribute
+                                .allocated_value) +
+                        "/" +
+                        std::to_string(
+                            attribute
+                                .allocation_cap),
+                    regular);
+                content_y +=
+                    content_step;
+            }
+        } else if (
+            menu_page ==
+            ProgressionMenuPage::
+                Slots) {
+            draw_text(
+                content_x,
+                content_y,
+                2.3F,
+                "RACCOURCIS DE POUVOIR",
+                accent);
+            content_y +=
+                content_step;
+            for (const auto& slot :
+                 menu.slots) {
+                const auto line =
+                    std::string("F") +
+                    std::to_string(
+                        slot.index +
+                        1U) +
+                    " " +
+                    std::string(
+                        slot.name) +
+                    " : " +
+                    (slot.ability ==
+                             AbilityId::None
+                         ? std::string(
+                               "VIDE")
+                         : std::string(
+                               slot
+                                   .ability_display_name));
+                draw_text(
+                    content_x,
+                    content_y,
+                    1.9F,
+                    line,
+                    slot.index ==
+                            menu.selected_slot
+                        ? accent
+                        : regular);
+                content_y +=
+                    content_step;
+            }
+        } else if (
+            menu_page ==
+            ProgressionMenuPage::
+                ConstructionPlan) {
+            const auto plan_index =
+                construction_plan_view_
+                        .active
+                    ? std::min(
+                          construction_plan_view_
+                              .selected_plan,
+                          construction_plan_view_
+                                  .plan_count -
+                              1U)
+                    : std::min<std::size_t>(
+                          build.selected_construction_plan,
+                          build.construction_plans
+                                  .size() -
+                              1U);
+            const auto& saved_plan =
+                build.construction_plans[
+                    plan_index];
+            const auto cell_count =
+                construction_plan_view_
+                        .active
+                    ? construction_plan_view_
+                          .cell_count
+                    : saved_plan.cell_count;
+            const auto mirrored =
+                construction_plan_view_
+                        .active
+                    ? construction_plan_view_
+                          .mirrored
+                    : saved_plan.mirrored;
+            draw_text(
+                content_x,
+                content_y,
+                2.3F,
+                std::string(
+                    "PLAN ") +
+                    std::to_string(
+                        plan_index +
+                        1U) +
+                    "/3   CELLULES " +
+                    std::to_string(
+                        cell_count) +
+                    "/10   MIROIR " +
+                    (mirrored
+                         ? "OUI"
+                         : "NON"),
+                accent);
+            content_y +=
+                content_step;
+            if (construction_plan_view_
+                    .active) {
+                const auto& cursor =
+                    construction_plan_view_
+                        .cursor;
+                draw_text(
+                    content_x,
+                    content_y,
+                    1.9F,
+                    std::string(
+                        "COUCHE Y=") +
+                        std::to_string(
+                            cursor.y) +
+                        "   CURSEUR " +
+                        std::to_string(
+                            cursor.x) +
+                        "," +
+                        std::to_string(
+                            cursor.z) +
+                        "   MATERIAU " +
+                        std::to_string(
+                            construction_plan_view_
+                                .selected_material_id),
+                    regular);
+                content_y +=
+                    content_step;
+                auto displayed_cells =
+                    std::size_t {0U};
+                for (std::size_t index = 0U;
+                     index <
+                     construction_plan_view_
+                         .cell_count &&
+                     index <
+                     construction_plan_view_
+                         .cells.size();
+                     ++index) {
+                    const auto& cell =
+                        construction_plan_view_
+                            .cells[index];
+                    if (!cell
+                             .on_selected_layer ||
+                        displayed_cells >=
+                            6U) {
+                        continue;
+                    }
+                    draw_text(
+                        content_x,
+                        content_y,
+                        1.8F,
+                        std::string(
+                            cell.selected
+                                ? "> "
+                                : "  ") +
+                            "X " +
+                            std::to_string(
+                                cell.position.x) +
+                            "  Z " +
+                            std::to_string(
+                                cell.position.z) +
+                            "  MAT " +
+                            std::to_string(
+                                cell.material_id),
+                        cell.selected
+                            ? accent
+                            : regular);
+                    content_y +=
+                        content_step;
+                    ++displayed_cells;
+                }
+                if (displayed_cells ==
+                    0U) {
+                    draw_text(
+                        content_x,
+                        content_y,
+                        1.9F,
+                        "AUCUNE CELLULE SUR CETTE COUCHE",
+                        regular);
+                }
+            } else {
+                draw_text(
+                    content_x,
+                    content_y,
+                    2.0F,
+                    "C MODIFIER PLAN",
+                    regular);
+            }
+        } else {
+            draw_text(
+                content_x,
+                content_y,
+                2.3F,
+                std::string("VOIE : ") +
+                    std::string(
+                        menu.selected_path_name),
+                accent);
+            content_y +=
+                content_step;
+            draw_text(
+                content_x,
+                content_y,
+                2.1F,
+                std::string("PALIER ") +
+                    std::to_string(
+                        menu.selected_tier) +
+                    " - " +
+                    std::string(
+                        menu.ability
+                            .display_name),
+                regular);
+            content_y +=
+                content_step;
+            draw_text(
+                content_x,
+                content_y,
+                1.9F,
+                std::string("RANG ") +
+                    std::to_string(
+                        menu.ability
+                            .current_rank) +
+                    "/3   " +
+                    (menu.ability.mastered
+                         ? "MAITRISE"
+                         : "NON MAITRISE") +
+                    "   " +
+                    (menu.ability
+                             .implemented
+                         ? "JOUABLE"
+                         : "EN PREPARATION"),
+                menu.ability.implemented
+                    ? HudColor {
+                          0.56F,
+                          0.92F,
+                          0.62F,
+                          1.0F,
+                      }
+                    : HudColor {
+                          0.86F,
+                          0.70F,
+                          0.44F,
+                          1.0F,
+                      });
+            content_y +=
+                content_step;
+            draw_text(
+                content_x,
+                content_y,
+                1.9F,
+                std::string("COUT ") +
+                    std::to_string(
+                        static_cast<int>(
+                            std::lround(
+                                menu.ability
+                                    .energy_cost))) +
+                    " EV   RECHARGE " +
+                    std::to_string(
+                        static_cast<int>(
+                            std::lround(
+                                menu.ability
+                                    .cooldown_seconds))) +
+                    " S   PORTEE " +
+                    std::to_string(
+                        static_cast<int>(
+                            std::lround(
+                                menu.ability
+                                    .range_meters))) +
+                    " M",
+                {0.50F, 0.78F, 0.96F, 1.0F});
+            content_y +=
+                content_step;
+            draw_text(
+                content_x,
+                content_y,
+                1.8F,
+                std::string("ACHAT : ") +
+                    std::string(
+                        menu.ability
+                            .rank_purchase_status),
+                regular);
+            content_y +=
+                content_step;
+            draw_text(
+                content_x,
+                content_y,
+                1.8F,
+                std::string("MAITRISE : ") +
+                    std::string(
+                        menu.ability
+                            .mastery_purchase_status),
+                regular);
+        }
+
+        if (construction_plan_view_
+                .active) {
+            draw_text(
+                layout.footer.x +
+                    layout.footer.width *
+                        0.5F,
+                layout.footer.y +
+                    1.0F,
+                1.35F,
+                "1-3 PLAN  FLECHES X/Z  PAGEUP/PAGEDOWN Y  ESPACE CELLULE  Q/E MATERIAU",
+                {0.82F, 0.85F, 0.90F, 0.96F},
+                true);
+            draw_text(
+                layout.footer.x +
+                    layout.footer.width *
+                        0.5F,
+                layout.footer.y +
+                    13.0F,
+                1.35F,
+                "M MIROIR  ENTREE VALIDER  ECHAP ANNULER",
+                {0.68F, 0.76F, 0.86F, 0.96F},
+                true);
+        } else {
+            draw_text(
+                layout.footer.x +
+                    layout.footer.width *
+                        0.5F,
+                layout.footer.y +
+                    7.0F,
+                1.45F,
+                "FLECHES CHOISIR  ENTREE ACHETER  M MAITRISER  TAB SLOT  ESPACE EQUIPER  C MODIFIER PLAN",
+                {0.78F, 0.83F, 0.90F, 0.96F},
+                true);
+        }
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(
+            GL_SRC_ALPHA,
+            GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(
+            hud_program_);
+        bind_hud_textures();
+        upload_hud_vertices(
+            vertices);
+        glDrawArrays(
+            GL_TRIANGLES,
+            0,
+            static_cast<GLsizei>(
+                vertices.size()));
+        glDisable(GL_BLEND);
+        glEnable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    if (construction_plan_view_
+            .active) {
+        const auto plan_count =
+            std::max<std::size_t>(
+                construction_plan_view_
+                    .plan_count,
+                1U);
+        const auto plan_index =
+            std::min(
+                construction_plan_view_
+                    .selected_plan,
+                plan_count -
+                    1U);
+        const auto& cursor =
+            construction_plan_view_
+                .cursor;
+        auto primary_y =
+            layout.primary_content.y;
+        draw_text(
+            layout.primary_content.x,
+            primary_y,
+            3.2F,
+            std::string("PLAN ") +
+                std::to_string(
+                    plan_index +
+                    1U) +
+                "/" +
+                std::to_string(
+                    plan_count),
+            accent);
+        primary_y += 38.0F;
+        draw_text(
+            layout.primary_content.x,
+            primary_y,
+            2.4F,
+            std::string("CELLULES ") +
+                std::to_string(
+                    construction_plan_view_
+                        .cell_count) +
+                "/" +
+                std::to_string(
+                    construction_plan_view_
+                        .maximum_cell_count),
+            {0.88F, 0.92F, 0.97F, 1.0F});
+        primary_y += 30.0F;
+        draw_text(
+            layout.primary_content.x,
+            primary_y,
+            2.4F,
+            std::string("COUCHE Y = ") +
+                std::to_string(
+                    cursor.y),
+            {0.70F, 0.84F, 0.96F, 1.0F});
+        primary_y += 30.0F;
+        draw_text(
+            layout.primary_content.x,
+            primary_y,
+            2.4F,
+            std::string("CURSEUR X/Z = ") +
+                std::to_string(
+                    cursor.x) +
+                " / " +
+                std::to_string(
+                    cursor.z),
+            {0.70F, 0.84F, 0.96F, 1.0F});
+        primary_y += 30.0F;
+        draw_text(
+            layout.primary_content.x,
+            primary_y,
+            2.4F,
+            std::string("MATERIAU = ") +
+                std::to_string(
+                    construction_plan_view_
+                        .selected_material_id),
+            {0.86F, 0.80F, 0.58F, 1.0F});
+        primary_y += 30.0F;
+        draw_text(
+            layout.primary_content.x,
+            primary_y,
+            2.4F,
+            std::string("MIROIR = ") +
+                (construction_plan_view_
+                         .mirrored
+                     ? "OUI"
+                     : "NON"),
+            construction_plan_view_
+                    .mirror_unlocked
+                ? HudColor {
+                      0.62F,
+                      0.92F,
+                      0.70F,
+                      1.0F,
+                  }
+                : HudColor {
+                      0.72F,
+                      0.62F,
+                      0.50F,
+                      1.0F,
+                  });
+
+        auto secondary_y =
+            layout.secondary_content.y;
+        draw_text(
+            layout.secondary_content.x,
+            secondary_y,
+            3.0F,
+            "CELLULES DE LA COUCHE",
+            accent);
+        secondary_y += 34.0F;
+        auto displayed_cells =
+            std::size_t {0U};
+        for (std::size_t index = 0U;
+             index <
+             construction_plan_view_
+                 .cell_count &&
+             index <
+             construction_plan_view_
+                 .cells.size();
+             ++index) {
+            const auto& cell =
+                construction_plan_view_
+                    .cells[index];
+            if (!cell.on_selected_layer) {
+                continue;
+            }
+            draw_text(
+                layout.secondary_content.x,
+                secondary_y,
+                2.1F,
+                std::string(
+                    cell.selected
+                        ? "> "
+                        : "  ") +
+                    "X " +
+                    std::to_string(
+                        cell.position.x) +
+                    "  Z " +
+                    std::to_string(
+                        cell.position.z) +
+                    "  MAT " +
+                    std::to_string(
+                        cell.material_id),
+                cell.selected
+                    ? accent
+                    : HudColor {
+                          0.82F,
+                          0.86F,
+                          0.92F,
+                          0.98F,
+                      });
+            secondary_y += 26.0F;
+            ++displayed_cells;
+        }
+        if (displayed_cells == 0U) {
+            draw_text(
+                layout.secondary_content.x,
+                secondary_y,
+                2.1F,
+                "AUCUNE CELLULE",
+                {0.72F, 0.76F, 0.82F, 0.94F});
+        }
+
+        draw_text(
+            layout.footer.x +
+                layout.footer.width *
+                    0.5F,
+            layout.footer.y,
+            1.8F,
+            "1-3 PLAN  FLECHES X/Z  PAGEUP/PAGEDOWN Y  ESPACE CELLULE  Q/E MATERIAU",
+            {0.82F, 0.85F, 0.90F, 0.96F},
+            true);
+        draw_text(
+            layout.footer.x +
+                layout.footer.width *
+                    0.5F,
+            layout.footer.y +
+                18.0F,
+            1.8F,
+            "M MIROIR  ENTREE VALIDER  ECHAP ANNULER",
+            {0.68F, 0.76F, 0.86F, 0.96F},
+            true);
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(
+            GL_SRC_ALPHA,
+            GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(
+            hud_program_);
+        bind_hud_textures();
+        upload_hud_vertices(
+            vertices);
+        glDrawArrays(
+            GL_TRIANGLES,
+            0,
+            static_cast<GLsizei>(
+                vertices.size()));
+        glDisable(GL_BLEND);
+        glEnable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    const auto left_x =
+        layout.primary_content.x;
+    const auto right_x =
+        layout.secondary_content.x;
+    auto left_y =
+        layout.primary_content.y;
+    draw_text(
+        left_x,
+        left_y,
+        3.5F,
+        std::string("VOIE : ") +
+            std::string(
+                menu.selected_path_name),
+        accent);
+    left_y += 34.0F;
+    draw_text(
+        left_x,
+        left_y,
+        3.0F,
+        std::string("PALIER ") +
+            std::to_string(
+                menu.selected_tier) +
+            " - " +
+            std::string(
+                menu.ability.display_name),
+        {0.92F, 0.94F, 0.98F, 1.0F});
+    left_y += 30.0F;
+    const auto state_line =
+        std::string("RANG ") +
+        std::to_string(
+            menu.ability.current_rank) +
+        "/3   " +
+        (menu.ability.mastered
+             ? "MAITRISE"
+             : "NON MAITRISE") +
+        "   " +
+        (menu.ability.implemented
+             ? "JOUABLE"
+             : "EN PREPARATION");
+    draw_text(
+        left_x,
+        left_y,
+        2.5F,
+        state_line,
+        menu.ability.implemented
+            ? HudColor {
+                  0.56F,
+                  0.92F,
+                  0.62F,
+                  1.0F,
+              }
+            : HudColor {
+                  0.86F,
+                  0.70F,
+                  0.44F,
+                  1.0F,
+              });
+    left_y += 34.0F;
+
+    const auto ability_data =
+        std::string("EV ") +
+        std::to_string(
+            static_cast<int>(
+                std::lround(
+                    menu.ability.energy_cost))) +
+        "   RECHARGE " +
+        std::to_string(
+            static_cast<int>(
+                std::lround(
+                    menu.ability.cooldown_seconds))) +
+        " S   PORTEE " +
+        std::to_string(
+            static_cast<int>(
+                std::lround(
+                    menu.ability.range_meters))) +
+        " M";
+    draw_text(
+        left_x,
+        left_y,
+        2.5F,
+        ability_data,
+        {0.50F, 0.78F, 0.96F, 1.0F});
+    left_y += 34.0F;
+    draw_text(
+        left_x,
+        left_y,
+        2.4F,
+        std::string("ACHAT : ") +
+            std::string(
+                menu.ability.rank_purchase_status),
+        {0.82F, 0.84F, 0.88F, 0.94F});
+    left_y += 26.0F;
+    draw_text(
+        left_x,
+        left_y,
+        2.4F,
+        std::string("MAITRISE : ") +
+            std::string(
+                menu.ability.mastery_purchase_status),
+        {0.82F, 0.84F, 0.88F, 0.94F});
+
+    auto right_y =
+        layout.secondary_content.y;
+    draw_text(
+        right_x,
+        right_y,
+        3.0F,
+        "ATTRIBUTS",
+        accent);
+    right_y += 30.0F;
+    for (const auto& attribute :
+         menu.attributes) {
+        const auto line =
+            std::string(attribute.name) +
+            "  " +
+            std::to_string(
+                attribute.allocated_value) +
+            "/" +
+            std::to_string(
+                attribute.allocation_cap);
+        draw_text(
+            right_x,
+            right_y,
+            2.5F,
+            line,
+            {0.88F, 0.90F, 0.94F, 1.0F});
+        right_y += 25.0F;
+    }
+
+    right_y += 18.0F;
+    draw_text(
+        right_x,
+        right_y,
+        3.0F,
+        "RACCOURCIS DE POUVOIR",
+        accent);
+    right_y += 30.0F;
+    for (const auto& slot :
+         menu.slots) {
+        const auto line =
+            std::string("F") +
+            std::to_string(
+                slot.index + 1U) +
+            "  " +
+            std::string(slot.name) +
+            " : " +
+            (slot.ability ==
+                     AbilityId::None
+                 ? std::string("VIDE")
+                 : std::string(
+                       slot.ability_display_name));
+        draw_text(
+            right_x,
+            right_y,
+            2.3F,
+            line,
+            slot.index ==
+                    menu.selected_slot
+                ? HudColor {
+                      0.99F,
+                      0.86F,
+                      0.48F,
+                      1.0F,
+                  }
+                : HudColor {
+                      0.76F,
+                      0.80F,
+                      0.86F,
+                      0.96F,
+                  });
+        right_y += 24.0F;
+    }
+
+    draw_text(
+        layout.footer.x +
+            layout.footer.width * 0.5F,
+        layout.footer.y,
+        1.9F,
+        "FLECHES CHOISIR   ENTREE ACHETER   M MAITRISER   TAB SLOT   ESPACE EQUIPER   C MODIFIER PLAN",
+        {0.82F, 0.85F, 0.90F, 0.96F},
+        true);
+    draw_text(
+        layout.footer.x +
+            layout.footer.width * 0.5F,
+        layout.footer.y +
+            18.0F,
+        1.9F,
+        "1 FORCE   2 SAGESSE   3 AGILITE   4 ROBUSTESSE   P OU ECHAP FERMER",
+        {0.68F, 0.76F, 0.86F, 0.96F},
+        true);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(
+        GL_SRC_ALPHA,
+        GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    bind_hud_textures();
+    upload_hud_vertices(vertices);
+    glDrawArrays(
+        GL_TRIANGLES,
+        0,
+        static_cast<GLsizei>(
+            vertices.size()));
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+    (void)build;
+}
+
+void Renderer::draw_progression_ability_hud(
+    const PlayerBuildState& build,
+    int width,
+    int height) {
+    if (width <= 0 ||
+        height <= 0 ||
+        hud_program_ == 0 ||
+        hud_vao_ == 0 ||
+        hud_vbo_ == 0) {
+        return;
+    }
+
+    const auto viewport_width =
+        static_cast<float>(width);
+    const auto viewport_height =
+        static_cast<float>(height);
+    auto vertices =
+        std::vector<HudVertex> {};
+    vertices.reserve(8'192U);
+    const auto snapshot =
+        make_progression_ability_hud_snapshot(
+            build,
+            progression_runtime_hud_view_);
+    if (!snapshot.visible) {
+        return;
+    }
+    const auto layout =
+        make_progression_ability_hud_layout(
+            width,
+            height);
+    if (!layout.valid()) {
+        return;
+    }
+    auto feedback_hash =
+        std::uint32_t {2'166'136'261U};
+    for (const auto character :
+         snapshot.feedback_assets
+             .visual_id) {
+        feedback_hash ^=
+            static_cast<std::uint32_t>(
+                static_cast<unsigned char>(
+                    character));
+        feedback_hash *=
+            16'777'619U;
+    }
+    const auto feedback_mix =
+        static_cast<float>(
+            feedback_hash & 0xFFU) /
+        255.0F;
+    const auto feedback_accent =
+        HudColor {
+            0.20F +
+                feedback_mix * 0.18F,
+            0.62F +
+                feedback_mix * 0.18F,
+            0.94F -
+                feedback_mix * 0.12F,
+            0.98F,
+        };
+    append_stylized_panel_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.panel.x,
+        layout.panel.y,
+        layout.panel.width,
+        layout.panel.height,
+        3.0F,
+        make_slate_panel_palette(),
+        false);
+    const auto ratio =
+        std::clamp(
+            snapshot.current_energy /
+                std::max(
+                    snapshot.maximum_energy,
+                    1.0F),
+            0.0F,
+            1.0F);
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.energy.x,
+        layout.energy.y,
+        layout.energy.width,
+        layout.energy.height,
+        {0.03F, 0.08F, 0.12F, 0.95F});
+    append_hud_rect_top_left(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.energy.x,
+        layout.energy.y,
+        layout.energy.width *
+            ratio,
+        layout.energy.height,
+        feedback_accent);
+    const auto energy_label =
+        std::string("EV ") +
+        std::to_string(
+            static_cast<int>(
+                std::lround(
+                    snapshot
+                        .current_energy))) +
+        "/" +
+        std::to_string(
+            static_cast<int>(
+                std::lround(
+                    snapshot
+                        .maximum_energy)));
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.energy.x +
+            layout.energy.width *
+                0.5F,
+        layout.energy.y +
+            1.0F,
+        1.35F,
+        energy_label,
+        {0.90F, 0.96F, 1.0F, 1.0F},
+        true);
+
+    const auto format_seconds =
+        [](float seconds) {
+            const auto tenths =
+                std::max(
+                    0,
+                    static_cast<int>(
+                        std::lround(
+                            seconds *
+                            10.0F)));
+            return std::to_string(
+                       tenths / 10) +
+                   "." +
+                   std::to_string(
+                       tenths % 10) +
+                   "S";
+        };
+    const auto text_pixel_size =
+        layout.panel.width <
+                320.0F
+            ? 1.3F
+            : 1.55F;
+    const auto ability_label =
+        std::string(
+            snapshot.display_name) +
+        "  COUT " +
+        std::to_string(
+            static_cast<int>(
+                std::lround(
+                    snapshot
+                        .energy_cost))) +
+        " EV";
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.ability.x,
+        layout.ability.y +
+            3.0F,
+        text_pixel_size,
+        ability_label,
+        snapshot.energy_insufficient
+            ? HudColor {
+                  1.0F,
+                  0.46F,
+                  0.36F,
+                  1.0F,
+              }
+            : HudColor {
+                  0.94F,
+                  0.92F,
+                  0.80F,
+                  0.98F,
+              });
+    const auto timer_label =
+        std::string("GCD ") +
+        format_seconds(
+            snapshot
+                .global_cooldown_remaining) +
+        "  CD " +
+        format_seconds(
+            snapshot
+                .cooldown_remaining) +
+        "  CH " +
+        std::to_string(
+            snapshot.charges) +
+        "/" +
+        std::to_string(
+            snapshot.maximum_charges) +
+        "  ACT " +
+        format_seconds(
+            snapshot
+                .active_duration_remaining);
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.timers.x,
+        layout.timers.y +
+            3.0F,
+        text_pixel_size,
+        timer_label,
+        snapshot.energy_insufficient
+            ? HudColor {
+                  1.0F,
+                  0.58F,
+                  0.42F,
+                  1.0F,
+              }
+            : HudColor {
+                  0.70F,
+                  0.86F,
+                  0.98F,
+                  0.98F,
+              });
+    const auto effects_label =
+        std::string(
+            snapshot.wind_blade_armed
+                ? "LAME OUI"
+                : "LAME NON") +
+        (snapshot.wind_dodge_ready
+             ? "  ESQ OUI"
+             : "  ESQ NON") +
+        (snapshot.iron_guard_active
+             ? "  GARDE OUI"
+             : "  GARDE NON") +
+        "  FANT " +
+        std::to_string(
+            snapshot.active_footmen);
+    auto effects_y =
+        layout.effects.y;
+    const auto effects_pixel_size =
+        snapshot.energy_insufficient
+            ? 1.15F
+            : text_pixel_size;
+    if (snapshot.energy_insufficient) {
+        append_pixel_text(
+            vertices,
+            viewport_width,
+            viewport_height,
+            layout.effects.x,
+            effects_y,
+            effects_pixel_size,
+            "ENERGIE INSUFFISANTE",
+            {1.0F, 0.48F, 0.34F, 1.0F});
+        effects_y += 11.0F;
+    }
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.effects.x,
+        effects_y,
+        effects_pixel_size,
+        effects_label,
+        {0.78F, 0.90F, 0.82F, 0.98F});
+    const auto points_label =
+        std::string("POINTS UTIL ") +
+        std::to_string(
+            progression_menu_view_
+                .budget
+                .spendable_skill_points) +
+        "  RESERVE " +
+        std::to_string(
+            progression_menu_view_
+                .budget
+                .reserved_skill_points);
+    append_pixel_text(
+        vertices,
+        viewport_width,
+        viewport_height,
+        layout.effects.x,
+        effects_y +
+            (snapshot.energy_insufficient
+                 ? 11.0F
+                 : 15.0F),
+        effects_pixel_size,
+        points_label,
+        {0.92F, 0.82F, 0.52F, 0.98F});
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(
+        GL_SRC_ALPHA,
+        GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(hud_program_);
+    bind_hud_textures();
+    upload_hud_vertices(vertices);
+    glDrawArrays(
+        GL_TRIANGLES,
+        0,
+        static_cast<GLsizei>(
+            vertices.size()));
     glDisable(GL_BLEND);
     glEnable(GL_CULL_FACE);
     glEnable(GL_DEPTH_TEST);

@@ -1,5 +1,6 @@
 #include "render/VisualEntityPrimitives.h"
 
+#include "creatures/HumanoidVisualContinuity.h"
 #include "player/PlayerGeometry.h"
 
 #include <doctest/doctest.h>
@@ -101,6 +102,60 @@ template <typename Tile>
 
 } // namespace
 
+TEST_CASE("les os visuels humains se recouvrent sans déplacer leur centre") {
+    const glm::vec3 start {1.0F, 2.0F, 3.0F};
+    const glm::vec3 end {1.0F, 3.0F, 3.0F};
+    const auto first = make_overlapping_humanoid_limb_span(
+        start,
+        end,
+        0.07F);
+    const auto second = make_overlapping_humanoid_limb_span(
+        start,
+        end,
+        0.07F);
+
+    REQUIRE(first.valid);
+    CHECK(first.start.x == doctest::Approx(1.0F));
+    CHECK(first.start.y == doctest::Approx(1.93F));
+    CHECK(first.end.y == doctest::Approx(3.07F));
+    CHECK(first.end.z == doctest::Approx(3.0F));
+    CHECK((first.start + first.end) * 0.5F ==
+          (start + end) * 0.5F);
+    CHECK(first.start == second.start);
+    CHECK(first.end == second.end);
+
+    const auto clamped = make_overlapping_humanoid_limb_span(
+        start,
+        end,
+        10.0F);
+    REQUIRE(clamped.valid);
+    CHECK(clamped.start.y == doctest::Approx(1.82F));
+    CHECK(clamped.end.y == doctest::Approx(3.18F));
+}
+
+TEST_CASE("les os visuels humains refusent les entrées non finies ou dégénérées") {
+    const auto degenerate = make_overlapping_humanoid_limb_span(
+        glm::vec3 {1.0F},
+        glm::vec3 {1.0F},
+        0.04F);
+    const auto nan_overlap = make_overlapping_humanoid_limb_span(
+        glm::vec3 {0.0F},
+        glm::vec3 {0.0F, 1.0F, 0.0F},
+        std::numeric_limits<float>::quiet_NaN());
+    const auto infinite_endpoint = make_overlapping_humanoid_limb_span(
+        glm::vec3 {0.0F},
+        glm::vec3 {
+            std::numeric_limits<float>::infinity(),
+            1.0F,
+            0.0F,
+        },
+        0.04F);
+
+    CHECK_FALSE(degenerate.valid);
+    CHECK_FALSE(nan_overlap.valid);
+    CHECK_FALSE(infinite_endpoint.valid);
+}
+
 TEST_CASE("le cache des primitives d'entite contient les trois LOD immuables") {
     constexpr std::array<StylizedPrimitiveType, 6> primitives {{
         StylizedPrimitiveType::RoundedBox,
@@ -145,6 +200,79 @@ TEST_CASE("le cache des primitives d'entite contient les trois LOD immuables") {
             }
         }
     }
+}
+
+TEST_CASE("le LOD des entités borne les micro-détails et ses deux distances") {
+    CHECK(
+        select_visual_entity_primitive_lod(
+            18.0F * 18.0F,
+            0.40F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::High);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            18.01F * 18.01F,
+            0.40F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::Medium);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            56.0F * 56.0F,
+            0.40F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::Medium);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            56.01F * 56.01F,
+            0.40F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::Low);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            1.0F,
+            0.10F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::Medium);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            1.0F,
+            0.05F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::Low);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            1.0F,
+            0.40F,
+            3,
+            true,
+            false) ==
+        StylizedPrimitiveLod::Low);
+    CHECK(
+        select_visual_entity_primitive_lod(
+            std::numeric_limits<float>::quiet_NaN(),
+            0.40F,
+            3,
+            false,
+            false) ==
+        StylizedPrimitiveLod::Low);
+    CHECK_FALSE(
+        visual_entity_part_casts_simplified_shadow(
+            0.084F));
+    CHECK(
+        visual_entity_part_casts_simplified_shadow(
+            0.085F));
 }
 
 TEST_CASE("la classification remplace les masses organiques et les membres sans toucher au rig") {
@@ -258,6 +386,9 @@ TEST_CASE("le renfort de silhouette reste contextuel et ne translate aucune piec
     const auto player_limb = make_part(
         glm::vec3 {0.16F, 0.82F, 0.15F},
         PlayerAtlasTile::Sleeve);
+    const auto crew_limb = make_part(
+        glm::vec3 {0.16F, 0.82F, 0.15F},
+        CreatureAtlasTile::CrewNavyCloth);
     auto generic_limb = creature_limb;
     generic_limb.material_class = 0.20F;
 
@@ -267,6 +398,9 @@ TEST_CASE("le renfort de silhouette reste contextuel et ne translate aucune piec
     const auto player_result = classify_visual_entity_part(
         player_limb,
         VisualEntityContext::PlayerWorld);
+    const auto crew_result = classify_visual_entity_part(
+        crew_limb,
+        VisualEntityContext::Crew);
     const auto generic_result = classify_visual_entity_part(
         generic_limb,
         VisualEntityContext::Generic);
@@ -280,15 +414,20 @@ TEST_CASE("le renfort de silhouette reste contextuel et ne translate aucune piec
     const auto player_extent = transformed_mesh_extent(
         capsule,
         player_limb.transform * player_result.primitive_to_part_local);
+    const auto crew_extent = transformed_mesh_extent(
+        capsule,
+        crew_limb.transform * crew_result.primitive_to_part_local);
     const auto generic_extent = transformed_mesh_extent(
         capsule,
         generic_limb.transform * generic_result.primitive_to_part_local);
 
     CHECK(creature_extent.x == doctest::Approx(0.16F * 1.10F));
     CHECK(player_extent.x == doctest::Approx(0.16F * 1.07F));
+    CHECK(crew_extent.x == doctest::Approx(0.16F * 1.07F));
     CHECK(generic_extent.x == doctest::Approx(0.16F));
     CHECK(creature_extent.y == doctest::Approx(0.82F));
     CHECK(player_extent.y == doctest::Approx(0.82F));
+    CHECK(crew_extent.y == doctest::Approx(0.82F));
     CHECK(generic_extent.y == doctest::Approx(0.82F));
     CHECK(glm::all(glm::equal(
         glm::vec3 {creature_result.primitive_to_part_local[3]},

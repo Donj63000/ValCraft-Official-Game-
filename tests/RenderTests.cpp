@@ -3,6 +3,7 @@
 #include "render/ItemDropGeometry.h"
 #include "render/MusketVisualRecipe.h"
 #include "render/ModernHudStyle.h"
+#include "render/ModernTerrainShaderSource.h"
 #include "render/SceneSamplerBindings.h"
 #include "render/RendererQuality.h"
 #include "render/Renderer.h"
@@ -331,6 +332,90 @@ TEST_CASE("renderer ship mesh cache remains not ready until revision renderer an
     CHECK_FALSE(cache.ready(geometry_revision, part_count, true, true));
 }
 
+TEST_CASE("renderer ship mesh cache retains both modern lod variants") {
+    RendererShipMeshCacheState cache;
+    constexpr std::uint64_t geometry_revision = 0xA6E11EULL;
+    constexpr std::size_t part_count = 3'291U;
+    constexpr std::uint8_t near_variant = 1U;
+    constexpr std::uint8_t far_variant = 2U;
+
+    CHECK(
+        stylized_ship_lod_index(
+            StylizedShipLod::Near) !=
+        stylized_ship_lod_index(
+            StylizedShipLod::Far));
+    CHECK(
+        stylized_ship_lod_index(
+            StylizedShipLod::Near) <
+        kStylizedShipLodCount);
+    CHECK(
+        stylized_ship_lod_index(
+            StylizedShipLod::Far) <
+        kStylizedShipLodCount);
+
+    cache.remember(
+        geometry_revision,
+        part_count,
+        near_variant);
+    CHECK(
+        cache.matches(
+            geometry_revision,
+            part_count,
+            near_variant));
+    CHECK_FALSE(
+        cache.matches(
+            geometry_revision,
+            part_count,
+            far_variant));
+
+    cache.remember(
+        geometry_revision,
+        part_count,
+        far_variant);
+    CHECK(
+        cache.ready(
+            geometry_revision,
+            part_count,
+            true,
+            true,
+            near_variant));
+    CHECK(
+        cache.ready(
+            geometry_revision,
+            part_count,
+            true,
+            true,
+            far_variant));
+
+    // Je simule une régénération Far : la résidence Near doit rester intacte.
+    cache.remember(
+        geometry_revision + 1U,
+        part_count,
+        far_variant);
+    CHECK(
+        cache.matches(
+            geometry_revision,
+            part_count,
+            near_variant));
+    CHECK_FALSE(
+        cache.matches(
+            geometry_revision,
+            part_count,
+            far_variant));
+
+    cache.reset();
+    CHECK_FALSE(
+        cache.matches(
+            geometry_revision,
+            part_count,
+            near_variant));
+    CHECK_FALSE(
+        cache.matches(
+            geometry_revision + 1U,
+            part_count,
+            far_variant));
+}
+
 static_assert(std::is_same_v<
               decltype(std::declval<Renderer&>().prepare_ship_mesh(std::declval<const ShipRenderState&>())),
               bool>);
@@ -374,7 +459,7 @@ static_assert(std::is_same_v<
 
 TEST_CASE("crew renderer owns six additional long range slots and packed local lighting") {
     CHECK(kCrewVisualRenderCapacity == 6U);
-    CHECK(kCrewVisualPartBudget == 64U);
+    CHECK(kCrewVisualPartBudget == 80U);
     CHECK(kCrewVisualDrawDistance == doctest::Approx(96.0F));
 
     // Je garde ces quatre flottants contigus car ils partagent l'attribut GPU 15.
@@ -384,6 +469,82 @@ TEST_CASE("crew renderer owns six additional long range slots and packed local l
           offsetof(CreaturePartInstance, sky_light) + sizeof(float));
     CHECK(offsetof(CreaturePartInstance, precipitation_exposure) ==
           offsetof(CreaturePartInstance, block_light) + sizeof(float));
+}
+
+TEST_CASE("creature shader preserves each uniform color under local ship lighting") {
+    const auto renderer_path =
+        std::filesystem::path {
+            __FILE__,
+        }
+            .parent_path()
+            .parent_path() /
+        "src" /
+        "render" /
+        "Renderer.cpp";
+    std::ifstream input {
+        renderer_path,
+        std::ios::binary,
+    };
+    REQUIRE(input.good());
+    const std::string source {
+        std::istreambuf_iterator<char> {
+            input,
+        },
+        std::istreambuf_iterator<char> {},
+    };
+    const auto fragment_begin =
+        source.find(
+            "static constexpr auto* creature_fragment_shader");
+    REQUIRE(
+        fragment_begin !=
+        std::string::npos);
+    const auto fragment_end =
+        source.find(
+            ")\";",
+            fragment_begin);
+    REQUIRE(
+        fragment_end !=
+        std::string::npos);
+    const auto fragment =
+        std::string_view {
+            source,
+        }.substr(
+            fragment_begin,
+            fragment_end -
+                fragment_begin);
+
+    CHECK(
+        fragment.find(
+            "vec3 modern_local_albedo") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "mix(albedo, sqrt(max(albedo, vec3(0.0))), 0.32)") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "u_modern_pipeline != 0") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "uniform vec3 u_local_light_radiance;") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "u_local_light_radiance *") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "if (instance_block_light > 0.0001)") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "local_light_facing *") !=
+        std::string_view::npos);
+    CHECK(
+        fragment.find(
+            "local_light_albedo;") !=
+        std::string_view::npos);
 }
 
 TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
@@ -411,7 +572,241 @@ TEST_CASE("sky shader avoids reserved GLSL noise identifiers") {
     CHECK(shader_source.find("uniform int u_cloud_steps") != std::string_view::npos);
     CHECK(shader_source.find("uniform float u_cloud_detail") != std::string_view::npos);
     CHECK(shader_source.find("step >= cloud_steps") != std::string_view::npos);
+    CHECK(shader_source.find("if (layer <= 0.0)") != std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "smoothstep(0.12, 0.24, disk_visibility)") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "directional_cloud_light > 0.001") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "if (shape + weather_bias <= coverage)") !=
+        std::string_view::npos);
     CHECK(vertex_source.find("vec4(clip, 1.0, 1.0)") != std::string_view::npos);
+}
+
+TEST_CASE("maritime sky seals the distant ocean with an analytic fogged plane") {
+    const std::string_view shader_source {kSkyFragmentShaderSource};
+
+    CHECK(
+        shader_source.find(
+            "uniform vec3 u_maritime_camera_position") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "uniform float u_maritime_sea_level") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "uniform int u_maritime_submersion_active") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "uniform vec2 u_maritime_far_fog_range") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "float plane_distance") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "u_maritime_camera_position.y") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "bool maritime_underwater_camera") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "u_maritime_submersion_active != 0") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "vec3 deep_water") !=
+        std::string_view::npos);
+    CHECK(
+        shader_source.find(
+            "float terminal_fog") !=
+        std::string_view::npos);
+    const auto terminal_mix_color =
+        shader_source.rfind(
+            "u_distant_fog_color");
+    REQUIRE(
+        terminal_mix_color !=
+        std::string_view::npos);
+    const auto terminal_mix_factor =
+        shader_source.find(
+            "terminal_fog",
+            terminal_mix_color);
+    REQUIRE(
+        terminal_mix_factor !=
+        std::string_view::npos);
+    CHECK(
+        terminal_mix_factor -
+            terminal_mix_color <
+        96U);
+}
+
+TEST_CASE("maritime detail stays opaque above a fogged proxy underlay") {
+    const auto terrain_shader =
+        kModernTerrainFragmentShaderSource;
+    CHECK(
+        terrain_shader.find(
+            "uniform int u_maritime_horizon_enabled;") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "uniform vec2 u_maritime_detail_transition_range;") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "uniform float u_maritime_sea_level;") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "uniform int u_maritime_submersion_active;") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "float maritime_horizon_haze = 0.0;") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "v_world_position.xz -\n"
+            "                u_camera_position.xz") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "if (proxy_coverage > dither_threshold)") ==
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "bool underwater_volume") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "u_maritime_submersion_active != 0") !=
+        std::string_view::npos);
+    CHECK(
+        terrain_shader.find(
+            "float underwater_terminal_fog") !=
+        std::string_view::npos);
+
+    const auto renderer_path =
+        std::filesystem::path {
+            __FILE__,
+        }
+            .parent_path()
+            .parent_path() /
+        "src" /
+        "render" /
+        "Renderer.cpp";
+    std::ifstream input(
+        renderer_path,
+        std::ios::binary);
+    REQUIRE(input.is_open());
+    const std::string renderer_source {
+        std::istreambuf_iterator<char> {
+            input,
+        },
+        std::istreambuf_iterator<char> {},
+    };
+    CHECK(
+        renderer_source.find(
+            "fog_distance =\n"
+            "            distance(") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "maritime_plane_distance)\n"
+            "                : 1.0;") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "sea_horizon_uniforms_.sea_level,\n"
+            "        static_cast<float>(\n"
+            "            kSeaLevel + 1));") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "ordered_transition_threshold(\n"
+            "                gl_FragCoord.xy)") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "v_world_position.y <\n"
+            "            u_sea_level - 0.25") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "if (submerged) {\n"
+            "        discard;") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "if (u_camera_position.y <\n"
+            "        u_sea_level) {\n"
+            "        discard;") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "underwater_camera") ==
+        std::string::npos);
+    const auto legacy_underwater_guard =
+        renderer_source.find(
+            "options_.visual_pipeline ==\n"
+            "                VisualPipeline::LegacyVoxel");
+    REQUIRE(
+        legacy_underwater_guard !=
+        std::string::npos);
+    const auto legacy_overlay =
+        renderer_source.find(
+            "const auto overlay_edge",
+            legacy_underwater_guard);
+    REQUIRE(
+        legacy_overlay !=
+        std::string::npos);
+    CHECK(
+        legacy_overlay -
+            legacy_underwater_guard <
+        256U);
+    CHECK(
+        renderer_source.find(
+            "u_camera_position.y >=\n"
+            "            u_maritime_sea_level") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "u_maritime_far_fog_range") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "uniform float u_maritime_sea_level;") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "float maritime_plane_distance") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "-maritime_plane_distance *\n"
+            "                maritime_plane_distance") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "u_projection_far_distance") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "? kSeaHorizonProjectionFarPlane") !=
+        std::string::npos);
+    CHECK(
+        renderer_source.find(
+            "const float far_plane = 320.0;") ==
+        std::string::npos);
 }
 
 TEST_CASE("ship protection GLSL keeps water and weather masks on one contract") {
@@ -442,6 +837,7 @@ TEST_CASE("ship protection GLSL keeps water and weather masks on one contract") 
     CHECK(shader_source.find("bool ship_shelters_weather") !=
           std::string_view::npos);
 }
+
 
 TEST_CASE("renderer precipitation pass keeps its shader and OpenGL contracts") {
     const auto renderer_path =
@@ -482,6 +878,124 @@ TEST_CASE("renderer precipitation pass keeps its shader and OpenGL contracts") {
           std::string::npos);
 }
 
+TEST_CASE("modern ship shader keeps the exterior lantern and wet deck contracts") {
+    const auto renderer_path =
+        std::filesystem::path {
+            __FILE__,
+        }
+            .parent_path()
+            .parent_path() /
+        "src" /
+        "render" /
+        "Renderer.cpp";
+    std::ifstream input(
+        renderer_path,
+        std::ios::binary);
+    REQUIRE(
+        input.is_open());
+    const std::string source {
+        std::istreambuf_iterator<char> {
+            input,
+        },
+        std::istreambuf_iterator<char> {},
+    };
+
+    CHECK(
+        source.find(
+            "in float v_block_light;") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "uniform float u_exterior_light_activation;") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "modern_ship_uniforms_.exterior_light_activation") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "ship_exterior_light_activation(") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "material_id != 7\n"
+            "            ? a_block_light *") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "float exterior_orientation =") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "u_exterior_light_activation *\n"
+            "                  exterior_orientation") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "v_block_light") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "u_exterior_light_activation") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "float exterior_light =\n"
+            "        v_block_light;") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "uniform vec3 u_exterior_light_radiance;") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "modern_ship_uniforms_.exterior_light_radiance") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "exterior_lantern_radiance(") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "u_exterior_light_radiance *") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "grazing_base *\n"
+            "                grazing_base *\n"
+            "                grazing_base") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "if (exposed_deck > 0.0001 &&\n"
+            "            wetness > 0.0001)") !=
+        std::string::npos);
+
+    CHECK(
+        source.find(
+            "float exposed_deck =") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "material_id == 1") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "min(\n"
+            "                roughness,\n"
+            "                0.50)") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "wetness *\n"
+            "                exposed_deck") !=
+        std::string::npos);
+    CHECK(
+        source.find(
+            "vec3(0.026, 0.036, 0.052)") !=
+        std::string::npos);
+}
+
 TEST_CASE("renderer quality profiles bound expensive passes predictably") {
     const auto high = resolve_renderer_quality_settings(RendererQuality::High, 3840, 2160);
     const auto medium = resolve_renderer_quality_settings(RendererQuality::Medium, 1920, 1080);
@@ -494,6 +1008,8 @@ TEST_CASE("renderer quality profiles bound expensive passes predictably") {
     CHECK(high.high_precision_hdr);
     CHECK(high.ocean_wave_count == 6);
     CHECK(high.ocean_detail_scale == doctest::Approx(1.0F));
+    CHECK(high.water_surface_detail ==
+          doctest::Approx(1.0F));
 
     CHECK(medium.cloud_steps == 4);
     CHECK(medium.cloud_detail < high.cloud_detail);
@@ -501,6 +1017,8 @@ TEST_CASE("renderer quality profiles bound expensive passes predictably") {
     CHECK_FALSE(medium.high_precision_hdr);
     CHECK(medium.ocean_wave_count == 4);
     CHECK(medium.ocean_detail_scale == doctest::Approx(0.70F));
+    CHECK(medium.water_surface_detail ==
+          doctest::Approx(0.70F));
 
     CHECK(low.cloud_steps == 2);
     CHECK(low.cloud_detail == doctest::Approx(0.0F));
@@ -508,6 +1026,14 @@ TEST_CASE("renderer quality profiles bound expensive passes predictably") {
     CHECK(low.glow_downsample == 4);
     CHECK(low.ocean_wave_count == 3);
     CHECK(low.ocean_detail_scale == doctest::Approx(0.0F));
+    CHECK(low.water_surface_detail ==
+          doctest::Approx(0.30F));
+    CHECK(
+        high.water_surface_detail >
+        medium.water_surface_detail);
+    CHECK(
+        medium.water_surface_detail >
+        low.water_surface_detail);
 
     CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 1920, 1080).resolved_quality == RendererQuality::High);
     CHECK(resolve_renderer_quality_settings(RendererQuality::Dynamic, 2560, 1440).resolved_quality == RendererQuality::Medium);
@@ -622,6 +1148,51 @@ TEST_CASE("ship mesh removes joined box faces and keeps local coordinates") {
     });
     REQUIRE(max_x != mesh.vertices.end());
     CHECK(max_x->x == doctest::Approx(2.0F));
+}
+
+TEST_CASE("legacy ship mesh ignores modern decorative furniture shapes") {
+    const std::array<ShipPart, 2>
+        decorative_parts {{
+            {
+                ShipPartShape::ChamferedBox,
+                ShipMaterial::Linen,
+                {-1.0F, 0.0F, -1.0F},
+                {1.0F, 0.4F, 1.0F},
+            },
+            {
+                ShipPartShape::DrapedPanel,
+                ShipMaterial::BurgundyTextile,
+                {-1.0F, 0.5F, -1.0F},
+                {1.0F, 0.5F, 1.0F},
+                {0.0F, 1.0F, 0.0F},
+                0.06F,
+            },
+        }};
+    const auto decorative_mesh =
+        build_ship_mesh_data(
+            decorative_parts);
+    CHECK(
+        decorative_mesh.face_count ==
+        0U);
+    CHECK(
+        decorative_mesh.vertices.empty());
+    CHECK(
+        decorative_mesh.indices.empty());
+
+    const std::array<ShipPart, 1>
+        physical_core {{
+            {
+                ShipPartShape::Box,
+                ShipMaterial::OiledOak,
+                {-1.0F, 0.0F, -1.0F},
+                {1.0F, 0.4F, 1.0F},
+            },
+        }};
+    const auto core_mesh =
+        build_ship_mesh_data(
+            physical_core);
+    CHECK_FALSE(
+        core_mesh.empty());
 }
 
 TEST_CASE("ship deck underside blocks its own sky lighting") {
@@ -1778,6 +2349,201 @@ TEST_CASE("L'Amelie ship atlas owns ten deterministic and distinct maritime mate
         ship_visual_material(
             ShipAtlasMaterial::Lantern) ==
         BlockVisualMaterial::Emissive);
+}
+
+TEST_CASE("progression HUD resolves exact experience and maximum level") {
+    const auto level = 99U;
+    const auto threshold =
+        player_experience_for_next_level(
+            level);
+    const auto progression =
+        PlayerProgressionState {
+            level,
+            threshold / 2ULL,
+        };
+    const auto snapshot =
+        make_progression_experience_hud_snapshot(
+            progression,
+            275ULL);
+
+    CHECK(snapshot.level == level);
+    CHECK(
+        snapshot.current_experience ==
+        threshold / 2ULL);
+    CHECK(
+        snapshot.next_level_experience ==
+        threshold);
+    CHECK(
+        snapshot.aggregated_experience_gain ==
+        275ULL);
+    CHECK_FALSE(snapshot.maximum_level);
+    CHECK(
+        snapshot.progress_ratio ==
+        doctest::Approx(
+            static_cast<float>(
+                threshold / 2ULL) /
+            static_cast<float>(
+                threshold)));
+
+    const auto maximum =
+        make_progression_experience_hud_snapshot(
+            {
+                kPlayerProgressionMaxLevel,
+                std::numeric_limits<
+                    std::uint64_t>::max(),
+            },
+            10ULL);
+    CHECK(maximum.maximum_level);
+    CHECK(
+        maximum.next_level_experience ==
+        0ULL);
+    CHECK(
+        maximum.progress_ratio ==
+        doctest::Approx(1.0F));
+}
+
+TEST_CASE("ability HUD exposes costs timers charges effects and point state") {
+    PlayerBuildState build {};
+    const auto ability =
+        AbilityId::
+            KnightVanguardStrike;
+    const auto index =
+        ability_index(
+            ability);
+    build.ability_ranks[index] =
+        1U;
+    build.equipped_abilities[0U] =
+        ability;
+    build.val_energy =
+        0.0F;
+    build.global_cooldown_remaining =
+        0.15F;
+    build.cooldowns_remaining[index] =
+        4.25F;
+    build.charges[index] =
+        1U;
+
+    ProgressionRuntimeHudView runtime {};
+    runtime.focused_ability =
+        ability;
+    runtime.active_duration_remaining =
+        3.5F;
+    runtime.wind_blade_armed =
+        true;
+    runtime.wind_dodge_ready =
+        true;
+    runtime.iron_guard_active =
+        true;
+    runtime.active_footmen =
+        25U;
+    const auto snapshot =
+        make_progression_ability_hud_snapshot(
+            build,
+            runtime);
+
+    CHECK(snapshot.visible);
+    CHECK(snapshot.ability == ability);
+    CHECK_FALSE(snapshot.display_name.empty());
+    CHECK(snapshot.energy_cost > 0.0F);
+    CHECK(snapshot.energy_insufficient);
+    CHECK(
+        snapshot.global_cooldown_remaining ==
+        doctest::Approx(0.15F));
+    CHECK(
+        snapshot.cooldown_remaining ==
+        doctest::Approx(4.25F));
+    CHECK(snapshot.charges == 1U);
+    CHECK(
+        snapshot.maximum_charges >=
+        snapshot.charges);
+    CHECK(
+        snapshot.active_duration_remaining ==
+        doctest::Approx(3.5F));
+    CHECK(snapshot.wind_blade_armed);
+    CHECK(snapshot.wind_dodge_ready);
+    CHECK(snapshot.iron_guard_active);
+    CHECK(snapshot.active_footmen == 8U);
+    CHECK_FALSE(
+        snapshot.feedback_assets
+            .visual_id.empty());
+    CHECK_FALSE(
+        snapshot.feedback_assets
+            .sfx_id.empty());
+}
+
+TEST_CASE("ability feedback identifiers have deterministic generic fallbacks") {
+    const auto fallback =
+        resolve_ability_feedback_assets(
+            AbilityId::None,
+            {},
+            {});
+    CHECK(
+        fallback.visual_id ==
+        kGenericAbilityVisualId);
+    CHECK(
+        fallback.sfx_id ==
+        kGenericAbilitySfxId);
+
+    const auto explicit_assets =
+        resolve_ability_feedback_assets(
+            AbilityId::
+                KnightIronGuard,
+            "VisualTest",
+            "SfxTest");
+    CHECK(
+        explicit_assets.visual_id ==
+        "VisualTest");
+    CHECK(
+        explicit_assets.sfx_id ==
+        "SfxTest");
+}
+
+TEST_CASE("ability HUD layout stays bounded and disjoint at supported resolutions") {
+    constexpr std::array<
+        std::array<int, 2U>,
+        3U>
+        viewports {{
+            {640, 360},
+            {1280, 720},
+            {1600, 900},
+        }};
+
+    for (const auto& viewport_size :
+         viewports) {
+        const auto layout =
+            make_progression_ability_hud_layout(
+                viewport_size[0U],
+                viewport_size[1U]);
+        CAPTURE(
+            viewport_size[0U],
+            viewport_size[1U]);
+        REQUIRE(layout.valid());
+        const auto viewport =
+            ProgressionMenuRect {
+                0.0F,
+                0.0F,
+                static_cast<float>(
+                    viewport_size[0U]),
+                static_cast<float>(
+                    viewport_size[1U]),
+            };
+        CHECK(
+            progression_menu_rect_contains(
+                viewport,
+                layout.panel));
+        CHECK_FALSE(
+            progression_menu_rects_overlap(
+                layout.energy,
+                layout.ability));
+        CHECK_FALSE(
+            progression_menu_rects_overlap(
+                layout.ability,
+                layout.timers));
+        CHECK_FALSE(
+            progression_menu_rects_overlap(
+                layout.timers,
+                layout.effects));
+    }
 }
 
 } // namespace valcraft

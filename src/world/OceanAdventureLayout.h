@@ -13,6 +13,8 @@ inline constexpr int kOceanNaturalLandExclusionHalfWidth = 24;
 inline constexpr int kOceanNavigationTransitionOuterHalfWidth = 40;
 inline constexpr int kOceanNavigationCorridorStartZ = -48;
 inline constexpr int kOceanNavigationCorridorMaxSeabedY = kSeaLevel - 6;
+inline constexpr int kLivingOceanMinimumSeabedY = 12;
+inline constexpr int kLivingOceanMaximumDeepSeabedY = kSeaLevel - 8;
 
 inline constexpr int kOceanRouteMacroSectorLength = 600;
 inline constexpr int kOceanRouteFirstIslandWindowMinZ = 500;

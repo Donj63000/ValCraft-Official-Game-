@@ -87,6 +87,32 @@ RECIPES: Final = (
     MaterialRecipe(29, "diamond_ore", SURFACE_ORGANIC, (100, 105, 102), (74, 173, 167), 176, 128, 6, "ore", 0x1EF0B, 2),
     MaterialRecipe(30, "alloy_ore", SURFACE_ORGANIC, (101, 98, 101), (139, 98, 157), 184, 188, 4, "ore", 0x20101, 2),
     MaterialRecipe(31, "tool_wood_steel", SURFACE_PROXY, (90, 75, 64), (151, 163, 162), 162, 142, 0, "tool", 0x21203, 2),
+    # Je prolonge le catalogue existant sans réutiliser un identifiant afin que
+    # les packs, captures et sauvegardes historiques restent interprétables.
+    MaterialRecipe(32, "ship_dark_hull", SURFACE_ARCHITECTURAL, (35, 25, 21), (76, 50, 34), 208, 0, 0, "ship_dark_wood", 0x22305, 2),
+    MaterialRecipe(33, "ship_deck_oak", SURFACE_ARCHITECTURAL, (137, 99, 59), (205, 161, 92), 198, 0, 0, "ship_deck", 0x23407, 2),
+    MaterialRecipe(34, "ship_oiled_oak", SURFACE_ARCHITECTURAL, (89, 54, 31), (169, 108, 58), 166, 0, 0, "ship_oiled_wood", 0x2450B, 2),
+    MaterialRecipe(35, "ship_linen", SURFACE_PROXY, (185, 171, 139), (232, 220, 184), 220, 0, 0, "ship_linen", 0x25601, 1),
+    MaterialRecipe(36, "ship_rope", SURFACE_PROXY, (111, 81, 49), (182, 146, 91), 234, 0, 0, "ship_rope", 0x26703, 2),
+    MaterialRecipe(37, "ship_iron", SURFACE_PROXY, (45, 50, 54), (111, 118, 119), 178, 226, 0, "ship_iron", 0x27805, 2),
+    MaterialRecipe(38, "ship_patinated_brass", SURFACE_PROXY, (68, 82, 54), (187, 141, 65), 158, 210, 0, "ship_brass", 0x28907, 1),
+    MaterialRecipe(39, "ship_lantern", SURFACE_PROXY, (168, 81, 22), (255, 194, 77), 80, 24, 226, "ship_lantern", 0x29A0B, 1),
+    MaterialRecipe(40, "ship_glass", SURFACE_ARCHITECTURAL, (96, 136, 143), (192, 210, 199), 46, 0, 0, "ship_glass", 0x2AB01, 1),
+    MaterialRecipe(41, "ship_navy_textile", SURFACE_PROXY, (23, 35, 49), (52, 69, 80), 222, 0, 0, "ship_textile", 0x2BC03, 1),
+    MaterialRecipe(42, "ship_gold", SURFACE_PROXY, (143, 91, 23), (235, 183, 71), 106, 232, 0, "ship_gold", 0x2CD05, 1),
+    MaterialRecipe(43, "ship_burgundy_textile", SURFACE_PROXY, (70, 24, 30), (128, 48, 55), 220, 0, 0, "ship_textile", 0x2DE07, 1),
+    MaterialRecipe(44, "ship_leather", SURFACE_PROXY, (66, 41, 25), (130, 80, 40), 192, 0, 0, "ship_leather", 0x2EF0B, 2),
+    MaterialRecipe(45, "ship_paper", SURFACE_PROXY, (177, 156, 112), (232, 213, 166), 230, 0, 0, "ship_paper", 0x30101, 1),
+    MaterialRecipe(46, "ship_ceramic", SURFACE_PROXY, (149, 153, 144), (224, 217, 192), 74, 0, 0, "ship_ceramic", 0x31203, 1),
+    # Je garde les matières marines à la fin pour préserver chaque couche
+    # historique et permettre aux anciennes captures de rester comparables.
+    MaterialRecipe(47, "marine_seagrass", SURFACE_CUTOUT, (24, 79, 63), (74, 139, 88), 196, 0, 0, "marine_seagrass", 0x32305, 1),
+    MaterialRecipe(48, "marine_kelp", SURFACE_CUTOUT, (24, 61, 42), (105, 126, 61), 208, 0, 0, "marine_kelp", 0x33407, 1),
+    MaterialRecipe(49, "coral_warm", SURFACE_PROXY, (151, 55, 61), (235, 126, 91), 184, 0, 0, "marine_coral", 0x3450B, 2),
+    MaterialRecipe(50, "coral_lagoon", SURFACE_PROXY, (37, 112, 118), (100, 194, 176), 176, 0, 0, "marine_coral", 0x35601, 2),
+    MaterialRecipe(51, "coral_fan", SURFACE_CUTOUT, (116, 46, 91), (222, 112, 145), 190, 0, 0, "coral_fan", 0x36703, 1),
+    MaterialRecipe(52, "reef_fish", SURFACE_CUTOUT, (28, 103, 145), (245, 184, 66), 150, 0, 0, "reef_fish", 0x37805, 1),
+    MaterialRecipe(53, "marine_shell", SURFACE_PROXY, (148, 109, 77), (232, 208, 158), 154, 0, 0, "marine_shell", 0x38907, 2),
 )
 
 
@@ -469,6 +495,345 @@ def _surface_sample(recipe: MaterialRecipe,
         height = _clamp_byte(105 + noise // 5 + (28 if steel else 0))
         blend = 220 if steel else _clamp_byte(48 + noise // 3)
         metallic = recipe.metallic if steel else 0
+    elif recipe.pattern in {"ship_dark_wood", "ship_deck", "ship_oiled_wood"}:
+        plank_width = max(16, size // 6)
+        seam = min(y % plank_width, plank_width - 1 - y % plank_width)
+        board_index = y // plank_width
+        board_tone = _hash8(board_index, 0, recipe.seed ^ 0x48D1) - 128
+        grain = _triangle_wave(x * 3 + noise // 9 + board_tone // 12, 29)
+        pores = _cellular_noise(
+            x,
+            y,
+            size,
+            max(4, size // 28),
+            recipe.seed ^ 0x91A7,
+        )
+        knot = _cellular_noise(
+            x,
+            y,
+            size,
+            max(16, size // 5),
+            recipe.seed ^ 0x3F29,
+        )
+        seam_lift = min(4, seam) * 9
+        height = _clamp_byte(
+            89 + seam_lift + grain * 2 +
+            (pores - 128) // 16 + max(0, knot - 218) // 5
+        )
+        blend = _clamp_byte(
+            54 + noise // 3 + grain * 4 + board_tone // 5 +
+            max(0, knot - 218) // 3
+        )
+        occlusion -= max(0, 4 - seam) * 13
+        if recipe.pattern == "ship_dark_wood":
+            # Je garde le goudron mat et profond sans écraser le veinage.
+            blend = _clamp_byte(blend - 22)
+            roughness += 10
+        elif recipe.pattern == "ship_deck":
+            blend = _clamp_byte(blend + 18)
+            roughness += 5
+        else:
+            roughness -= 14
+    elif recipe.pattern in {"ship_linen", "ship_textile"}:
+        weave_size = max(4, size // 32)
+        warp = _triangle_wave(x + (y // weave_size) % 2, weave_size)
+        weft = _triangle_wave(y + (x // weave_size) % 2, weave_size)
+        crossing = (warp * 17 + weft * 13) // max(1, weave_size)
+        fold = _value_noise(
+            x,
+            y,
+            size,
+            max(8, size // 8),
+            recipe.seed ^ 0x7C53,
+        )
+        height = _clamp_byte(
+            119 + crossing // 3 + (fold - 128) // 11 +
+            (fine - 128) // 28
+        )
+        blend = _clamp_byte(
+            102 + crossing // 2 + (noise - 128) // 9 +
+            (fold - 128) // 12
+        )
+        roughness += (fine - 128) // 28
+        if recipe.pattern == "ship_linen":
+            blend = _clamp_byte(blend + 18)
+            occlusion = 244 + (fold - 128) // 24
+    elif recipe.pattern == "ship_rope":
+        twist = _triangle_wave(x * 2 + y * 5, max(12, size // 5))
+        strand = _triangle_wave(x * 5 - y * 2, max(8, size // 9))
+        fibres = _cellular_noise(
+            x,
+            y,
+            size,
+            max(3, size // 36),
+            recipe.seed ^ 0xB17D,
+        )
+        height = _clamp_byte(
+            103 + twist * 6 + strand * 3 +
+            (fibres - 128) // 13
+        )
+        blend = _clamp_byte(
+            72 + twist * 7 + strand * 4 +
+            (noise - 128) // 9
+        )
+        roughness += 8
+        occlusion -= max(0, 3 - twist) * 8
+    elif recipe.pattern == "ship_iron":
+        pits = _cellular_noise(
+            x,
+            y,
+            size,
+            max(4, size // 24),
+            recipe.seed ^ 0xD643,
+        )
+        scratch = _triangle_wave(x * 7 + y * 2, 53)
+        pitted = pits > 214
+        height = _clamp_byte(
+            126 + (noise - 128) // 12 -
+            (24 if pitted else 0) + (8 if scratch < 2 else 0)
+        )
+        blend = _clamp_byte(
+            86 + (noise - 128) // 5 -
+            (35 if pitted else 0) + (30 if scratch < 2 else 0)
+        )
+        roughness += 18 if pitted else (fine - 128) // 20
+        metallic = recipe.metallic - (46 if pitted else 0)
+        occlusion -= 22 if pitted else 0
+    elif recipe.pattern == "ship_brass":
+        patina = _cellular_noise(
+            x,
+            y,
+            size,
+            max(8, size // 10),
+            recipe.seed ^ 0xE813,
+        )
+        scratch = _triangle_wave(x * 5 + y, 61)
+        polished = patina < 142
+        height = _clamp_byte(
+            124 + (noise - 128) // 13 +
+            (9 if scratch < 2 else 0) - max(0, patina - 205) // 5
+        )
+        blend = _clamp_byte(
+            180 - (patina - 128) // 2 +
+            (24 if scratch < 2 else 0)
+        )
+        roughness += 24 if not polished else -8
+        metallic = recipe.metallic if polished else recipe.metallic - 58
+    elif recipe.pattern == "ship_lantern":
+        glow = _cellular_noise(
+            x,
+            y,
+            size,
+            max(16, size // 4),
+            recipe.seed ^ 0xFA91,
+        )
+        grille = (
+            _triangle_wave(x, max(12, size // 6)) < 2 or
+            _triangle_wave(y, max(12, size // 6)) < 2
+        )
+        height = _clamp_byte(
+            130 + (glow - 128) // 10 + (20 if grille else 0)
+        )
+        blend = _clamp_byte(
+            170 + (glow - 128) // 2 - (72 if grille else 0)
+        )
+        emission = _clamp_byte(
+            recipe.emission + (glow - 128) // 5 - (82 if grille else 0)
+        )
+        metallic = recipe.metallic if grille else 0
+        roughness += 36 if grille else -16
+        occlusion = 255
+    elif recipe.pattern == "ship_glass":
+        broad_streak = _triangle_wave(x + y, max(16, size // 3))
+        fine_streak = _triangle_wave(x * 3 - y, max(12, size // 5))
+        streak = broad_streak < 2 or fine_streak < 1
+        height = _clamp_byte(
+            126 + (noise - 128) // 18 + (7 if streak else 0)
+        )
+        blend = _clamp_byte(
+            94 + (noise - 128) // 7 + (96 if streak else 0)
+        )
+        alpha = 78 if streak else 42
+        roughness -= 16
+        occlusion = 255
+    elif recipe.pattern == "ship_gold":
+        scratch = _triangle_wave(x * 6 + y, 67)
+        hammer = _cellular_noise(
+            x,
+            y,
+            size,
+            max(6, size // 18),
+            recipe.seed ^ 0x2C7B,
+        )
+        height = _clamp_byte(
+            124 + (hammer - 128) // 15 + (8 if scratch < 2 else 0)
+        )
+        blend = _clamp_byte(
+            150 + (noise - 128) // 5 + (34 if scratch < 2 else 0)
+        )
+        roughness += (hammer - 128) // 16
+        metallic = recipe.metallic
+    elif recipe.pattern == "ship_leather":
+        pores = _cellular_noise(
+            x,
+            y,
+            size,
+            max(3, size // 34),
+            recipe.seed ^ 0x4E27,
+        )
+        crease = _triangle_wave(x * 2 + y + noise // 16, 73)
+        deep_pore = pores > 222
+        height = _clamp_byte(
+            124 + (noise - 128) // 9 -
+            (18 if deep_pore else 0) - (8 if crease < 2 else 0)
+        )
+        blend = _clamp_byte(
+            96 + (noise - 128) // 4 -
+            (24 if deep_pore else 0) + (18 if crease < 3 else 0)
+        )
+        roughness += 10 if deep_pore else (fine - 128) // 24
+        occlusion -= 16 if deep_pore else 0
+    elif recipe.pattern == "ship_paper":
+        fibres = _triangle_wave(x * 7 + y * 3, 43)
+        stains = _value_noise(
+            x,
+            y,
+            size,
+            max(16, size // 4),
+            recipe.seed ^ 0x6A5D,
+        )
+        height = _clamp_byte(
+            127 + (fibres - 10) // 3 + (fine - 128) // 30
+        )
+        blend = _clamp_byte(
+            155 + (noise - 128) // 10 -
+            max(0, stains - 180) // 3
+        )
+        roughness += (fine - 128) // 30
+        occlusion = 248
+    elif recipe.pattern == "ship_ceramic":
+        glaze = _value_noise(
+            x,
+            y,
+            size,
+            max(8, size // 12),
+            recipe.seed ^ 0x83C1,
+        )
+        speckle = 20 if fine > 245 else -12 if fine < 14 else 0
+        height = _clamp_byte(
+            128 + (glaze - 128) // 18 + speckle // 3
+        )
+        blend = _clamp_byte(
+            168 + (glaze - 128) // 5 + speckle
+        )
+        roughness -= 16
+        occlusion = 252
+    elif recipe.pattern == "marine_seagrass":
+        normalized_y = y / max(1, size - 1)
+        blade_width = max(1, int((1.0 - normalized_y) * size * 0.018))
+        blade_hit = False
+        for blade in range(5):
+            origin = (blade + 1) * size / 6.0
+            sway = math.sin(
+                normalized_y * math.pi * (1.4 + blade * 0.11) +
+                blade * 1.37,
+            ) * size * (0.018 + blade * 0.002)
+            blade_hit = blade_hit or abs(x - (origin + sway)) <= blade_width
+        alpha = 255 if blade_hit and normalized_y < 0.98 else 0
+        height = _clamp_byte(126 + (noise - 128) // 8)
+        blend = _clamp_byte(92 + (noise - 128) // 3 + int(normalized_y * 34))
+        occlusion = 246
+    elif recipe.pattern == "marine_kelp":
+        normalized_y = y / max(1, size - 1)
+        center = (
+            size * 0.5 +
+            math.sin(normalized_y * math.pi * 2.5 + 0.4) *
+            size * 0.085
+        )
+        frond_width = (
+            (0.12 + 0.045 * math.sin(normalized_y * math.pi * 5.0) ** 2) *
+            size
+        )
+        tapered_width = frond_width * min(1.0, (1.0 - normalized_y) * 5.0)
+        ragged = (_hash8(x, y, recipe.seed ^ 0x71B9) - 128) * size / 8192.0
+        alpha = 255 if abs(x - center) <= max(1.0, tapered_width + ragged) else 0
+        height = _clamp_byte(128 + (noise - 128) // 7)
+        blend = _clamp_byte(84 + (noise - 128) // 3 + int(normalized_y * 28))
+        occlusion = 244
+    elif recipe.pattern == "marine_coral":
+        polyps = _cellular_noise(
+            x,
+            y,
+            size,
+            max(4, size // 26),
+            recipe.seed ^ 0x4A91,
+        )
+        broad = _cellular_noise(
+            x,
+            y,
+            size,
+            max(10, size // 8),
+            recipe.seed ^ 0xC32D,
+        )
+        height = _clamp_byte(
+            122 + (polyps - 128) // 4 + (broad - 128) // 12
+        )
+        blend = _clamp_byte(
+            110 + (noise - 128) // 5 + (polyps - 128) // 8
+        )
+        roughness += 12
+        occlusion -= max(0, 102 - polyps) // 8
+    elif recipe.pattern == "coral_fan":
+        normalized_y = y / max(1, size - 1)
+        normalized_x = x / max(1, size - 1)
+        fan_hit = False
+        for branch in range(7):
+            target = 0.12 + branch * 0.125
+            branch_x = 0.5 + (target - 0.5) * normalized_y
+            branch_x += math.sin(normalized_y * math.pi * 2.0 + branch) * 0.012
+            thickness = max(0.006, 0.018 * (1.0 - normalized_y * 0.45))
+            fan_hit = fan_hit or abs(normalized_x - branch_x) <= thickness
+        web_phase = int(normalized_y * 8.0)
+        web_y = (web_phase + 0.5) / 8.0
+        fan_width = 0.10 + normalized_y * 0.43
+        web_hit = (
+            abs(normalized_y - web_y) <= 0.009 and
+            abs(normalized_x - 0.5) <= fan_width
+        )
+        alpha = 255 if (fan_hit or web_hit) and normalized_y < 0.98 else 0
+        height = _clamp_byte(129 + (noise - 128) // 9)
+        blend = _clamp_byte(112 + (noise - 128) // 3)
+        occlusion = 247
+    elif recipe.pattern == "reef_fish":
+        nx = x / max(1, size - 1) * 2.0 - 1.0
+        ny = y / max(1, size - 1) * 2.0 - 1.0
+        body = ((nx + 0.10) / 0.72) ** 2 + (ny / 0.48) ** 2 <= 1.0
+        tail = nx < -0.55 and nx > -0.98 and abs(ny) < (nx + 0.98) * 0.95
+        fin = abs(nx + 0.02) < 0.22 and ny > 0.30 and ny < 0.60 - abs(nx) * 0.45
+        alpha = 255 if body or tail or fin else 0
+        stripe = int((nx + 1.0) * 5.0) % 2
+        blend = 214 if stripe == 0 else 68
+        if nx > 0.47 and abs(ny + 0.10) < 0.075:
+            blend = 12
+        height = _clamp_byte(128 + (noise - 128) // 12)
+        roughness -= 12
+        occlusion = 252
+    elif recipe.pattern == "marine_shell":
+        center_x = x - size * 0.5
+        center_y = y - size * 0.12
+        radius = max(1.0, math.hypot(center_x, center_y))
+        angle = math.atan2(center_y, center_x)
+        ridges = 0.5 + 0.5 * math.sin(angle * 12.0 + radius * 0.11)
+        spiral = 0.5 + 0.5 * math.sin(radius * 0.34 + angle * 2.0)
+        height = _clamp_byte(
+            112 + int(ridges * 34.0) + int(spiral * 18.0) +
+            (noise - 128) // 14
+        )
+        blend = _clamp_byte(
+            102 + int(ridges * 62.0) + (noise - 128) // 8
+        )
+        roughness -= 20
+        occlusion = 250
 
     color = _mix_color(recipe.base, recipe.accent, _clamp_byte(blend))
     if detail_luma != 0:

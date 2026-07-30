@@ -1,10 +1,12 @@
 #include "creatures/OldGuardGeometry.h"
 
+#include "creatures/HumanoidVisualContinuity.h"
 #include "creatures/OldGuardAnimation.h"
 #include "render/MusketVisualRecipe.h"
 
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/vec4.hpp>
 
@@ -162,6 +164,59 @@ void append_segment(std::vector<CreaturePartInstance>& parts,
         cavity);
 }
 
+void append_limb_segment(
+    std::vector<CreaturePartInstance>& parts,
+    std::size_t first_part,
+    const glm::vec3& start,
+    const glm::vec3& end,
+    const glm::vec2& half_width,
+    CreatureAtlasTile tile,
+    float material,
+    float cavity = 0.08F) {
+    const auto span = make_overlapping_humanoid_limb_span(
+        start,
+        end,
+        std::max(half_width.x, half_width.y) * 0.68F);
+    if (!span.valid) {
+        return;
+    }
+    append_segment(
+        parts,
+        first_part,
+        span.start,
+        span.end,
+        half_width,
+        tile,
+        material,
+        cavity);
+}
+
+void append_body_space_box(
+    std::vector<CreaturePartInstance>& parts,
+    std::size_t first_part,
+    const glm::mat4& body_root,
+    const glm::mat4& world_to_body,
+    const glm::vec3& world_center,
+    const glm::vec3& local_half_extent,
+    CreatureAtlasTile tile,
+    float material,
+    float cavity = 0.08F) {
+    const auto local_center = glm::vec3 {
+        world_to_body *
+        glm::vec4 {world_center, 1.0F},
+    };
+    append_box(
+        parts,
+        first_part,
+        body_root,
+        local_center,
+        local_half_extent,
+        glm::vec3 {0.0F},
+        tile,
+        material,
+        cavity);
+}
+
 auto skin_tile(std::uint32_t seed) noexcept -> CreatureAtlasTile {
     switch ((seed >> 4U) % 3U) {
     case 0U:
@@ -213,16 +268,20 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
     const auto moustache_width =
         0.052F +
         static_cast<float>((guard.appearance_seed >> 18U) & 0x3U) * 0.009F;
-    const auto& root = pose.body_root;
+    const auto root = glm::translate(
+        pose.body_root,
+        pose.body_offset_local);
+    const auto world_to_root = glm::inverse(root);
 
-    // Je construis l'habit commun avant les details du visage : le bleu,
-    // le blanc et le rouge restent ainsi immediatement lisibles de loin.
+    // Je construis une poitrine, une taille et un bassin qui se recouvrent.
+    // L'habit conserve ainsi une carrure humaine même pendant la marche et ne
+    // ressemble plus à une succession de blocs séparés.
     append_box(
         parts,
         first_part,
         root,
-        glm::vec3 {0.0F, 1.24F, 0.0F},
-        glm::vec3 {0.175F, 0.315F, 0.125F},
+        glm::vec3 {0.006F, 1.33F, 0.0F},
+        glm::vec3 {0.170F, 0.225F, 0.202F},
         glm::vec3 {0.0F},
         CreatureAtlasTile::CrewNavyCloth,
         kMaterialFabric,
@@ -231,45 +290,57 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         parts,
         first_part,
         root,
-        glm::vec3 {0.166F, 1.27F, -0.070F},
-        glm::vec3 {0.020F, 0.270F, 0.055F},
-        glm::vec3 {0.42F, 0.0F, 0.0F},
+        glm::vec3 {-0.008F, 1.075F, 0.0F},
+        glm::vec3 {0.154F, 0.150F, 0.180F},
+        glm::vec3 {0.0F},
+        CreatureAtlasTile::CrewNavyCloth,
+        kMaterialFabric);
+    append_box(
+        parts,
+        first_part,
+        root,
+        glm::vec3 {-0.020F, 0.875F, 0.0F},
+        glm::vec3 {0.150F, 0.135F, 0.170F},
+        glm::vec3 {0.0F},
+        CreatureAtlasTile::CrewNavyCloth,
+        kMaterialFabric);
+
+    // Je pose deux revers étroits et un plastron ivoire sur l'avant du corps :
+    // les baudriers restent historiques sans former un énorme X flottant.
+    append_box(
+        parts,
+        first_part,
+        root,
+        glm::vec3 {0.188F, 1.33F, -0.055F},
+        glm::vec3 {0.015F, 0.205F, 0.027F},
+        glm::vec3 {0.20F, 0.0F, 0.0F},
         CreatureAtlasTile::CrewIvoryCloth,
         kMaterialFabric);
     append_box(
         parts,
         first_part,
         root,
-        glm::vec3 {0.166F, 1.27F, 0.070F},
-        glm::vec3 {0.020F, 0.270F, 0.055F},
-        glm::vec3 {-0.42F, 0.0F, 0.0F},
+        glm::vec3 {0.188F, 1.33F, 0.055F},
+        glm::vec3 {0.015F, 0.205F, 0.027F},
+        glm::vec3 {-0.20F, 0.0F, 0.0F},
         CreatureAtlasTile::CrewIvoryCloth,
         kMaterialFabric);
     append_box(
         parts,
         first_part,
         root,
-        glm::vec3 {0.0F, 0.93F, 0.0F},
-        glm::vec3 {0.170F, 0.115F, 0.125F},
+        glm::vec3 {0.174F, 1.105F, 0.0F},
+        glm::vec3 {0.016F, 0.150F, 0.102F},
         glm::vec3 {0.0F},
         CreatureAtlasTile::CrewIvoryCloth,
-        kMaterialFabric);
+        kMaterialFabric,
+        0.06F);
     append_box(
         parts,
         first_part,
         root,
-        glm::vec3 {0.175F, 1.21F, 0.0F},
-        glm::vec3 {0.018F, 0.020F, 0.180F},
-        glm::vec3 {0.0F},
-        CreatureAtlasTile::CrewLeather,
-        kMaterialLeather,
-        0.05F);
-    append_box(
-        parts,
-        first_part,
-        root,
-        glm::vec3 {0.183F, 1.23F, 0.0F},
-        glm::vec3 {0.014F, 0.350F, 0.035F},
+        glm::vec3 {0.183F, 1.235F, 0.0F},
+        glm::vec3 {0.012F, 0.305F, 0.023F},
         glm::vec3 {0.72F, 0.0F, 0.0F},
         CreatureAtlasTile::CrewIvoryCloth,
         kMaterialFabric,
@@ -279,11 +350,34 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         first_part,
         root,
         glm::vec3 {0.186F, 1.23F, 0.0F},
-        glm::vec3 {0.014F, 0.350F, 0.035F},
+        glm::vec3 {0.012F, 0.305F, 0.023F},
         glm::vec3 {-0.72F, 0.0F, 0.0F},
         CreatureAtlasTile::CrewIvoryCloth,
         kMaterialFabric,
         0.04F);
+    append_box(
+        parts,
+        first_part,
+        root,
+        glm::vec3 {0.174F, 0.965F, 0.0F},
+        glm::vec3 {0.018F, 0.024F, 0.176F},
+        glm::vec3 {0.0F},
+        CreatureAtlasTile::CrewLeather,
+        kMaterialLeather,
+        0.05F);
+
+    for (const auto side : {-1.0F, 1.0F}) {
+        append_box(
+            parts,
+            first_part,
+            root,
+            glm::vec3 {-0.105F, 0.890F, side * 0.080F},
+            glm::vec3 {0.074F, 0.215F, 0.068F},
+            glm::vec3 {0.0F, 0.0F, -0.06F},
+            CreatureAtlasTile::CrewNavyCloth,
+            kMaterialFabric,
+            0.12F);
+    }
 
     for (int row = 0; row < 3; ++row) {
         for (const auto side : {-1.0F, 1.0F}) {
@@ -306,52 +400,92 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
 
     // Je garde les guetres blanches hautes et les souliers sombres propres a
     // la silhouette de la Vieille Garde, y compris pendant la marche.
+    const auto limb_scale = std::clamp(
+        pose.stature_scale,
+        0.90F,
+        1.10F);
+    const auto body_forward = safe_direction(
+        glm::vec3 {root[0]},
+        glm::vec3 {1.0F, 0.0F, 0.0F});
+    const auto body_up = safe_direction(
+        glm::vec3 {root[1]},
+        glm::vec3 {0.0F, 1.0F, 0.0F});
     for (std::size_t index = 0; index < pose.hips.size(); ++index) {
-        append_segment(
+        append_limb_segment(
             parts,
             first_part,
             pose.hips[index],
             pose.knees[index],
-            glm::vec2 {0.065F, 0.060F},
+            glm::vec2 {0.071F, 0.066F} * limb_scale,
             CreatureAtlasTile::CrewIvoryCloth,
             kMaterialFabric,
             0.10F);
-        append_segment(
+        append_limb_segment(
             parts,
             first_part,
             pose.knees[index],
             pose.ankles[index],
-            glm::vec2 {0.058F, 0.054F},
+            glm::vec2 {0.063F, 0.059F} * limb_scale,
             CreatureAtlasTile::CrewIvoryCloth,
             kMaterialFabric,
             0.09F);
-        append_segment(
+        append_limb_segment(
             parts,
             first_part,
-            pose.ankles[index] - glm::vec3 {0.03F, 0.0F, 0.0F},
-            pose.feet[index] + glm::vec3 {0.09F, 0.0F, 0.0F},
-            glm::vec2 {0.055F, 0.060F},
-            CreatureAtlasTile::CrewLeather,
+            pose.ankles[index] - body_forward * (0.03F * limb_scale),
+            pose.feet[index] + body_forward * (0.09F * limb_scale),
+            glm::vec2 {0.062F, 0.067F} * limb_scale,
+            CreatureAtlasTile::CrewHairBlack,
             kMaterialLeather,
+            0.08F);
+        append_body_space_box(
+            parts,
+            first_part,
+            root,
+            world_to_root,
+            pose.hips[index],
+            {0.076F, 0.080F, 0.073F},
+            CreatureAtlasTile::CrewIvoryCloth,
+            kMaterialFabric,
+            0.10F);
+        append_body_space_box(
+            parts,
+            first_part,
+            root,
+            world_to_root,
+            pose.knees[index],
+            {0.066F, 0.064F, 0.062F},
+            CreatureAtlasTile::CrewIvoryCloth,
+            kMaterialFabric,
+            0.09F);
+        append_body_space_box(
+            parts,
+            first_part,
+            root,
+            world_to_root,
+            pose.ankles[index],
+            {0.059F, 0.061F, 0.058F},
+            CreatureAtlasTile::CrewIvoryCloth,
+            kMaterialFabric,
             0.08F);
     }
 
     for (std::size_t index = 0; index < pose.shoulders.size(); ++index) {
-        append_segment(
+        append_limb_segment(
             parts,
             first_part,
             pose.shoulders[index],
             pose.elbows[index],
-            glm::vec2 {0.058F, 0.055F},
+            glm::vec2 {0.064F, 0.061F} * limb_scale,
             CreatureAtlasTile::CrewNavyCloth,
             kMaterialFabric,
             0.11F);
-        append_segment(
+        append_limb_segment(
             parts,
             first_part,
             pose.elbows[index],
             pose.hands[index],
-            glm::vec2 {0.049F, 0.047F},
+            glm::vec2 {0.054F, 0.052F} * limb_scale,
             CreatureAtlasTile::CrewNavyCloth,
             kMaterialFabric,
             0.09F);
@@ -360,27 +494,48 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
             first_part,
             glm::mix(pose.elbows[index], pose.hands[index], 0.62F),
             glm::mix(pose.elbows[index], pose.hands[index], 0.82F),
-            glm::vec2 {0.057F, 0.055F},
+            glm::vec2 {0.060F, 0.058F} * limb_scale,
             CreatureAtlasTile::CrewRedCloth,
             kMaterialFabric,
             0.08F);
-        append_box(
+        append_body_space_box(
             parts,
             first_part,
-            glm::mat4 {1.0F},
+            root,
+            world_to_root,
             pose.hands[index],
-            glm::vec3 {0.050F, 0.052F, 0.050F},
-            glm::vec3 {0.0F},
+            glm::vec3 {0.054F, 0.057F, 0.053F},
             skin,
             kMaterialSkin,
             0.07F);
-        append_box(
+        append_body_space_box(
             parts,
             first_part,
-            glm::mat4 {1.0F},
-            pose.shoulders[index] + glm::vec3 {0.0F, 0.025F, 0.0F},
-            glm::vec3 {0.095F, 0.032F, 0.085F},
-            glm::vec3 {0.0F},
+            root,
+            world_to_root,
+            pose.shoulders[index],
+            glm::vec3 {0.078F, 0.079F, 0.075F},
+            CreatureAtlasTile::CrewNavyCloth,
+            kMaterialFabric,
+            0.11F);
+        append_body_space_box(
+            parts,
+            first_part,
+            root,
+            world_to_root,
+            pose.elbows[index],
+            glm::vec3 {0.059F, 0.060F, 0.057F},
+            CreatureAtlasTile::CrewNavyCloth,
+            kMaterialFabric,
+            0.09F);
+        append_body_space_box(
+            parts,
+            first_part,
+            root,
+            world_to_root,
+            pose.shoulders[index] +
+                body_up * (0.025F * limb_scale),
+            glm::vec3 {0.092F, 0.035F, 0.082F},
             CreatureAtlasTile::CrewRedCloth,
             kMaterialFabric,
             0.10F);
@@ -390,11 +545,21 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         parts,
         first_part,
         root,
-        glm::vec3 {0.02F, 1.54F, 0.0F},
-        glm::vec3 {0.063F, 0.060F, 0.063F},
+        glm::vec3 {0.02F, 1.535F, 0.0F},
+        glm::vec3 {0.069F, 0.080F, 0.069F},
         glm::vec3 {0.0F},
-        CreatureAtlasTile::CrewHairBlack,
-        kMaterialLeather);
+        skin,
+        kMaterialSkin);
+    append_box(
+        parts,
+        first_part,
+        root,
+        glm::vec3 {0.085F, 1.505F, 0.0F},
+        glm::vec3 {0.090F, 0.035F, 0.105F},
+        glm::vec3 {0.0F},
+        CreatureAtlasTile::CrewIvoryCloth,
+        kMaterialFabric,
+        0.08F);
     append_box(
         parts,
         first_part,
@@ -409,8 +574,18 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         parts,
         first_part,
         root,
-        glm::vec3 {0.186F, 1.705F, 0.0F},
-        glm::vec3 {0.045F, 0.050F, 0.044F},
+        glm::vec3 {0.068F, 1.575F, 0.0F},
+        glm::vec3 {0.105F, 0.072F, 0.114F},
+        glm::vec3 {0.0F},
+        skin,
+        kMaterialSkin,
+        0.09F);
+    append_box(
+        parts,
+        first_part,
+        root,
+        glm::vec3 {0.181F, 1.705F, 0.0F},
+        glm::vec3 {0.038F, 0.045F, 0.033F},
         glm::vec3 {0.0F},
         skin,
         kMaterialSkin,
@@ -430,6 +605,26 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
             parts,
             first_part,
             root,
+            glm::vec3 {0.174F, 1.796F, side * 0.066F},
+            glm::vec3 {0.012F, 0.010F, 0.042F},
+            glm::vec3 {side * 0.05F, 0.0F, 0.0F},
+            moustache,
+            kMaterialLeather,
+            0.10F);
+        append_box(
+            parts,
+            first_part,
+            root,
+            glm::vec3 {0.010F, 1.700F, side * 0.150F},
+            glm::vec3 {0.025F, 0.044F, 0.022F},
+            glm::vec3 {0.0F},
+            skin,
+            kMaterialSkin,
+            0.07F);
+        append_box(
+            parts,
+            first_part,
+            root,
             glm::vec3 {0.190F, 1.650F, side * moustache_width},
             glm::vec3 {0.017F, 0.020F, moustache_width},
             glm::vec3 {side * 0.18F, 0.0F, 0.0F},
@@ -437,6 +632,16 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
             kMaterialLeather,
             0.12F);
     }
+    append_box(
+        parts,
+        first_part,
+        root,
+        glm::vec3 {0.178F, 1.615F, 0.0F},
+        glm::vec3 {0.010F, 0.010F, 0.042F},
+        glm::vec3 {0.0F},
+        CreatureAtlasTile::CrewBurgundyCloth,
+        kMaterialFabric,
+        0.04F);
 
     // Je monte un bonnet d'ours massif, une plaque frontale et un plumet rouge
     // en plusieurs volumes afin que le profil reste reconnaissable sous tous
@@ -445,8 +650,8 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         parts,
         first_part,
         root,
-        glm::vec3 {-0.01F, 1.99F, 0.0F},
-        glm::vec3 {0.165F, 0.235F, 0.160F},
+        glm::vec3 {-0.01F, 1.965F, 0.0F},
+        glm::vec3 {0.158F, 0.200F, 0.154F},
         glm::vec3 {0.0F, 0.0F, -0.035F},
         CreatureAtlasTile::CrewHairBlack,
         kMaterialLeather,
@@ -455,8 +660,8 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         parts,
         first_part,
         root,
-        glm::vec3 {-0.035F, 2.215F, 0.0F},
-        glm::vec3 {0.145F, 0.045F, 0.145F},
+        glm::vec3 {-0.035F, 2.155F, 0.0F},
+        glm::vec3 {0.140F, 0.038F, 0.140F},
         glm::vec3 {0.0F},
         CreatureAtlasTile::CrewHairBlack,
         kMaterialLeather,
@@ -465,27 +670,27 @@ void append_old_guard_parts(std::vector<CreaturePartInstance>& parts,
         parts,
         first_part,
         root,
-        glm::vec3 {0.158F, 2.015F, 0.0F},
-        glm::vec3 {0.018F, 0.100F, 0.087F},
+        glm::vec3 {0.152F, 1.985F, 0.0F},
+        glm::vec3 {0.018F, 0.087F, 0.080F},
         glm::vec3 {0.0F},
         CreatureAtlasTile::CrewGold,
         kMaterialMetal,
         0.05F);
-    for (int section = 0; section < 4; ++section) {
+    for (int section = 0; section < 3; ++section) {
         const auto section_f = static_cast<float>(section);
         append_box(
             parts,
             first_part,
             root,
             glm::vec3 {
-                0.0F + section_f * 0.018F,
-                2.31F + section_f * 0.105F,
-                -0.105F,
+                0.0F + section_f * 0.015F,
+                2.245F + section_f * 0.090F,
+                -0.095F,
             },
             glm::vec3 {
-                0.045F - section_f * 0.004F,
-                0.075F,
-                0.045F - section_f * 0.004F,
+                0.042F - section_f * 0.004F,
+                0.064F,
+                0.042F - section_f * 0.004F,
             },
             glm::vec3 {0.0F, 0.0F, -0.15F},
             CreatureAtlasTile::CrewRedCloth,

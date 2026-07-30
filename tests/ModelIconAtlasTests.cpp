@@ -24,7 +24,7 @@ namespace valcraft {
 namespace {
 
 constexpr std::uint64_t kExpectedMaterialChecksum =
-    0x1E684B7F8A55B223ULL;
+    0xDF9527D7F9BAEEC0ULL;
 constexpr std::uint64_t kExpectedIconContentChecksum =
     0x74D3CC0F846DA790ULL;
 
@@ -514,7 +514,7 @@ TEST_CASE(
             const auto minimum_channel =
                 std::min({red, green, blue});
             neutral_steel_pixels +=
-                maximum_channel - minimum_channel < 34U &&
+                maximum_channel - minimum_channel < 34 &&
                         maximum_channel > 58U
                     ? 1U
                     : 0U;

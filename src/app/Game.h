@@ -2,6 +2,7 @@
 
 #include "app/CommandConsole.h"
 #include "app/ConfirmDialog.h"
+#include "app/ConstructionPlanEditor.h"
 #include "app/DeathScreen.h"
 #include "app/Hotbar.h"
 #include "app/InventoryMenu.h"
@@ -14,6 +15,7 @@
 #include "app/PauseMenu.h"
 #include "app/PerformanceReport.h"
 #include "app/ProcessMemory.h"
+#include "app/ProgressionMenu.h"
 #include "app/SaveGame.h"
 #include "app/SaveSlotMenu.h"
 #include "app/SessionSaveState.h"
@@ -27,12 +29,18 @@
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
 #include "gameplay/StartingVillage.h"
+#include "gameplay/progression/AbilitySystem.h"
+#include "gameplay/progression/ExperienceAwardService.h"
+#include "gameplay/progression/PlayerAbilityEffects.h"
+#include "gameplay/progression/SummonedUnitSystem.h"
+#include "gameplay/progression/WorldEditTransaction.h"
 #include "render/Renderer.h"
 #include "world/Environment.h"
 
 #include <SDL.h>
 
 #include <chrono>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -40,6 +48,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -63,6 +72,7 @@ private:
         Pause = 5,
         Death = 6,
         CommandConsole = 7,
+        Progression = 8,
     };
 
     struct FramePerformanceStats {
@@ -126,6 +136,11 @@ private:
         std::uint64_t override_bytes = 0;
         std::uint64_t gpu_buffer_bytes = 0;
         std::uint64_t gpu_texture_bytes = 0;
+        // Je conserve gpu_water_ms comme agregat historique et j'ajoute les
+        // trois passes modernes a la fin pour ne pas changer son sens.
+        double gpu_water_resolve_ms = 0.0;
+        double gpu_water_surface_ms = 0.0;
+        double gpu_transparent_weather_ms = 0.0;
     };
 
     struct GameplayAnnouncement {
@@ -259,6 +274,17 @@ private:
     void finalize_audit(const PerformanceRunReport& report, AuditRunStatus status);
     void process_events();
     void update_simulation(float dt, FramePerformanceStats& frame_stats);
+    void resolve_pending_player_ability(
+        bool maritime_session_active);
+    void update_summoned_footman(
+        float dt,
+        bool maritime_session_active);
+    void consume_ability_logical_events();
+    void rebuild_progression_creature_render_instances(
+        const EnvironmentState& environment);
+    void grant_creature_kill_rewards(
+        const CreatureDamageResult& result,
+        std::string_view source);
     void update_world_pipeline(FramePerformanceStats& frame_stats);
     void set_mouse_capture(bool captured);
     [[nodiscard]] auto can_open_command_console() const noexcept -> bool;
@@ -269,6 +295,9 @@ private:
     void set_death_screen_visible(bool visible, PlayerDeathCause cause = PlayerDeathCause::None);
     void set_paused(bool paused);
     void set_inventory_visible(bool visible);
+    void set_progression_menu_visible(bool visible);
+    void handle_progression_menu_keydown(
+        const SDL_KeyboardEvent& event);
     void set_confirm_dialog_visible(bool visible,
                                     ConfirmDialogIntent intent = ConfirmDialogIntent::None,
                                     std::optional<std::size_t> slot_index = std::nullopt);
@@ -292,7 +321,10 @@ private:
     void drop_hovered_inventory_stack(bool full_stack) noexcept;
     void drop_carried_inventory_stack(bool full_stack) noexcept;
     void spawn_dropped_stack(const HotbarSlot& stack, const glm::vec3& origin, const glm::vec3& initial_velocity) noexcept;
-    void grant_player_experience(std::uint64_t base_experience, const BlockCoord& activity_block, std::string_view source);
+    void award_player_experience(
+        const ExperienceAwardEvent& event,
+        const BlockCoord& activity_block,
+        std::string_view source);
     void toggle_super_vision();
     void queue_gameplay_announcement(std::string title, std::string detail, float duration_seconds = 3.25F);
     void queue_level_up_announcements(std::uint32_t previous_level, std::uint32_t current_level);
@@ -367,8 +399,14 @@ private:
                                 float progress,
                                 bool force = false);
     void complete_loading_screen(std::string_view title, std::string_view detail);
-    [[nodiscard]] auto preload_readiness(const World& world, const glm::vec3& focus, int radius) const -> float;
-    [[nodiscard]] auto preload_gpu_readiness(const World& world, const glm::vec3& focus, int radius) const -> float;
+    [[nodiscard]] auto initial_preload_targets(const World& world, const glm::vec3& focus) const
+        -> std::vector<ChunkCoord>;
+    [[nodiscard]] auto preload_readiness(
+        const World& world,
+        std::span<const ChunkCoord> targets) const -> float;
+    [[nodiscard]] auto preload_gpu_readiness(
+        const World& world,
+        std::span<const ChunkCoord> targets) const -> float;
     void refresh_save_slots();
     auto finish_pending_save(bool wait_for_completion) -> bool;
     [[nodiscard]] auto wait_for_pending_save_during_loading(std::string_view title) -> bool;
@@ -440,6 +478,44 @@ private:
     std::optional<std::size_t> bound_musket_hotbar_slot_ {};
     PlayerController preview_player_ {};
     PlayerProgression progression_ {};
+    ExperienceAwardService experience_awards_ {};
+    PlayerBuildState player_build_ {};
+    AbilitySystem ability_system_ {};
+    PlayerAbilityEffects player_ability_effects_ {};
+    ProgressionMenu progression_menu_ {};
+    ConstructionPlanEditor
+        construction_plan_editor_ {};
+    static constexpr std::size_t
+        kMaximumPlayerSummons = 8U;
+    std::array<
+        SummonedUnitSystem,
+        kMaximumPlayerSummons>
+        summoned_footmen_ {};
+    std::array<
+        std::optional<glm::vec3>,
+        kMaximumPlayerSummons>
+        summoned_footman_ship_local_positions_ {};
+    std::array<
+        float,
+        kMaximumPlayerSummons>
+        summoned_footman_far_seconds_ {};
+    std::array<
+        AbilityCastSequence,
+        kMaximumPlayerSummons>
+        summoned_footman_cast_sequences_ {};
+    std::vector<CreatureRenderInstance>
+        progression_creature_render_instances_ {};
+    std::optional<std::size_t>
+        pending_ability_slot_ {};
+    float melee_attack_cooldown_remaining_ = 0.0F;
+    float wind_acceleration_remaining_ = 0.0F;
+    float wind_movement_bonus_ = 0.0F;
+    float wind_recovery_bonus_ = 0.0F;
+    float wind_dodge_remaining_ = 0.0F;
+    bool wind_blade_available_ = false;
+    AbilityCastSequence
+        wind_acceleration_cast_sequence_ = 0U;
+    float seconds_since_successful_shield_block_ = -1.0F;
     std::deque<GameplayAnnouncement> gameplay_announcements_ {};
     bool super_vision_active_ = false;
     CreatureSystem creatures_ {};

@@ -19,7 +19,7 @@ inline constexpr std::size_t kOldGuardMemberCount = 6U;
 inline constexpr std::size_t kOldGuardRoutePointCount = 4U;
 // Je reserve assez de pieces pour conserver la silhouette du soldat et tous
 // les organes lisibles du mousquet a silex, baionnette comprise.
-inline constexpr std::size_t kOldGuardVisualPartBudget = 80U;
+inline constexpr std::size_t kOldGuardVisualPartBudget = 112U;
 inline constexpr std::size_t kOldGuardSmokeCapacity = 128U;
 inline constexpr std::size_t kOldGuardFlashCapacity = kOldGuardMemberCount;
 inline constexpr float kOldGuardRenderDistance = 96.0F;
@@ -189,6 +189,8 @@ using OldGuardShotLineQuery = std::function<bool(const glm::vec3& origin,
                                                  const glm::vec3& direction,
                                                  float distance,
                                                  std::uint64_t intended_target)>;
+using OldGuardLocalLightQuery =
+    std::function<float(const glm::vec3& local_position)>;
 
 struct OldGuardUpdateContext {
     OldGuardPlatformFrame platform {};
@@ -203,6 +205,9 @@ struct OldGuardUpdateContext {
     float sky_light = 1.0F;
     float local_light = 0.0F;
     float precipitation_exposure = 1.0F;
+    // Je garde le scalaire historique comme repli et je n'échantillonne la
+    // lumière spatiale que lorsque l'appelant connaît les fanaux du navire.
+    OldGuardLocalLightQuery local_light_at {};
 };
 
 struct OldGuardFrameEvents {

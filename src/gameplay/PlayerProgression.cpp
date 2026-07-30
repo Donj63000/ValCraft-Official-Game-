@@ -8,63 +8,54 @@ namespace valcraft {
 
 namespace {
 
-[[nodiscard]] auto next_experience_threshold(std::uint64_t current) noexcept -> std::uint64_t {
-    const auto half_rounded_up = current / 2ULL + static_cast<std::uint64_t>((current % 2ULL) != 0ULL);
-    if (current > std::numeric_limits<std::uint64_t>::max() - half_rounded_up) {
-        return std::numeric_limits<std::uint64_t>::max();
-    }
-    return current + half_rounded_up;
-}
-
-[[nodiscard]] auto quantized_axis(float value) noexcept -> std::int32_t {
-    if (!std::isfinite(value)) {
-        return 0;
-    }
-
-    const auto clamped = std::clamp(value, -1000000.0F, 1000000.0F);
-    return static_cast<std::int32_t>(std::floor(clamped * 16.0F));
-}
-
-[[nodiscard]] auto mix_hash(std::uint32_t value) noexcept -> std::uint32_t {
-    value ^= value >> 16U;
-    value *= 0x7FEB352DU;
-    value ^= value >> 15U;
-    value *= 0x846CA68BU;
-    value ^= value >> 16U;
-    return value;
-}
-
-[[nodiscard]] auto hash_axis(std::int32_t value) noexcept -> std::uint32_t {
-    return static_cast<std::uint32_t>(value);
-}
-
-} // namespace
-
-auto player_experience_for_next_level(std::uint32_t level) noexcept -> std::uint64_t {
-    if (level >= kPlayerProgressionMaxLevel) {
-        return 0ULL;
-    }
-
-    auto threshold = kPlayerProgressionFirstLevelExperience;
-    auto current_level = kPlayerProgressionMinLevel;
-    while (current_level < std::max(level, kPlayerProgressionMinLevel)) {
-        threshold = next_experience_threshold(threshold);
-        ++current_level;
+[[nodiscard]] auto legacy_experience_for_next_level(
+    std::uint32_t level) noexcept -> std::uint64_t {
+    auto threshold = std::uint64_t {100};
+    const auto normalized_level =
+        std::clamp(
+            level,
+            kPlayerProgressionMinLevel,
+            kPlayerProgressionMaxLevel);
+    for (auto current = kPlayerProgressionMinLevel;
+         current < normalized_level;
+         ++current) {
+        const auto half_rounded_up =
+            threshold / 2ULL +
+            static_cast<std::uint64_t>(
+                threshold % 2ULL != 0ULL);
+        if (threshold >
+            std::numeric_limits<std::uint64_t>::max() -
+                half_rounded_up) {
+            return std::numeric_limits<std::uint64_t>::max();
+        }
+        threshold += half_rounded_up;
     }
     return threshold;
 }
 
+} // namespace
+
 auto player_progression_bonus_percent(std::uint32_t level) noexcept -> float {
-    const auto clamped_level = std::clamp(level, kPlayerProgressionMinLevel, kPlayerProgressionMaxLevel);
-    return static_cast<float>(clamped_level - kPlayerProgressionMinLevel);
+    return (
+               player_derived_stats(
+                   level)
+                       .attack_damage_multiplier -
+               1.0F) *
+           100.0F;
 }
 
 auto player_has_super_vision_power(std::uint32_t level) noexcept -> bool {
-    return std::clamp(level, kPlayerProgressionMinLevel, kPlayerProgressionMaxLevel) >= kPlayerProgressionSuperVisionLevel;
+    return player_progression_capabilities(
+               level)
+        .super_vision
+        .unlocked;
 }
 
 auto player_has_flight_power(std::uint32_t level) noexcept -> bool {
-    return std::clamp(level, kPlayerProgressionMinLevel, kPlayerProgressionMaxLevel) >= kPlayerProgressionFlightLevel;
+    return player_progression_capabilities(
+               level)
+        .flight
+        .unlocked;
 }
 
 auto sanitize_player_progression_state(PlayerProgressionState state) noexcept -> PlayerProgressionState {
@@ -89,67 +80,89 @@ auto sanitize_player_progression_state(PlayerProgressionState state) noexcept ->
     return state;
 }
 
-auto block_break_experience(BlockId block_id) noexcept -> std::uint64_t {
-    const auto item_id = block_item_id(block_id);
-    switch (static_cast<BlockType>(item_id)) {
-    case BlockType::Wood:
-    case BlockType::PineWood:
-    case BlockType::Planks:
-        return 15ULL;
-    case BlockType::CoalOre:
-        return 20ULL;
-    case BlockType::IronOre:
-        return 32ULL;
-    case BlockType::GoldOre:
-        return 48ULL;
-    case BlockType::DiamondOre:
-        return 72ULL;
-    case BlockType::MetallicAlloyOre:
-        return 96ULL;
-    case BlockType::Air:
-    case BlockType::Pastron:
-    case BlockType::RoundShield:
-    case BlockType::Sword:
-    case BlockType::Spear:
-    case BlockType::Shoes:
-    case BlockType::Pants:
-    case BlockType::Pickaxe:
-    case BlockType::Axe:
-    case BlockType::Shovel:
-        return 0ULL;
-    default:
-        return is_block_breakable(item_id) ? 10ULL : 0ULL;
+auto migrate_legacy_player_progression_state(
+    PlayerProgressionState legacy_state) noexcept -> PlayerProgressionState {
+    // Je préserve le niveau et la position relative dans son ancienne barre
+    // d'XP : une migration ne doit ni offrir ni retirer arbitrairement un niveau.
+    legacy_state.level =
+        std::clamp(
+            legacy_state.level,
+            kPlayerProgressionMinLevel,
+            kPlayerProgressionMaxLevel);
+    if (legacy_state.level >=
+        kPlayerProgressionMaxLevel) {
+        legacy_state.experience = 0ULL;
+        return legacy_state;
     }
+
+    const auto old_threshold =
+        legacy_experience_for_next_level(
+            legacy_state.level);
+    const auto new_threshold =
+        player_experience_for_next_level(
+            legacy_state.level);
+    if (old_threshold == 0ULL ||
+        new_threshold == 0ULL) {
+        legacy_state.experience = 0ULL;
+        return legacy_state;
+    }
+
+    const auto bounded_old_experience =
+        std::min(
+            legacy_state.experience,
+            old_threshold - 1ULL);
+    const auto ratio =
+        static_cast<long double>(
+            bounded_old_experience) /
+        static_cast<long double>(
+            old_threshold);
+    const auto migrated =
+        static_cast<std::uint64_t>(
+            std::floor(
+                ratio *
+                    static_cast<long double>(
+                        new_threshold) +
+                0.5L));
+    legacy_state.experience =
+        std::min(
+            migrated,
+            new_threshold - 1ULL);
+    return legacy_state;
+}
+
+auto block_break_experience(
+    BlockId block_id,
+    bool player_placed) noexcept -> std::uint64_t {
+    return ExperienceRewardPolicy::harvest_experience(
+        block_id,
+        player_placed);
 }
 
 auto creature_kill_experience(CreatureSpecies species,
                               const glm::vec3& position,
                               std::uint32_t salt) noexcept -> std::uint64_t {
-    auto hash = salt ^ 0x9E3779B9U;
-    hash ^= mix_hash(static_cast<std::uint32_t>(species) + 0x85EBCA6BU);
-    hash ^= mix_hash(hash_axis(quantized_axis(position.x)) + 0xC2B2AE35U);
-    hash ^= mix_hash(hash_axis(quantized_axis(position.y)) + 0x27D4EB2FU);
-    hash ^= mix_hash(hash_axis(quantized_axis(position.z)) + 0x165667B1U);
-    return 1ULL + static_cast<std::uint64_t>(mix_hash(hash) % 100U);
+    (void)position;
+    (void)salt;
+    return ExperienceRewardPolicy::creature_profile_experience(
+        ThreatRank::Zero,
+        EntityWeight::Light,
+        Faction::Neutral,
+        species !=
+            CreatureSpecies::Villager);
 }
 
-auto experience_multiplier_for_activity(const CreatureCycleState& cycle,
-                                        std::optional<int> surface_y,
-                                        int activity_y) noexcept -> std::uint32_t {
-    if (cycle.phase != CreaturePhase::Night || !surface_y.has_value()) {
-        return 1U;
+auto apply_experience_modifiers(
+    std::uint64_t base_experience,
+    const ExperienceAwardContext& context) noexcept -> std::uint64_t {
+    if (context.reason !=
+        ExperienceReason::Combat) {
+        return base_experience;
     }
-    return activity_y >= *surface_y ? 2U : 1U;
-}
-
-auto multiply_experience(std::uint64_t base_experience, std::uint32_t multiplier) noexcept -> std::uint64_t {
-    if (base_experience == 0ULL || multiplier == 0U) {
-        return 0ULL;
-    }
-    if (base_experience > std::numeric_limits<std::uint64_t>::max() / static_cast<std::uint64_t>(multiplier)) {
-        return std::numeric_limits<std::uint64_t>::max();
-    }
-    return base_experience * static_cast<std::uint64_t>(multiplier);
+    return ExperienceRewardPolicy::combat_experience(
+        base_experience,
+        context.hostile_target,
+        context.surface_water_context,
+        context.phase);
 }
 
 void PlayerProgression::reset() noexcept {
@@ -185,35 +198,63 @@ auto PlayerProgression::level_progress_ratio() const noexcept -> float {
 }
 
 auto PlayerProgression::attack_damage_multiplier() const noexcept -> float {
-    return 1.0F + player_progression_bonus_percent(state_.level) * 0.01F;
+    return derived_stats()
+        .attack_damage_multiplier;
 }
 
 auto PlayerProgression::damage_resistance_percent() const noexcept -> float {
-    return player_progression_bonus_percent(state_.level);
+    return derived_stats()
+        .damage_reduction_percent;
 }
 
 auto PlayerProgression::apnea_resistance_percent() const noexcept -> float {
-    return player_progression_bonus_percent(state_.level);
+    return derived_stats()
+        .apnea_resistance_percent;
 }
 
 auto PlayerProgression::fall_safety_multiplier() const noexcept -> float {
-    return 1.0F + player_progression_bonus_percent(state_.level) * 0.01F;
+    return derived_stats()
+        .safe_fall_multiplier;
 }
 
 auto PlayerProgression::movement_speed_multiplier() const noexcept -> float {
-    return 1.0F + player_progression_bonus_percent(state_.level) * 0.01F;
+    return derived_stats()
+        .movement_speed_multiplier;
 }
 
 auto PlayerProgression::block_break_speed_multiplier() const noexcept -> float {
-    return 1.0F + player_progression_bonus_percent(state_.level) * 0.01F;
+    return derived_stats()
+        .mining_speed_multiplier;
+}
+
+auto PlayerProgression::base_max_health() const noexcept -> float {
+    return derived_stats()
+        .base_max_health;
+}
+
+auto PlayerProgression::derived_stats() const noexcept -> PlayerDerivedStats {
+    return player_derived_stats(
+        state_.level);
+}
+
+auto PlayerProgression::capabilities(
+    PlayerProgressionMode mode) const noexcept
+    -> PlayerProgressionCapabilities {
+    return player_progression_capabilities(
+        state_.level,
+        mode);
 }
 
 auto PlayerProgression::has_super_vision_power() const noexcept -> bool {
-    return player_has_super_vision_power(state_.level);
+    return capabilities()
+        .super_vision
+        .unlocked;
 }
 
 auto PlayerProgression::has_flight_power() const noexcept -> bool {
-    return player_has_flight_power(state_.level);
+    return capabilities()
+        .flight
+        .unlocked;
 }
 
 auto PlayerProgression::is_max_level() const noexcept -> bool {

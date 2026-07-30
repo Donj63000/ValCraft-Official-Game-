@@ -12,7 +12,6 @@ namespace valcraft {
 
 namespace {
 
-inline constexpr std::uint16_t kVisualSurfaceFlagCutout = 1U;
 inline constexpr float kLightingNormalProbeDistance = 0.42F;
 inline constexpr float kLightingUpwardProbeDistance = 0.34F;
 inline constexpr float kTau = 6.28318530717958647692F;
@@ -222,10 +221,10 @@ void append_instance(
     const auto cosine = std::cos(instance.yaw_radians);
     const auto sine = std::sin(instance.yaw_radians);
     const auto surface_flags = requires_alpha_cutout(instance)
-        ? kVisualSurfaceFlagCutout
+        ? kTerrainSurfaceFlagCutout
         : std::uint16_t {0U};
     const auto uses_cutout_uv =
-        (surface_flags & kVisualSurfaceFlagCutout) != 0U;
+        (surface_flags & kTerrainSurfaceFlagCutout) != 0U;
 
     destination.vertices.reserve(
         destination.vertices.size() + primitive.vertices.size());

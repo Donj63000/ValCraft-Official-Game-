@@ -104,4 +104,16 @@ private:
     std::span<const CreaturePartInstance> parts,
     VisualEntityContext context) -> std::vector<VisualEntityPrimitiveInstance>;
 
+// Je centralise le LOD par distance et par taille projetée approximative afin
+// que les micro-détails ne paient jamais la tessellation d'un torse.
+[[nodiscard]] auto select_visual_entity_primitive_lod(
+    float distance_squared,
+    float maximum_dimension,
+    int available_lod_count,
+    bool simplified_shadow,
+    bool viewmodel) noexcept -> StylizedPrimitiveLod;
+
+[[nodiscard]] auto visual_entity_part_casts_simplified_shadow(
+    float maximum_dimension) noexcept -> bool;
+
 } // namespace valcraft

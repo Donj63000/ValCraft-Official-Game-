@@ -111,6 +111,8 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 result.options.smoke_session = SmokeSessionMode::SeaNew;
             } else if (mode == "sea-legacy") {
                 result.options.smoke_session = SmokeSessionMode::SeaLegacy;
+            } else if (mode == "sea-open") {
+                result.options.smoke_session = SmokeSessionMode::SeaOpen;
             } else {
                 return make_error("Invalid value for --smoke-session");
             }
@@ -136,6 +138,16 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 result.options.smoke_ship_view = SmokeShipView::CargoHold;
             } else if (view == "crew") {
                 result.options.smoke_ship_view = SmokeShipView::CrewDeck;
+            } else if (view == "infirmary") {
+                result.options.smoke_ship_view = SmokeShipView::Infirmary;
+            } else if (view == "mess") {
+                result.options.smoke_ship_view = SmokeShipView::Mess;
+            } else if (view == "battery") {
+                result.options.smoke_ship_view = SmokeShipView::GunDeck;
+            } else if (view == "underwater") {
+                result.options.smoke_ship_view = SmokeShipView::Underwater;
+            } else if (view == "wake") {
+                result.options.smoke_ship_view = SmokeShipView::Wake;
             } else {
                 return make_error("Invalid value for --smoke-ship-view");
             }
@@ -171,6 +183,7 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 return make_error("Invalid value for --initial-time");
             }
             result.options.initial_time_of_day = parsed_value;
+            result.options.initial_time_explicitly_set = true;
             continue;
         }
         if (argument.starts_with("--initial-weather-time=")) {
@@ -190,6 +203,11 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 result.options.startup_ui_overlay = StartupUiOverlay::Inventory;
             } else if (overlay == "pause") {
                 result.options.startup_ui_overlay = StartupUiOverlay::Pause;
+            } else if (overlay == "progression") {
+                result.options.startup_ui_overlay = StartupUiOverlay::Progression;
+            } else if (overlay == "construction-plan") {
+                result.options.startup_ui_overlay =
+                    StartupUiOverlay::ConstructionPlan;
             } else {
                 return make_error("Invalid value for --ui-preview");
             }

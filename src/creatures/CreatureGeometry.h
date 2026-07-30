@@ -17,7 +17,7 @@ constexpr int kCreatureAtlasSize = 128;
 constexpr int kCreatureAtlasTileSize = 16;
 constexpr float kCreatureAtlasTilesPerAxis = 8.0F;
 inline constexpr std::size_t kCrewVisualRenderCapacity = 6U;
-inline constexpr std::size_t kCrewVisualPartBudget = 64U;
+inline constexpr std::size_t kCrewVisualPartBudget = 80U;
 inline constexpr float kCrewVisualDrawDistance = 96.0F;
 
 enum class CreatureAtlasTile : std::uint8_t {

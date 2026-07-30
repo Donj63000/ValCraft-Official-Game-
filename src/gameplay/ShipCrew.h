@@ -96,7 +96,21 @@ enum class ShipCrewStation : std::uint8_t {
     ForeLowerPortA = 39,
     ForeLowerPortB = 40,
     WaterStillApproach = 41,
-    Count = 42,
+
+    // J'ajoute ces valeurs uniquement en fin d'enum afin de garder les
+    // identifiants 0..41 compatibles avec les sauvegardes existantes.
+    CrewStairsTop = 42,
+    CrewStairsMid = 43,
+    CrewStairsBottom = 44,
+    HoldStairsTop = 45,
+    HoldStairsMid = 46,
+    HoldStairsBottom = 47,
+    CrewHoldApproach = 48,
+    HoldBypassA = 49,
+    HoldBypassB = 50,
+    CrewHoldExit = 51,
+    HoldMessApproach = 52,
+    Count = 53,
 };
 
 struct ShipCrewNavigationNode {

@@ -8,6 +8,10 @@
 #include "gameplay/PlayerController.h"
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
+#include "gameplay/progression/ExperienceAwardService.h"
+#include "gameplay/progression/PlayerAbilityEffects.h"
+#include "gameplay/progression/PlayerBuildState.h"
+#include "gameplay/progression/SummonedUnitSystem.h"
 #include "world/World.h"
 
 #include <glm/vec3.hpp>
@@ -23,6 +27,7 @@
 namespace valcraft {
 
 constexpr std::size_t kSaveSlotCount = 8;
+constexpr std::size_t kMaximumSavedPlayerSummons = 8U;
 
 struct SaveSlotMetadata {
     bool exists = false;
@@ -37,12 +42,57 @@ struct SaveSlotMetadata {
     auto operator==(const SaveSlotMetadata&) const -> bool = default;
 };
 
+struct WindAccelerationRuntimeSaveState {
+    float remaining_seconds = 0.0F;
+    float movement_bonus = 0.0F;
+    float recovery_bonus = 0.0F;
+    float dodge_remaining_seconds = 0.0F;
+    bool blade_armed = false;
+    AbilityCastSequence cast_sequence = 0U;
+
+    auto operator==(const WindAccelerationRuntimeSaveState&) const
+        -> bool = default;
+};
+
+struct SummonedFootmanRuntimeSaveState {
+    SummonedUnitSystemSnapshot runtime {};
+    std::optional<glm::vec3> ship_local_position {};
+    float far_seconds = 0.0F;
+    AbilityCastSequence cast_sequence = 0U;
+
+    auto operator==(const SummonedFootmanRuntimeSaveState&) const
+        -> bool = default;
+};
+
+struct PlayerAbilityRuntimeSaveState {
+    PlayerAbilityEffectsSnapshot player_effects {};
+    WindAccelerationRuntimeSaveState wind {};
+    std::array<
+        SummonedFootmanRuntimeSaveState,
+        kMaximumSavedPlayerSummons>
+        summoned_footmen {};
+    // Je conserve les prochaines séquences explicitement pour garantir qu'un
+    // chargement ne réutilise jamais un identifiant ou un cast déjà restauré.
+    SummonedUnitId next_summoned_unit_id = 1U;
+    AbilityCastSequence next_cast_sequence = 1U;
+
+    auto operator==(const PlayerAbilityRuntimeSaveState&) const
+        -> bool = default;
+};
+
+[[nodiscard]] auto sanitize_player_ability_runtime_save_state(
+    const PlayerAbilityRuntimeSaveState& state) noexcept
+    -> PlayerAbilityRuntimeSaveState;
+
 struct SaveGameSnapshot {
     SaveSlotMetadata metadata {};
     glm::vec3 spawn_position {0.5F, 70.0F, 0.5F};
     PlayerState player_state {};
     PlayerProgressionState progression {};
+    PlayerBuildState player_build {};
     SeaAdventureSaveState sea_adventure {};
+    MaritimeExperienceAwardState maritime_experience {};
+    PlayerAbilityRuntimeSaveState player_ability_runtime {};
     HotbarState hotbar {};
     InventoryMenuState inventory {};
     std::uint64_t musket_shot_sequence = 0U;
