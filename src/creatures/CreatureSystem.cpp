@@ -2305,6 +2305,44 @@ auto CreatureSystem::apply_stagger(CreatureId target_id, float duration_seconds)
     return true;
 }
 
+auto CreatureSystem::apply_knockback(
+    CreatureId target_id,
+    const glm::vec3& direction,
+    float distance) noexcept -> bool {
+    if (target_id == 0U ||
+        !is_finite_vec3(direction) ||
+        !std::isfinite(distance) ||
+        distance <= 0.0F) {
+        return false;
+    }
+    auto* creature = find_creature(target_id);
+    if (creature == nullptr ||
+        !std::isfinite(creature->health) ||
+        creature->health <= 0.0F) {
+        return false;
+    }
+    const auto horizontal =
+        glm::vec3 {direction.x, 0.0F, direction.z};
+    const auto length_squared =
+        glm::dot(horizontal, horizontal);
+    if (!std::isfinite(length_squared) ||
+        length_squared <= 1.0e-6F) {
+        return false;
+    }
+    // Je borne le déplacement instantané pour conserver une simulation
+    // stable même si une donnée de combat externe est corrompue.
+    const auto bounded_distance =
+        std::clamp(distance, 0.0F, 4.0F);
+    creature->position +=
+        horizontal /
+        std::sqrt(length_squared) *
+        bounded_distance;
+    creature->behavior_state = CreatureBehaviorState::Flee;
+    creature->behavior_timer =
+        std::max(creature->behavior_timer, 0.35F);
+    return true;
+}
+
 auto CreatureSystem::taunt_hostiles(
     std::uint64_t target_id,
     const glm::vec3& target_position,

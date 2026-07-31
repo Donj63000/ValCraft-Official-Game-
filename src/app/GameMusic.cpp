@@ -1,5 +1,7 @@
 #include "app/GameMusic.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <span>
@@ -46,6 +48,8 @@ auto GameMusic::initialize() -> bool {
     }
 
     composer_ = ProceduralMusicComposer(obtained_spec_.freq);
+    backrooms_ambience_.set_sample_rate(obtained_spec_.freq);
+    backrooms_ambience_.reset();
     sfx_mixer_.set_sample_rate(obtained_spec_.freq);
     sfx_mixer_.reset();
     SDL_PauseAudioDevice(device_id_, 0);
@@ -59,6 +63,7 @@ void GameMusic::shutdown() noexcept {
         device_id_ = 0;
     }
 
+    backrooms_ambience_.reset();
     sfx_mixer_.reset();
 
     if (owns_audio_subsystem_ && SDL_WasInit(SDL_INIT_AUDIO) != 0U) {
@@ -77,7 +82,44 @@ void GameMusic::sync_environment(const EnvironmentState& environment,
     }
 
     SDL_LockAudioDevice(device_id_);
-    composer_.set_environment(environment, cycle, has_active_session, front_end_visible, context);
+    const auto finite_unit = [](float value) noexcept {
+        return std::isfinite(value)
+                   ? std::clamp(value, 0.0F, 1.0F)
+                   : 0.0F;
+    };
+    const auto backrooms_active =
+        has_active_session &&
+        !front_end_visible &&
+        context.scene ==
+            ProceduralMusicScene::Backrooms;
+    backrooms_ambience_.set_context({
+        .active = backrooms_active,
+        .seed = context.seed,
+        .darkness =
+            finite_unit(
+                1.0F -
+                environment.exposure),
+        .anomaly =
+            finite_unit(
+                (environment.vignette_strength -
+                 0.16F) /
+                0.24F),
+    });
+
+    // Le compositeur musical prépare son bus classique pendant le fondu, mais
+    // l'ambiance BackRooms le remplace progressivement dans le callback.
+    auto composer_context = context;
+    if (composer_context.scene ==
+        ProceduralMusicScene::Backrooms) {
+        composer_context.scene =
+            ProceduralMusicScene::Classic;
+    }
+    composer_.set_environment(
+        environment,
+        cycle,
+        has_active_session,
+        front_end_visible,
+        composer_context);
     SDL_UnlockAudioDevice(device_id_);
 }
 
@@ -137,7 +179,12 @@ void GameMusic::render_callback_stream(Uint8* stream, int len) noexcept {
     }
 
     auto* output = reinterpret_cast<float*>(stream);
-    composer_.render_interleaved(std::span<float> {output, sample_count});
+    auto output_samples =
+        std::span<float> {output, sample_count};
+    composer_.render_interleaved(output_samples);
+    backrooms_ambience_.mix_interleaved(
+        output_samples,
+        channel_count);
     sfx_mixer_.mix_interleaved(
         std::span<float> {output, sample_count},
         channel_count);

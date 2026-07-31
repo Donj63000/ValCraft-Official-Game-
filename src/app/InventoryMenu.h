@@ -48,6 +48,16 @@ struct InventoryMenuState {
     auto operator==(const InventoryMenuState&) const -> bool = default;
 };
 
+struct InventoryLegendaryWeaponReconcileResult {
+    std::size_t removed_duplicates = 0U;
+    bool weapon_present = false;
+    bool weapon_granted = false;
+    bool recovery_required = false;
+
+    auto operator==(const InventoryLegendaryWeaponReconcileResult&) const
+        -> bool = default;
+};
+
 struct InventorySlotLayout {
     InventorySlotRef ref {};
     HotbarSlot slot {};
@@ -255,6 +265,8 @@ inline constexpr auto inventory_item_label(BlockId block_id) noexcept -> std::st
         return "PELLE";
     case BlockType::Musket:
         return "FUSIL";
+    case BlockType::LeviathanSpine:
+        return "L'ECHINE DU LEVIATHAN";
     case BlockType::Air:
     default:
         return "";
@@ -302,8 +314,20 @@ inline constexpr void normalize_inventory_state(InventoryMenuState& inventory, H
     inventory.carrying_item = inventory_slot_has_item(inventory.carried_slot);
 }
 
-inline constexpr auto inventory_equipment_resistance_percent(const InventoryMenuState& inventory) noexcept -> float {
-    return equipped_resistance_percent(inventory.equipment_slots);
+inline constexpr auto inventory_equipment_resistance_percent(
+    const InventoryMenuState& inventory,
+    bool legendary_weapon_drawn = false) noexcept -> float {
+    return equipped_resistance_percent(
+        inventory.equipment_slots,
+        legendary_weapon_drawn);
+}
+
+inline constexpr auto inventory_has_equipped_legendary_weapon(
+    const InventoryMenuState& inventory) noexcept -> bool {
+    return is_legendary_weapon_item(
+        inventory.equipment_slots[
+            equipment_slot_index(
+                EquipmentSlot::Weapon)]);
 }
 
 inline constexpr auto inventory_active_weapon_stats(const InventoryMenuState& inventory,
@@ -311,7 +335,8 @@ inline constexpr auto inventory_active_weapon_stats(const InventoryMenuState& in
     const auto& selected_slot = hotbar.selected_slot();
     if (hotbar_slot_has_item(selected_slot) &&
         (is_tool_item(selected_slot.block_id) ||
-         is_musket_item(selected_slot))) {
+         is_musket_item(selected_slot) ||
+         is_legendary_weapon_item(selected_slot))) {
         return std::nullopt;
     }
     return equipped_weapon_stats(inventory.equipment_slots, hotbar);
@@ -526,6 +551,213 @@ inline auto inventory_try_grant_loaded_musket(InventoryMenuState& inventory,
 
     // Je ne valide mes copies qu'apres avoir trouve une destination complete.
     return std::nullopt;
+}
+
+inline constexpr auto inventory_legendary_weapon_count(
+    const InventoryMenuState& inventory,
+    const HotbarState& hotbar) noexcept -> std::size_t {
+    auto count = std::size_t {0U};
+    const auto count_slot =
+        [&count](const HotbarSlot& slot) constexpr noexcept {
+            if (is_legendary_weapon_item(slot)) {
+                ++count;
+            }
+        };
+    for (const auto& slot : hotbar.slots) {
+        count_slot(slot);
+    }
+    for (const auto& slot : inventory.storage_slots) {
+        count_slot(slot);
+    }
+    for (const auto& slot : inventory.equipment_slots) {
+        count_slot(slot);
+    }
+    count_slot(inventory.carried_slot);
+    return count;
+}
+
+inline constexpr auto inventory_has_legendary_weapon(
+    const InventoryMenuState& inventory,
+    const HotbarState& hotbar) noexcept -> bool {
+    return inventory_legendary_weapon_count(
+               inventory,
+               hotbar) != 0U;
+}
+
+inline auto inventory_remove_all_legendary_weapons(
+    InventoryMenuState& inventory,
+    HotbarState& hotbar) noexcept -> std::size_t {
+    auto removed = std::size_t {0U};
+    const auto remove_slot =
+        [&removed](HotbarSlot& slot) noexcept {
+            if (!is_legendary_weapon_item(slot)) {
+                return;
+            }
+            slot = inventory_empty_slot();
+            ++removed;
+        };
+    for (auto& slot : hotbar.slots) {
+        remove_slot(slot);
+    }
+    for (auto& slot : inventory.storage_slots) {
+        remove_slot(slot);
+    }
+    for (auto& slot : inventory.equipment_slots) {
+        remove_slot(slot);
+    }
+    remove_slot(inventory.carried_slot);
+    normalize_inventory_state(inventory, hotbar);
+    return removed;
+}
+
+inline auto inventory_deduplicate_legendary_weapon(
+    InventoryMenuState& inventory,
+    HotbarState& hotbar) noexcept -> std::size_t {
+    normalize_inventory_state(inventory, hotbar);
+    auto retained = false;
+    auto removed = std::size_t {0U};
+    const auto retain_first =
+        [&retained, &removed](HotbarSlot& slot) noexcept {
+            if (!is_legendary_weapon_item(slot)) {
+                return;
+            }
+            if (!retained) {
+                retained = true;
+                return;
+            }
+            slot = inventory_empty_slot();
+            ++removed;
+        };
+
+    // Je privilegie l'arme equipee, puis la selection courante, afin qu'une
+    // sauvegarde corrompue ne change pas silencieusement l'objet tenu.
+    retain_first(
+        inventory.equipment_slots[
+            equipment_slot_index(
+                EquipmentSlot::Weapon)]);
+    retain_first(
+        hotbar.slots[
+            normalize_hotbar_index(
+                hotbar.selected_index)]);
+    for (std::size_t index = 0U;
+         index < hotbar.slots.size();
+         ++index) {
+        if (index ==
+            normalize_hotbar_index(
+                hotbar.selected_index)) {
+            continue;
+        }
+        retain_first(hotbar.slots[index]);
+    }
+    for (auto& slot : inventory.storage_slots) {
+        retain_first(slot);
+    }
+    for (std::size_t index = 0U;
+         index < inventory.equipment_slots.size();
+         ++index) {
+        if (index ==
+            equipment_slot_index(
+                EquipmentSlot::Weapon)) {
+            continue;
+        }
+        retain_first(
+            inventory.equipment_slots[index]);
+    }
+    retain_first(inventory.carried_slot);
+    normalize_inventory_state(inventory, hotbar);
+    return removed;
+}
+
+inline auto inventory_try_grant_legendary_weapon(
+    InventoryMenuState& inventory,
+    HotbarState& hotbar) noexcept
+    -> std::optional<InventorySlotRef> {
+    auto next_inventory = inventory;
+    auto next_hotbar = hotbar;
+    normalize_inventory_state(
+        next_inventory,
+        next_hotbar);
+    if (inventory_has_legendary_weapon(
+            next_inventory,
+            next_hotbar)) {
+        return std::nullopt;
+    }
+
+    const auto weapon =
+        inventory_make_slot(
+            to_block_id(
+                BlockType::LeviathanSpine),
+            1U);
+    for (std::size_t index = 0U;
+         index < next_hotbar.slots.size();
+         ++index) {
+        if (inventory_slot_has_item(
+                next_hotbar.slots[index])) {
+            continue;
+        }
+        next_hotbar.slots[index] = weapon;
+        select_hotbar_index(next_hotbar, index);
+        inventory = next_inventory;
+        hotbar = next_hotbar;
+        return InventorySlotRef {
+            InventorySlotGroup::Hotbar,
+            index,
+        };
+    }
+    for (std::size_t index = 0U;
+         index < next_inventory.storage_slots.size();
+         ++index) {
+        if (inventory_slot_has_item(
+                next_inventory.storage_slots[index])) {
+            continue;
+        }
+        next_inventory.storage_slots[index] = weapon;
+        inventory = next_inventory;
+        hotbar = next_hotbar;
+        return InventorySlotRef {
+            InventorySlotGroup::Storage,
+            index,
+        };
+    }
+    return std::nullopt;
+}
+
+inline auto inventory_reconcile_legendary_weapon(
+    InventoryMenuState& inventory,
+    HotbarState& hotbar,
+    bool weapon_should_exist) noexcept
+    -> InventoryLegendaryWeaponReconcileResult {
+    InventoryLegendaryWeaponReconcileResult result {};
+    if (!weapon_should_exist) {
+        result.removed_duplicates =
+            inventory_remove_all_legendary_weapons(
+                inventory,
+                hotbar);
+        return result;
+    }
+
+    result.removed_duplicates =
+        inventory_deduplicate_legendary_weapon(
+            inventory,
+            hotbar);
+    result.weapon_present =
+        inventory_has_legendary_weapon(
+            inventory,
+            hotbar);
+    if (result.weapon_present) {
+        return result;
+    }
+
+    result.weapon_granted =
+        inventory_try_grant_legendary_weapon(
+            inventory,
+            hotbar)
+            .has_value();
+    result.weapon_present =
+        result.weapon_granted;
+    result.recovery_required =
+        !result.weapon_granted;
+    return result;
 }
 
 inline constexpr auto inventory_is_tool_crafting_material(BlockId block_id) noexcept -> bool {

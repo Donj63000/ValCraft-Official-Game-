@@ -767,6 +767,7 @@ TEST_CASE("ocean adventure swimming follows tempest crests and troughs") {
 TEST_CASE("shallow water slows movement without entering swimming state") {
     World world(1523, 1);
     test::make_chunk_empty(world, {0, 0});
+    test::make_chunk_empty(world, {0, -1});
     test::make_flat_floor(world, -2, 12, 0, -10, 2);
     for (int z = -10; z <= 2; ++z) {
         for (int x = -1; x <= 1; ++x) {
@@ -775,21 +776,44 @@ TEST_CASE("shallow water slows movement without entering swimming state") {
     }
 
     PlayerController shallow_player({0.5F, 1.001F, 0.5F});
+    PlayerController poolrooms_player({0.5F, 1.001F, 0.5F});
     PlayerController dry_player({3.5F, 1.001F, 0.5F});
+    poolrooms_player.set_water_movement_profile(
+        PlayerWaterMovementProfile::Poolrooms);
+    CHECK(
+        poolrooms_player.water_movement_profile() ==
+        PlayerWaterMovementProfile::Poolrooms);
     PlayerInput input {};
     input.move_forward = 1.0F;
 
     for (int i = 0; i < 60; ++i) {
         shallow_player.update(input, 1.0F / 60.0F, world);
+        poolrooms_player.update(
+            input,
+            1.0F / 60.0F,
+            world);
         dry_player.update(input, 1.0F / 60.0F, world);
     }
 
-    const auto shallow_distance = std::abs(shallow_player.position().x - 0.5F);
-    const auto dry_distance = std::abs(dry_player.position().x - 3.5F);
+    const auto shallow_distance =
+        std::abs(shallow_player.position().z - 0.5F);
+    const auto poolrooms_distance =
+        std::abs(poolrooms_player.position().z - 0.5F);
+    const auto dry_distance =
+        std::abs(dry_player.position().z - 0.5F);
 
     CHECK_FALSE(shallow_player.state().swimming);
     CHECK_FALSE(shallow_player.state().head_underwater);
-    CHECK(shallow_distance <= dry_distance);
+    CHECK_FALSE(poolrooms_player.state().swimming);
+    CHECK_FALSE(poolrooms_player.state().head_underwater);
+    CHECK(shallow_distance <
+          poolrooms_distance);
+    CHECK(
+        poolrooms_distance / dry_distance >=
+        0.94F);
+    CHECK(
+        poolrooms_distance / dry_distance <=
+        0.96F);
 }
 
 TEST_CASE("falling into deep water prevents fall damage") {
@@ -5750,6 +5774,32 @@ TEST_CASE("item drops sanitize corrupted loaded state") {
         CHECK(std::isfinite(instance.age_seconds));
         CHECK(std::isfinite(instance.spin_radians));
     }
+}
+
+TEST_CASE("l'arme legendaire ne peut jamais devenir un objet jete") {
+    ItemDrop forbidden {};
+    forbidden.position = {0.5F, 2.0F, 0.5F};
+    forbidden.stack =
+        inventory_make_slot(
+            to_block_id(
+                BlockType::LeviathanSpine),
+            1U);
+    CHECK_FALSE(
+        sanitize_item_drop_state(
+            forbidden));
+
+    ItemDropSystem drop_system {};
+    drop_system.spawn_drop(
+        forbidden.stack,
+        forbidden.position,
+        {0.0F, 1.0F, 0.0F});
+    CHECK(drop_system.active_drop_count() == 0U);
+    CHECK(
+        drop_system.consume_audit_stats()
+            .rejected_spawns == 1U);
+
+    drop_system.load_drops({forbidden});
+    CHECK(drop_system.active_drop_count() == 0U);
 }
 
 TEST_CASE("placing a solid block can replace decorative flora") {

@@ -348,6 +348,8 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
           WorldGenerationVersion::LegacyV1);
     CHECK(resolve_world_generation_version(WorldGenerationProfile::OceanAdventure) ==
           WorldGenerationVersion::LivingOceanV3);
+    CHECK(resolve_world_generation_version(WorldGenerationProfile::Backrooms) ==
+          WorldGenerationVersion::BackroomsV1);
 
     constexpr auto seed = 424242;
     WorldGenerator latest(
@@ -391,6 +393,11 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
     CHECK(ocean_world.generation_version() == WorldGenerationVersion::LivingOceanV3);
     CHECK(ocean_world.capture_save_plan().generation_version ==
           WorldGenerationVersion::LivingOceanV3);
+
+    World backrooms_world(seed, 0, WorldGenerationProfile::Backrooms);
+    CHECK(backrooms_world.generation_version() == WorldGenerationVersion::BackroomsV1);
+    CHECK(backrooms_world.capture_save_plan().generation_version ==
+          WorldGenerationVersion::BackroomsV1);
     CHECK_THROWS_AS(
         WorldGenerator(
             seed,
@@ -402,6 +409,18 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
             seed,
             WorldGenerationProfile::Continental,
             WorldGenerationVersion::LivingOceanV3),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        WorldGenerator(
+            seed,
+            WorldGenerationProfile::Backrooms,
+            WorldGenerationVersion::LivingOceanV3),
+        std::invalid_argument);
+    CHECK_THROWS_AS(
+        WorldGenerator(
+            seed,
+            WorldGenerationProfile::OceanAdventure,
+            WorldGenerationVersion::BackroomsV1),
         std::invalid_argument);
 }
 
@@ -1957,7 +1976,9 @@ TEST_CASE("crafted tools accelerate only their matching block families") {
     CHECK(tool_break_speed_multiplier(to_block_id(BlockType::Shovel), to_block_id(BlockType::Wood)) == doctest::Approx(1.0F));
 }
 
-TEST_CASE("block atlas expands to 128 square pixels and preserves transparent decorative tiles") {
+TEST_CASE("block atlas expands to 256 square pixels and preserves transparent decorative tiles") {
+    CHECK(kBlockAtlasSize == 256);
+    CHECK(kBlockAtlasTilesPerAxis == 16);
     const auto pixels = build_block_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
 
@@ -3471,6 +3492,220 @@ TEST_CASE("torch light crosses chunk boundaries") {
     CHECK(world.get_block_light(15, 1, 2) == 14);
     CHECK(world.get_block_light(16, 1, 2) == 13);
     CHECK(world.get_block_light(17, 1, 2) == 12);
+}
+
+TEST_CASE("Poolrooms synchronous and incremental chunks share blocks and water") {
+    const WorldGenerator generator(
+        424242,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV1,
+        -2);
+    CHECK(generator.backrooms_level() == -2);
+
+    constexpr std::array<ChunkCoord, 3> coordinates {{
+        {0, 0},
+        {-5, 3},
+        {11, -7},
+    }};
+    auto water_cells = 0;
+    for (const auto coord : coordinates) {
+        Chunk synchronous(coord);
+        generator.generate_chunk(synchronous);
+
+        auto incremental =
+            generator.begin_chunk_generation(coord);
+        while (!generator.is_chunk_generation_complete(
+            incremental)) {
+            generator.advance_chunk_generation(
+                incremental,
+                7);
+        }
+
+        CHECK(
+            synchronous.blocks() ==
+            incremental.chunk.blocks());
+        CHECK(
+            synchronous.water_state() ==
+            incremental.chunk.water_state());
+
+        for (int local_z = 0;
+             local_z < kChunkSizeZ;
+             ++local_z) {
+            for (int local_x = 0;
+                 local_x < kChunkSizeX;
+                 ++local_x) {
+                const auto world_x =
+                    coord.x * kChunkSizeX + local_x;
+                const auto world_z =
+                    coord.z * kChunkSizeZ + local_z;
+                for (int y = kWorldMinY;
+                     y <= kWorldMaxY;
+                     ++y) {
+                    CHECK(
+                        synchronous.get_local(
+                            local_x,
+                            y,
+                            local_z) ==
+                        generator.sample_block(
+                            world_x,
+                            y,
+                            world_z));
+                    const auto expected_water =
+                        generator.sample_water_state(
+                            world_x,
+                            y,
+                            world_z);
+                    CHECK(
+                        synchronous.get_water_state_local(
+                            local_x,
+                            y,
+                            local_z) ==
+                        expected_water);
+                    water_cells += expected_water != 0 ? 1 : 0;
+                }
+            }
+        }
+    }
+    CHECK(water_cells > 0);
+}
+
+TEST_CASE("BackRooms ceiling panels project light into tall halls") {
+    constexpr auto source_y = 30;
+    constexpr auto distant_floor_y = 4;
+    constexpr auto source_x = 8;
+    constexpr auto source_z = 8;
+
+    World continental(
+        2201,
+        1,
+        WorldGenerationProfile::Continental);
+    test::make_chunk_empty(continental, {0, 0});
+    continental.set_block(
+        source_x,
+        source_y,
+        source_z,
+        to_block_id(BlockType::BackroomsFluorescentLight));
+    continental.rebuild_lighting();
+
+    World backrooms(
+        2201,
+        1,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV1);
+    test::make_chunk_empty(backrooms, {0, 0});
+    backrooms.set_block(
+        source_x,
+        source_y,
+        source_z,
+        to_block_id(BlockType::BackroomsFluorescentLight));
+    backrooms.rebuild_lighting();
+
+    // Le monde extérieur conserve sa propagation historique. Dans les
+    // Backrooms, le même panneau éclaire encore le sol 26 blocs plus bas et
+    // forme un bassin horizontal, sans traverser les parois opaques.
+    CHECK(
+        backrooms.get_block_light(
+            source_x,
+            source_y,
+            source_z) == 14U);
+    CHECK(
+        backrooms.get_block_light(
+            source_x + 1,
+            source_y,
+            source_z) == 13U);
+    CHECK(
+        continental.get_block_light(
+            source_x,
+            distant_floor_y,
+            source_z) == 0U);
+    const auto floor_light =
+        backrooms.get_block_light(
+            source_x,
+            distant_floor_y,
+            source_z);
+    CHECK(floor_light >= 5U);
+    CHECK(
+        backrooms.get_block_light(
+            source_x + 3,
+            distant_floor_y,
+            source_z) >= 2U);
+
+    World poolrooms(
+        2201,
+        1,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV1,
+        VisualPipeline::LegacyVoxel,
+        -2);
+    test::make_chunk_empty(poolrooms, {0, 0});
+    poolrooms.set_block(
+        source_x,
+        source_y,
+        source_z,
+        to_block_id(BlockType::PoolroomsLight));
+    poolrooms.rebuild_lighting();
+
+    // Je prolonge seulement la descente des vraies lampes des Poolrooms : les
+    // grands volumes gagnent un bassin lumineux au sol, mais une salle sans
+    // source conserve toujours un niveau de lumière strictement nul.
+    const auto poolrooms_floor_light =
+        poolrooms.get_block_light(
+            source_x,
+            distant_floor_y,
+            source_z);
+    CHECK(poolrooms_floor_light >= 7U);
+    CHECK(poolrooms_floor_light > floor_light);
+    CHECK(
+        poolrooms.get_block_light(
+            source_x + 3,
+            distant_floor_y,
+            source_z) >= 4U);
+
+    backrooms.set_block(
+        source_x + 1,
+        distant_floor_y,
+        source_z,
+        to_block_id(BlockType::Stone));
+    backrooms.rebuild_lighting();
+    CHECK(
+        backrooms.get_block_light(
+            source_x + 1,
+            distant_floor_y,
+            source_z) == 0U);
+
+    backrooms.set_block(
+        source_x,
+        source_y,
+        source_z,
+        to_block_id(BlockType::BackroomsEmergencyLight));
+    backrooms.rebuild_lighting();
+    CHECK(
+        backrooms.get_block_light(
+            source_x,
+            source_y,
+            source_z) == 11U);
+    CHECK(
+        backrooms.get_block_light(
+            source_x + 1,
+            source_y,
+            source_z) == 10U);
+
+    backrooms.set_block(
+        source_x,
+        source_y,
+        source_z,
+        to_block_id(BlockType::BackroomsFailedLight));
+    backrooms.rebuild_lighting();
+    CHECK(
+        backrooms.get_block_light(
+            source_x,
+            source_y,
+            source_z) == 0U);
+    CHECK(
+        backrooms.get_block_light(
+            source_x + 1,
+            source_y,
+            source_z) == 0U);
 }
 
 TEST_CASE("removing the support block removes the torch above it") {

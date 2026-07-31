@@ -205,6 +205,8 @@ add_library(valcraft_core
     src/app/SmokeCamera.cpp
     src/app/TerrainEditStress.cpp
     src/app/ProgressionMenu.cpp
+    src/audio/BackroomsAmbience.cpp
+    src/audio/LeviathanProceduralAudio.cpp
     src/audio/ProceduralMusic.cpp
     src/audio/ProceduralSfx.cpp
     src/creatures/CrewAnimation.cpp
@@ -212,7 +214,10 @@ add_library(valcraft_core
     src/creatures/CreatureSystem.cpp
     src/creatures/OldGuardAnimation.cpp
     src/creatures/OldGuardGeometry.cpp
+    src/creatures/bosses/ChainedColossus.cpp
+    src/creatures/legendary/LegendaryEnemySystem.cpp
     src/world/Chunk.cpp
+    src/world/BackroomsGenerator.cpp
     src/world/BlockVisuals.cpp
     src/world/World.cpp
     src/world/WorldGenerator.cpp
@@ -222,9 +227,17 @@ add_library(valcraft_core
     src/world/OceanSimulation.cpp
     src/world/PrecipitationField.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/BackroomsFlashlight.cpp
+    src/gameplay/BackroomsJack.cpp
     src/gameplay/PlayerMusket.cpp
     src/gameplay/PlayerMusketEffects.cpp
     src/gameplay/PlayerProgression.cpp
+    src/gameplay/combat/DamageZones.cpp
+    src/gameplay/combat/DismembermentSystem.cpp
+    src/gameplay/combat/ColossalSweep.cpp
+    src/gameplay/combat/StaggerSystem.cpp
+    src/gameplay/combat/WorldProtectionRegistry.cpp
+    src/gameplay/encounters/SeaLeviathanEncounter.cpp
     src/gameplay/progression/AbilityCatalog.cpp
     src/gameplay/progression/AbilityEvents.cpp
     src/gameplay/progression/AbilitySystem.cpp
@@ -245,11 +258,24 @@ add_library(valcraft_core
     src/gameplay/ShipCrew.cpp
     src/gameplay/StartingPort.cpp
     src/gameplay/StartingVillage.cpp
+    src/gameplay/quests/LegendaryQuestWorldContent.cpp
+    src/gameplay/quests/LegendaryWeaponQuest.cpp
+    src/gameplay/scenarios/IssouArenaLayout.cpp
+    src/gameplay/scenarios/IssouArenaScenario.cpp
+    src/gameplay/weapons/ColossalWeaponCombat.cpp
+    src/gameplay/weapons/ColossalWeaponDefinition.cpp
+    src/gameplay/weapons/ColossalWeaponSystem.cpp
+    src/gameplay/weapons/LeviathanKnightSynergy.cpp
+    src/gameplay/weapons/LegendaryWeaponProgression.cpp
     src/player/PlayerGeometry.cpp
     src/gameplay/ItemDropSystem.cpp
     src/gameplay/OldGuard.cpp
     src/render/ArchitecturalFixtureMesh.cpp
     src/render/ArchitecturalMesher.cpp
+    src/render/BackroomsFlicker.cpp
+    src/render/BackroomsJackScreamer.cpp
+    src/render/BackroomsJackVisual.cpp
+    src/render/BackroomsVisibility.cpp
     src/render/ItemDropGeometry.cpp
     src/render/MarineDecor.cpp
     src/render/MarineVisualMesh.cpp
@@ -266,6 +292,9 @@ add_library(valcraft_core
     src/render/VisualMaterials.cpp
     src/render/VisualVegetation.cpp
     src/render/VisualVegetationMesh.cpp
+    src/render/creatures/ChainedColossusPresentation.cpp
+    src/render/scenarios/IssouArenaPresentation.cpp
+    src/render/weapons/LeviathanWeaponPresentation.cpp
 )
 
 target_include_directories(valcraft_core
@@ -347,13 +376,37 @@ add_custom_command(TARGET ValCraft POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/OFL.txt
         $<TARGET_FILE_DIR:ValCraft>/assets/fonts/OFL.txt
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:ValCraft>/assets/backrooms
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/backrooms/jack_le_pirate_screamer.bmp
+        $<TARGET_FILE_DIR:ValCraft>/assets/backrooms/jack_le_pirate_screamer.bmp
 )
 
 add_executable(valcraft_tests
+    src/render/Renderer.cpp
     tests/main.cpp
     tests/AppTests.cpp
     tests/AudioTests.cpp
+    tests/BackroomsAmbienceTests.cpp
+    tests/BackroomsFlickerTests.cpp
+    tests/BackroomsFlashlightTests.cpp
+    tests/BackroomsJackAudioTests.cpp
+    tests/BackroomsJackFlickerTests.cpp
+    tests/BackroomsJackIntegrationTests.cpp
+    tests/BackroomsJackSaveTests.cpp
+    tests/BackroomsJackScreamerTests.cpp
+    tests/BackroomsJackTests.cpp
+    tests/BackroomsJackVisualTests.cpp
+    tests/BackroomsLevelTests.cpp
+    tests/BackroomsGeneratorTests.cpp
+    tests/BackroomsVisibilityTests.cpp
     tests/CommandConsoleTests.cpp
+    tests/ChainedColossusTests.cpp
+    tests/ChainedColossusPresentationTests.cpp
+    tests/ColossalCombatCoreTests.cpp
+    tests/ColossalCombatIntegrationTests.cpp
+    tests/ColossalWeaponTests.cpp
     tests/CrewAnimationTests.cpp
     tests/CreatureTests.cpp
     tests/OldGuardCombatTests.cpp
@@ -410,16 +463,32 @@ add_executable(valcraft_tests
     tests/WorldEditTransactionTests.cpp
     tests/MusketCombatTests.cpp
     tests/MusketHudTests.cpp
+    tests/DamageZonesTests.cpp
+    tests/DismembermentSystemTests.cpp
+    tests/IssouArenaScenarioTests.cpp
+    tests/IssouArenaPresentationTests.cpp
+    tests/LegendaryEnemySystemTests.cpp
+    tests/LegendaryQuestWorldContentTests.cpp
+    tests/LegendaryWeaponQuestTests.cpp
+    tests/LeviathanKnightSynergyTests.cpp
+    tests/LeviathanProceduralAudioTests.cpp
+    tests/LeviathanWeaponPresentationTests.cpp
     tests/PrecipitationTests.cpp
     tests/ProceduralSfxTests.cpp
+    tests/SeaLeviathanEncounterTests.cpp
+    tests/StaggerSystemTests.cpp
 )
 
 target_link_libraries(valcraft_tests
     PRIVATE
         valcraft_core
         SDL2::SDL2
+        valcraft_glad
         doctest::doctest
 )
+if(WIN32)
+    target_link_libraries(valcraft_tests PRIVATE opengl32)
+endif()
 target_compile_definitions(valcraft_tests PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 valcraft_apply_strict_warnings(valcraft_tests)
 valcraft_enable_coverage_for(valcraft_tests)

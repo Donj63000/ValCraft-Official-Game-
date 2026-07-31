@@ -1,5 +1,7 @@
 #include "world/Environment.h"
 
+#include "world/BackroomsGenerator.h"
+
 #include <glm/common.hpp>
 #include <glm/geometric.hpp>
 
@@ -473,6 +475,330 @@ void apply_weather(EnvironmentState& state,
 }
 
 } // namespace
+
+
+auto make_backrooms_environment_state(
+    float elapsed_seconds,
+    int seed,
+    float player_x,
+    float player_z,
+    bool poolrooms) noexcept -> EnvironmentState {
+
+    const auto safe_coordinate = [](float value) noexcept -> double {
+        if (!std::isfinite(value)) {
+            return 0.0;
+        }
+        return static_cast<double>(
+            std::clamp(
+                value,
+                -1'000'000.0F,
+                1'000'000.0F));
+    };
+
+    const auto safe_elapsed =
+        std::isfinite(elapsed_seconds)
+            ? std::clamp(
+                  elapsed_seconds,
+                  0.0F,
+                  kMaximumWeatherTimeSeconds)
+            : 0.0F;
+    const BackroomsGenerator generator {seed};
+
+    // La variation reste lente et de faible amplitude : elle entretient une
+    // instabilité perceptible sans stroboscope ni rupture brutale de lisibilité.
+    const auto seed_phase =
+        static_cast<float>(
+            static_cast<std::uint32_t>(seed) % 997U) /
+        997.0F;
+    const auto electrical_drift =
+        0.965F +
+        std::sin(
+            safe_elapsed * 0.17F +
+            seed_phase * kTwoPi) *
+            0.018F +
+        std::sin(
+            safe_elapsed * 0.043F +
+            seed_phase * 3.7F) *
+            0.012F;
+
+    struct ModuleLighting {
+        glm::vec3 ambient_tint {0.0F};
+        glm::vec3 fog_tint {0.0F};
+        float exposure = 0.0F;
+        float fog_density = 0.0F;
+        float vignette = 0.0F;
+    };
+
+    const auto module_lighting =
+        [&](int module_x, int module_z) noexcept {
+            const auto descriptor =
+                generator.module_descriptor(module_x, module_z);
+            ModuleLighting lighting {
+                .ambient_tint = {0.105F, 0.101F, 0.068F},
+                .fog_tint = {0.145F, 0.137F, 0.082F},
+                .exposure = 0.94F * electrical_drift,
+                .fog_density = 0.0065F,
+                .vignette = 0.12F,
+            };
+
+            // Je représente ici le rebond diffus des rampes sur la moquette et
+            // les murs sans modifier la palette propre aux modules éloignés.
+            switch (descriptor.palette) {
+            case BackroomsPalette::SickGreen:
+                lighting.ambient_tint = {0.078F, 0.101F, 0.073F};
+                lighting.fog_tint = {0.105F, 0.142F, 0.094F};
+                break;
+            case BackroomsPalette::WashedBlue:
+                lighting.ambient_tint = {0.073F, 0.087F, 0.101F};
+                lighting.fog_tint = {0.091F, 0.116F, 0.132F};
+                break;
+            case BackroomsPalette::FadedRose:
+                lighting.ambient_tint = {0.101F, 0.073F, 0.071F};
+                lighting.fog_tint = {0.137F, 0.094F, 0.092F};
+                break;
+            case BackroomsPalette::Oxide:
+                lighting.ambient_tint = {0.098F, 0.068F, 0.050F};
+                lighting.fog_tint = {0.131F, 0.086F, 0.058F};
+                break;
+            case BackroomsPalette::RawConcrete:
+                lighting.ambient_tint = {0.083F, 0.083F, 0.078F};
+                lighting.fog_tint = {0.105F, 0.105F, 0.096F};
+                break;
+            case BackroomsPalette::NicotineYellow:
+            default:
+                break;
+            }
+
+            // Je laisse la tension assombrir progressivement la scène sans
+            // sacrifier les basses lumières au contraste du post-traitement.
+            switch (descriptor.tension) {
+            case BackroomsTension::Familiarity:
+                lighting.exposure *= 1.04F;
+                lighting.fog_density = 0.0045F;
+                lighting.vignette = 0.08F;
+                break;
+            case BackroomsTension::Compression:
+                lighting.exposure *= 0.93F;
+                lighting.fog_density = 0.0080F;
+                lighting.vignette = 0.15F;
+                break;
+            case BackroomsTension::Expansion:
+                lighting.exposure *= 0.98F;
+                lighting.fog_density = 0.0105F;
+                lighting.vignette = 0.11F;
+                break;
+            case BackroomsTension::Repetition:
+                lighting.exposure *= 0.95F;
+                lighting.fog_density = 0.0070F;
+                lighting.vignette = 0.13F;
+                break;
+            case BackroomsTension::Anomaly:
+                lighting.exposure *= 0.89F;
+                lighting.fog_density = 0.0090F;
+                lighting.vignette = 0.17F;
+                break;
+            case BackroomsTension::Blackout:
+                lighting.exposure *= 0.75F;
+                lighting.fog_density = 0.0120F;
+                lighting.vignette = 0.23F;
+                break;
+            }
+            lighting.exposure =
+                std::clamp(lighting.exposure, 0.66F, 1.02F);
+            return lighting;
+        };
+
+    struct AxisModuleBlend {
+        int first_module = 0;
+        int second_module = 0;
+        float first_weight = 1.0F;
+        float second_weight = 0.0F;
+    };
+
+    const auto axis_module_blend =
+        [](double world_coordinate) noexcept {
+            constexpr auto kBlendRadius = 4.0;
+            constexpr auto kModuleSize =
+                static_cast<double>(kBackroomsModuleSize);
+            const auto module_floor =
+                std::floor(world_coordinate / kModuleSize);
+            const auto module = static_cast<int>(module_floor);
+            const auto local_coordinate =
+                world_coordinate - module_floor * kModuleSize;
+            const auto neighbour_weight =
+                [](double boundary_distance) noexcept {
+                    constexpr auto kBlendRadius = 4.0;
+                    const auto normalized =
+                        std::clamp(
+                            boundary_distance / kBlendRadius,
+                            0.0,
+                            1.0);
+                    const auto eased =
+                        normalized * normalized *
+                        (3.0 - 2.0 * normalized);
+                    return static_cast<float>(
+                        0.5 * (1.0 - eased));
+                };
+
+            AxisModuleBlend blend {
+                .first_module = module,
+                .second_module = module,
+                .first_weight = 1.0F,
+                .second_weight = 0.0F,
+            };
+            if (local_coordinate < kBlendRadius) {
+                const auto weight =
+                    neighbour_weight(local_coordinate);
+                blend.first_module = module - 1;
+                blend.second_module = module;
+                blend.first_weight = weight;
+                blend.second_weight = 1.0F - weight;
+            } else if (
+                kModuleSize - local_coordinate <
+                kBlendRadius) {
+                const auto weight =
+                    neighbour_weight(
+                        kModuleSize - local_coordinate);
+                blend.first_module = module;
+                blend.second_module = module + 1;
+                blend.first_weight = 1.0F - weight;
+                blend.second_weight = weight;
+            }
+            return blend;
+        };
+
+    const auto x_blend =
+        axis_module_blend(safe_coordinate(player_x));
+    const auto z_blend =
+        axis_module_blend(safe_coordinate(player_z));
+    ModuleLighting blended_lighting {};
+    for (int z_index = 0; z_index < 2; ++z_index) {
+        const auto module_z =
+            z_index == 0
+                ? z_blend.first_module
+                : z_blend.second_module;
+        const auto z_weight =
+            z_index == 0
+                ? z_blend.first_weight
+                : z_blend.second_weight;
+        for (int x_index = 0; x_index < 2; ++x_index) {
+            const auto module_x =
+                x_index == 0
+                    ? x_blend.first_module
+                    : x_blend.second_module;
+            const auto x_weight =
+                x_index == 0
+                    ? x_blend.first_weight
+                    : x_blend.second_weight;
+            const auto weight = x_weight * z_weight;
+            if (!(weight > 0.0F)) {
+                continue;
+            }
+            const auto lighting =
+                module_lighting(module_x, module_z);
+            blended_lighting.ambient_tint +=
+                lighting.ambient_tint * weight;
+            blended_lighting.fog_tint +=
+                lighting.fog_tint * weight;
+            blended_lighting.exposure +=
+                lighting.exposure * weight;
+            blended_lighting.fog_density +=
+                lighting.fog_density * weight;
+            blended_lighting.vignette +=
+                lighting.vignette * weight;
+        }
+    }
+
+    // Je combine deux modules près d'une arête et quatre près d'un angle.
+    // Je place exactement la moitié de chaque poids sur la frontière pour
+    // obtenir le même résultat des deux côtés, puis je restitue le module
+    // courant après quatre mètres.
+    const auto ambient_tint = blended_lighting.ambient_tint;
+    const auto fog_tint = blended_lighting.fog_tint;
+    const auto exposure = blended_lighting.exposure;
+    const auto fog_density = blended_lighting.fog_density;
+    const auto vignette = blended_lighting.vignette;
+
+    EnvironmentState state {};
+    state.time_of_day = 0.0F;
+    state.weather_time_seconds = safe_elapsed;
+    state.daylight_factor = 0.0F;
+    state.weather = WeatherKind::Clear;
+    state.sun_direction = {0.0F, -1.0F, 0.0F};
+    state.sun_color = {0.0F, 0.0F, 0.0F};
+    state.ambient_color = ambient_tint;
+    state.block_light_color = {0.94F, 1.00F, 0.82F};
+    state.fog_color = fog_tint;
+    state.sky_color = fog_tint * 0.16F;
+    state.sky_zenith_color = fog_tint * 0.10F;
+    state.sky_horizon_color = fog_tint * 0.20F;
+    state.horizon_glow_color = {0.0F, 0.0F, 0.0F};
+    state.distant_fog_color = fog_tint * 0.82F;
+    // Je conserve l'ambiance comme teinte de rebond pour les surfaces
+    // réellement éclairées, mais je n'ajoute aucune lumière nocturne globale :
+    // un noir absolu doit rester noir jusque dans le post-traitement.
+    state.night_tint_color = {0.0F, 0.0F, 0.0F};
+    state.sun_disk_color = {0.0F, 0.0F, 0.0F};
+    state.moon_disk_color = {0.0F, 0.0F, 0.0F};
+    state.star_intensity = 0.0F;
+    state.cloud_intensity = 0.0F;
+    state.overcast_intensity = 0.0F;
+    state.precipitation_intensity = 0.0F;
+    state.storm_intensity = 0.0F;
+    state.violent_storm_intensity = 0.0F;
+    state.lightning_intensity = 0.0F;
+    state.lightning_bolt_intensity = 0.0F;
+    state.weather_transition_factor = 1.0F;
+    state.cloud_shadow_strength = 0.0F;
+    state.wind_direction_xz = {0.0F, 0.0F};
+    state.wind_strength = 0.0F;
+    state.atmospheric_scatter_strength = 0.010F;
+    state.height_fog_density = fog_density;
+    state.exposure = exposure;
+    state.saturation_boost = 0.88F;
+    state.contrast = 1.01F;
+    state.vignette_strength = vignette;
+    state.glow_threshold = 0.78F;
+    state.glow_strength = 0.13F;
+    state.post_sharpen_strength = 0.07F;
+    state.post_edge_strength = 0.04F;
+    state.suppress_gameplay_hud = true;
+    state.enclosed_interior = true;
+    state.poolrooms = poolrooms;
+
+    if (poolrooms) {
+        // Je remplace le rebond jaune des bureaux par une lumière froide et
+        // humide. La visibilité finale dépend toujours des vraies lampes et de
+        // la Maglite : cette palette ne crée aucune lumière dans le noir total.
+        state.ambient_color =
+            glm::mix(
+                glm::vec3 {0.024F, 0.050F, 0.055F},
+                glm::vec3 {0.044F, 0.078F, 0.080F},
+                std::clamp(electrical_drift, 0.0F, 1.0F));
+        state.block_light_color = {0.67F, 0.91F, 0.96F};
+        state.fog_color = {0.016F, 0.043F, 0.048F};
+        state.distant_fog_color = {0.009F, 0.026F, 0.031F};
+        state.sky_color = state.fog_color * 0.10F;
+        state.sky_zenith_color = state.fog_color * 0.07F;
+        state.sky_horizon_color = state.fog_color * 0.13F;
+        state.height_fog_density =
+            std::clamp(fog_density * 0.82F, 0.0040F, 0.0105F);
+        state.exposure =
+            std::clamp(exposure * 0.86F, 0.58F, 0.86F);
+        // Je garde le carrelage froid sans délaver le cyan de l'eau : cette
+        // saturation ne relève aucune zone noire, elle ne colore que les
+        // surfaces réellement atteintes par un néon ou la Maglite.
+        state.saturation_boost = 0.96F;
+        state.contrast = 1.035F;
+        state.vignette_strength =
+            std::clamp(vignette + 0.045F, 0.12F, 0.27F);
+        state.glow_threshold = 0.82F;
+        state.glow_strength = 0.16F;
+        state.post_sharpen_strength = 0.08F;
+        state.post_edge_strength = 0.035F;
+    }
+    return state;
+}
 
 EnvironmentClock::EnvironmentClock(float initial_time_of_day, bool frozen, std::uint32_t weather_seed)
     : time_of_day_(normalize_time_of_day(initial_time_of_day)),

@@ -85,6 +85,10 @@ public:
                       CreatureDamageSource source,
                       const glm::vec3& hit_direction = {0.0F, 0.0F, 1.0F}) -> CreatureDamageResult;
     [[nodiscard]] auto apply_stagger(CreatureId target_id, float duration_seconds) noexcept -> bool;
+    [[nodiscard]] auto apply_knockback(
+        CreatureId target_id,
+        const glm::vec3& direction,
+        float distance) noexcept -> bool;
     [[nodiscard]] auto taunt_hostiles(
         std::uint64_t target_id,
         const glm::vec3& target_position,

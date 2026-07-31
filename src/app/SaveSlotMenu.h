@@ -101,8 +101,13 @@ inline constexpr auto save_slot_menu_mode_title(SaveSlotMenuMode mode) noexcept 
 }
 
 inline constexpr auto save_slot_menu_title(const SaveSlotMenuState& state) noexcept -> std::string_view {
-    if (state.mode == SaveSlotMenuMode::NewGame && state.new_game_mode == GameMode::SeaAdventure) {
-        return "AVENTURE EN MER";
+    if (state.mode == SaveSlotMenuMode::NewGame) {
+        if (state.new_game_mode == GameMode::SeaAdventure) {
+            return "AVENTURE EN MER";
+        }
+        if (state.new_game_mode == GameMode::Backrooms) {
+            return "BACKROOMS";
+        }
     }
     return save_slot_menu_mode_title(state.mode);
 }
@@ -121,8 +126,13 @@ inline constexpr auto save_slot_menu_mode_subtitle(SaveSlotMenuMode mode) noexce
 }
 
 inline constexpr auto save_slot_menu_subtitle(const SaveSlotMenuState& state) noexcept -> std::string_view {
-    if (state.mode == SaveSlotMenuMode::NewGame && state.new_game_mode == GameMode::SeaAdventure) {
-        return "CHOISIS UN SLOT POUR PRENDRE LA MER";
+    if (state.mode == SaveSlotMenuMode::NewGame) {
+        if (state.new_game_mode == GameMode::SeaAdventure) {
+            return "CHOISIS UN SLOT POUR PRENDRE LA MER";
+        }
+        if (state.new_game_mode == GameMode::Backrooms) {
+            return "CHAQUE PARTIE RECOMPOSE L'ETAGE";
+        }
     }
     return save_slot_menu_mode_subtitle(state.mode);
 }

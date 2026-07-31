@@ -51,6 +51,37 @@ enum class BlockType : BlockId {
     Axe = 38,
     Shovel = 39,
     Musket = 40,
+    // Je conserve tous les identifiants historiques et j'ajoute l'objet en fin
+    // pour garantir la lecture exacte des anciennes sauvegardes.
+    LeviathanSpine = 41,
+
+    // Matériaux réservés au mode BackRooms. Les identifiants sont ajoutés en
+    // fin d'énumération afin de préserver la compatibilité des sauvegardes.
+    BackroomsWallYellow = 42,
+    BackroomsWallGreen = 43,
+    BackroomsWallBlue = 44,
+    BackroomsWallRose = 45,
+    BackroomsWallOxide = 46,
+    BackroomsConcrete = 47,
+    BackroomsCarpet = 48,
+    BackroomsCeilingTile = 49,
+    BackroomsFluorescentLight = 50,
+    BackroomsFailedLight = 51,
+    BackroomsEmergencyLight = 52,
+
+    // Je garde ces identifiants append-only : une ancienne sauvegarde conserve
+    // exactement le sens de chaque octet déjà écrit sur disque.
+    PoolroomsTile = 53,
+    PoolroomsWetTile = 54,
+    PoolroomsDarkTile = 55,
+    PoolroomsMetal = 56,
+    PoolroomsPlastic = 57,
+    PoolroomsLight = 58,
+    PoolroomsFailedLight = 59,
+    BackroomsDesk = 60,
+    BackroomsChair = 61,
+    BackroomsPlant = 62,
+    PoolroomsFloat = 63,
 };
 
 enum class BlockMeshType : std::uint8_t {
@@ -125,7 +156,7 @@ inline constexpr auto to_block_id(BlockType type) noexcept -> BlockId {
 }
 
 inline constexpr auto is_known_block_id(BlockId block_id) noexcept -> bool {
-    return block_id <= to_block_id(BlockType::Musket);
+    return block_id <= to_block_id(BlockType::PoolroomsFloat);
 }
 
 inline constexpr WaterState kWaterSourceBit = static_cast<WaterState>(1U << 7U);
@@ -196,6 +227,7 @@ inline constexpr auto is_torch_block(BlockId block_id) noexcept -> bool {
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     default:
         return false;
     }
@@ -239,6 +271,7 @@ inline constexpr auto is_wall_torch_block(BlockId block_id) noexcept -> bool {
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     default:
         return false;
     }
@@ -295,6 +328,7 @@ inline constexpr auto is_resource_ore(BlockId block_id) noexcept -> bool {
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     default:
         return false;
     }
@@ -313,6 +347,7 @@ inline constexpr auto is_inventory_only_item(BlockId block_id) noexcept -> bool 
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
         return true;
     case BlockType::Air:
     case BlockType::Grass:
@@ -354,7 +389,24 @@ inline constexpr auto is_weapon_item(BlockId block_id) noexcept -> bool {
     block_id = block_item_id(block_id);
     return block_id == to_block_id(BlockType::Sword) ||
            block_id == to_block_id(BlockType::Spear) ||
-           block_id == to_block_id(BlockType::Musket);
+           block_id == to_block_id(BlockType::Musket) ||
+           block_id == to_block_id(BlockType::LeviathanSpine);
+}
+
+inline constexpr auto is_legendary_weapon_item(BlockId block_id) noexcept
+    -> bool {
+    return block_item_id(block_id) ==
+           to_block_id(BlockType::LeviathanSpine);
+}
+
+inline constexpr auto is_unique_inventory_item(BlockId block_id) noexcept
+    -> bool {
+    return is_legendary_weapon_item(block_id);
+}
+
+inline constexpr auto is_undroppable_item(BlockId block_id) noexcept
+    -> bool {
+    return is_legendary_weapon_item(block_id);
 }
 
 inline constexpr auto is_tool_item(BlockId block_id) noexcept -> bool {
@@ -457,6 +509,7 @@ inline constexpr auto torch_support_offset(BlockId block_id) noexcept -> BlockCo
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     case BlockType::CoalOre:
     case BlockType::IronOre:
     case BlockType::GoldOre:
@@ -510,6 +563,17 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
         return {false, true, false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     case BlockType::Water:
         return {false, false, false, true, BlockMeshType::Water, static_cast<std::uint8_t>(0)};
+    case BlockType::BackroomsFluorescentLight:
+        return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(14)};
+    case BlockType::BackroomsEmergencyLight:
+        return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(11)};
+    case BlockType::PoolroomsLight:
+        return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(14)};
+    case BlockType::BackroomsPlant:
+    case BlockType::PoolroomsFloat:
+        // Je réserve ces deux éléments au décor clairsemé : leur croix ne
+        // bloque ni le joueur ni Jack et conserve une silhouette légère.
+        return {false, false, false, true, BlockMeshType::Cross, static_cast<std::uint8_t>(0)};
     case BlockType::Pastron:
     case BlockType::RoundShield:
     case BlockType::Sword:
@@ -520,6 +584,7 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
         return {false, false, false, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     case BlockType::Grass:
     case BlockType::Dirt:
@@ -647,6 +712,7 @@ inline constexpr auto block_break_duration_seconds(BlockId block_id) noexcept ->
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
         return 0.0F;
     default:
         return 0.80F;

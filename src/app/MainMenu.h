@@ -13,8 +13,9 @@ namespace valcraft {
 enum class MainMenuAction : std::uint8_t {
     Play = 0,
     SeaAdventure = 1,
-    Load = 2,
-    Options = 3,
+    Backrooms = 2,
+    Load = 3,
+    Options = 4,
 };
 
 struct MainMenuState {
@@ -37,7 +38,7 @@ struct MainMenuButtonLayout {
     bool hovered = false;
 };
 
-constexpr std::size_t kMainMenuButtonCount = 4;
+constexpr std::size_t kMainMenuButtonCount = 5;
 
 struct MainMenuLayout {
     float hero_center_x = 0.0F;
@@ -57,6 +58,8 @@ inline constexpr auto main_menu_action_label(MainMenuAction action) noexcept -> 
         return "JOUER";
     case MainMenuAction::SeaAdventure:
         return "AVENTURE EN MER";
+    case MainMenuAction::Backrooms:
+        return "BACKROOMS";
     case MainMenuAction::Load:
         return "CHARGER";
     case MainMenuAction::Options:
@@ -77,8 +80,10 @@ inline constexpr auto main_menu_action_from_index(std::size_t index) noexcept ->
     case 1:
         return MainMenuAction::SeaAdventure;
     case 2:
-        return MainMenuAction::Load;
+        return MainMenuAction::Backrooms;
     case 3:
+        return MainMenuAction::Load;
+    case 4:
     default:
         return MainMenuAction::Options;
     }
@@ -97,21 +102,59 @@ inline auto build_main_menu_layout(int viewport_width, int viewport_height, cons
     const auto safe_width = static_cast<float>(std::max(viewport_width, 360));
     const auto safe_height = static_cast<float>(std::max(viewport_height, 300));
 
-    const auto compact_height = layout_height < 300.0F;
-    const auto button_width = std::clamp(safe_width * 0.22F, 240.0F, 340.0F);
-    const auto button_height_source = compact_height ? layout_height : safe_height;
-    const auto button_height = std::clamp(button_height_source * 0.072F, compact_height ? 38.0F : 44.0F, compact_height ? 44.0F : 58.0F);
-    const auto button_gap = std::clamp(button_height_source * 0.022F, compact_height ? 8.0F : 12.0F, compact_height ? 12.0F : 20.0F);
+    const auto compact_height = layout_height < 520.0F;
+    const auto button_width =
+        std::clamp(safe_width * 0.22F, 240.0F, 340.0F);
+    const auto hero_center_x = layout_width * 0.5F;
+    const auto hero_y =
+        compact_height
+            ? std::clamp(layout_height * 0.12F, 30.0F, 56.0F)
+            : std::clamp(
+                  layout_height * 0.18F,
+                  48.0F,
+                  layout_height * 0.32F);
+    const auto tagline_y =
+        hero_y +
+        (compact_height
+             ? std::clamp(layout_height * 0.15F, 46.0F, 60.0F)
+             : std::clamp(safe_height * 0.16F, 58.0F, 92.0F));
+    const auto preferred_stack_y =
+        tagline_y +
+        (compact_height
+             ? std::clamp(layout_height * 0.067F, 20.0F, 32.0F)
+             : std::clamp(safe_height * 0.12F, 56.0F, 94.0F));
+    const auto bottom_margin =
+        compact_height
+            ? std::max(10.0F, layout_height * 0.03F)
+            : std::max(28.0F, safe_height * 0.10F);
+    const auto button_gap =
+        compact_height
+            ? std::clamp(layout_height * 0.014F, 5.0F, 8.0F)
+            : std::clamp(safe_height * 0.022F, 12.0F, 20.0F);
+    const auto gap_total =
+        button_gap *
+        static_cast<float>(kMainMenuButtonCount - 1U);
+    const auto available_stack_height =
+        std::max(
+            layout_height - preferred_stack_y - bottom_margin,
+            0.0F);
+    const auto button_height =
+        std::clamp(
+            (available_stack_height - gap_total) /
+                static_cast<float>(kMainMenuButtonCount),
+            30.0F,
+            compact_height ? 44.0F : 58.0F);
     const auto stack_height =
         button_height * static_cast<float>(kMainMenuButtonCount) +
-        button_gap * static_cast<float>(kMainMenuButtonCount - 1U);
-    const auto hero_center_x = layout_width * 0.5F;
-    const auto hero_y = std::clamp(layout_height * 0.18F, 48.0F, layout_height * 0.32F);
-    const auto tagline_y = hero_y + std::clamp(safe_height * 0.16F, 58.0F, 92.0F);
-    const auto button_stack_x = std::floor((layout_width - button_width) * 0.5F);
-    const auto button_stack_y = std::min(
-        layout_height - stack_height - std::max(28.0F, safe_height * 0.10F),
-        tagline_y + std::clamp(safe_height * 0.12F, 56.0F, 94.0F));
+        gap_total;
+    const auto button_stack_x =
+        std::floor((layout_width - button_width) * 0.5F);
+    const auto latest_stack_y =
+        std::max(6.0F, layout_height - stack_height - bottom_margin);
+    const auto button_stack_y =
+        std::max(
+            6.0F,
+            std::min(preferred_stack_y, latest_stack_y));
 
     MainMenuLayout layout {};
     layout.hero_center_x = hero_center_x;

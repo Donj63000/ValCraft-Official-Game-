@@ -3,6 +3,7 @@
 #include "gameplay/progression/ExperienceRewardPolicy.h"
 #include "gameplay/progression/PlayerDerivedStats.h"
 #include "gameplay/progression/ProgressionCurve.h"
+#include "gameplay/weapons/LegendaryWeaponProgression.h"
 
 #include <doctest/doctest.h>
 
@@ -10,6 +11,185 @@
 #include <limits>
 
 namespace valcraft {
+
+TEST_CASE("l'echine du leviathan exige exactement le niveau 35 et quatre points de Force") {
+    CHECK_FALSE(
+        legendary_weapon_meets_acquisition_requirements(
+            34U,
+            4U));
+    CHECK_FALSE(
+        legendary_weapon_meets_acquisition_requirements(
+            35U,
+            3U));
+    CHECK(
+        legendary_weapon_meets_acquisition_requirements(
+            35U,
+            4U));
+
+    PlayerAttributeAllocation attributes {};
+    attributes.values[
+        player_attribute_index(
+            PlayerAttribute::Strength)] = 4U;
+    CHECK(
+        legendary_weapon_meets_acquisition_requirements(
+            35U,
+            attributes));
+}
+
+TEST_CASE("la quete de l'arme legendaire avance sans saut ni regression") {
+    LegendaryWeaponProgression progression {};
+    CHECK_FALSE(progression.discover_forge());
+    REQUIRE(progression.hear_rumor());
+    CHECK_FALSE(progression.hear_rumor());
+
+    for (std::uint8_t fragment = 0U;
+         fragment <
+         kLegendaryWeaponRequiredMapFragments;
+         ++fragment) {
+        REQUIRE(
+            progression.collect_map_fragment());
+    }
+    CHECK_FALSE(
+        progression.collect_map_fragment());
+    CHECK(
+        progression.state().quest_stage ==
+        LegendaryWeaponQuestStage::MapFragmentsComplete);
+    REQUIRE(progression.discover_forge());
+    REQUIRE(progression.defeat_guardian());
+    CHECK_FALSE(
+        progression.claim_weapon(
+            0ULL,
+            35U,
+            4U));
+    CHECK_FALSE(
+        progression.claim_weapon(
+            42ULL,
+            34U,
+            4U));
+    REQUIRE(
+        progression.claim_weapon(
+            42ULL,
+            35U,
+            4U));
+    CHECK_FALSE(
+        progression.claim_weapon(
+            43ULL,
+            100U,
+            10U));
+    REQUIRE(
+        progression.complete_first_combat());
+    CHECK_FALSE(
+        progression.complete_first_combat());
+
+    const auto state = progression.state();
+    CHECK(state.unique_weapon_id == 42ULL);
+    CHECK(state.weapon_owned);
+    CHECK(
+        state.quest_stage ==
+        LegendaryWeaponQuestStage::FirstCombatComplete);
+}
+
+TEST_CASE("les eveils derivent uniquement des preuves permanentes requises") {
+    LegendaryWeaponProgression progression {};
+    REQUIRE(progression.hear_rumor());
+    for (std::uint8_t fragment = 0U;
+         fragment <
+         kLegendaryWeaponRequiredMapFragments;
+         ++fragment) {
+        REQUIRE(
+            progression.collect_map_fragment());
+    }
+    REQUIRE(progression.discover_forge());
+    REQUIRE(progression.defeat_guardian());
+    REQUIRE(
+        progression.claim_weapon(
+            7ULL,
+            35U,
+            4U));
+
+    REQUIRE(
+        progression.record_astral_boss_defeat());
+    REQUIRE(
+        progression.record_major_boss_defeat());
+    REQUIRE(
+        progression.complete_forge_ritual());
+    CHECK(
+        progression.state().awakening ==
+        LegendaryWeaponAwakening::Dormant);
+
+    REQUIRE(
+        progression.record_corrupted_kills(
+            kLegendaryWeaponFirstAwakeningKills));
+    CHECK(
+        progression.state().awakening ==
+        LegendaryWeaponAwakening::Astral);
+
+    REQUIRE(
+        progression.record_corrupted_kills(
+            kLegendaryWeaponFinalAwakeningKills -
+            kLegendaryWeaponFirstAwakeningKills));
+    CHECK(
+        progression.state().awakening ==
+        LegendaryWeaponAwakening::Awakened);
+    CHECK_FALSE(
+        progression.record_corrupted_kills(0U));
+}
+
+TEST_CASE("l'etat legendaire corrompu est borne et remis en coherence") {
+    LegendaryWeaponProgressionState corrupted {};
+    corrupted.unique_weapon_id = 99ULL;
+    corrupted.weapon_owned = true;
+    corrupted.quest_stage =
+        static_cast<LegendaryWeaponQuestStage>(
+            255U);
+    corrupted.awakening =
+        static_cast<LegendaryWeaponAwakening>(
+            255U);
+    corrupted.cosmetic =
+        static_cast<LegendaryWeaponCosmetic>(
+            255U);
+    corrupted.map_fragments_collected = 255U;
+    corrupted.corrupted_kills =
+        (std::numeric_limits<std::uint32_t>::max)();
+    corrupted.upgrade_flags =
+        (std::numeric_limits<std::uint32_t>::max)();
+
+    const auto sanitized =
+        sanitize_legendary_weapon_progression_state(
+            corrupted);
+    CHECK(
+        sanitized.quest_stage ==
+        LegendaryWeaponQuestStage::WeaponClaimed);
+    CHECK(
+        sanitized.map_fragments_collected ==
+        kLegendaryWeaponRequiredMapFragments);
+    CHECK(
+        sanitized.corrupted_kills ==
+        kLegendaryWeaponMaximumCorruptedKills);
+    CHECK(
+        sanitized.upgrade_flags ==
+        kLegendaryWeaponKnownUpgradeMask);
+    CHECK(
+        sanitized.cosmetic ==
+        LegendaryWeaponCosmetic::LeviathanBone);
+    CHECK(
+        sanitized.awakening ==
+        LegendaryWeaponAwakening::Corrupted);
+    CHECK(
+        is_valid_legendary_weapon_progression_state(
+            sanitized));
+    CHECK_FALSE(
+        is_valid_legendary_weapon_progression_state(
+            corrupted));
+
+    corrupted.weapon_owned = false;
+    const auto unowned =
+        sanitize_legendary_weapon_progression_state(
+            corrupted);
+    CHECK(unowned.unique_weapon_id == 0ULL);
+    CHECK(unowned.corrupted_kills == 0U);
+    CHECK(unowned.upgrade_flags == 0U);
+}
 
 TEST_CASE("la courbe courante et la courbe v13 restent explicitement distinctes") {
     CHECK(player_experience_for_next_level(0U) == 100ULL);

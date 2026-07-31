@@ -242,10 +242,13 @@ auto make_noise(int seed, FastNoiseLite::NoiseType type, float frequency) -> std
 
 WorldGenerator::WorldGenerator(int seed,
                                WorldGenerationProfile profile,
-                               WorldGenerationVersion generation_version)
+                               WorldGenerationVersion generation_version,
+                               int logical_level)
     : seed_(seed),
       profile_(profile),
       generation_version_(resolve_world_generation_version(profile, generation_version)),
+      logical_level_(logical_level),
+      backrooms_generator_(seed, logical_level),
       terrain_noise_(make_noise(seed, FastNoiseLite::NoiseType_OpenSimplex2, 0.0065F)),
       detail_noise_(make_noise(seed + 101, FastNoiseLite::NoiseType_Perlin, 0.018F)),
       temperature_noise_(make_noise(seed + 202, FastNoiseLite::NoiseType_OpenSimplex2, 0.0021F)),
@@ -259,12 +262,27 @@ WorldGenerator::WorldGenerator(int seed,
 
     if (generation_version_ != WorldGenerationVersion::LegacyV1 &&
         generation_version_ != WorldGenerationVersion::SparseArchipelagoV2 &&
-        generation_version_ != WorldGenerationVersion::LivingOceanV3) {
+        generation_version_ != WorldGenerationVersion::LivingOceanV3 &&
+        generation_version_ != WorldGenerationVersion::BackroomsV1) {
         throw std::invalid_argument("Unknown world generation version");
     }
-    if (profile_ != WorldGenerationProfile::OceanAdventure &&
-        generation_version_ != WorldGenerationVersion::LegacyV1) {
-        throw std::invalid_argument("Sparse archipelago generation is only valid for ocean adventures");
+
+    const auto compatible_profile = [this]() noexcept {
+        switch (profile_) {
+        case WorldGenerationProfile::Continental:
+            return generation_version_ == WorldGenerationVersion::LegacyV1;
+        case WorldGenerationProfile::OceanAdventure:
+            return generation_version_ == WorldGenerationVersion::LegacyV1 ||
+                   generation_version_ == WorldGenerationVersion::SparseArchipelagoV2 ||
+                   generation_version_ == WorldGenerationVersion::LivingOceanV3;
+        case WorldGenerationProfile::Backrooms:
+            return generation_version_ == WorldGenerationVersion::BackroomsV1;
+        default:
+            return false;
+        }
+    }();
+    if (!compatible_profile) {
+        throw std::invalid_argument("World generation profile and version are incompatible");
     }
 }
 
@@ -283,7 +301,9 @@ void WorldGenerator::generate_chunk(Chunk& chunk) const {
 auto WorldGenerator::begin_chunk_generation(ChunkCoord coord, bool generate_decorations) const -> ChunkGenerationState {
     ChunkGenerationState state {coord, generate_decorations};
     state.resource_ore_blocks.fill(to_block_id(BlockType::Air));
-    build_resource_ore_map(state);
+    if (profile_ != WorldGenerationProfile::Backrooms) {
+        build_resource_ore_map(state);
+    }
     return state;
 }
 
@@ -303,6 +323,105 @@ void WorldGenerator::advance_chunk_generation(ChunkGenerationState& state, std::
         const auto local_z = static_cast<int>(state.next_column / static_cast<std::size_t>(kChunkSizeX));
         const auto world_x = base_world_x + local_x;
         const auto world_z = base_world_z + local_z;
+
+        if (profile_ == WorldGenerationProfile::Backrooms) {
+            const auto column =
+                backrooms_generator_.sample_column(world_x, world_z);
+
+            // Une colonne BackRooms est déjà entièrement décrite par son
+            // échantillon. Je l'écris directement afin de ne pas recalculer le
+            // module, les cloisons et la panne lumineuse pour chaque voxel.
+            for (int y = kWorldMinY; y < column.floor_y; ++y) {
+                state.chunk.set_local(
+                    local_x,
+                    y,
+                    local_z,
+                    column.foundation_block);
+            }
+            state.chunk.set_local(
+                local_x,
+                column.floor_y,
+                local_z,
+                column.floor_block);
+
+            if (column.wall) {
+                for (int y = column.floor_y + 1;
+                     y <= column.wall_top_y;
+                     ++y) {
+                    state.chunk.set_local(
+                        local_x,
+                        y,
+                        local_z,
+                        column.wall_block);
+                }
+            }
+
+            // Une cloison basse ne remplace pas le plafond du module. Pour un
+            // mur pleine hauteur, le mur occupe déjà ce voxel et reste prioritaire.
+            if (column.overhead_bottom_y <=
+                column.overhead_top_y) {
+                for (int y = column.overhead_bottom_y;
+                     y <= column.overhead_top_y;
+                     ++y) {
+                    if (column.wall &&
+                        y <= column.wall_top_y) {
+                        continue;
+                    }
+                    state.chunk.set_local(
+                        local_x,
+                        y,
+                        local_z,
+                        column.overhead_block);
+                }
+            }
+
+            if (column.ceiling_y > column.wall_top_y) {
+                state.chunk.set_local(
+                    local_x,
+                    column.ceiling_y,
+                    local_z,
+                    column.ceiling_block);
+            }
+
+            // Je génère les Backrooms dans une masse souterraine continue. Le
+            // remplissage au-dessus du plafond ferme les différences de hauteur
+            // entre salles et empêche toute ouverture vers le ciel ou le vide.
+            // Le bloc de toiture, non émissif, évite de dupliquer les néons.
+            for (int y = column.ceiling_y + 1;
+                 y <= kBackroomsRoofY;
+                 ++y) {
+                state.chunk.set_local(
+                    local_x,
+                    y,
+                    local_z,
+                    column.roof_block);
+            }
+
+            if (column.water_state != 0 &&
+                is_world_y_valid(column.water_y)) {
+                const auto water_cell_occupied =
+                    column.water_y <= column.floor_y ||
+                    (column.wall &&
+                     column.water_y <= column.wall_top_y) ||
+                    (column.water_y >=
+                         column.overhead_bottom_y &&
+                     column.water_y <=
+                         column.overhead_top_y) ||
+                    column.water_y == column.ceiling_y;
+                if (!water_cell_occupied) {
+                    state.chunk.set_water_state_local(
+                        local_x,
+                        column.water_y,
+                        local_z,
+                        column.water_state);
+                }
+            }
+
+            ++state.next_column;
+            ++processed_columns;
+            continue;
+        }
+
         const auto column = sample_column(world_x, world_z);
         const auto column_max_y = std::min(std::max(column.surface_height, column.water_level), kWorldMaxY);
 
@@ -374,6 +493,10 @@ auto WorldGenerator::generation_version() const noexcept -> WorldGenerationVersi
     return generation_version_;
 }
 
+auto WorldGenerator::backrooms_level() const noexcept -> int {
+    return logical_level_;
+}
+
 auto WorldGenerator::biome_at(int world_x, int world_z) const noexcept -> BiomeType {
     return sample_column(world_x, world_z).biome;
 }
@@ -392,6 +515,9 @@ auto WorldGenerator::sample_block(int world_x, int y, int world_z) const noexcep
     if (!is_world_y_valid(y)) {
         return to_block_id(BlockType::Air);
     }
+    if (profile_ == WorldGenerationProfile::Backrooms) {
+        return backrooms_generator_.sample_block(world_x, y, world_z);
+    }
 
     const auto column = sample_column(world_x, world_z);
     return choose_terrain_block(column, world_x, y, world_z);
@@ -400,6 +526,12 @@ auto WorldGenerator::sample_block(int world_x, int y, int world_z) const noexcep
 auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const noexcept -> WaterState {
     if (!is_world_y_valid(y)) {
         return 0;
+    }
+    if (profile_ == WorldGenerationProfile::Backrooms) {
+        return backrooms_generator_.sample_water_state(
+            world_x,
+            y,
+            world_z);
     }
 
     const auto column = sample_column(world_x, world_z);
@@ -410,6 +542,21 @@ auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const n
 }
 
 auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> TerrainColumnSample {
+    if (profile_ == WorldGenerationProfile::Backrooms) {
+        const auto backrooms_column =
+            backrooms_generator_.sample_column(world_x, world_z);
+        TerrainColumnSample sample {};
+        sample.biome = BiomeType::Meadow;
+        sample.surface_height = backrooms_column.floor_y;
+        sample.water_level =
+            backrooms_column.water_state != 0
+                ? backrooms_column.water_y
+                : kWorldMinY - 1;
+        sample.surface_block = backrooms_column.floor_block;
+        sample.filler_block = backrooms_column.foundation_block;
+        return sample;
+    }
+
     if (profile_ == WorldGenerationProfile::OceanAdventure) {
         if (uses_sparse_archipelago(generation_version_)) {
             return sample_archipelago_ocean_column(

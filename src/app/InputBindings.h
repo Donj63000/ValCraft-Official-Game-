@@ -35,6 +35,13 @@ inline auto is_flight_action_key(const SDL_Keysym& keysym) noexcept -> bool {
     return keysym.scancode == SDL_SCANCODE_F;
 }
 
+inline auto is_backrooms_flashlight_action_key(
+    const SDL_Keysym& keysym) noexcept -> bool {
+    // Je conserve la même touche physique sur AZERTY et QWERTY sans mélanger
+    // l'intention Backrooms avec celle du vol dans les autres modes.
+    return keysym.scancode == SDL_SCANCODE_F;
+}
+
 inline auto is_super_vision_action_key(const SDL_Keysym& keysym) noexcept -> bool {
     return keysym.scancode == SDL_SCANCODE_V;
 }

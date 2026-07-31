@@ -77,6 +77,83 @@ auto parse_command_console_input(std::string_view input)
             CommandConsoleFamily::Give,
         };
     }
+    if (command == "/issou") {
+        return {
+            CommandConsoleCommand::EnterIssou,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou reset") {
+        return {
+            CommandConsoleCommand::ResetIssou,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou exit") {
+        return {
+            CommandConsoleCommand::ExitIssou,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou skip") {
+        return {
+            CommandConsoleCommand::SkipIssouCountdown,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou gore 0") {
+        return {
+            CommandConsoleCommand::DisableIssouGore,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou gore 1") {
+        return {
+            CommandConsoleCommand::EnableIssouGore,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou awake 0") {
+        return {
+            CommandConsoleCommand::SetIssouAwakening0,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou awake 1") {
+        return {
+            CommandConsoleCommand::SetIssouAwakening1,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou awake 2") {
+        return {
+            CommandConsoleCommand::SetIssouAwakening2,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command == "/issou awake 3") {
+        return {
+            CommandConsoleCommand::SetIssouAwakening3,
+            CommandConsoleParseStatus::Ready,
+            CommandConsoleFamily::Issou,
+        };
+    }
+    if (command.starts_with("/issou ")) {
+        return {
+            CommandConsoleCommand::None,
+            CommandConsoleParseStatus::InvalidUsage,
+            CommandConsoleFamily::Issou,
+        };
+    }
     return {
         CommandConsoleCommand::None,
         CommandConsoleParseStatus::UnknownCommand,

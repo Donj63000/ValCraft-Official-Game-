@@ -8,12 +8,24 @@
 
 #include <iostream>
 #include <memory>
+#include <exception>
 // Game dev by V.GIDON FR63500
 namespace {
 
 auto run_valcraft(const valcraft::GameOptions& options) -> int {
-    auto game = std::make_unique<valcraft::Game>(options);
-    return game->run();
+    try {
+        auto game = std::make_unique<valcraft::Game>(options);
+        return game->run();
+    } catch (const std::exception& error) {
+        // Je transforme une erreur d'initialisation en diagnostic exploitable
+        // au lieu de laisser Windows interrompre brutalement le processus.
+        std::cerr << "ValCraft fatal error: " << error.what() << std::endl;
+        return 1;
+    } catch (...) {
+        // Je garde aussi un dernier filet pour les exceptions non standard.
+        std::cerr << "ValCraft fatal error: unknown exception" << std::endl;
+        return 1;
+    }
 }
 
 } // namespace

@@ -63,6 +63,82 @@ TEST_CASE("command console recognizes only the supported musket give command") {
         CommandConsoleParseStatus::UnknownCommand);
 }
 
+TEST_CASE("command console recognizes every exact issou scenario command") {
+    const auto check_ready =
+        [](std::string_view input,
+           CommandConsoleCommand expected) {
+            CHECK(
+                parse_command_console_input(input) ==
+                CommandConsoleParseResult {
+                    expected,
+                    CommandConsoleParseStatus::Ready,
+                    CommandConsoleFamily::Issou,
+                });
+        };
+
+    check_ready(
+        "/issou",
+        CommandConsoleCommand::EnterIssou);
+    check_ready(
+        "  /ISSOU   RESET  ",
+        CommandConsoleCommand::ResetIssou);
+    check_ready(
+        "/issou exit",
+        CommandConsoleCommand::ExitIssou);
+    check_ready(
+        "/issou skip",
+        CommandConsoleCommand::SkipIssouCountdown);
+    check_ready(
+        "/issou gore 0",
+        CommandConsoleCommand::DisableIssouGore);
+    check_ready(
+        "/issou gore 1",
+        CommandConsoleCommand::EnableIssouGore);
+    check_ready(
+        "/issou awake 0",
+        CommandConsoleCommand::SetIssouAwakening0);
+    check_ready(
+        "/issou awake 1",
+        CommandConsoleCommand::SetIssouAwakening1);
+    check_ready(
+        "/issou awake 2",
+        CommandConsoleCommand::SetIssouAwakening2);
+    check_ready(
+        " /IsSoU AwAkE 3 ",
+        CommandConsoleCommand::SetIssouAwakening3);
+}
+
+TEST_CASE("command console rejects malformed issou variants strictly") {
+    for (const auto input :
+         {"/issou gore",
+          "/issou gore -1",
+          "/issou gore 2",
+          "/issou awake",
+          "/issou awake -1",
+          "/issou awake 4",
+          "/issou reset now",
+          "/issou enter",
+          "/issou unknown"}) {
+        const auto parsed =
+            parse_command_console_input(input);
+        CAPTURE(input);
+        CHECK(
+            parsed.status ==
+            CommandConsoleParseStatus::InvalidUsage);
+        CHECK(
+            parsed.family ==
+            CommandConsoleFamily::Issou);
+        CHECK(
+            command_console_usage(parsed.family) ==
+            "UTILISATION : /ISSOU [RESET|EXIT|SKIP|GORE 0|1|AWAKE 0|1|2|3]");
+    }
+    CHECK(
+        parse_command_console_input(
+            "/issoufoo")
+            .status ==
+        CommandConsoleParseStatus::UnknownCommand);
+}
+
 TEST_CASE("command console distinguishes empty invalid and unknown commands") {
     CHECK(
         parse_command_console_input("   ").status ==

@@ -273,7 +273,8 @@ auto is_sane_item_drop_position(const glm::vec3& position) noexcept -> bool {
 
 auto sanitize_item_drop_state(ItemDrop& drop) noexcept -> bool {
     normalize_item_stack(drop.stack);
-    if (!inventory_slot_has_item(drop.stack) || !is_sane_item_drop_position(drop.position)) {
+    if (!item_stack_can_be_dropped(drop.stack) ||
+        !is_sane_item_drop_position(drop.position)) {
         return false;
     }
 
@@ -298,6 +299,10 @@ void ItemDropSystem::spawn_drop(const HotbarSlot& stack, const glm::vec3& positi
     HotbarSlot remaining = stack;
     normalize_item_stack(remaining);
     if (!inventory_slot_has_item(remaining)) {
+        return;
+    }
+    if (!item_stack_can_be_dropped(remaining)) {
+        ++audit_stats_.rejected_spawns;
         return;
     }
     if (!is_sane_item_drop_position(position)) {

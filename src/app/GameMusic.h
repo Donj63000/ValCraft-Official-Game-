@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/BackroomsAmbience.h"
 #include "audio/ProceduralSfx.h"
 #include "audio/ProceduralMusic.h"
 
@@ -16,34 +17,59 @@ struct GameMusicContextInput {
     bool has_active_session = false;
     bool front_end_visible = false;
     bool maritime_gameplay_active = false;
+    bool backrooms_gameplay_active = false;
     float voyage_motion = 0.0F;
     float danger = 0.0F;
     int world_seed = 0;
 };
 
-[[nodiscard]] inline auto make_game_music_context(const GameMusicContextInput& input) noexcept
+[[nodiscard]] inline auto make_game_music_context(
+    const GameMusicContextInput& input) noexcept
     -> ProceduralMusicContext {
+
     constexpr std::uint32_t kMaritimeSeedSalt = 0xA17E5EA5U;
+    constexpr std::uint32_t kBackroomsSeedSalt = 0xB4C3'0015U;
     constexpr std::uint32_t kSeedFallback = 0x9E3779B9U;
 
     ProceduralMusicContext context {};
-    context.seed = static_cast<std::uint32_t>(input.world_seed) ^ kMaritimeSeedSalt;
+    const auto seed_salt =
+        input.backrooms_gameplay_active
+            ? kBackroomsSeedSalt
+            : kMaritimeSeedSalt;
+    context.seed =
+        static_cast<std::uint32_t>(input.world_seed) ^
+        seed_salt;
     if (context.seed == 0U) {
         context.seed = kSeedFallback;
     }
 
-    if (!input.has_active_session || input.front_end_visible || !input.maritime_gameplay_active) {
+    if (!input.has_active_session ||
+        input.front_end_visible) {
         return context;
     }
 
-    // Je borne les signaux applicatifs avant de les transmettre au syntheseur.
+    if (input.backrooms_gameplay_active) {
+        context.scene =
+            ProceduralMusicScene::Backrooms;
+        return context;
+    }
+    if (!input.maritime_gameplay_active) {
+        return context;
+    }
+
+    // Je borne les signaux applicatifs avant de les transmettre au synthèseur.
     const auto sanitize_unit = [](float value) noexcept {
-        return std::isfinite(value) ? std::clamp(value, 0.0F, 1.0F) : 0.0F;
+        return std::isfinite(value)
+                   ? std::clamp(value, 0.0F, 1.0F)
+                   : 0.0F;
     };
 
-    context.scene = ProceduralMusicScene::SeaAdventure;
-    context.voyage_motion = sanitize_unit(input.voyage_motion);
-    context.danger = sanitize_unit(input.danger);
+    context.scene =
+        ProceduralMusicScene::SeaAdventure;
+    context.voyage_motion =
+        sanitize_unit(input.voyage_motion);
+    context.danger =
+        sanitize_unit(input.danger);
     return context;
 }
 
@@ -74,6 +100,7 @@ private:
     SDL_AudioSpec obtained_spec_ {};
     bool owns_audio_subsystem_ = false;
     ProceduralMusicComposer composer_ {};
+    BackroomsAmbience backrooms_ambience_ {};
     ProceduralSfxMixer sfx_mixer_ {};
 };
 

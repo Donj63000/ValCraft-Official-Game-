@@ -48,6 +48,61 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             result.options.hidden_window = true;
             continue;
         }
+        if (argument == "--smoke-backrooms-flashlight") {
+            result.options.smoke_backrooms_flashlight = true;
+            continue;
+        }
+        if (argument == "--smoke-backrooms-ceiling-view") {
+            result.options.smoke_backrooms_ceiling_view = true;
+            continue;
+        }
+        if (argument == "--smoke-backrooms-blackout") {
+            result.options.smoke_backrooms_blackout = true;
+            continue;
+        }
+        if (argument.starts_with("--smoke-backrooms-level=")) {
+            constexpr auto prefix =
+                std::string_view {
+                    "--smoke-backrooms-level="};
+            int parsed_value = 0;
+            if (!parse_number(
+                    argument.substr(prefix.size()),
+                    parsed_value) ||
+                parsed_value < -1'000'000 ||
+                parsed_value > 1'000'000) {
+                return make_error(
+                    "Invalid value for --smoke-backrooms-level");
+            }
+            result.options.smoke_backrooms_level =
+                parsed_value;
+            continue;
+        }
+        if (argument.starts_with("--smoke-backrooms-jack=")) {
+            const auto mode =
+                argument.substr(
+                    std::string_view {
+                        "--smoke-backrooms-jack="}.size());
+            if (mode == "standing") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::Standing;
+            } else if (mode == "hunched") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::Hunched;
+            } else if (mode == "stare") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::Stare;
+            } else if (mode == "chase") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::Chase;
+            } else if (mode == "jumpscare") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::Jumpscare;
+            } else {
+                return make_error(
+                    "Invalid value for --smoke-backrooms-jack");
+            }
+            continue;
+        }
         if (argument == "--freeze-time") {
             result.options.freeze_time = true;
             continue;
@@ -113,6 +168,8 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 result.options.smoke_session = SmokeSessionMode::SeaLegacy;
             } else if (mode == "sea-open") {
                 result.options.smoke_session = SmokeSessionMode::SeaOpen;
+            } else if (mode == "backrooms") {
+                result.options.smoke_session = SmokeSessionMode::Backrooms;
             } else {
                 return make_error("Invalid value for --smoke-session");
             }

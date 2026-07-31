@@ -5,6 +5,8 @@
 #include "app/InventoryMenu.h"
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
+#include "gameplay/BackroomsJack.h"
+#include "gameplay/BackroomsFlashlight.h"
 #include "gameplay/PlayerController.h"
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
@@ -12,6 +14,7 @@
 #include "gameplay/progression/PlayerAbilityEffects.h"
 #include "gameplay/progression/PlayerBuildState.h"
 #include "gameplay/progression/SummonedUnitSystem.h"
+#include "gameplay/weapons/LegendaryWeaponProgression.h"
 #include "world/World.h"
 
 #include <glm/vec3.hpp>
@@ -93,6 +96,8 @@ struct SaveGameSnapshot {
     SeaAdventureSaveState sea_adventure {};
     MaritimeExperienceAwardState maritime_experience {};
     PlayerAbilityRuntimeSaveState player_ability_runtime {};
+    LegendaryWeaponProgressionState legendary_weapon {};
+    BackroomsFlashlightState backrooms_flashlight {};
     HotbarState hotbar {};
     InventoryMenuState inventory {};
     std::uint64_t musket_shot_sequence = 0U;
@@ -103,6 +108,15 @@ struct SaveGameSnapshot {
     WorldSavePlan world_save_plan {};
     // Je garde ce champ pour l'ecriture des anciens appelants et des fixtures.
     std::vector<WorldChunkSnapshot> chunk_snapshots {};
+    // Je l'ajoute en fin de snapshot pour ne déplacer aucun initialiseur
+    // positionnel historique. Le runtime de navigation reste volontairement
+    // hors sauvegarde et sera reconstruit autour du joueur au chargement.
+    BackroomsJackState backrooms_jack {
+        initialize_backrooms_jack(0U),
+    };
+    // Je place le niveau à la toute fin pour conserver tous les initialisateurs
+    // positionnels historiques du snapshot et l'écris dans l'extension BRLV.
+    std::int32_t backrooms_level = 0;
 };
 
 enum class SaveLoadPhase : std::uint8_t {

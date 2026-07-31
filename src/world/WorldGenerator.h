@@ -1,5 +1,6 @@
 #pragma once
 
+#include "world/BackroomsGenerator.h"
 #include "world/Chunk.h"
 #include "world/OceanAdventureLayout.h"
 
@@ -14,6 +15,7 @@ namespace valcraft {
 enum class WorldGenerationProfile : std::uint8_t {
     Continental = 0,
     OceanAdventure = 1,
+    Backrooms = 2,
 };
 
 enum class WorldGenerationVersion : std::uint32_t {
@@ -21,6 +23,7 @@ enum class WorldGenerationVersion : std::uint32_t {
     LegacyV1 = 1,
     SparseArchipelagoV2 = 2,
     LivingOceanV3 = 3,
+    BackroomsV1 = 4,
 };
 
 [[nodiscard]] inline constexpr auto resolve_world_generation_version(
@@ -29,9 +32,15 @@ enum class WorldGenerationVersion : std::uint32_t {
     if (requested_version != WorldGenerationVersion::Latest) {
         return requested_version;
     }
-    return profile == WorldGenerationProfile::OceanAdventure
-               ? WorldGenerationVersion::LivingOceanV3
-               : WorldGenerationVersion::LegacyV1;
+    switch (profile) {
+    case WorldGenerationProfile::OceanAdventure:
+        return WorldGenerationVersion::LivingOceanV3;
+    case WorldGenerationProfile::Backrooms:
+        return WorldGenerationVersion::BackroomsV1;
+    case WorldGenerationProfile::Continental:
+    default:
+        return WorldGenerationVersion::LegacyV1;
+    }
 }
 
 enum class BiomeType : std::uint8_t {
@@ -66,7 +75,8 @@ public:
     explicit WorldGenerator(
         int seed = 1337,
         WorldGenerationProfile profile = WorldGenerationProfile::Continental,
-        WorldGenerationVersion generation_version = WorldGenerationVersion::Latest);
+        WorldGenerationVersion generation_version = WorldGenerationVersion::Latest,
+        int logical_level = 0);
     ~WorldGenerator();
     WorldGenerator(WorldGenerator&& other) noexcept;
     auto operator=(WorldGenerator&& other) noexcept -> WorldGenerator&;
@@ -81,6 +91,7 @@ public:
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto profile() const noexcept -> WorldGenerationProfile;
     [[nodiscard]] auto generation_version() const noexcept -> WorldGenerationVersion;
+    [[nodiscard]] auto backrooms_level() const noexcept -> int;
     [[nodiscard]] auto biome_at(int world_x, int world_z) const noexcept -> BiomeType;
     [[nodiscard]] auto sample_surface(int world_x, int world_z) const noexcept -> TerrainSurfaceSample;
     [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept -> BlockId;
@@ -139,6 +150,8 @@ private:
     int seed_ = 1337;
     WorldGenerationProfile profile_ = WorldGenerationProfile::Continental;
     WorldGenerationVersion generation_version_ = WorldGenerationVersion::LegacyV1;
+    int logical_level_ = 0;
+    BackroomsGenerator backrooms_generator_ {};
     std::unique_ptr<FastNoiseLite> terrain_noise_ {};
     std::unique_ptr<FastNoiseLite> detail_noise_ {};
     std::unique_ptr<FastNoiseLite> temperature_noise_ {};

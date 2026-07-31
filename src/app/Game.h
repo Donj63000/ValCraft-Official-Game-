@@ -21,6 +21,10 @@
 #include "app/SessionSaveState.h"
 #include "app/TerrainEditStress.h"
 #include "creatures/CreatureSystem.h"
+#include "creatures/bosses/ChainedColossus.h"
+#include "creatures/legendary/LegendaryEnemySystem.h"
+#include "gameplay/BackroomsFlashlight.h"
+#include "gameplay/BackroomsJack.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/MusketCombat.h"
 #include "gameplay/PlayerController.h"
@@ -29,12 +33,25 @@
 #include "gameplay/PlayerProgression.h"
 #include "gameplay/SeaAdventure.h"
 #include "gameplay/StartingVillage.h"
+#include "gameplay/combat/ColossalSweep.h"
+#include "gameplay/combat/WorldProtectionRegistry.h"
+#include "gameplay/encounters/SeaLeviathanEncounter.h"
+#include "gameplay/quests/LegendaryQuestWorldContent.h"
+#include "gameplay/quests/LegendaryWeaponQuest.h"
 #include "gameplay/progression/AbilitySystem.h"
 #include "gameplay/progression/ExperienceAwardService.h"
 #include "gameplay/progression/PlayerAbilityEffects.h"
 #include "gameplay/progression/SummonedUnitSystem.h"
 #include "gameplay/progression/WorldEditTransaction.h"
+#include "gameplay/scenarios/IssouArenaScenario.h"
+#include "gameplay/scenarios/ScenarioSessionState.h"
+#include "gameplay/weapons/ColossalWeaponSystem.h"
+#include "gameplay/weapons/LeviathanKnightSynergy.h"
+#include "gameplay/weapons/LegendaryWeaponProgression.h"
 #include "render/Renderer.h"
+#include "render/creatures/ChainedColossusPresentation.h"
+#include "render/scenarios/IssouArenaPresentation.h"
+#include "render/weapons/LeviathanWeaponPresentation.h"
 #include "world/Environment.h"
 
 #include <SDL.h>
@@ -148,6 +165,97 @@ private:
         std::string detail {};
         float elapsed_seconds = 0.0F;
         float duration_seconds = 3.25F;
+    };
+
+    struct ScenarioLegendaryRuntimeRestore {
+        static constexpr std::size_t
+            kSummonCapacity = 8U;
+
+        // Je conserve ici les etats runtime que le format de sauvegarde
+        // normalise volontairement. La sortie de /issou peut ainsi restituer
+        // la frame de jeu normale sans perdre les vitesses, evenements ou
+        // minuteries transitoires.
+        EnvironmentClock environment {};
+        PlayerController player {};
+        PlayerMusketController player_musket {};
+        PlayerMusketEffects player_musket_effects {};
+        PlayerProgression progression {};
+        LegendaryWeaponProgression
+            weapon_progression {};
+        ExperienceAwardService
+            experience_awards {};
+        PlayerBuildState player_build {};
+        AbilitySystem ability_system {};
+        PlayerAbilityEffects ability_effects {};
+        CreatureSystem creatures {};
+        ItemDropSystem item_drops {};
+        SeaAdventureSystem sea_adventure {};
+        HotbarState hotbar {};
+        InventoryMenuState inventory {};
+        StartingVillageLayout starting_village {};
+        std::array<
+            SummonedUnitSystem,
+            kSummonCapacity>
+            summoned_footmen {};
+        std::array<
+            std::optional<glm::vec3>,
+            kSummonCapacity>
+            summoned_footman_ship_local_positions {};
+        std::array<
+            float,
+            kSummonCapacity>
+            summoned_footman_far_seconds {};
+        std::array<
+            AbilityCastSequence,
+            kSummonCapacity>
+            summoned_footman_cast_sequences {};
+        ColossalWeaponSystem weapon {};
+        LeviathanKnightSynergyRuntime
+            knight_synergy {};
+        ColossalHitLedger hit_ledger {};
+        ColossalBladePose previous_blade_pose {};
+        WorldProtectionRegistry protections {};
+        ColossusBloodTraceBuffer blood_traces {};
+        LegendaryEnemySystem enemies {};
+        SeaLeviathanEncounter sea_encounter {};
+        std::optional<std::size_t>
+            bound_musket_hotbar_slot {};
+        std::optional<std::size_t>
+            pending_ability_slot {};
+        glm::vec3 spawn_position {
+            0.5F,
+            70.0F,
+            0.5F,
+        };
+        GameMode active_game_mode =
+            GameMode::ClassicAdventure;
+        std::uint64_t wall_impact_sequence = 0U;
+        std::uint64_t shockwave_sequence = 0U;
+        LegendaryEnemyId quest_guardian_id = 0U;
+        LegendaryEnemyId astral_boss_id = 0U;
+        AbilityCastSequence
+            wind_acceleration_cast_sequence = 0U;
+        float melee_attack_cooldown_remaining = 0.0F;
+        float wind_acceleration_remaining = 0.0F;
+        float wind_movement_bonus = 0.0F;
+        float wind_recovery_bonus = 0.0F;
+        float wind_dodge_remaining = 0.0F;
+        float seconds_since_successful_shield_block = -1.0F;
+        float backrooms_elapsed_seconds = 0.0F;
+        BackroomsFlashlightState backrooms_flashlight {};
+        BackroomsJackState backrooms_jack {};
+        BackroomsJackRuntime backrooms_jack_runtime {};
+        BackroomsJackUpdateResult
+            backrooms_jack_last_result {};
+        float backrooms_jack_death_delay_seconds = 0.0F;
+        bool backrooms_jack_death_pending = false;
+        bool blade_pose_valid = false;
+        bool weapon_was_selected = false;
+        bool sea_encounter_started = false;
+        bool wind_blade_available = false;
+        bool super_vision_active = false;
+        bool starting_village_enabled = false;
+        bool quest_tutorial_spawned = false;
     };
 
     struct AuditSecondAccumulator {
@@ -338,6 +446,53 @@ private:
         const EnvironmentState& environment) const noexcept -> glm::vec3;
     [[nodiscard]] auto current_gameplay_announcement_view() const noexcept -> GameplayHudAnnouncementView;
     [[nodiscard]] auto current_maritime_hud_view() const noexcept -> MaritimeHudView;
+    void prepare_legendary_presentation(
+        float animation_time_seconds);
+    [[nodiscard]] auto selected_colossal_weapon_active() const noexcept
+        -> bool;
+    [[nodiscard]] auto colossal_weapon_drawn() const noexcept -> bool;
+    [[nodiscard]] auto intercept_colossal_guard(
+        const ColossalGuardRequest& request,
+        std::uint8_t allies_behind = 0U) noexcept
+        -> ColossalGuardResult;
+    void clear_colossal_weapon_input() noexcept;
+    void update_colossal_weapon(
+        float dt,
+        const PlayerInput& movement_input,
+        bool gameplay_input_enabled,
+        bool maritime_session_active);
+    void resolve_colossal_weapon_sweep(
+        bool maritime_session_active);
+    void update_legendary_encounters(
+        float dt,
+        bool maritime_session_active);
+    void configure_legendary_weapon_quest();
+    [[nodiscard]] auto
+    apply_legendary_quest_world_content() -> bool;
+    void update_legendary_weapon_quest();
+    [[nodiscard]] auto
+    try_interact_legendary_weapon_quest() -> bool;
+    [[nodiscard]] auto
+    process_legendary_quest_request(
+        const LegendaryQuestRequest& request)
+        -> LegendaryQuestProcessResult;
+    void record_legendary_quest_tutorial(
+        LegendaryQuestAction action,
+        std::uint64_t target_id,
+        float combat_value);
+    void consume_legendary_quest_events();
+    void process_colossus_attack_events();
+    [[nodiscard]] auto enter_issou_scenario() -> bool;
+    [[nodiscard]] auto reset_issou_scenario() -> bool;
+    void initialize_issou_run_state(
+        const IssouArenaLayout& layout,
+        bool rebuild_world);
+    [[nodiscard]] auto exit_issou_scenario() -> bool;
+    void update_issou_scenario(float dt);
+    void consume_issou_scenario_events();
+    void restore_scenario_snapshot(
+        ScenarioSessionRestore restore);
+    void rebuild_colossal_world_protections() noexcept;
     void sync_selected_hotbar_slot() noexcept;
     [[nodiscard]] auto selected_tool_break_speed_multiplier(BlockId target_block_id) const noexcept -> float;
     void select_hotbar_slot(std::size_t index) noexcept;
@@ -372,6 +527,19 @@ private:
     [[nodiscard]] auto active_ui_screen() const noexcept -> UiScreen;
     [[nodiscard]] auto front_end_visible() const noexcept -> bool;
     [[nodiscard]] auto gameplay_interaction_blocked() const noexcept -> bool;
+    [[nodiscard]] auto backrooms_active() const noexcept -> bool;
+    [[nodiscard]] auto session_backrooms_supports_jack() const noexcept
+        -> bool;
+    [[nodiscard]] auto backrooms_jack_jumpscare_active() const noexcept
+        -> bool;
+    [[nodiscard]] auto current_environment_state() const -> EnvironmentState;
+    void reset_backrooms_jack_runtime() noexcept;
+    void update_backrooms_simulation(float dt);
+    [[nodiscard]] auto try_backrooms_level_transition() -> bool;
+    [[nodiscard]] auto transition_backrooms_level(
+        int destination_level,
+        const BlockCoord& destination_landing,
+        float destination_yaw_degrees) -> bool;
     [[nodiscard]] auto render_player() const noexcept -> const PlayerController&;
     [[nodiscard]] auto streaming_focus_position() const noexcept -> glm::vec3;
     [[nodiscard]] auto current_renderer_options() const noexcept -> RendererOptions;
@@ -455,12 +623,23 @@ private:
     bool pending_musket_fire_press_ = false;
     bool musket_aim_held_ = false;
     bool pending_musket_reload_ = false;
+    bool colossal_primary_held_ = false;
+    bool pending_colossal_primary_press_ = false;
+    bool pending_colossal_primary_release_ = false;
+    bool colossal_guard_held_ = false;
+    bool pending_colossal_guard_press_ = false;
+    bool pending_colossal_guard_release_ = false;
+    bool colossal_weapon_was_selected_ = false;
+    bool colossal_blade_pose_valid_ = false;
     float pending_look_x_ = 0.0F;
     float pending_look_y_ = 0.0F;
     int window_width_ = 1600;
     int window_height_ = 900;
     int rendered_frames_ = 0;
     float smoke_elapsed_seconds_ = 0.0F;
+    glm::vec3 backrooms_smoke_camera_position_ {0.0F};
+    float backrooms_smoke_camera_yaw_degrees_ = -90.0F;
+    bool backrooms_smoke_camera_pose_valid_ = false;
     double audit_elapsed_ms_ = 0.0;
     std::size_t frame_raw_input_events_ = 0;
     std::size_t frame_input_action_events_ = 0;
@@ -478,6 +657,44 @@ private:
     std::optional<std::size_t> bound_musket_hotbar_slot_ {};
     PlayerController preview_player_ {};
     PlayerProgression progression_ {};
+    LegendaryWeaponProgression
+        legendary_weapon_progression_ {};
+    LegendaryWeaponQuest
+        legendary_weapon_quest_ {};
+    std::optional<LegendaryQuestWorldContentPlan>
+        legendary_quest_world_content_ {};
+    std::array<
+        bool,
+        kLegendaryQuestWorldSceneCount>
+        legendary_quest_world_scenes_applied_ {};
+    ColossalWeaponSystem colossal_weapon_ {};
+    LeviathanKnightSynergyRuntime
+        leviathan_knight_synergy_ {};
+    ColossalHitLedger colossal_hit_ledger_ {};
+    ColossalBladePose previous_colossal_blade_pose_ {};
+    std::uint64_t colossal_wall_impact_sequence_ = 0U;
+    std::uint64_t colossal_shockwave_sequence_ = 0U;
+    std::vector<LeviathanVisualEvent>
+        pending_leviathan_visual_events_ {};
+    WorldProtectionRegistry colossal_world_protections_ {};
+    IssouArenaScenario issou_scenario_ {};
+    ScenarioSessionState scenario_session_ {};
+    ChainedColossus chained_colossus_ {};
+    ColossusBloodTraceBuffer colossus_blood_traces_ {};
+    LegendaryEnemySystem legendary_enemies_ {};
+    LegendaryEnemyId
+        legendary_quest_guardian_id_ = 0U;
+    LegendaryEnemyId
+        legendary_astral_boss_id_ = 0U;
+    bool legendary_quest_tutorial_spawned_ = false;
+    SeaLeviathanEncounter sea_leviathan_ {};
+    bool sea_leviathan_started_for_session_ = false;
+    bool issou_arena_minions_spawned_ = false;
+    IssouArenaEventKind latest_issou_event_ =
+        IssouArenaEventKind::CrowdMurmur;
+    std::optional<ScenarioLegendaryRuntimeRestore>
+        scenario_legendary_runtime_restore_ {};
+    std::uint32_t issou_run_sequence_ = 0U;
     ExperienceAwardService experience_awards_ {};
     PlayerBuildState player_build_ {};
     AbilitySystem ability_system_ {};
@@ -561,6 +778,19 @@ private:
     bool loading_active_ = false;
     bool loading_completed_ = false;
     GameMode active_game_mode_ = GameMode::ClassicAdventure;
+    // Temps indépendant utilisé pour les variations électriques lentes du mode BackRooms.
+    float backrooms_elapsed_seconds_ = 0.0F;
+    BackroomsFlashlightState backrooms_flashlight_ {};
+    BackroomsJackState backrooms_jack_ {};
+    BackroomsJackRuntime backrooms_jack_runtime_ {};
+    BackroomsJackUpdateResult
+        backrooms_jack_last_result_ {};
+    float backrooms_jack_death_delay_seconds_ = 0.0F;
+    bool backrooms_jack_death_pending_ = false;
+    // Je neutralise le palier d'arrivée quelques secondes : le volume apparié
+    // ne peut pas renvoyer immédiatement le joueur vers l'étage précédent.
+    float backrooms_level_transition_cooldown_seconds_ = 0.0F;
+    bool backrooms_level_transition_in_progress_ = false;
     float menu_preview_time_of_day_ = 8.25F;
     float preview_orbit_radians_ = 0.0F;
     bool has_active_session_ = false;

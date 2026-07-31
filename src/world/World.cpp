@@ -68,6 +68,8 @@ constexpr auto kSkyColumnCount = static_cast<std::size_t>(kChunkSizeX * kChunkSi
 constexpr int kCanonicalVisualVegetationHalo = 8;
 constexpr auto kMeshInvalidationPriorityRadius = 2;
 constexpr std::size_t kLightingTimeCheckInterval = 128;
+constexpr int kBackroomsVerticalLightStride = 3;
+constexpr int kPoolroomsVerticalLightStride = 4;
 constexpr std::uint8_t kLightingBoundaryNegX = 1U << 0U;
 constexpr std::uint8_t kLightingBoundaryPosX = 1U << 1U;
 constexpr std::uint8_t kLightingBoundaryNegZ = 1U << 2U;
@@ -549,13 +551,34 @@ void mix_revision(std::uint64_t& hash, std::uint64_t value) noexcept {
 
 } // namespace
 
+World::World(
+    int seed,
+    int stream_radius,
+    WorldGenerationProfile generation_profile,
+    WorldGenerationVersion generation_version,
+    VisualPipeline visual_pipeline)
+    // Je conserve le symbole historique à cinq arguments pour que mes modules
+    // déjà compilés restent compatibles, puis je centralise toute l'initialisation.
+    : World(
+          seed,
+          stream_radius,
+          generation_profile,
+          generation_version,
+          visual_pipeline,
+          0) {}
+
 World::World(int seed,
              int stream_radius,
              WorldGenerationProfile generation_profile,
              WorldGenerationVersion generation_version,
-             VisualPipeline visual_pipeline)
+             VisualPipeline visual_pipeline,
+             int backrooms_level)
     : stream_radius_(std::clamp(stream_radius, 0, kMaxStreamRadius)),
-      generator_(seed, generation_profile, generation_version),
+      generator_(
+          seed,
+          generation_profile,
+          generation_version,
+          backrooms_level),
       visual_pipeline_(visual_pipeline),
       active_stream_radius_(stream_radius_) {
     const auto loaded_side = static_cast<std::size_t>(std::max(stream_radius_, 0) * 2 + 3);
@@ -1783,6 +1806,10 @@ auto World::generation_version() const noexcept -> WorldGenerationVersion {
     return generator_.generation_version();
 }
 
+auto World::backrooms_level() const noexcept -> int {
+    return generator_.backrooms_level();
+}
+
 auto World::visual_pipeline() const noexcept -> VisualPipeline {
     return visual_pipeline_;
 }
@@ -2051,6 +2078,7 @@ auto World::capture_save_plan() const -> WorldSavePlan {
     plan.seed = generator_.seed();
     plan.generation_profile = generator_.profile();
     plan.generation_version = generator_.generation_version();
+    plan.backrooms_level = generator_.backrooms_level();
     plan.chunks.reserve(chunk_overrides_.size());
 
     for (const auto& [coord, override_entry] : chunk_overrides_) {
@@ -2085,7 +2113,8 @@ auto World::capture_save_plan() const -> WorldSavePlan {
 void World::begin_restore_save_plan(WorldSavePlan plan) {
     if (plan.seed != generator_.seed() ||
         plan.generation_profile != generator_.profile() ||
-        plan.generation_version != generator_.generation_version()) {
+        plan.generation_version != generator_.generation_version() ||
+        plan.backrooms_level != generator_.backrooms_level()) {
         throw std::invalid_argument("World save plan does not match the destination world");
     }
 
@@ -2496,9 +2525,15 @@ void World::install_generated_chunk(Chunk&& chunk) {
     iterator->second.chunk.clear_lighting();
     if (const auto override_iterator = chunk_overrides_.find(coord); override_iterator != chunk_overrides_.end()) {
         apply_chunk_override_to_record(iterator->second, override_iterator->second);
+    } else if (
+        generator_.profile() ==
+        WorldGenerationProfile::Backrooms) {
+        // Les plafonniers BackRooms sont générés directement dans le chunk.
+        // Le cache doit donc être construit avant le premier calcul de lumière.
+        refresh_chunk_emissive_cache(iterator->second);
     } else {
-        // Le generateur ne place actuellement aucun bloc emissif. Je supprime
-        // donc un scan complet de 32 768 voxels a chaque chunk streame.
+        // Les profils extérieurs ne placent pas de bloc émissif pendant la
+        // génération et évitent ainsi un scan complet de chaque chunk.
         iterator->second.emissive_blocks.clear();
     }
     iterator->second.sky_columns_dirty.set();
@@ -2702,6 +2737,12 @@ void World::enqueue_lighting_update(const ChunkCoord& coord) {
 }
 
 void World::enqueue_fluid_cell(const BlockCoord& world_coord) {
+    if (uses_static_poolrooms_water()) {
+        // Dans mes Poolrooms, la nappe fait partie de l'architecture procédurale.
+        // Je ne la confie pas au simulateur océanique, sinon elle se viderait et
+        // recoloniserait les zones sèches au fil des chargements de chunks.
+        return;
+    }
     if (!is_world_y_valid(world_coord.y) || !is_chunk_loaded_for_world(world_coord.x, world_coord.z)) {
         return;
     }
@@ -2926,6 +2967,14 @@ void World::process_generation_queue(std::size_t budget, double max_ms, WorldWor
 
 void World::process_fluid_queue(std::size_t budget, double max_ms, WorldWorkStats& stats) {
     using clock = std::chrono::steady_clock;
+
+    if (uses_static_poolrooms_water()) {
+        // Je purge aussi une éventuelle file héritée d'une restauration afin que
+        // le niveau soit totalement stable avant sa première image jouable.
+        pending_fluid_queue_.clear();
+        pending_fluid_set_.clear();
+        return;
+    }
 
     if (budget == 0) {
         return;
@@ -3185,6 +3234,12 @@ void World::process_lighting_queue(std::size_t budget, double max_ms, WorldWorkS
 
     const auto deadline = clock::now() + std::chrono::duration<double, std::milli>(std::max(0.0, max_ms));
     std::size_t processed_since_deadline_check = 0;
+    const auto backrooms_lighting =
+        generation_profile() == WorldGenerationProfile::Backrooms;
+    const auto vertical_light_stride =
+        backrooms_lighting && backrooms_level() <= -2
+            ? kPoolroomsVerticalLightStride
+            : kBackroomsVerticalLightStride;
 
     while (true) {
         if (remaining == 0U) {
@@ -3291,7 +3346,20 @@ void World::process_lighting_queue(std::size_t budget, double max_ms, WorldWorkS
                 continue;
             }
 
-            const auto propagated = static_cast<std::uint8_t>(node.light_level - 1);
+            auto attenuation = std::uint8_t {1U};
+            if (backrooms_lighting &&
+                offset.y != 0 &&
+                neighbor.y % vertical_light_stride != 0) {
+                // Les dalles fluorescentes sont des sources surfaciques : leur
+                // énergie descend plus loin qu'elle ne s'étale à l'horizontale.
+                // Je conserve un champ entier déterministe. Dans les Poolrooms,
+                // quatre cellules verticales ne coûtent qu'un niveau : les
+                // plafonds très hauts éclairent ainsi encore leur bassin, sans
+                // créer le moindre photon lorsqu'une zone n'a aucune lampe.
+                attenuation = 0U;
+            }
+            const auto propagated = static_cast<std::uint8_t>(
+                node.light_level - attenuation);
             if (propagated <= get_job_block_light(job, neighbor)) {
                 continue;
             }
@@ -4727,6 +4795,12 @@ auto World::normalize_water_state_for_generated(const BlockCoord& world_coord, W
         return make_water_state(kMaxWaterLevel, true, true);
     }
     return water_state;
+}
+
+auto World::uses_static_poolrooms_water() const noexcept -> bool {
+    return generator_.profile() ==
+               WorldGenerationProfile::Backrooms &&
+           generator_.backrooms_level() <= -2;
 }
 
 auto World::is_chunk_loaded_for_world(int x, int z) const noexcept -> bool {

@@ -182,6 +182,225 @@ constexpr auto kSerializedBuildOffset =
     kSerializedPlayerStateByteCount +
     sizeof(std::uint32_t) +
     sizeof(std::uint64_t);
+constexpr auto kSerializedLegendaryWeaponExtensionByteCount =
+    4U +
+    sizeof(std::uint8_t) +
+    sizeof(std::uint64_t) +
+    3U * sizeof(std::uint8_t) +
+    2U * sizeof(std::uint32_t) +
+    sizeof(std::uint8_t) +
+    4U * sizeof(std::uint8_t);
+constexpr auto kSerializedBackroomsFlashlightExtensionByteCount =
+    4U +
+    sizeof(std::uint8_t) +
+    sizeof(float) +
+    sizeof(std::uint8_t);
+constexpr auto kSerializedBackroomsJackExtensionByteCount = 146U;
+constexpr auto kSerializedBackroomsLevelExtensionByteCount =
+    4U + sizeof(std::uint8_t) + sizeof(std::int32_t);
+
+void remove_current_backrooms_jack_extension(
+    std::vector<char>& bytes) {
+    constexpr auto level_magic =
+        std::array<char, 4> {
+            'B',
+            'R',
+            'L',
+            'V',
+        };
+    REQUIRE(
+        bytes.size() >=
+        kSerializedBackroomsLevelExtensionByteCount);
+    const auto level_extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            kSerializedBackroomsLevelExtensionByteCount);
+    REQUIRE(
+        std::equal(
+            level_magic.begin(),
+            level_magic.end(),
+            level_extension_begin));
+    bytes.erase(
+        level_extension_begin,
+        bytes.end());
+
+    constexpr auto magic =
+        std::array<char, 4> {
+            'B',
+            'J',
+            'C',
+            'K',
+        };
+    REQUIRE(
+        bytes.size() >=
+        kSerializedBackroomsJackExtensionByteCount);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            kSerializedBackroomsJackExtensionByteCount);
+    REQUIRE(
+        std::equal(
+            magic.begin(),
+            magic.end(),
+            extension_begin));
+    bytes.erase(
+        extension_begin,
+        bytes.end());
+}
+
+void remove_current_backrooms_flashlight_extension(
+    std::vector<char>& bytes) {
+    // Je retire d'abord BRLV puis Jack pour retrouver exactement la
+    // terminaison BFLH du format v16.
+    remove_current_backrooms_jack_extension(bytes);
+    constexpr auto magic =
+        std::array<char, 4> {
+            'B',
+            'F',
+            'L',
+            'H',
+        };
+    REQUIRE(
+        bytes.size() >=
+        kSerializedBackroomsFlashlightExtensionByteCount);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            kSerializedBackroomsFlashlightExtensionByteCount);
+    REQUIRE(
+        std::equal(
+            magic.begin(),
+            magic.end(),
+            extension_begin));
+    bytes.erase(
+        extension_begin,
+        bytes.end());
+}
+
+void remove_current_legendary_weapon_extension(
+    std::vector<char>& bytes) {
+    // Je retire d'abord l'extension v16 qui suit désormais LWEA.
+    remove_current_backrooms_flashlight_extension(
+        bytes);
+    constexpr auto magic =
+        std::array<char, 4> {
+            'L',
+            'W',
+            'E',
+            'A',
+        };
+    REQUIRE(
+        bytes.size() >=
+        kSerializedLegendaryWeaponExtensionByteCount);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            kSerializedLegendaryWeaponExtensionByteCount);
+    REQUIRE(
+        std::equal(
+            magic.begin(),
+            magic.end(),
+            extension_begin));
+    bytes.erase(
+        extension_begin,
+        bytes.end());
+}
+
+void downgrade_current_save_to_v15(
+    const std::filesystem::path& path) {
+    std::ifstream input(
+        path,
+        std::ios::binary);
+    REQUIRE(input.good());
+    const auto raw_size =
+        std::filesystem::file_size(path);
+    REQUIRE(
+        raw_size <=
+        (std::numeric_limits<
+             std::size_t>::max)());
+    auto bytes =
+        std::vector<char>(
+            static_cast<std::size_t>(
+                raw_size));
+    input.read(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(
+        input.gcount() ==
+        static_cast<std::streamsize>(
+            bytes.size()));
+    input.close();
+
+    remove_current_backrooms_flashlight_extension(
+        bytes);
+    constexpr auto version =
+        std::uint32_t {15U};
+    std::memcpy(
+        bytes.data() + 8U,
+        &version,
+        sizeof(version));
+    std::ofstream output(
+        path,
+        std::ios::binary |
+            std::ios::trunc);
+    REQUIRE(output.good());
+    output.write(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(output.good());
+}
+
+void downgrade_current_save_to_v14(
+    const std::filesystem::path& path) {
+    std::ifstream input(
+        path,
+        std::ios::binary);
+    REQUIRE(input.good());
+    const auto raw_size =
+        std::filesystem::file_size(path);
+    REQUIRE(
+        raw_size <=
+        (std::numeric_limits<
+             std::size_t>::max)());
+    auto bytes =
+        std::vector<char>(
+            static_cast<std::size_t>(
+                raw_size));
+    input.read(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(
+        input.gcount() ==
+        static_cast<std::streamsize>(
+            bytes.size()));
+    input.close();
+
+    remove_current_legendary_weapon_extension(
+        bytes);
+    REQUIRE(
+        bytes.size() >=
+        8U + sizeof(std::uint32_t));
+    constexpr auto version =
+        std::uint32_t {14U};
+    std::memcpy(
+        bytes.data() + 8U,
+        &version,
+        sizeof(version));
+
+    std::ofstream output(
+        path,
+        std::ios::binary |
+            std::ios::trunc);
+    REQUIRE(output.good());
+    output.write(
+        bytes.data(),
+        static_cast<std::streamsize>(
+            bytes.size()));
+    REQUIRE(output.good());
+}
 
 void downgrade_current_save_to_v13(
     const std::filesystem::path& path) {
@@ -206,6 +425,8 @@ void downgrade_current_save_to_v13(
         static_cast<std::streamsize>(
             bytes.size()));
     input.close();
+    remove_current_legendary_weapon_extension(
+        bytes);
 
     auto cursor =
         static_cast<std::size_t>(
@@ -368,6 +589,8 @@ void downgrade_current_save_to_v11(
     input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     REQUIRE(input.gcount() == static_cast<std::streamsize>(bytes.size()));
     input.close();
+    remove_current_legendary_weapon_extension(
+        bytes);
 
     constexpr auto player_state_byte_count =
         2U * 3U * sizeof(float) +
@@ -459,6 +682,8 @@ void downgrade_current_sea_save_to_v9(const std::filesystem::path& path,
     input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     REQUIRE(input.gcount() == static_cast<std::streamsize>(bytes.size()));
     input.close();
+    remove_current_legendary_weapon_extension(
+        bytes);
 
     constexpr auto player_state_byte_count =
         2U * 3U * sizeof(float) +
@@ -1093,6 +1318,16 @@ TEST_CASE("game option parser accepts explicit smoke session modes") {
         sea_open_parse.options.smoke_session ==
         SmokeSessionMode::SeaOpen);
 
+    const auto backrooms_parse =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--smoke-session=backrooms",
+            });
+    REQUIRE(backrooms_parse.ok);
+    CHECK(
+        backrooms_parse.options.smoke_session ==
+        SmokeSessionMode::Backrooms);
+
     const auto empty_parse = parse_game_options(std::vector<std::string_view> {"--smoke-session="});
     CHECK_FALSE(empty_parse.ok);
     CHECK(empty_parse.error_message == "Invalid value for --smoke-session");
@@ -1100,6 +1335,61 @@ TEST_CASE("game option parser accepts explicit smoke session modes") {
     const auto unknown_parse = parse_game_options(std::vector<std::string_view> {"--smoke-session=classic"});
     CHECK_FALSE(unknown_parse.ok);
     CHECK(unknown_parse.error_message == "Invalid value for --smoke-session");
+}
+
+TEST_CASE("Backrooms smoke starts gameplay and remains compatible with frame capture") {
+    const auto parsed =
+        parse_game_options(
+            std::vector<std::string_view> {
+                "--smoke-test",
+                "--smoke-session=backrooms",
+                "--smoke-frames=180",
+                "--hidden-window",
+                "--visual-pipeline=modern",
+                "--fixed-render-quality",
+                "--smoke-backrooms-blackout",
+                "--smoke-backrooms-flashlight",
+                "--smoke-backrooms-ceiling-view",
+                "--capture-frame=artifacts/backrooms/lighting.bmp",
+            });
+
+    REQUIRE(parsed.ok);
+    CHECK(parsed.options.smoke_test);
+    CHECK(parsed.options.hidden_window);
+    CHECK(
+        parsed.options.smoke_session ==
+        SmokeSessionMode::Backrooms);
+    CHECK(
+        smoke_session_starts_gameplay(
+            parsed.options.smoke_session));
+    CHECK(parsed.options.smoke_frames == 180);
+    CHECK(
+        parsed.options.visual_pipeline ==
+        VisualPipeline::ModernStylized);
+    CHECK(
+        parsed.options.smoke_backrooms_flashlight);
+    CHECK(
+        parsed.options.smoke_backrooms_ceiling_view);
+    CHECK(
+        parsed.options.smoke_backrooms_blackout);
+    CHECK_FALSE(
+        parsed.options.performance.adaptive_quality);
+    CHECK(
+        parsed.options.frame_capture_path ==
+        "artifacts/backrooms/lighting.bmp");
+
+    CHECK_FALSE(
+        smoke_session_starts_gameplay(
+            SmokeSessionMode::Menu));
+    CHECK(
+        smoke_session_starts_gameplay(
+            SmokeSessionMode::SeaNew));
+    CHECK(
+        smoke_session_starts_gameplay(
+            SmokeSessionMode::SeaLegacy));
+    CHECK(
+        smoke_session_starts_gameplay(
+            SmokeSessionMode::SeaOpen));
 }
 
 TEST_CASE("game option parser accepts deterministic maritime smoke views") {
@@ -1358,6 +1648,14 @@ TEST_CASE("gameplay action keys use physical scancodes") {
     flight_key.sym = SDLK_f;
     flight_key.scancode = SDL_SCANCODE_F;
     CHECK(is_flight_action_key(flight_key));
+    CHECK(is_backrooms_flashlight_action_key(flight_key));
+
+    SDL_Keysym remapped_flashlight_key {};
+    remapped_flashlight_key.sym = SDLK_f;
+    remapped_flashlight_key.scancode = SDL_SCANCODE_G;
+    CHECK_FALSE(
+        is_backrooms_flashlight_action_key(
+            remapped_flashlight_key));
 
     SDL_Keysym reload_key {};
     reload_key.sym = SDLK_r;
@@ -2223,6 +2521,174 @@ TEST_CASE("musket is a non placeable single weapon with sanitized per-item chamb
     CHECK(stone.instance_state == 0U);
 }
 
+TEST_CASE("l'echine du leviathan est une arme unique non placable hors statistiques legacy") {
+    CHECK(
+        to_block_id(
+            BlockType::LeviathanSpine) ==
+        static_cast<BlockId>(41U));
+    CHECK(
+        is_known_block_id(
+            static_cast<BlockId>(41U)));
+    CHECK_FALSE(
+        is_known_block_id(
+            static_cast<BlockId>(
+                to_block_id(
+                    BlockType::PoolroomsFloat) +
+                1U)));
+
+    const auto weapon =
+        make_item_stack(
+            to_block_id(
+                BlockType::LeviathanSpine),
+            64U);
+    CHECK(weapon.count == 1U);
+    CHECK(weapon.instance_state == 0U);
+    CHECK(is_inventory_only_item(weapon.block_id));
+    CHECK(is_weapon_item(weapon.block_id));
+    CHECK(is_legendary_weapon_item(weapon));
+    CHECK(is_unique_inventory_item(weapon.block_id));
+    CHECK(is_undroppable_item(weapon.block_id));
+    CHECK_FALSE(item_stack_can_be_dropped(weapon));
+    CHECK_FALSE(is_placeable_item(weapon.block_id));
+    CHECK(
+        item_equipment_slot(weapon.block_id) ==
+        EquipmentSlot::Weapon);
+    CHECK_FALSE(
+        weapon_stats(weapon.block_id)
+            .has_value());
+    CHECK(
+        inventory_item_label(weapon.block_id) ==
+        "L'ECHINE DU LEVIATHAN");
+
+    InventoryMenuState inventory {};
+    HotbarState hotbar {};
+    inventory.equipment_slots[
+        equipment_slot_index(
+            EquipmentSlot::Weapon)] = weapon;
+    hotbar.slots[0] =
+        make_item_stack(
+            to_block_id(BlockType::Sword),
+            1U);
+    CHECK(
+        inventory_has_equipped_legendary_weapon(
+            inventory));
+    CHECK_FALSE(
+        inventory_active_weapon_stats(
+            inventory,
+            hotbar)
+            .has_value());
+}
+
+TEST_CASE("l'inventaire deduplique et recupere l'arme legendaire sans ecraser de slot") {
+    const auto weapon =
+        inventory_make_slot(
+            to_block_id(
+                BlockType::LeviathanSpine),
+            1U);
+    InventoryMenuState inventory {};
+    HotbarState hotbar {};
+    inventory.equipment_slots[
+        equipment_slot_index(
+            EquipmentSlot::Weapon)] = weapon;
+    hotbar.slots[0] = weapon;
+    hotbar.selected_index = 0U;
+    inventory.storage_slots[4] = weapon;
+    inventory.carried_slot = weapon;
+    inventory.carrying_item = true;
+
+    const auto reconciled =
+        inventory_reconcile_legendary_weapon(
+            inventory,
+            hotbar,
+            true);
+    CHECK(reconciled.removed_duplicates == 3U);
+    CHECK(reconciled.weapon_present);
+    CHECK_FALSE(reconciled.weapon_granted);
+    CHECK_FALSE(reconciled.recovery_required);
+    CHECK(
+        inventory_legendary_weapon_count(
+            inventory,
+            hotbar) == 1U);
+    CHECK(
+        is_legendary_weapon_item(
+            inventory.equipment_slots[
+                equipment_slot_index(
+                    EquipmentSlot::Weapon)]));
+
+    InventoryMenuState recovered_inventory {};
+    HotbarState recovered_hotbar {};
+    const auto recovered =
+        inventory_reconcile_legendary_weapon(
+            recovered_inventory,
+            recovered_hotbar,
+            true);
+    CHECK(recovered.weapon_granted);
+    CHECK(recovered.weapon_present);
+    CHECK_FALSE(recovered.recovery_required);
+    CHECK(
+        inventory_legendary_weapon_count(
+            recovered_inventory,
+            recovered_hotbar) == 1U);
+
+    InventoryMenuState full_inventory {};
+    HotbarState full_hotbar {};
+    full_inventory.storage_slots.fill(
+        inventory_make_slot(
+            to_block_id(BlockType::Stone),
+            64U));
+    full_hotbar.slots.fill(
+        inventory_make_slot(
+            to_block_id(BlockType::Dirt),
+            64U));
+    const auto full_before = full_inventory;
+    const auto full_hotbar_before = full_hotbar;
+    const auto pending =
+        inventory_reconcile_legendary_weapon(
+            full_inventory,
+            full_hotbar,
+            true);
+    CHECK(pending.recovery_required);
+    CHECK_FALSE(pending.weapon_present);
+    CHECK(full_inventory == full_before);
+    CHECK(full_hotbar == full_hotbar_before);
+
+    const auto removed =
+        inventory_reconcile_legendary_weapon(
+            recovered_inventory,
+            recovered_hotbar,
+            false);
+    CHECK(removed.removed_duplicates == 1U);
+    CHECK_FALSE(
+        inventory_has_legendary_weapon(
+            recovered_inventory,
+            recovered_hotbar));
+}
+
+TEST_CASE("la resistance du bouclier peut etre neutralisee par une arme a deux mains") {
+    InventoryMenuState inventory {};
+    inventory.equipment_slots[
+        equipment_slot_index(
+            EquipmentSlot::Chest)] =
+        inventory_make_slot(
+            to_block_id(BlockType::Pastron),
+            1U);
+    inventory.equipment_slots[
+        equipment_slot_index(
+            EquipmentSlot::Shield)] =
+        inventory_make_slot(
+            to_block_id(BlockType::RoundShield),
+            1U);
+    CHECK(
+        inventory_equipment_resistance_percent(
+            inventory) ==
+        doctest::Approx(30.0F));
+    CHECK(
+        inventory_equipment_resistance_percent(
+            inventory,
+            true) ==
+        doctest::Approx(18.0F));
+}
+
 TEST_CASE("hotbar layout stays centered and anchored to the bottom across resolutions") {
     auto hotbar = make_default_hotbar_state();
     select_hotbar_index(hotbar, 6);
@@ -2379,8 +2845,9 @@ TEST_CASE("main menu layout stays centered and resolves hovered buttons") {
     CHECK(layout.tagline_center_x == doctest::Approx(800.0F));
     CHECK(layout.buttons[0].label == "JOUER");
     CHECK(layout.buttons[1].label == "AVENTURE EN MER");
-    CHECK(layout.buttons[2].label == "CHARGER");
-    CHECK(layout.buttons[3].label == "OPTIONS");
+    CHECK(layout.buttons[2].label == "BACKROOMS");
+    CHECK(layout.buttons[3].label == "CHARGER");
+    CHECK(layout.buttons[4].label == "OPTIONS");
     CHECK(layout.buttons[1].hovered);
     CHECK(layout.buttons[1].selected);
 
@@ -2391,7 +2858,8 @@ TEST_CASE("main menu layout stays centered and resolves hovered buttons") {
 
 TEST_CASE("main menu keyboard navigation wraps across all actions") {
     CHECK(next_main_menu_action(MainMenuAction::Play, 1) == MainMenuAction::SeaAdventure);
-    CHECK(next_main_menu_action(MainMenuAction::SeaAdventure, 1) == MainMenuAction::Load);
+    CHECK(next_main_menu_action(MainMenuAction::SeaAdventure, 1) == MainMenuAction::Backrooms);
+    CHECK(next_main_menu_action(MainMenuAction::Backrooms, 1) == MainMenuAction::Load);
     CHECK(next_main_menu_action(MainMenuAction::Load, 1) == MainMenuAction::Options);
     CHECK(next_main_menu_action(MainMenuAction::Options, 1) == MainMenuAction::Play);
     CHECK(next_main_menu_action(MainMenuAction::Play, -1) == MainMenuAction::Options);
@@ -3270,7 +3738,7 @@ TEST_CASE("inventory number key swap can move a hovered stack into an empty hotb
     CHECK_FALSE(inventory_slot_has_item(inventory.storage_slots[13]));
 }
 
-TEST_CASE("save version 14 preserves loaded and empty muskets in every item container") {
+TEST_CASE("save version 18 preserves loaded and empty muskets in every item container") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -3279,7 +3747,7 @@ TEST_CASE("save version 14 preserves loaded and empty muskets in every item cont
                     .count()));
     const auto save_root =
         std::filesystem::temp_directory_path() /
-        ("valcraft-save-v14-musket-" +
+        ("valcraft-save-v15-musket-" +
          unique_suffix);
     std::filesystem::remove_all(save_root);
 
@@ -3340,7 +3808,7 @@ TEST_CASE("save version 14 preserves loaded and empty muskets in every item cont
             reinterpret_cast<char*>(&version),
             sizeof(version));
         REQUIRE(input.good());
-        CHECK(version == 14U);
+        CHECK(version == 18U);
     }
 
     const auto loaded =
@@ -3388,7 +3856,11 @@ TEST_CASE("save version 14 preserves loaded and empty muskets in every item cont
         sizeof(std::uint64_t);
     REQUIRE(
         byte_count >=
-        extension_byte_count);
+        extension_byte_count +
+            kSerializedLegendaryWeaponExtensionByteCount +
+            kSerializedBackroomsFlashlightExtensionByteCount +
+            kSerializedBackroomsJackExtensionByteCount +
+            kSerializedBackroomsLevelExtensionByteCount);
 
     const auto version_11_path =
         save_slot_file_path(
@@ -3425,6 +3897,10 @@ TEST_CASE("save version 14 preserves loaded and empty muskets in every item cont
         const auto hotbar_state_offset =
             static_cast<std::streamoff>(
                 byte_count -
+                kSerializedBackroomsLevelExtensionByteCount -
+                kSerializedBackroomsJackExtensionByteCount -
+                kSerializedBackroomsFlashlightExtensionByteCount -
+                kSerializedLegendaryWeaponExtensionByteCount -
                 extension_byte_count +
                 4U +
                 2U);
@@ -3459,6 +3935,396 @@ TEST_CASE("save version 14 preserves loaded and empty muskets in every item cont
             0U)
             .has_value());
 
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save version 18 round trips the permanent legendary weapon state and rejects a damaged extension") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v15-legendary-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.legendary_weapon = {
+        0x1234'5678'9ABC'DEF0ULL,
+        LegendaryWeaponQuestStage::FirstCombatComplete,
+        LegendaryWeaponAwakening::Awakened,
+        kLegendaryWeaponRequiredMapFragments,
+        144U,
+        kLegendaryWeaponUpgradeMomentum |
+            kLegendaryWeaponUpgradeStability,
+        LegendaryWeaponCosmetic::Sovereign,
+        true,
+        true,
+        true,
+        true,
+    };
+    REQUIRE(
+        is_valid_legendary_weapon_progression_state(
+            snapshot.legendary_weapon));
+    snapshot.hotbar.slots[3] =
+        inventory_make_slot(
+            to_block_id(
+                BlockType::LeviathanSpine),
+            1U);
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot);
+
+    const auto loaded =
+        load_save_slot(
+            save_root,
+            0U);
+    REQUIRE(loaded.has_value());
+    CHECK(
+        loaded->legendary_weapon ==
+        snapshot.legendary_weapon);
+    CHECK(
+        inventory_legendary_weapon_count(
+            loaded->inventory,
+            loaded->hotbar) == 1U);
+    CHECK(
+        is_legendary_weapon_item(
+            loaded->hotbar.slots[3]));
+
+    const auto source =
+        save_slot_file_path(
+            save_root,
+            0U);
+    const auto source_size =
+        std::filesystem::file_size(source);
+    REQUIRE(
+        source_size >=
+        kSerializedLegendaryWeaponExtensionByteCount +
+            kSerializedBackroomsFlashlightExtensionByteCount +
+            kSerializedBackroomsJackExtensionByteCount +
+            kSerializedBackroomsLevelExtensionByteCount);
+    const auto extension_offset =
+        static_cast<std::streamoff>(
+            source_size -
+            kSerializedBackroomsLevelExtensionByteCount -
+            kSerializedBackroomsJackExtensionByteCount -
+            kSerializedBackroomsFlashlightExtensionByteCount -
+            kSerializedLegendaryWeaponExtensionByteCount);
+    const auto copy_and_overwrite =
+        [&](std::size_t slot,
+            std::streamoff relative_offset,
+            std::uint8_t value) {
+            const auto path =
+                save_slot_file_path(
+                    save_root,
+                    slot);
+            std::filesystem::copy_file(
+                source,
+                path);
+            std::fstream output(
+                path,
+                std::ios::binary |
+                    std::ios::in |
+                    std::ios::out);
+            REQUIRE(output.good());
+            output.seekp(
+                extension_offset +
+                relative_offset);
+            output.write(
+                reinterpret_cast<const char*>(
+                    &value),
+                sizeof(value));
+            REQUIRE(output.good());
+        };
+
+    copy_and_overwrite(
+        1U,
+        0,
+        static_cast<std::uint8_t>('X'));
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            1U)
+            .has_value());
+
+    // Je cible l'octet d'eveil apres magic, schema, identifiant et etape.
+    copy_and_overwrite(
+        2U,
+        4 +
+            static_cast<std::streamoff>(
+                sizeof(std::uint8_t) +
+                sizeof(std::uint64_t) +
+                sizeof(std::uint8_t)),
+        255U);
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            2U)
+            .has_value());
+
+    // Je refuse aussi un booleen non canonique au lieu de le convertir.
+    copy_and_overwrite(
+        3U,
+        4 +
+            static_cast<std::streamoff>(
+                sizeof(std::uint8_t) +
+                sizeof(std::uint64_t) +
+                3U * sizeof(std::uint8_t) +
+                2U * sizeof(std::uint32_t) +
+                sizeof(std::uint8_t)),
+        2U);
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            3U)
+            .has_value());
+
+    const auto truncated =
+        save_slot_file_path(
+            save_root,
+            4U);
+    std::filesystem::copy_file(
+        source,
+        truncated);
+    std::filesystem::resize_file(
+        truncated,
+        source_size - 1U);
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            4U)
+            .has_value());
+
+    auto invalid = snapshot;
+    invalid.legendary_weapon.awakening =
+        LegendaryWeaponAwakening::Dormant;
+    CHECK_THROWS_AS(
+        write_save_slot(
+            save_root,
+            5U,
+            invalid),
+        std::runtime_error);
+
+    const auto legacy_path =
+        save_slot_file_path(
+            save_root,
+            6U);
+    std::filesystem::copy_file(
+        source,
+        legacy_path);
+    downgrade_current_save_to_v14(
+        legacy_path);
+    const auto legacy =
+        load_save_slot(
+            save_root,
+            6U);
+    REQUIRE(legacy.has_value());
+    CHECK(
+        legacy->legendary_weapon ==
+        LegendaryWeaponProgressionState {});
+    CHECK_FALSE(
+        inventory_has_legendary_weapon(
+            legacy->inventory,
+            legacy->hotbar));
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save version 18 preserves the Backrooms flashlight battery and rejects a damaged extension") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v16-flashlight-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.metadata.game_mode =
+        GameMode::Backrooms;
+    snapshot.backrooms_flashlight = {
+        .battery_charge = 0.37F,
+        .enabled = true,
+    };
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot);
+
+    const auto current =
+        load_save_slot(
+            save_root,
+            0U);
+    REQUIRE(current.has_value());
+    CHECK(
+        current->backrooms_flashlight
+            .battery_charge ==
+        doctest::Approx(0.37F));
+    CHECK(
+        current->backrooms_flashlight
+            .enabled);
+
+    const auto source =
+        save_slot_file_path(
+            save_root,
+            0U);
+    const auto source_size =
+        std::filesystem::file_size(source);
+    REQUIRE(
+        source_size >=
+        kSerializedBackroomsFlashlightExtensionByteCount +
+            kSerializedBackroomsJackExtensionByteCount +
+            kSerializedBackroomsLevelExtensionByteCount);
+
+    const auto legacy_path =
+        save_slot_file_path(
+            save_root,
+            1U);
+    std::filesystem::copy_file(
+        source,
+        legacy_path);
+    downgrade_current_save_to_v15(
+        legacy_path);
+    const auto legacy =
+        load_save_slot(
+            save_root,
+            1U);
+    REQUIRE(legacy.has_value());
+    CHECK(
+        legacy->backrooms_flashlight ==
+        BackroomsFlashlightState {});
+
+    const auto corrupted_magic =
+        save_slot_file_path(
+            save_root,
+            2U);
+    std::filesystem::copy_file(
+        source,
+        corrupted_magic);
+    {
+        std::fstream output(
+            corrupted_magic,
+            std::ios::binary |
+                std::ios::in |
+                std::ios::out);
+        REQUIRE(output.good());
+        output.seekp(
+            static_cast<std::streamoff>(
+                source_size -
+                kSerializedBackroomsLevelExtensionByteCount -
+                kSerializedBackroomsJackExtensionByteCount -
+                kSerializedBackroomsFlashlightExtensionByteCount));
+        constexpr auto invalid_magic =
+            std::uint8_t {'X'};
+        output.write(
+            reinterpret_cast<const char*>(
+                &invalid_magic),
+            sizeof(invalid_magic));
+        REQUIRE(output.good());
+    }
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            2U)
+            .has_value());
+
+    const auto corrupted_bool =
+        save_slot_file_path(
+            save_root,
+            3U);
+    std::filesystem::copy_file(
+        source,
+        corrupted_bool);
+    {
+        std::fstream output(
+            corrupted_bool,
+            std::ios::binary |
+                std::ios::in |
+                std::ios::out);
+        REQUIRE(output.good());
+        output.seekp(
+            static_cast<std::streamoff>(
+                source_size -
+                kSerializedBackroomsLevelExtensionByteCount -
+                kSerializedBackroomsJackExtensionByteCount -
+                1U));
+        constexpr auto invalid_bool =
+            std::uint8_t {2U};
+        output.write(
+            reinterpret_cast<const char*>(
+                &invalid_bool),
+            sizeof(invalid_bool));
+        REQUIRE(output.good());
+    }
+    CHECK_FALSE(
+        load_save_slot(
+            save_root,
+            3U)
+            .has_value());
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("save version 18 restaure le niveau Poolrooms et refuse un plan d'un autre etage") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-v18-poolrooms-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.metadata.seed = 74'021;
+    snapshot.metadata.game_mode =
+        GameMode::Backrooms;
+    snapshot.backrooms_level = -23;
+    snapshot.backrooms_jack.logical_level = -23;
+
+    WorldSavePlan plan {};
+    plan.seed = snapshot.metadata.seed;
+    plan.generation_profile =
+        WorldGenerationProfile::Backrooms;
+    plan.generation_version =
+        WorldGenerationVersion::BackroomsV1;
+    plan.backrooms_level = -23;
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot,
+        plan);
+
+    const auto loaded =
+        load_save_slot(save_root, 0U);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->backrooms_level == -23);
+    CHECK(
+        loaded->world_save_plan.backrooms_level ==
+        -23);
+    CHECK(
+        loaded->backrooms_jack.logical_level ==
+        -23);
+
+    plan.backrooms_level = -22;
+    CHECK_THROWS_AS(
+        write_save_slot(
+            save_root,
+            1U,
+            snapshot,
+            plan),
+        std::runtime_error);
     std::filesystem::remove_all(save_root);
 }
 
@@ -5051,7 +5917,9 @@ TEST_CASE("compact world save plan stays compact until its incremental world res
     snapshot.metadata.seed = seed;
     snapshot.metadata.modified_chunk_count = 1U;
     write_save_slot(save_root, 0, snapshot, save_plan);
-    CHECK(std::filesystem::file_size(save_slot_file_path(save_root, 0)) < 16U * 1024U);
+    // Je garde un plafond compact tout en comptant les extensions persistantes
+    // modernes, dont les 146 octets de l'état durable de Jack.
+    CHECK(std::filesystem::file_size(save_slot_file_path(save_root, 0)) < 17U * 1024U);
 
     const auto loaded = load_save_slot(save_root, 0);
     REQUIRE(loaded.has_value());
@@ -5347,7 +6215,7 @@ TEST_CASE("save game deletion removes slot metadata and payloads") {
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 14 round trips maritime milestones and active ability runtimes exactly") {
+TEST_CASE("save version 18 round trips maritime milestones and active ability runtimes exactly") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -5356,7 +6224,7 @@ TEST_CASE("save version 14 round trips maritime milestones and active ability ru
                     .count()));
     const auto save_root =
         std::filesystem::temp_directory_path() /
-        ("valcraft-save-v14-runtime-" +
+        ("valcraft-save-v15-runtime-" +
          unique_suffix);
     std::filesystem::remove_all(save_root);
 
@@ -5488,7 +6356,7 @@ TEST_CASE("save version 14 round trips maritime milestones and active ability ru
                 &version),
             sizeof(version));
         REQUIRE(input.good());
-        CHECK(version == 14U);
+        CHECK(version == 18U);
     }
 
     const auto loaded =
@@ -5513,7 +6381,7 @@ TEST_CASE("save version 14 round trips maritime milestones and active ability ru
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio to version 14") {
+TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio in version 18") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -5608,7 +6476,7 @@ TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio 
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 14 rejects invalid positional build array counts") {
+TEST_CASE("save version 18 rejects invalid positional build array counts") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -5617,7 +6485,7 @@ TEST_CASE("save version 14 rejects invalid positional build array counts") {
                     .count()));
     const auto save_root =
         std::filesystem::temp_directory_path() /
-        ("valcraft-save-v14-counts-" +
+        ("valcraft-save-v15-counts-" +
          unique_suffix);
     std::filesystem::remove_all(save_root);
 

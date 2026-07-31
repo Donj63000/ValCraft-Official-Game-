@@ -22,6 +22,7 @@ uniform vec3 u_camera_position;
 uniform vec4 u_ocean_waves[6];
 uniform vec2 u_ocean_wave_phases[6];
 uniform int u_ocean_wave_count;
+uniform int u_poolrooms_interior;
 
 out vec3 v_normal;
 out float v_sky_light;
@@ -96,7 +97,8 @@ void main() {
         clamp(a_wave_weight, 0.0, 1.0);
     vec2 ocean_gradient = vec2(0.0);
     float ocean_crest = 0.0;
-    if (wave_weight > 0.0) {
+    if (wave_weight > 0.0 &&
+        u_poolrooms_interior == 0) {
         float ocean_height = 0.0;
         sample_ocean(
             world_position.xz,
@@ -148,10 +150,12 @@ uniform sampler2D u_scene_depth;
 uniform sampler2DArray u_material_normal_height;
 uniform mat4 u_inverse_view_projection;
 uniform vec3 u_camera_position;
+uniform vec3 u_camera_forward;
 uniform vec3 u_sun_direction;
 uniform vec3 u_sun_color;
 uniform vec3 u_moon_disk_color;
 uniform vec3 u_ambient_color;
+uniform vec3 u_block_light_color;
 uniform vec3 u_fog_color;
 uniform vec3 u_distant_fog_color;
 uniform vec3 u_horizon_glow_color;
@@ -183,6 +187,12 @@ uniform int u_maritime_horizon_enabled;
 uniform vec2 u_maritime_water_blend_range;
 uniform vec2 u_maritime_far_fog_range;
 uniform float u_maritime_sea_level;
+uniform int u_enclosed_interior;
+uniform int u_poolrooms_interior;
+uniform int u_backrooms_flicker_count;
+uniform vec4 u_backrooms_flicker_lights[6];
+uniform float u_backrooms_flashlight_intensity;
+uniform vec2 u_interior_fog_range;
 
 out vec4 frag_color;
 )VALCRAFT_GLSL"} +
@@ -215,6 +225,150 @@ float value_noise2(vec2 position) {
         mix(southwest, southeast, curve.x),
         mix(northwest, northeast, curve.x),
         curve.y);
+}
+
+float backrooms_flashlight_irradiance(
+    vec3 world_position
+) {
+    float intensity =
+        max(
+            u_backrooms_flashlight_intensity,
+            0.0);
+    if (u_enclosed_interior == 0 ||
+        intensity <= 0.0001) {
+        return 0.0;
+    }
+
+    vec3 camera_to_fragment =
+        world_position - u_camera_position;
+    float distance_squared =
+        dot(camera_to_fragment, camera_to_fragment);
+    const float inverse_range_squared =
+        1.0 / (34.0 * 34.0);
+    float normalized_distance_squared =
+        distance_squared * inverse_range_squared;
+    if (normalized_distance_squared >= 1.0) {
+        return 0.0;
+    }
+
+    vec3 ray_direction =
+        camera_to_fragment *
+        inversesqrt(max(distance_squared, 0.000001));
+    float angle_cosine =
+        dot(
+            ray_direction,
+            ocean_visual_safe_normalize(
+                u_camera_forward,
+                vec3(0.0, 0.0, -1.0)));
+    const float outer_cone_cosine = 0.913545;
+    const float inner_cone_cosine = 0.974370;
+    const float hotspot_cosine = 0.994522;
+    const float penumbra_cone_cosine = 0.887011;
+    if (angle_cosine <= penumbra_cone_cosine) {
+        return 0.0;
+    }
+
+    float penumbra =
+        smoothstep(
+            penumbra_cone_cosine,
+            outer_cone_cosine,
+            angle_cosine);
+    float spill =
+        smoothstep(
+            outer_cone_cosine,
+            inner_cone_cosine,
+            angle_cosine);
+    float hotspot =
+        smoothstep(
+            inner_cone_cosine,
+            hotspot_cosine,
+            angle_cosine);
+    float angular_profile =
+        penumbra *
+        mix(
+            0.035,
+            mix(0.30, 1.0, hotspot),
+            spill);
+    float distance_attenuation =
+        clamp(
+            1.0 -
+                normalized_distance_squared *
+                normalized_distance_squared,
+            0.0,
+            1.0);
+    distance_attenuation *= distance_attenuation;
+    distance_attenuation /=
+        1.0 + 0.012 * distance_squared;
+    return
+        intensity *
+        angular_profile *
+        distance_attenuation;
+}
+
+float backrooms_flicker_light_scale(
+    vec3 world_position
+) {
+    if (u_enclosed_interior == 0) {
+        return 1.0;
+    }
+    float scale = 1.0;
+    for (int light_index = 0;
+         light_index < 6;
+         ++light_index) {
+        if (light_index >=
+            u_backrooms_flicker_count) {
+            break;
+        }
+        vec2 delta =
+            world_position.xz -
+            u_backrooms_flicker_lights[light_index].xz;
+        float distance_squared = dot(delta, delta);
+        float influence =
+            1.0 -
+            smoothstep(
+                9.0,
+                100.0,
+                distance_squared);
+        float flicker =
+            clamp(
+                u_backrooms_flicker_lights[light_index].w,
+                0.05,
+                1.0);
+        scale =
+            min(
+                scale,
+                mix(1.0, flicker, influence));
+    }
+    return scale;
+}
+
+float backrooms_darkness_visibility(
+    float local_light,
+    float flashlight_energy
+) {
+    if (u_enclosed_interior == 0) {
+        return 1.0;
+    }
+    float safe_local_light =
+        (isnan(local_light) ||
+         isinf(local_light))
+            ? 0.0
+            : clamp(local_light, 0.0, 1.0);
+    float safe_flashlight_energy =
+        (isnan(flashlight_energy) ||
+         isinf(flashlight_energy))
+            ? 0.0
+            : clamp(flashlight_energy, 0.0, 1.0);
+    float fixture_visibility =
+        smoothstep(0.000, 0.620, safe_local_light);
+    float flashlight_visibility =
+        smoothstep(0.000, 0.180, safe_flashlight_energy);
+    return clamp(
+        1.0 -
+            (1.0 - fixture_visibility) *
+            (1.0 - flashlight_visibility),
+        0.0,
+        1.0);
 }
 
 vec3 reconstruct_world_position(
@@ -396,6 +550,47 @@ vec3 atlantic_volume_color(
     return clear_color;
 }
 
+vec3 poolrooms_volume_color(
+    float water_depth
+) {
+    // Je garde les premiers centimètres turquoise et lisibles sous une lampe,
+    // puis je ferme rapidement le volume vers un bleu-vert inquiétant.
+    vec3 shallow_color =
+        vec3(0.018, 0.520, 0.460);
+    vec3 deep_color =
+        vec3(0.006, 0.070, 0.078);
+    return mix(
+        shallow_color,
+        deep_color,
+        smoothstep(0.55, 7.5, water_depth));
+}
+
+vec2 poolrooms_ripple_gradient(
+    vec2 world_xz
+) {
+    // Je superpose trois rides très lentes et de faible amplitude. Elles
+    // cassent le reflet des néons sans réintroduire la houle maritime.
+    const vec2 first_direction =
+        vec2(0.824, 0.566);
+    const vec2 second_direction =
+        vec2(-0.438, 0.899);
+    const vec2 third_direction =
+        vec2(0.970, -0.243);
+    float first_phase =
+        dot(world_xz, first_direction) * 2.10 +
+        u_water_animation_time * 0.31;
+    float second_phase =
+        dot(world_xz, second_direction) * 3.35 -
+        u_water_animation_time * 0.23;
+    float third_phase =
+        dot(world_xz, third_direction) * 1.42 +
+        u_water_animation_time * 0.14;
+    return
+        first_direction * cos(first_phase) * 0.024 +
+        second_direction * cos(second_phase) * 0.016 +
+        third_direction * cos(third_phase) * 0.010;
+}
+
 )VALCRAFT_GLSL" +
         R"VALCRAFT_GLSL(
 float fragmented_foam(
@@ -549,7 +744,10 @@ float ship_wake_mask(
 )VALCRAFT_GLSL" +
         R"VALCRAFT_GLSL(
 void main() {
-    if (ship_excludes_ocean(v_world_position)) {
+    bool poolrooms_interior =
+        u_poolrooms_interior != 0;
+    if (!poolrooms_interior &&
+        ship_excludes_ocean(v_world_position)) {
         // Je rejette l'eau sous la coque avant toute lecture de réfraction.
         discard;
     }
@@ -572,17 +770,26 @@ void main() {
     }
 
     vec2 detail_gradient = vec2(0.0);
-    if (u_ocean_detail_strength > 0.000001) {
+    if (poolrooms_interior) {
+        detail_gradient +=
+            poolrooms_ripple_gradient(
+                v_world_position.xz);
+    }
+    if (!poolrooms_interior &&
+        u_ocean_detail_strength > 0.000001) {
         detail_gradient +=
             analytic_detail_gradient(
                 v_world_position.xz);
     }
     detail_gradient +=
         material_detail_gradient(
-            v_world_position.xz);
+            v_world_position.xz) *
+        (poolrooms_interior ? 0.12 : 1.0);
     vec2 rain_gradient =
-        rain_dimple_gradient(
-            v_world_position.xz);
+        poolrooms_interior
+            ? vec2(0.0)
+            : rain_dimple_gradient(
+                  v_world_position.xz);
     detail_gradient +=
         rain_gradient;
     detail_gradient *=
@@ -636,9 +843,13 @@ void main() {
                 0));
     vec2 scene_uv =
         gl_FragCoord.xy * scene_texel;
+    float refraction_strength =
+        poolrooms_interior
+            ? mix(0.0085, 0.0022, fresnel)
+            : mix(0.018, 0.004, fresnel);
     vec2 refraction_offset =
         normal.xz *
-        mix(0.018, 0.004, fresnel) *
+        refraction_strength *
         surface_mask;
     vec2 refracted_uv =
         clamp(
@@ -691,17 +902,26 @@ void main() {
             0.0,
             64.0);
     float body_depth =
-        max(
-            water_depth,
-            0.24 + 0.18 * surface_mask);
+        poolrooms_interior
+            ? max(
+                  water_depth,
+                  0.10 + 0.06 * surface_mask)
+            : max(
+                  water_depth,
+                  0.24 + 0.18 * surface_mask);
 
     vec3 transmittance =
-        exp(
-            -k_ocean_visual_absorption *
-            body_depth);
+        poolrooms_interior
+            ? exp(
+                  -vec3(0.52, 0.110, 0.075) *
+                  body_depth)
+            : exp(
+                  -k_ocean_visual_absorption *
+                  body_depth);
     vec3 volume_color =
-        atlantic_volume_color(
-            body_depth);
+        poolrooms_interior
+            ? poolrooms_volume_color(body_depth)
+            : atlantic_volume_color(body_depth);
     float daylight =
         clamp(
             u_daylight_factor,
@@ -712,6 +932,38 @@ void main() {
             v_sky_light,
             0.0,
             1.0);
+    float local_light =
+        clamp(v_block_light, 0.0, 1.0) *
+        backrooms_flicker_light_scale(
+            v_world_position);
+    float flashlight_energy =
+        backrooms_flashlight_irradiance(
+            v_world_position);
+    float poolrooms_light_response =
+        poolrooms_interior
+            ? sqrt(
+                  clamp(
+                      local_light * 0.90 +
+                          flashlight_energy * 1.35,
+                      0.0,
+                      1.0))
+            : 0.0;
+    float poolrooms_shallow_factor =
+        poolrooms_interior
+            ? 1.0 -
+                  smoothstep(
+                      0.18,
+                      2.40,
+                      water_depth)
+            : 0.0;
+    float poolrooms_edge_band =
+        poolrooms_interior
+            ? 1.0 -
+                  smoothstep(
+                      0.025,
+                      0.30,
+                      water_depth)
+            : 0.0;
     vec3 water_light =
         u_ambient_color *
             mix(0.62, 1.05, sky_light) +
@@ -719,15 +971,33 @@ void main() {
             daylight *
             clamp(u_sun_visibility, 0.0, 1.0) *
             0.18 +
-        vec3(1.00, 0.62, 0.30) *
-            clamp(v_block_light, 0.0, 1.0) *
-            0.26;
+        u_block_light_color *
+            local_light *
+            (poolrooms_interior ? 0.72 : 0.26) +
+        vec3(1.00, 0.92, 0.76) *
+            flashlight_energy *
+            (poolrooms_interior ? 1.36 : 0.36);
     vec3 water_body =
         scene_color * transmittance +
         volume_color *
             water_light *
             (vec3(1.0) - transmittance);
+    if (poolrooms_interior) {
+        // Je révèle l'épaisseur et la rive uniquement sous un néon ou la
+        // Maglite. Le multiplicateur final d'obscurité conserve donc un noir
+        // absolu lorsque ces deux sources sont absentes.
+        vec3 shallow_turquoise =
+            vec3(0.018, 0.520, 0.460);
+        water_body +=
+            shallow_turquoise *
+            poolrooms_light_response *
+            (0.055 +
+             poolrooms_shallow_factor * 0.155 +
+             poolrooms_edge_band * 0.180);
+    }
 
+)VALCRAFT_GLSL" +
+        R"VALCRAFT_GLSL(
     vec3 reflected_view =
         reflect(
             -view_direction,
@@ -751,6 +1021,17 @@ void main() {
             u_ocean_tempest_factor,
             0.0,
             1.0);
+    float poolrooms_surface_fresnel =
+        poolrooms_interior
+            ? clamp(
+                  0.030 +
+                      pow(
+                          1.0 - view_alignment,
+                          4.0) *
+                          0.280,
+                  0.0,
+                  0.310)
+            : 0.0;
     vec3 reflected_sky =
         ocean_visual_reflected_sky(
             reflected_view,
@@ -769,6 +1050,26 @@ void main() {
             reflection_storm,
             reflection_tempest,
             u_lightning_intensity);
+    if (poolrooms_interior) {
+        // Je ne reflète aucun ciel dans une salle close. La scène résolue,
+        // les néons et la Maglite fournissent une réponse locale stable.
+        reflected_sky =
+            scene_color *
+                (0.22 +
+                 poolrooms_surface_fresnel * 0.62) +
+            u_block_light_color *
+                local_light *
+                (0.18 +
+                 poolrooms_surface_fresnel * 0.30) +
+            vec3(1.00, 0.92, 0.76) *
+                flashlight_energy *
+                (0.28 +
+                 poolrooms_surface_fresnel * 0.42) +
+            vec3(0.10, 0.78, 0.72) *
+                poolrooms_light_response *
+                (0.018 +
+                 poolrooms_surface_fresnel * 0.12);
+    }
 
     float shallow_contact =
         1.0 -
@@ -790,7 +1091,8 @@ void main() {
     float crest_foam = 0.0;
     float breaking_foam = 0.0;
     float rain_impact_foam = 0.0;
-    if (foam_detail >= 0.45) {
+    if (!poolrooms_interior) {
+        if (foam_detail >= 0.45) {
         foam_breakup =
             fragmented_foam(
                 v_world_position.xz,
@@ -864,13 +1166,17 @@ void main() {
                 1.0) *
             surface_mask *
             detailed_foam_strength;
+        }
     }
     float wake =
-        ship_wake_mask(
-            v_world_position);
+        poolrooms_interior
+            ? 0.0
+            : ship_wake_mask(
+                  v_world_position);
     float foam_strength =
         clamp(
-            shallow_contact * 0.58 +
+            shallow_contact *
+                (poolrooms_interior ? 0.0 : 0.58) +
                 crest_foam * 0.72 +
                 breaking_foam * 0.82 +
                 rain_impact_foam * 0.26 +
@@ -890,6 +1196,16 @@ void main() {
             reflected_sky,
             normal,
             view_direction);
+    if (poolrooms_interior) {
+        // Je souligne optiquement la rive sans générer de mousse : ce filet
+        // turquoise reste transparent et suit exactement la profondeur lue.
+        color +=
+            vec3(0.012, 0.520, 0.470) *
+            poolrooms_light_response *
+            (poolrooms_edge_band * 0.160 +
+             poolrooms_surface_fresnel * 0.110) *
+            surface_mask;
+    }
     color =
         mix(
             color,
@@ -941,6 +1257,23 @@ void main() {
                           0.001),
                   v_distance)
             : 0.0;
+    if (poolrooms_interior &&
+        u_interior_fog_range.x >= 0.0) {
+        float interior_terminal_fog =
+            u_interior_fog_range.y >
+                    u_interior_fog_range.x
+                ? smoothstep(
+                      u_interior_fog_range.x,
+                      u_interior_fog_range.y,
+                      length(
+                          v_world_position.xz -
+                          u_camera_position.xz))
+                : 1.0;
+        terminal_fog =
+            max(
+                terminal_fog,
+                interior_terminal_fog);
+    }
     float fog =
         clamp(
             max(
@@ -1022,6 +1355,10 @@ void main() {
                 far_blend);
     }
 
+    color *=
+        backrooms_darkness_visibility(
+            local_light,
+            flashlight_energy);
     frag_color =
         vec4(
             max(color, vec3(0.0)),

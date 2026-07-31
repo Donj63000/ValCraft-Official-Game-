@@ -16,12 +16,23 @@ enum class CommandConsoleCommand : std::uint8_t {
     None = 0,
     StartTempest = 1,
     GiveMusket = 2,
+    EnterIssou = 3,
+    ResetIssou = 4,
+    ExitIssou = 5,
+    SkipIssouCountdown = 6,
+    DisableIssouGore = 7,
+    EnableIssouGore = 8,
+    SetIssouAwakening0 = 9,
+    SetIssouAwakening1 = 10,
+    SetIssouAwakening2 = 11,
+    SetIssouAwakening3 = 12,
 };
 
 enum class CommandConsoleFamily : std::uint8_t {
     None = 0,
     Weather = 1,
     Give = 2,
+    Issou = 3,
 };
 
 enum class CommandConsoleParseStatus : std::uint8_t {
@@ -80,6 +91,8 @@ struct CommandConsoleTextWindow {
         return "UTILISATION : /METEO TEMPETE";
     case CommandConsoleFamily::Give:
         return "UTILISATION : /GIVE FUSIL";
+    case CommandConsoleFamily::Issou:
+        return "UTILISATION : /ISSOU [RESET|EXIT|SKIP|GORE 0|1|AWAKE 0|1|2|3]";
     case CommandConsoleFamily::None:
     default:
         return {};

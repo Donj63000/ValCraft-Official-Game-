@@ -126,6 +126,51 @@ auto read_all_bytes(const std::filesystem::path& path)
     return bytes;
 }
 
+void erase_terminal_extension(
+    std::vector<char>& bytes,
+    std::array<char, 4> magic,
+    std::size_t extension_byte_count) {
+    REQUIRE(bytes.size() >= extension_byte_count);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            extension_byte_count);
+    REQUIRE(std::equal(
+        magic.begin(),
+        magic.end(),
+        extension_begin));
+    bytes.erase(extension_begin, bytes.end());
+}
+
+void erase_current_post_item_extensions(
+    std::vector<char>& bytes) {
+    // Je déroule les extensions terminales dans l'ordre inverse d'écriture
+    // pour reconstruire fidèlement une sauvegarde v11 ou v10 historique.
+    erase_terminal_extension(
+        bytes,
+        {'B', 'R', 'L', 'V'},
+        4U + sizeof(std::uint8_t) +
+            sizeof(std::int32_t));
+    erase_terminal_extension(
+        bytes,
+        {'B', 'J', 'C', 'K'},
+        146U);
+    erase_terminal_extension(
+        bytes,
+        {'B', 'F', 'L', 'H'},
+        4U + sizeof(std::uint8_t) +
+            sizeof(float) + sizeof(std::uint8_t));
+    erase_terminal_extension(
+        bytes,
+        {'L', 'W', 'E', 'A'},
+        4U + sizeof(std::uint8_t) +
+            sizeof(std::uint64_t) +
+            3U * sizeof(std::uint8_t) +
+            2U * sizeof(std::uint32_t) +
+            sizeof(std::uint8_t) +
+            4U * sizeof(std::uint8_t));
+}
+
 void erase_item_extension_without_drops(
     std::vector<char>& bytes) {
     constexpr auto magic =
@@ -256,6 +301,7 @@ void downgrade_to_version_11(
         runtime_begin +
             static_cast<std::ptrdiff_t>(
                 kSerializedV14RuntimeExtensionBytes));
+    erase_current_post_item_extensions(bytes);
     erase_item_extension_without_drops(bytes);
     write_save_version(bytes, 11U);
     write_all_bytes(path, bytes);
@@ -289,6 +335,7 @@ void downgrade_to_version_10(
             static_cast<std::ptrdiff_t>(
                 kSerializedOldGuardPayloadBytes +
                 kSerializedV14RuntimeExtensionBytes));
+    erase_current_post_item_extensions(bytes);
     erase_item_extension_without_drops(bytes);
     write_save_version(bytes, 10U);
     write_all_bytes(path, bytes);

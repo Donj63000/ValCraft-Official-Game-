@@ -153,8 +153,14 @@ uniform vec3 u_camera_forward;
 uniform vec3 u_sun_direction;
 uniform vec3 u_sun_color;
 uniform vec3 u_ambient_color;
+uniform vec3 u_block_light_color;
+uniform int u_enclosed_interior;
+uniform int u_backrooms_flicker_count;
+uniform vec4 u_backrooms_flicker_lights[6];
+uniform float u_backrooms_flashlight_intensity;
 uniform vec3 u_fog_color;
 uniform vec3 u_distant_fog_color;
+uniform vec2 u_interior_fog_range;
 uniform vec3 u_night_tint_color;
 uniform float u_daylight_factor;
 uniform float u_sun_visibility;
@@ -186,6 +192,134 @@ float saturate(float value) {
     return clamp(value, 0.0, 1.0);
 }
 
+bool is_backrooms_block(uint block_id) {
+    return block_id >= 42u && block_id <= 63u;
+}
+
+vec3 backrooms_base_color(uint block_id) {
+    if (block_id == 42u) return vec3(0.76, 0.69, 0.36);
+    if (block_id == 43u) return vec3(0.46, 0.57, 0.38);
+    if (block_id == 44u) return vec3(0.40, 0.53, 0.61);
+    if (block_id == 45u) return vec3(0.61, 0.45, 0.47);
+    if (block_id == 46u) return vec3(0.55, 0.34, 0.21);
+    if (block_id == 47u) return vec3(0.43, 0.44, 0.41);
+    if (block_id == 48u) return vec3(0.39, 0.34, 0.20);
+    if (block_id == 49u) return vec3(0.67, 0.68, 0.58);
+    if (block_id == 50u) return vec3(0.78, 0.94, 0.78);
+    if (block_id == 51u) return vec3(0.24, 0.25, 0.22);
+    if (block_id == 52u) return vec3(0.92, 0.13, 0.065);
+    if (block_id == 53u) return vec3(0.79, 0.83, 0.80);
+    if (block_id == 54u) return vec3(0.52, 0.67, 0.65);
+    if (block_id == 55u) return vec3(0.24, 0.32, 0.33);
+    if (block_id == 56u) return vec3(0.31, 0.39, 0.41);
+    if (block_id == 57u) return vec3(0.08, 0.48, 0.55);
+    if (block_id == 58u) return vec3(0.72, 1.00, 0.97);
+    if (block_id == 59u) return vec3(0.18, 0.23, 0.24);
+    if (block_id == 60u) return vec3(0.39, 0.31, 0.20);
+    if (block_id == 61u) return vec3(0.13, 0.17, 0.18);
+    if (block_id == 62u) return vec3(0.08, 0.29, 0.14);
+    if (block_id == 63u) return vec3(0.88, 0.12, 0.045);
+    return vec3(1.0);
+}
+
+vec2 poolrooms_face_coordinate() {
+    vec3 normal_weight = abs(v_normal);
+    if (normal_weight.y >= normal_weight.x &&
+        normal_weight.y >= normal_weight.z) {
+        return v_world_position.xz;
+    }
+    if (normal_weight.x >= normal_weight.z) {
+        return v_world_position.zy;
+    }
+    return v_world_position.xy;
+}
+
+vec3 poolrooms_ceramic_color(uint block_id) {
+    // Je pose des carreaux de cinquante centimètres : cette échelle reste
+    // lisible à distance sans transformer les grandes salles en grille.
+    vec2 tile_position =
+        poolrooms_face_coordinate() * 2.0;
+    vec2 tile_cell = floor(tile_position);
+    vec2 centered =
+        abs(fract(tile_position) - vec2(0.5));
+    float edge_distance =
+        max(centered.x, centered.y);
+    vec2 derivative =
+        max(fwidth(tile_position), vec2(0.0005));
+    float antialias_width =
+        clamp(max(derivative.x, derivative.y) * 0.35, 0.0015, 0.035);
+    float grout =
+        smoothstep(
+            0.486 - antialias_width,
+            0.496 + antialias_width,
+            edge_distance);
+    float tile_variation =
+        fract(
+            sin(
+                dot(
+                    tile_cell,
+                    vec2(12.9898, 78.233))) *
+            43758.5453);
+    vec3 ceramic =
+        backrooms_base_color(block_id) *
+        mix(0.985, 1.015, tile_variation);
+    vec3 grout_color =
+        block_id == 55u
+            ? vec3(0.165, 0.225, 0.230)
+            : (block_id == 54u
+                   ? vec3(0.390, 0.505, 0.495)
+                   : vec3(0.585, 0.625, 0.605));
+    return mix(ceramic, grout_color, grout);
+}
+
+vec3 tint_backrooms_material(vec3 sampled_albedo, uint block_id) {
+    if (!is_backrooms_block(block_id)) {
+        return sampled_albedo;
+    }
+
+    // Je conserve le micro-détail PBR du matériau source, mais sa luminance
+    // module une couleur BackRooms stable. Les palettes restent ainsi nettes
+    // dans le pipeline moderne sans ajouter onze textures GPU redondantes.
+    float luminance = dot(
+        sampled_albedo,
+        vec3(0.2126, 0.7152, 0.0722));
+    float detail = mix(
+        0.70,
+        1.24,
+        smoothstep(0.08, 0.92, luminance));
+
+    if (block_id >= 53u && block_id <= 55u) {
+        // Je reconstruis le calepinage en espace monde pour garder des joints
+        // continus. Le matériau d'atlas ne fournit plus qu'une variation de
+        // trois pour cent afin de ne jamais superposer une seconde grille.
+        float atlas_modulation =
+            mix(
+                0.985,
+                1.015,
+                smoothstep(0.08, 0.92, luminance));
+        return clamp(
+            poolrooms_ceramic_color(block_id) *
+                atlas_modulation,
+            vec3(0.012),
+            vec3(1.0));
+    }
+
+    if (block_id >= 42u && block_id <= 46u) {
+        // Une fibre verticale très discrète empêche les grands murs de devenir
+        // des aplats propres ; elle évoque le papier peint jauni sans scintiller.
+        float fiber = 0.975 + 0.025 * sin(
+            v_world_position.y * 37.0 +
+            v_world_position.x * 0.19 +
+            v_world_position.z * 0.13);
+        detail *= fiber;
+    }
+
+    return clamp(
+        backrooms_base_color(block_id) * detail,
+        vec3(0.015),
+        vec3(1.0));
+}
+
 vec3 safe_normalize(vec3 value, vec3 fallback) {
     float value_length_squared = dot(value, value);
     if (!(value_length_squared > 0.00000001) ||
@@ -206,6 +340,21 @@ float material_layer(uint block_id) {
     if ((v_surface_flags & 32u) != 0u) {
         return float(clamp(block_id, 1u, 53u) - 1u);
     }
+    // Les matériaux BackRooms réutilisent les familles PBR existantes ; leur
+    // couleur propre est restaurée ensuite par tint_backrooms_material().
+    if (block_id >= 42u && block_id <= 46u) return 3.0;
+    if (block_id == 47u) return 2.0;
+    if (block_id == 48u) return 24.0;
+    if (block_id == 49u) return 11.0;
+    if (block_id == 50u || block_id == 52u) return 6.0;
+    if (block_id == 51u) return 23.0;
+    if (block_id >= 53u && block_id <= 55u) return 45.0;
+    if (block_id == 56u || block_id == 59u ||
+        block_id == 61u) return 36.0;
+    if (block_id == 57u || block_id == 63u) return 45.0;
+    if (block_id == 58u) return 38.0;
+    if (block_id == 60u) return 32.0;
+    if (block_id == 62u) return 5.0;
     if (block_id >= 1u && block_id <= 20u) {
         return float(block_id - 1u);
     }
@@ -219,6 +368,12 @@ float material_layer(uint block_id) {
     return 2.0;
 }
 
+)";
+
+// Je fractionne le fragment shader pour rester sous la limite des littéraux
+// MSVC sans modifier la source GLSL finalement assemblée.
+inline constexpr auto*
+    kModernTerrainFragmentShaderSourcePart1Materials = R"(
 float material_scale(uint block_id) {
     if ((v_surface_flags & 32u) != 0u) {
         return 1.0;
@@ -232,6 +387,18 @@ float material_scale(uint block_id) {
     if (block_id == 10u || block_id == 11u) return 0.76;
     if (block_id == 12u) return 0.92;
     if (block_id >= 32u && block_id <= 36u) return 0.92;
+    if (block_id >= 42u && block_id <= 46u) return 0.44;
+    if (block_id == 47u) return 0.82;
+    if (block_id == 48u) return 1.16;
+    if (block_id == 49u) return 0.72;
+    if (block_id >= 50u && block_id <= 52u) return 0.94;
+    if (block_id >= 53u && block_id <= 55u) return 0.92;
+    if (block_id == 56u || block_id == 59u) return 1.18;
+    if (block_id == 57u || block_id == 63u) return 0.82;
+    if (block_id == 58u) return 1.00;
+    if (block_id == 60u) return 0.68;
+    if (block_id == 61u) return 0.86;
+    if (block_id == 62u) return 0.94;
     return 0.68;
 }
 
@@ -248,7 +415,50 @@ float material_normal_strength(uint block_id) {
     if (block_id == 10u || block_id == 11u) return 0.095;
     if (block_id == 12u) return 0.030;
     if (block_id >= 32u && block_id <= 36u) return 0.100;
+    if (block_id >= 42u && block_id <= 46u) return 0.026;
+    if (block_id == 47u) return 0.055;
+    if (block_id == 48u) return 0.035;
+    if (block_id == 49u) return 0.018;
+    if (block_id >= 50u && block_id <= 52u) return 0.012;
+    // Je neutralise presque entièrement le relief de la couche céramique
+    // réutilisée : le seul calepinage lisible doit rester celui de 50 cm.
+    if (block_id >= 53u && block_id <= 55u) return 0.008;
+    if (block_id == 56u || block_id == 59u) return 0.055;
+    if (block_id == 57u || block_id == 63u) return 0.018;
+    if (block_id == 58u) return 0.010;
+    if (block_id == 60u) return 0.050;
+    if (block_id == 61u) return 0.035;
+    if (block_id == 62u) return 0.045;
     return 0.085;
+}
+
+float backrooms_material_roughness(
+    uint block_id,
+    float sampled_roughness
+) {
+    if (block_id == 53u) return 0.27;
+    if (block_id == 54u) return 0.095;
+    if (block_id == 55u) return 0.34;
+    if (block_id == 56u) return 0.24;
+    if (block_id == 57u) return 0.23;
+    if (block_id == 58u) return 0.16;
+    if (block_id == 59u) return 0.49;
+    if (block_id == 60u) return 0.52;
+    if (block_id == 61u) return 0.31;
+    if (block_id == 62u) return 0.74;
+    if (block_id == 63u) return 0.20;
+    return sampled_roughness;
+}
+
+float backrooms_material_metallic(
+    uint block_id,
+    float sampled_metallic
+) {
+    if (block_id == 56u) return 0.86;
+    if (block_id == 59u) return 0.72;
+    if (block_id == 61u) return 0.38;
+    if (block_id >= 53u && block_id <= 63u) return 0.0;
+    return sampled_metallic;
 }
 
 bool is_geological_block(uint block_id) {
@@ -547,6 +757,200 @@ float submerged_caustic_envelope(
         quality_attenuation);
 }
 
+)";
+
+inline constexpr auto*
+    kModernTerrainFragmentShaderSourcePart2Backrooms = R"(
+float backrooms_flashlight_irradiance(
+    vec3 world_position) {
+    float intensity =
+        max(
+            u_backrooms_flashlight_intensity,
+            0.0);
+    if (u_enclosed_interior == 0 ||
+        intensity <= 0.0001) {
+        return 0.0;
+    }
+
+    vec3 camera_to_fragment =
+        world_position -
+        u_camera_position;
+    float distance_squared =
+        dot(
+            camera_to_fragment,
+            camera_to_fragment);
+    const float inverse_range_squared =
+        1.0 / (34.0 * 34.0);
+    float normalized_distance_squared =
+        distance_squared *
+        inverse_range_squared;
+    if (normalized_distance_squared >= 1.0) {
+        return 0.0;
+    }
+
+    vec3 ray_direction =
+        camera_to_fragment *
+        inversesqrt(
+            max(
+                distance_squared,
+                0.000001));
+    float angle_cosine =
+        dot(
+            ray_direction,
+            safe_normalize(
+                u_camera_forward,
+                vec3(0.0, 0.0, -1.0)));
+    const float outer_cone_cosine = 0.913545;
+    const float inner_cone_cosine = 0.974370;
+    const float hotspot_cosine = 0.994522;
+    const float penumbra_cone_cosine = 0.887011;
+    if (angle_cosine <= penumbra_cone_cosine) {
+        return 0.0;
+    }
+
+    float penumbra =
+        smoothstep(
+            penumbra_cone_cosine,
+            outer_cone_cosine,
+            angle_cosine);
+    float spill =
+        smoothstep(
+            outer_cone_cosine,
+            inner_cone_cosine,
+            angle_cosine);
+    float hotspot =
+        smoothstep(
+            inner_cone_cosine,
+            hotspot_cosine,
+            angle_cosine);
+    float angular_profile =
+        penumbra *
+        mix(
+            0.035,
+            mix(
+                0.30,
+                1.0,
+                hotspot),
+            spill);
+    float distance_attenuation =
+        clamp(
+            1.0 -
+                normalized_distance_squared *
+                normalized_distance_squared,
+            0.0,
+            1.0);
+    distance_attenuation *= distance_attenuation;
+    distance_attenuation /=
+        1.0 +
+        0.012 *
+        distance_squared;
+    return
+        intensity *
+        angular_profile *
+        distance_attenuation;
+}
+
+vec2 backrooms_flicker_scales(
+    vec3 world_position) {
+    vec2 scales = vec2(1.0);
+    if (u_enclosed_interior == 0) {
+        return scales;
+    }
+    for (int light_index = 0;
+         light_index < 6;
+         ++light_index) {
+        if (light_index >=
+            u_backrooms_flicker_count) {
+            break;
+        }
+        vec2 light_delta =
+            world_position.xz -
+            u_backrooms_flicker_lights[
+                light_index].xz;
+        float light_distance_squared =
+            dot(
+                light_delta,
+                light_delta);
+        float light_influence =
+            1.0 -
+            smoothstep(
+                9.0,
+                100.0,
+                light_distance_squared);
+        float source_influence =
+            1.0 -
+            smoothstep(
+                4.0,
+                12.25,
+                light_distance_squared);
+        float flicker_intensity =
+            clamp(
+                u_backrooms_flicker_lights[
+                    light_index].w,
+                0.05,
+                1.0);
+        scales.x =
+            min(
+                scales.x,
+                mix(
+                    1.0,
+                    flicker_intensity,
+                    light_influence));
+        scales.y =
+            min(
+                scales.y,
+                mix(
+                    1.0,
+                    flicker_intensity,
+                    source_influence));
+    }
+    return scales;
+}
+
+float backrooms_darkness_visibility(
+    float local_light,
+    float flashlight_energy) {
+    if (u_enclosed_interior == 0) {
+        return 1.0;
+    }
+
+    // Je ne conserve aucune luminance artificielle lorsqu'aucun photon voxel
+    // ni aucun rayon de la Maglite n'atteint ce fragment. La transition douce
+    // evite toutefois de dessiner les marches discretes de la propagation.
+    float safe_local_light =
+        (isnan(local_light) ||
+         isinf(local_light))
+            ? 0.0
+            : clamp(
+                  local_light,
+                  0.0,
+                  1.0);
+    float safe_flashlight_energy =
+        (isnan(flashlight_energy) ||
+         isinf(flashlight_energy))
+            ? 0.0
+            : clamp(
+                  flashlight_energy,
+                  0.0,
+                  1.0);
+    float fixture_visibility =
+        smoothstep(
+            0.000,
+            0.620,
+            safe_local_light);
+    float flashlight_visibility =
+        smoothstep(
+            0.000,
+            0.180,
+            safe_flashlight_energy);
+    return clamp(
+        1.0 -
+            (1.0 - fixture_visibility) *
+            (1.0 - flashlight_visibility),
+        0.0,
+        1.0);
+}
+
 void main() {
     float maritime_horizon_haze = 0.0;
     if (u_maritime_horizon_enabled != 0 &&
@@ -679,8 +1083,19 @@ void main() {
             secondary_layer, secondary_scale, weights);
     }
 
+    // Je garde la luminance brute du texel avant la teinte Backrooms : elle
+    // distingue le tube clair de son cadre sombre pour le repli d'émission.
+    float primary_source_peak = max(
+        max(primary_sample.albedo.r, primary_sample.albedo.g),
+        primary_sample.albedo.b);
     vec4 primary_albedo = primary_sample.albedo;
     vec4 secondary_albedo = secondary_sample.albedo;
+    primary_albedo.rgb = tint_backrooms_material(
+        primary_albedo.rgb,
+        v_primary_block);
+    secondary_albedo.rgb = tint_backrooms_material(
+        secondary_albedo.rgb,
+        v_secondary_block);
     vec4 primary_orm = primary_sample.orm;
     vec4 secondary_orm = secondary_sample.orm;
     vec3 albedo = mix(primary_albedo.rgb, secondary_albedo.rgb, blend);
@@ -791,6 +1206,14 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
     float wetness = saturate(u_precipitation_intensity) *
                     saturate(v_sky_light) *
                     smoothstep(-0.15, 0.9, normal.y);
+    float poolrooms_wetness =
+        mix(
+            v_primary_block == 54u ? 1.0 : 0.0,
+            v_secondary_block == 54u ? 1.0 : 0.0,
+            blend);
+    wetness = max(wetness, poolrooms_wetness);
+    float enclosed_interior =
+        u_enclosed_interior != 0 ? 1.0 : 0.0;
     float raw_occlusion = saturate(orm.r * v_ao);
     float occlusion_floor = architectural_surface ? 0.24 : 0.30;
     if (geological_surface) {
@@ -799,10 +1222,56 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
     if (vegetation_surface) {
         occlusion_floor = 0.52;
     }
+    // Je conserve des contacts lisibles dans un espace ferme : l'occlusion
+    // structure les angles sans supprimer toute l'irradiance des plafonniers.
+    occlusion_floor = mix(
+        occlusion_floor,
+        max(occlusion_floor, 0.56),
+        enclosed_interior);
     float occlusion = mix(occlusion_floor, 1.0, raw_occlusion);
-    float roughness = clamp(mix(orm.g, orm.g * 0.48, wetness), 0.08, 1.0);
-    float metallic = saturate(orm.b);
+    float sampled_roughness =
+        mix(orm.g, orm.g * 0.48, wetness);
+    float roughness =
+        clamp(
+            mix(
+                backrooms_material_roughness(
+                    v_primary_block,
+                    sampled_roughness),
+                backrooms_material_roughness(
+                    v_secondary_block,
+                    sampled_roughness),
+                blend),
+            0.06,
+            1.0);
+    float metallic =
+        saturate(
+            mix(
+                backrooms_material_metallic(
+                    v_primary_block,
+                    orm.b),
+                backrooms_material_metallic(
+                    v_secondary_block,
+                    orm.b),
+                blend));
     float emission = saturate(orm.a);
+    if (v_primary_block == 50u || v_primary_block == 52u) {
+        // Je garde les tubes actifs lisibles lorsque la mip lointaine filtre
+        // leur émission. Le masque du texel empêche le cadre de rayonner; le
+        // plafond (49) et le tube cassé (51) restent entièrement éteints.
+        float source_mask =
+            smoothstep(0.52, 0.82, primary_source_peak);
+        emission = max(
+            emission,
+            (v_primary_block == 50u ? 0.92 : 0.82) *
+                source_mask);
+    } else if (v_primary_block == 58u) {
+        float source_mask =
+            smoothstep(0.48, 0.78, primary_source_peak);
+        emission =
+            max(
+                emission,
+                0.96 * source_mask);
+    }
 
     vec3 view_direction = safe_normalize(
         u_camera_position - v_world_position,
@@ -834,15 +1303,31 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
 
     float daylight = saturate(u_daylight_factor);
     float sky_exposure = smoothstep(0.0, 1.0, saturate(v_sky_light));
+    vec2 backrooms_flicker =
+        backrooms_flicker_scales(
+            v_world_position);
+    float local_light =
+        saturate(v_block_light) *
+        backrooms_flicker.x;
+    float smooth_local_light =
+        local_light * local_light * (3.0 - 2.0 * local_light);
+    float softened_local_light = mix(
+        local_light,
+        smooth_local_light,
+        enclosed_interior);
     vec3 ambient_albedo = albedo;
     if (vegetation_surface) {
         // Je relève uniquement le terme diffus des matières végétales sombres :
         // leur albédo et leur identité restent inchangés sous la lumière directe.
         ambient_albedo = max(ambient_albedo, vec3(0.055));
     }
-    vec3 ambient = u_ambient_color * ambient_albedo *
-                   mix(0.50, 1.08, sky_exposure) * occlusion;
     float hemisphere = saturate(geometric_normal.y * 0.5 + 0.5);
+    float ambient_distribution = mix(
+        mix(0.50, 1.08, sky_exposure),
+        mix(0.92, 1.04, hemisphere),
+        enclosed_interior);
+    vec3 ambient = u_ambient_color * ambient_albedo *
+                   ambient_distribution * occlusion;
     vec3 bounce_tint = mix(
         vec3(0.22, 0.13, 0.075),
         max(u_ambient_color, vec3(0.055, 0.065, 0.085)),
@@ -851,6 +1336,14 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
                   (0.075 + 0.075 * daylight) *
                   mix(0.72, 1.0, sky_exposure) *
                   occlusion;
+    float interior_distribution =
+        mix(0.72, 1.12, smoothstep(-0.2, 1.0, geometric_normal.y));
+    vec3 interior_bounce =
+        ambient_albedo * u_block_light_color *
+        enclosed_interior *
+        (0.090 * softened_local_light) *
+        interior_distribution *
+        mix(0.78, 1.0, occlusion);
     vec3 direct =
         (diffuse * diffuse_ndotl + specular * ndotl) *
         u_sun_color * visibility * u_sun_visibility * daylight;
@@ -866,7 +1359,7 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
     }
     vec3 torch = marine_fish
         ? vec3(0.0)
-        : vec3(1.18, 0.63, 0.25) * saturate(v_block_light) *
+        : u_block_light_color * softened_local_light *
               (albedo * 0.72 + vec3(0.18));
     float rim = pow(1.0 - ndotv, 2.6);
     float rim_strength = geological_surface
@@ -880,7 +1373,37 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
     if (architectural_surface && silhouette_bevel) {
         rim_light += u_sun_color * rim * 0.045 * daylight;
     }
-    vec3 color = ambient + bounce + direct + torch + rim_light;
+    vec3 color =
+        ambient + bounce + interior_bounce + direct + torch + rim_light;
+    float flashlight_energy =
+        backrooms_flashlight_irradiance(
+            v_world_position);
+    if (flashlight_energy > 0.0) {
+        float flashlight_incidence =
+            max(
+                dot(
+                    normal,
+                    view_direction),
+                0.0);
+        float contact_visibility =
+            mix(
+                0.78,
+                1.0,
+                occlusion);
+        vec3 flashlight_radiance =
+            vec3(1.00, 0.92, 0.76) *
+            (3.60 * flashlight_energy);
+        // Je rends le faisceau F identique dans les deux pipelines : son coeur
+        // revele franchement la piece, tandis que le spill reste localise.
+        color +=
+            albedo *
+            flashlight_radiance *
+            mix(
+                0.20,
+                1.0,
+                flashlight_incidence) *
+            contact_visibility;
+    }
     if (submerged_surface &&
         u_material_detail_scale >=
             k_normal_mapping_detail_threshold &&
@@ -923,7 +1446,22 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
             vec3(0.42, 0.72, 0.68) *
             caustic;
     }
-    color += albedo * emission * vec3(1.35, 0.74, 0.28);
+    vec3 emission_color =
+        albedo * vec3(1.35, 0.74, 0.28);
+    if (v_primary_block == 50u) {
+        emission_color = vec3(0.72, 1.02, 0.76);
+    } else if (v_primary_block == 52u) {
+        emission_color = vec3(1.12, 0.055, 0.025);
+    } else if (v_primary_block == 58u) {
+        emission_color = vec3(0.54, 0.98, 1.04);
+    }
+    color +=
+        emission_color *
+        emission *
+        mix(
+            1.0,
+            backrooms_flicker.y,
+            enclosed_interior);
     color = mix(color, color * vec3(0.69, 0.77, 0.86), wetness * 0.22);
     color += albedo * vec3(0.64, 0.74, 1.0) *
              saturate(u_lightning_intensity) * saturate(v_sky_light) * 0.42;
@@ -935,6 +1473,10 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
     float readability_energy =
         mix(0.105, 0.30, daylight) *
         mix(0.42, 1.0, sky_exposure);
+    readability_energy = mix(
+        readability_energy,
+        0.15 + 0.08 * softened_local_light,
+        enclosed_interior);
     if (vegetation_surface) {
         readability_energy += mix(0.055, 0.18, daylight);
     }
@@ -951,6 +1493,21 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
                         saturate(u_storm_intensity) * 0.36;
     float fog = 1.0 - exp(-v_distance * v_distance * 0.000008 * weather_fog);
     fog = max(fog, maritime_horizon_haze * 0.08);
+    if (u_interior_fog_range.x >= 0.0) {
+        // Je rends le fond ferme totalement opaque avant le premier anneau
+        // qui n'est pas encore garanti sur le GPU. Une plage nulle signifie
+        // que je masque immediatement toute geometrie non garantie.
+        float interior_distance =
+            length(v_world_position.xz - u_camera_position.xz);
+        float interior_terminal_fog =
+            u_interior_fog_range.y > u_interior_fog_range.x
+                ? smoothstep(
+                      u_interior_fog_range.x,
+                      u_interior_fog_range.y,
+                      interior_distance)
+                : 1.0;
+        fog = max(fog, interior_terminal_fog);
+    }
     float horizon = smoothstep(0.0, 1.0, 1.0 - abs(normalize(v_world_position - u_camera_position).y));
     vec3 atmospheric_color = mix(u_fog_color, u_distant_fog_color, saturate(fog + horizon * 0.08));
     bool underwater_volume =
@@ -1003,6 +1560,10 @@ inline constexpr auto* kModernTerrainFragmentShaderSourcePart3 = R"(
         color = mix(color, u_fog_color + vec3(0.08, 0.13, 0.16), 0.30);
         output_alpha = clamp(0.30 + coverage * 0.28, 0.30, 0.58);
     }
+    color *=
+        backrooms_darkness_visibility(
+            local_light,
+            flashlight_energy);
     frag_color = vec4(max(color, vec3(0.0)), output_alpha);
 }
 )";
@@ -1013,13 +1574,21 @@ inline const std::string kModernTerrainFragmentShaderSource = [] {
         std::char_traits<char>::length(
             kModernTerrainFragmentShaderSourcePart1) +
         std::char_traits<char>::length(
+            kModernTerrainFragmentShaderSourcePart1Materials) +
+        std::char_traits<char>::length(
             kModernTerrainFragmentShaderSourcePart2) +
+        std::char_traits<char>::length(
+            kModernTerrainFragmentShaderSourcePart2Backrooms) +
         std::char_traits<char>::length(
             kModernTerrainFragmentShaderSourcePart3));
     source +=
         kModernTerrainFragmentShaderSourcePart1;
     source +=
+        kModernTerrainFragmentShaderSourcePart1Materials;
+    source +=
         kModernTerrainFragmentShaderSourcePart2;
+    source +=
+        kModernTerrainFragmentShaderSourcePart2Backrooms;
     source +=
         kModernTerrainFragmentShaderSourcePart3;
     return source;
@@ -1066,6 +1635,13 @@ float material_layer(uint block_id) {
     if (block_id == 30u || block_id == 31u) return 24.0;
     if (block_id >= 32u && block_id <= 36u) return float(block_id - 7u);
     if (block_id >= 37u && block_id <= 39u) return 30.0;
+    if (block_id >= 53u && block_id <= 55u) return 45.0;
+    if (block_id == 56u || block_id == 59u ||
+        block_id == 61u) return 36.0;
+    if (block_id == 57u || block_id == 63u) return 45.0;
+    if (block_id == 58u) return 38.0;
+    if (block_id == 60u) return 32.0;
+    if (block_id == 62u) return 5.0;
     return 2.0;
 }
 

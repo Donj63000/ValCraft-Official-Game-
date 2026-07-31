@@ -133,6 +133,10 @@ struct WorldSavePlan {
     int seed = 1337;
     WorldGenerationProfile generation_profile = WorldGenerationProfile::Continental;
     WorldGenerationVersion generation_version = WorldGenerationVersion::LegacyV1;
+    // Je rattache les overrides à l'étage logique qui les a produits. Deux
+    // niveaux Backrooms peuvent partager les mêmes coordonnées X/Z sans jamais
+    // partager leur identité procédurale.
+    int backrooms_level = 0;
     std::vector<WorldSavePlanChunk> chunks {};
 };
 
@@ -218,6 +222,12 @@ public:
                    WorldGenerationProfile generation_profile = WorldGenerationProfile::Continental,
                    WorldGenerationVersion generation_version = WorldGenerationVersion::Latest,
                    VisualPipeline visual_pipeline = VisualPipeline::LegacyVoxel);
+    World(int seed,
+          int stream_radius,
+          WorldGenerationProfile generation_profile,
+          WorldGenerationVersion generation_version,
+          VisualPipeline visual_pipeline,
+          int backrooms_level);
 
     [[nodiscard]] auto get_block(int x, int y, int z) const -> BlockId;
     [[nodiscard]] auto water_level(int x, int y, int z) const -> std::uint8_t;
@@ -307,6 +317,7 @@ public:
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto generation_profile() const noexcept -> WorldGenerationProfile;
     [[nodiscard]] auto generation_version() const noexcept -> WorldGenerationVersion;
+    [[nodiscard]] auto backrooms_level() const noexcept -> int;
     [[nodiscard]] auto visual_pipeline() const noexcept -> VisualPipeline;
     void set_visual_pipeline(VisualPipeline visual_pipeline);
     [[nodiscard]] auto stream_radius() const noexcept -> int;
@@ -479,6 +490,7 @@ private:
                                  bool player_placed,
                                  const Chunk* loaded_chunk);
     [[nodiscard]] auto normalize_water_state_for_generated(const BlockCoord& world_coord, WaterState water_state) const -> WaterState;
+    [[nodiscard]] auto uses_static_poolrooms_water() const noexcept -> bool;
     [[nodiscard]] auto raw_water_state(int x, int y, int z) const -> WaterState;
     [[nodiscard]] auto can_water_flow_into_loaded(int x, int y, int z) const -> bool;
     [[nodiscard]] auto is_chunk_loaded_for_world(int x, int z) const noexcept -> bool;

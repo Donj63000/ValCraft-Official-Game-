@@ -15,6 +15,14 @@ performancesaudit/legacy-live/
 performancesaudit/visual-refactor-baseline-*/
 tmp-perf-probe/
 tmp-perf-review/
+artifacts/
+performancesaudit/perf-suite/
+
+# Je garde hors du dépôt les sauvegardes et produits temporaires de mes audits.
+.compiler-tmp/
+.codex-tmp-renderer-recovery/
+.amelie-refit-backup/
+__pycache__/
 
 *compile*.txt
 build-errors*.txt
@@ -31,6 +39,10 @@ valcraft-performance-patch.diff
 *.gcda
 *.gcno
 *.gcov
+*.obj
+
+# Je n'envoie pas le patch de secours une fois les sources intégrées.
+valcraft_backrooms_complete.patch
 
 Thumbs.db
 .DS_Store

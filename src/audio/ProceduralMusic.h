@@ -13,6 +13,7 @@ namespace valcraft {
 enum class ProceduralMusicScene : std::uint8_t {
     Classic = 0,
     SeaAdventure = 1,
+    Backrooms = 2,
 };
 
 struct ProceduralMusicContext {

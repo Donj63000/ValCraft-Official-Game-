@@ -6,6 +6,7 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
+#include <cstdint>
 #include <optional>
 #include <string_view>
 
@@ -14,6 +15,11 @@ namespace valcraft {
 class World;
 class ShipEntity;
 struct OceanState;
+
+enum class PlayerWaterMovementProfile : std::uint8_t {
+    Standard = 0,
+    Poolrooms = 1,
+};
 
 enum class PlayerDeathCause : std::uint8_t {
     None = 0,
@@ -24,6 +30,7 @@ enum class PlayerDeathCause : std::uint8_t {
     Starvation = 5,
     Thirst = 6,
     Stranded = 7,
+    JackThePirate = 8,
 };
 
 inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept -> std::string_view {
@@ -42,6 +49,8 @@ inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept 
         return "SOIF";
     case PlayerDeathCause::Stranded:
         return "NAVIRE PERDU";
+    case PlayerDeathCause::JackThePirate:
+        return "JACK LE PIRATE";
     case PlayerDeathCause::None:
     default:
         return "INCONNUE";
@@ -146,6 +155,8 @@ public:
     [[nodiscard]] auto apnea_resistance_percent() const noexcept -> float;
     [[nodiscard]] auto fall_safety_multiplier() const noexcept -> float;
     [[nodiscard]] auto movement_speed_multiplier() const noexcept -> float;
+    [[nodiscard]] auto water_movement_profile() const noexcept
+        -> PlayerWaterMovementProfile;
     [[nodiscard]] auto block_break_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto is_dead() const noexcept -> bool;
     [[nodiscard]] auto is_climbing_dynamic_obstacle() const noexcept -> bool;
@@ -162,6 +173,8 @@ public:
     void set_apnea_resistance_percent(float percent) noexcept;
     void set_fall_safety_multiplier(float multiplier) noexcept;
     void set_movement_speed_multiplier(float multiplier) noexcept;
+    void set_water_movement_profile(
+        PlayerWaterMovementProfile profile) noexcept;
     void set_block_break_speed_multiplier(float multiplier) noexcept;
     void trigger_primary_action() noexcept;
     void trigger_secondary_action() noexcept;
@@ -248,6 +261,10 @@ private:
     float apnea_resistance_percent_ = 0.0F;
     float fall_safety_multiplier_ = 1.0F;
     float movement_speed_multiplier_ = 1.0F;
+    // Je garde ce réglage dans le runtime du contrôleur : le niveau courant
+    // le réapplique et aucune donnée dérivée de l'eau ne pollue la sauvegarde.
+    PlayerWaterMovementProfile water_movement_profile_ =
+        PlayerWaterMovementProfile::Standard;
     float block_break_speed_multiplier_ = 1.0F;
     float ground_coyote_timer_ = 0.0F;
     float jump_buffer_timer_ = 0.0F;

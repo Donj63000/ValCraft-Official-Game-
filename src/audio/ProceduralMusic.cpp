@@ -104,6 +104,10 @@ auto sanitize_scene(ProceduralMusicScene scene) noexcept -> ProceduralMusicScene
     case ProceduralMusicScene::Classic:
     case ProceduralMusicScene::SeaAdventure:
         return scene;
+    case ProceduralMusicScene::Backrooms:
+        // Le bus BackRooms est synthétisé séparément dans GameMusic. Le
+        // compositeur musical reste sur sa scène neutre pendant le fondu.
+        return ProceduralMusicScene::Classic;
     }
     return ProceduralMusicScene::Classic;
 }

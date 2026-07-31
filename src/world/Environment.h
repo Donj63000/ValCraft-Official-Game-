@@ -29,6 +29,7 @@ struct EnvironmentState {
     glm::vec3 sun_direction {0.25F, 0.9F, 0.35F};
     glm::vec3 sun_color {1.0F, 0.95F, 0.82F};
     glm::vec3 ambient_color {0.42F, 0.48F, 0.56F};
+    glm::vec3 block_light_color {1.18F, 0.63F, 0.25F};
     glm::vec3 fog_color {0.52F, 0.68F, 0.86F};
     glm::vec3 sky_color {0.46F, 0.70F, 0.94F};
     glm::vec3 sky_zenith_color {0.38F, 0.66F, 0.98F};
@@ -62,7 +63,17 @@ struct EnvironmentState {
     float glow_strength = 0.22F;
     float post_sharpen_strength = 0.16F;
     float post_edge_strength = 0.14F;
+    bool suppress_gameplay_hud = false;
+    bool enclosed_interior = false;
+    bool poolrooms = false;
 };
+
+[[nodiscard]] auto make_backrooms_environment_state(
+    float elapsed_seconds,
+    int seed,
+    float player_x,
+    float player_z,
+    bool poolrooms = false) noexcept -> EnvironmentState;
 
 enum class CreaturePhase : unsigned char {
     Day = 0,

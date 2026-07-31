@@ -7,11 +7,13 @@
 
 namespace valcraft {
 
-constexpr int kBlockAtlasSize = 128;
+constexpr int kBlockAtlasSize = 256;
 constexpr int kBlockAtlasTileSize = 16;
-constexpr float kBlockAtlasTilesPerAxis = 8.0F;
+constexpr float kBlockAtlasTilesPerAxis = 16.0F;
 constexpr int kBlockBreakCrackAtlasRow = 5;
 constexpr int kShipAtlasRow = 7;
+constexpr int kBackroomsAtlasRow = 8;
+constexpr int kPoolroomsAtlasRow = 9;
 constexpr int kShipAtlasMaterialCount = 10;
 constexpr int kAccentAtlasSize = 64;
 constexpr int kAccentAtlasTileSize = 16;
@@ -270,6 +272,52 @@ enum class ShipAtlasMaterial : std::uint8_t {
         return {7, 6};
     case BlockType::Musket:
         return {4, 2};
+    case BlockType::LeviathanSpine:
+        return {4, 2};
+    case BlockType::BackroomsWallYellow:
+        return {0, kBackroomsAtlasRow};
+    case BlockType::BackroomsWallGreen:
+        return {1, kBackroomsAtlasRow};
+    case BlockType::BackroomsWallBlue:
+        return {2, kBackroomsAtlasRow};
+    case BlockType::BackroomsWallRose:
+        return {3, kBackroomsAtlasRow};
+    case BlockType::BackroomsWallOxide:
+        return {4, kBackroomsAtlasRow};
+    case BlockType::BackroomsConcrete:
+        return {5, kBackroomsAtlasRow};
+    case BlockType::BackroomsCarpet:
+        return {6, kBackroomsAtlasRow};
+    case BlockType::BackroomsCeilingTile:
+        return {7, kBackroomsAtlasRow};
+    case BlockType::BackroomsFluorescentLight:
+        return {8, kBackroomsAtlasRow};
+    case BlockType::BackroomsFailedLight:
+        return {9, kBackroomsAtlasRow};
+    case BlockType::BackroomsEmergencyLight:
+        return {10, kBackroomsAtlasRow};
+    case BlockType::PoolroomsTile:
+        return {0, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsWetTile:
+        return {1, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsDarkTile:
+        return {2, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsMetal:
+        return {3, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsPlastic:
+        return {4, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsLight:
+        return {5, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsFailedLight:
+        return {6, kPoolroomsAtlasRow};
+    case BlockType::BackroomsDesk:
+        return {7, kPoolroomsAtlasRow};
+    case BlockType::BackroomsChair:
+        return {8, kPoolroomsAtlasRow};
+    case BlockType::BackroomsPlant:
+        return {9, kPoolroomsAtlasRow};
+    case BlockType::PoolroomsFloat:
+        return {10, kPoolroomsAtlasRow};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -321,6 +369,8 @@ enum class ShipAtlasMaterial : std::uint8_t {
         return {7, 6};
     case BlockType::Musket:
         return {4, 2};
+    case BlockType::LeviathanSpine:
+        return {4, 2};
     default:
         return block_atlas_tile(block_id, BlockVisualFace::PositiveX);
     }
@@ -365,8 +415,36 @@ enum class ShipAtlasMaterial : std::uint8_t {
         return BlockVisualMaterial::Flora;
     case BlockType::Water:
         return BlockVisualMaterial::Water;
+    case BlockType::BackroomsWallYellow:
+    case BlockType::BackroomsWallGreen:
+    case BlockType::BackroomsWallBlue:
+    case BlockType::BackroomsWallRose:
+    case BlockType::BackroomsWallOxide:
+    case BlockType::BackroomsCarpet:
+        return BlockVisualMaterial::Fabric;
+    case BlockType::BackroomsConcrete:
+    case BlockType::BackroomsCeilingTile:
+    case BlockType::PoolroomsTile:
+    case BlockType::PoolroomsWetTile:
+    case BlockType::PoolroomsDarkTile:
+        return BlockVisualMaterial::Rock;
+    case BlockType::BackroomsFailedLight:
+    case BlockType::PoolroomsMetal:
+    case BlockType::PoolroomsFailedLight:
+    case BlockType::BackroomsChair:
+        return BlockVisualMaterial::Metal;
     case BlockType::Torch:
+    case BlockType::BackroomsFluorescentLight:
+    case BlockType::BackroomsEmergencyLight:
+    case BlockType::PoolroomsLight:
         return BlockVisualMaterial::Emissive;
+    case BlockType::PoolroomsPlastic:
+    case BlockType::PoolroomsFloat:
+        return BlockVisualMaterial::Fabric;
+    case BlockType::BackroomsDesk:
+        return BlockVisualMaterial::Wood;
+    case BlockType::BackroomsPlant:
+        return BlockVisualMaterial::Foliage;
     case BlockType::Snow:
         return BlockVisualMaterial::Snow;
     case BlockType::Glass:
@@ -376,6 +454,7 @@ enum class ShipAtlasMaterial : std::uint8_t {
     case BlockType::Sword:
     case BlockType::Spear:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     case BlockType::Pickaxe:
     case BlockType::Shovel:
         return BlockVisualMaterial::Rock;

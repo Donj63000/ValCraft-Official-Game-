@@ -25,7 +25,20 @@ namespace {
 
 constexpr std::array<char, 8> kSaveMagic {{'V', 'A', 'L', 'S', 'L', 'O', 'T', '1'}};
 constexpr std::array<char, 4> kItemInstanceStateMagic {{'I', 'T', 'E', 'M'}};
-constexpr std::uint32_t kSaveVersion = 14;
+constexpr std::array<char, 4> kLegendaryWeaponStateMagic {{'L', 'W', 'E', 'A'}};
+constexpr std::array<char, 4> kBackroomsFlashlightStateMagic {{'B', 'F', 'L', 'H'}};
+constexpr std::array<char, 4> kBackroomsJackStateMagic {{'B', 'J', 'C', 'K'}};
+constexpr std::array<char, 4> kBackroomsLevelStateMagic {{'B', 'R', 'L', 'V'}};
+constexpr std::uint8_t kLegendaryWeaponStateFormatVersion = 1U;
+constexpr std::uint8_t kBackroomsFlashlightStateFormatVersion = 1U;
+constexpr std::uint8_t kBackroomsJackStateFormatVersion = 1U;
+constexpr std::uint8_t kBackroomsLevelStateFormatVersion = 1U;
+constexpr std::uint32_t kSaveVersion = 18;
+constexpr std::uint32_t kSaveVersionBackroomsLevel = 18;
+constexpr std::uint32_t kSaveVersionBackroomsJack = 17;
+constexpr std::uint32_t kSaveVersionBackroomsFlashlight = 16;
+constexpr std::uint32_t kSaveVersionBackrooms = 15;
+constexpr std::uint32_t kSaveVersionLegendaryWeapon = 15;
 constexpr std::uint32_t kSaveVersionRuntimeState = 14;
 constexpr std::uint32_t kSaveVersionCountedBuildArrays = 14;
 constexpr std::uint32_t kSaveVersionProgressionBuilds = 13;
@@ -50,6 +63,12 @@ constexpr std::uint64_t kMaximumSavedNavigationMilestone =
     1'000'000ULL /
     ExperienceRewardPolicy::kNavigationExperienceDistanceMeters;
 constexpr float kMaximumSavedAbilityRuntimeSeconds = 86'400.0F;
+constexpr float kMaximumSavedBackroomsJackSuspicion = 3.75F;
+constexpr float kMaximumSavedBackroomsJackPhaseSeconds = 86'400.0F;
+constexpr float kMaximumSavedBackroomsJackLostSightSeconds = 86'400.0F;
+constexpr float kMaximumSavedBackroomsJackUnseenDistance = 100'000.0F;
+constexpr float kMaximumSavedBackroomsJackSpawnDelay = 3'600.0F;
+constexpr float kMaximumSavedBackroomsJackFootstepDistance = 2.0F;
 
 static_assert(kChunkSizeX > 0 && kChunkSizeZ > 0);
 static_assert(kShipCrewMemberCount == 6U, "Changer le roster v9 exige une nouvelle version de sauvegarde");
@@ -59,6 +78,19 @@ static_assert(sizeof(std::underlying_type_t<ShipCrewActivity>) == sizeof(std::ui
 static_assert(sizeof(std::underlying_type_t<ShipCrewCargo>) == sizeof(std::uint8_t));
 static_assert(sizeof(std::underlying_type_t<ShipCrewStation>) == sizeof(std::uint8_t));
 static_assert(sizeof(std::underlying_type_t<OldGuardAction>) == sizeof(std::uint8_t));
+static_assert(
+    sizeof(std::underlying_type_t<LegendaryWeaponQuestStage>) ==
+    sizeof(std::uint8_t));
+static_assert(
+    sizeof(std::underlying_type_t<LegendaryWeaponAwakening>) ==
+    sizeof(std::uint8_t));
+static_assert(
+    sizeof(std::underlying_type_t<LegendaryWeaponCosmetic>) ==
+    sizeof(std::uint8_t));
+static_assert(
+    sizeof(std::underlying_type_t<BackroomsJackPhase>) ==
+    sizeof(std::uint8_t));
+static_assert(sizeof(int) == sizeof(std::int32_t));
 
 constexpr int kMinSafeSavedChunkX =
     (std::numeric_limits<int>::lowest)() / kChunkSizeX + kSavedChunkNeighborMargin;
@@ -99,20 +131,31 @@ auto has_sane_save_metadata_counts(const SaveSlotMetadata& metadata) noexcept ->
 }
 
 auto generation_profile_for_game_mode(GameMode mode) noexcept -> WorldGenerationProfile {
-    return mode == GameMode::SeaAdventure
-               ? WorldGenerationProfile::OceanAdventure
-               : WorldGenerationProfile::Continental;
+    switch (mode) {
+    case GameMode::SeaAdventure:
+        return WorldGenerationProfile::OceanAdventure;
+    case GameMode::Backrooms:
+        return WorldGenerationProfile::Backrooms;
+    case GameMode::ClassicAdventure:
+    default:
+        return WorldGenerationProfile::Continental;
+    }
 }
 
 auto is_supported_world_generation_version(WorldGenerationProfile profile,
                                            WorldGenerationVersion version) noexcept -> bool {
-    if (profile == WorldGenerationProfile::Continental) {
+    switch (profile) {
+    case WorldGenerationProfile::Continental:
         return version == WorldGenerationVersion::LegacyV1;
+    case WorldGenerationProfile::OceanAdventure:
+        return version == WorldGenerationVersion::LegacyV1 ||
+               version == WorldGenerationVersion::SparseArchipelagoV2 ||
+               version == WorldGenerationVersion::LivingOceanV3;
+    case WorldGenerationProfile::Backrooms:
+        return version == WorldGenerationVersion::BackroomsV1;
+    default:
+        return false;
     }
-    return profile == WorldGenerationProfile::OceanAdventure &&
-           (version == WorldGenerationVersion::LegacyV1 ||
-            version == WorldGenerationVersion::SparseArchipelagoV2 ||
-            version == WorldGenerationVersion::LivingOceanV3);
 }
 
 auto is_world_generation_version_compatible_with_save(std::uint32_t save_version,
@@ -121,7 +164,14 @@ auto is_world_generation_version_compatible_with_save(std::uint32_t save_version
     if (!is_supported_world_generation_version(profile, generation_version)) {
         return false;
     }
-    // Les formats v8/v9 possedaient deja le champ, mais seule la geographie
+    if (profile == WorldGenerationProfile::Backrooms) {
+        // Le profil et ses identifiants de blocs n'existent qu'à partir de v15.
+        // Une valeur BackRooms injectée dans une ancienne entête est rejetée.
+        return save_version >= kSaveVersionBackrooms &&
+               generation_version == WorldGenerationVersion::BackroomsV1;
+    }
+
+    // Les formats v8/v9 possédaient déjà le champ, mais seule la géographie
     // historique V1 existait alors. Une valeur V2/V3 dans ces entêtes est donc
     // un payload corrompu et ne doit jamais changer leur monde rétroactivement.
     return save_version >= kSaveVersionSeaDeparture ||
@@ -144,6 +194,118 @@ auto is_sane_saved_world_position(const glm::vec3& position) noexcept -> bool {
            std::abs(position.z) <= kMaxSavedWorldCoordinateMagnitude;
 }
 
+[[nodiscard]] auto is_finite_in_range(
+    float value,
+    float minimum,
+    float maximum) noexcept -> bool {
+    return std::isfinite(value) &&
+           value >= minimum &&
+           value <= maximum;
+}
+
+[[nodiscard]] auto backrooms_jack_phase_has_body_for_save(
+    BackroomsJackPhase phase) noexcept -> bool {
+    return phase == BackroomsJackPhase::Wandering ||
+           phase == BackroomsJackPhase::Watching ||
+           phase == BackroomsJackPhase::Chasing ||
+           phase == BackroomsJackPhase::Searching ||
+           phase == BackroomsJackPhase::Jumpscare;
+}
+
+[[nodiscard]] auto is_valid_backrooms_jack_save_state(
+    const BackroomsJackState& state) noexcept -> bool {
+    const auto phase_value =
+        static_cast<std::uint8_t>(state.phase);
+    if (phase_value >
+            static_cast<std::uint8_t>(
+                BackroomsJackPhase::Cooldown) ||
+        !is_sane_saved_world_position(state.position) ||
+        !is_sane_saved_world_position(
+            state.last_seen_player_position) ||
+        !is_sane_saved_world_position(
+            state.previous_player_position) ||
+        !std::isfinite(state.body_yaw_degrees) ||
+        state.body_yaw_degrees < -180.0F ||
+        state.body_yaw_degrees >= 180.0F ||
+        !is_finite_in_range(
+            state.head_yaw_degrees,
+            -45.0F,
+            45.0F) ||
+        !is_finite_in_range(
+            state.hunch_ratio,
+            0.0F,
+            1.0F) ||
+        !is_finite_in_range(
+            state.motion_amount,
+            0.0F,
+            1.0F) ||
+        !is_finite_in_range(
+            state.phase_seconds,
+            0.0F,
+            kMaximumSavedBackroomsJackPhaseSeconds) ||
+        !is_finite_in_range(
+            state.suspicion,
+            0.0F,
+            kMaximumSavedBackroomsJackSuspicion) ||
+        !is_finite_in_range(
+            state.lost_sight_seconds,
+            0.0F,
+            kMaximumSavedBackroomsJackLostSightSeconds) ||
+        !is_finite_in_range(
+            state.unseen_travel_distance,
+            0.0F,
+            kMaximumSavedBackroomsJackUnseenDistance) ||
+        !is_finite_in_range(
+            state.spawn_check_seconds,
+            0.0F,
+            kMaximumSavedBackroomsJackSpawnDelay) ||
+        !is_finite_in_range(
+            state.cooldown_seconds,
+            0.0F,
+            kBackroomsJackMaximumCooldownSeconds) ||
+        !is_finite_in_range(
+            state.footstep_distance,
+            0.0F,
+            kMaximumSavedBackroomsJackFootstepDistance) ||
+        state.evaded_chunk_count >
+            state.evaded_chunks.size() ||
+        !is_valid_backrooms_logical_level(
+            state.logical_level) ||
+        state.random_state == 0U ||
+        state.next_event_sequence == 0U ||
+        state.active !=
+            backrooms_jack_phase_has_body_for_save(
+                state.phase) ||
+        (!state.active && state.motion_amount != 0.0F) ||
+        (state.evaded_chunk_count > 0U &&
+         !state.has_last_evade_chunk)) {
+        return false;
+    }
+
+    for (const auto& chunk : state.evaded_chunks) {
+        if (!is_safe_saved_chunk_coord(chunk)) {
+            return false;
+        }
+    }
+    if (!is_safe_saved_chunk_coord(
+            state.last_evade_chunk)) {
+        return false;
+    }
+    for (std::size_t first = 0U;
+         first < state.evaded_chunk_count;
+         ++first) {
+        for (std::size_t second = first + 1U;
+             second < state.evaded_chunk_count;
+             ++second) {
+            if (state.evaded_chunks[first] ==
+                state.evaded_chunks[second]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void write_generation_profile(BinaryWriter& writer, WorldGenerationProfile profile);
 auto read_generation_profile(BinaryReader& reader, WorldGenerationProfile& profile) -> bool;
 
@@ -160,11 +322,40 @@ void validate_snapshot_for_write(const SaveGameSnapshot& snapshot) {
         !is_sane_saved_world_position(snapshot.player_state.position)) {
         throw std::runtime_error("Save snapshot contains an invalid world position");
     }
+    if (!is_valid_backrooms_logical_level(
+            snapshot.backrooms_level) ||
+        snapshot.backrooms_jack.logical_level !=
+            snapshot.backrooms_level ||
+        (snapshot.metadata.game_mode != GameMode::Backrooms &&
+         snapshot.backrooms_level != 0)) {
+        throw std::runtime_error(
+            "Save snapshot contains an inconsistent Backrooms level");
+    }
+    if (!is_valid_backrooms_jack_save_state(
+            snapshot.backrooms_jack)) {
+        throw std::runtime_error(
+            "Save snapshot contains an invalid Backrooms Jack state");
+    }
     for (const auto& drop : snapshot.item_drops) {
         auto sanitized_drop = drop;
         if (!sanitize_item_drop_state(sanitized_drop)) {
             throw std::runtime_error("Save snapshot contains an invalid item drop");
         }
+    }
+    if (!is_valid_legendary_weapon_progression_state(
+            snapshot.legendary_weapon)) {
+        throw std::runtime_error(
+            "Save snapshot contains an invalid legendary weapon state");
+    }
+    const auto legendary_weapon_count =
+        inventory_legendary_weapon_count(
+            snapshot.inventory,
+            snapshot.hotbar);
+    if ((!snapshot.legendary_weapon.weapon_owned &&
+         legendary_weapon_count != 0U) ||
+        legendary_weapon_count > 1U) {
+        throw std::runtime_error(
+            "Save snapshot contains inconsistent legendary weapon ownership");
     }
 
     for (const auto& chunk : snapshot.chunk_snapshots) {
@@ -187,7 +378,8 @@ void validate_world_save_plan(const SaveGameSnapshot& snapshot, const WorldSaveP
     }
 
     if (plan.generation_profile != WorldGenerationProfile::Continental &&
-        plan.generation_profile != WorldGenerationProfile::OceanAdventure) {
+        plan.generation_profile != WorldGenerationProfile::OceanAdventure &&
+        plan.generation_profile != WorldGenerationProfile::Backrooms) {
         throw std::runtime_error("World save plan uses an unsupported generation profile");
     }
     if (plan.generation_profile != generation_profile_for_game_mode(snapshot.metadata.game_mode)) {
@@ -195,6 +387,18 @@ void validate_world_save_plan(const SaveGameSnapshot& snapshot, const WorldSaveP
     }
     if (!is_supported_world_generation_version(plan.generation_profile, plan.generation_version)) {
         throw std::runtime_error("World save plan uses an unsupported generation version");
+    }
+    if (!is_valid_backrooms_logical_level(
+            static_cast<std::int32_t>(
+                plan.backrooms_level)) ||
+        (plan.generation_profile ==
+                 WorldGenerationProfile::Backrooms
+             ? plan.backrooms_level !=
+                   snapshot.backrooms_level
+             : plan.backrooms_level != 0 ||
+                   snapshot.backrooms_level != 0)) {
+        throw std::runtime_error(
+            "World save plan uses an inconsistent Backrooms level");
     }
 
     for (const auto& chunk : plan.chunks) {
@@ -381,6 +585,15 @@ auto read_bool(BinaryReader& reader, bool& value) -> bool {
     return true;
 }
 
+auto read_strict_bool(BinaryReader& reader, bool& value) -> bool {
+    auto raw = std::uint8_t {0U};
+    if (!reader.read_value(raw) || raw > 1U) {
+        return false;
+    }
+    value = raw == 1U;
+    return true;
+}
+
 void write_game_mode(BinaryWriter& writer, GameMode mode) {
     writer.write_value(static_cast<std::uint8_t>(mode));
 }
@@ -405,7 +618,8 @@ auto read_generation_profile(BinaryReader& reader, WorldGenerationProfile& profi
     }
     profile = static_cast<WorldGenerationProfile>(raw);
     return profile == WorldGenerationProfile::Continental ||
-           profile == WorldGenerationProfile::OceanAdventure;
+           profile == WorldGenerationProfile::OceanAdventure ||
+           profile == WorldGenerationProfile::Backrooms;
 }
 
 void write_vec3(BinaryWriter& writer, const glm::vec3& value) {
@@ -1141,6 +1355,329 @@ auto read_item_instance_state_extension(
     }
     return reader.read_value(
         snapshot.musket_shot_sequence);
+}
+
+void write_legendary_weapon_state_extension(
+    BinaryWriter& writer,
+    const LegendaryWeaponProgressionState& state) {
+    writer.write_bytes(
+        kLegendaryWeaponStateMagic.data(),
+        kLegendaryWeaponStateMagic.size());
+    writer.write_value(
+        kLegendaryWeaponStateFormatVersion);
+    writer.write_value(state.unique_weapon_id);
+    write_enum(writer, state.quest_stage);
+    write_enum(writer, state.awakening);
+    writer.write_value(
+        state.map_fragments_collected);
+    writer.write_value(state.corrupted_kills);
+    writer.write_value(state.upgrade_flags);
+    write_enum(writer, state.cosmetic);
+    write_bool(writer, state.weapon_owned);
+    write_bool(
+        writer,
+        state.astral_boss_defeated);
+    write_bool(
+        writer,
+        state.major_boss_defeated);
+    write_bool(
+        writer,
+        state.forge_ritual_complete);
+}
+
+auto read_legendary_weapon_state_extension(
+    BinaryReader& reader,
+    LegendaryWeaponProgressionState& state) -> bool {
+    auto magic =
+        std::array<
+            char,
+            kLegendaryWeaponStateMagic.size()> {};
+    auto format_version = std::uint8_t {0U};
+    LegendaryWeaponProgressionState raw {};
+    if (!reader.read_bytes(
+            magic.data(),
+            magic.size()) ||
+        magic != kLegendaryWeaponStateMagic ||
+        !reader.read_value(format_version) ||
+        format_version !=
+            kLegendaryWeaponStateFormatVersion ||
+        !reader.read_value(raw.unique_weapon_id) ||
+        !read_enum(reader, raw.quest_stage) ||
+        !read_enum(reader, raw.awakening) ||
+        !reader.read_value(
+            raw.map_fragments_collected) ||
+        !reader.read_value(raw.corrupted_kills) ||
+        !reader.read_value(raw.upgrade_flags) ||
+        !read_enum(reader, raw.cosmetic) ||
+        !read_strict_bool(
+            reader,
+            raw.weapon_owned) ||
+        !read_strict_bool(
+            reader,
+            raw.astral_boss_defeated) ||
+        !read_strict_bool(
+            reader,
+            raw.major_boss_defeated) ||
+        !read_strict_bool(
+            reader,
+            raw.forge_ritual_complete) ||
+        !is_valid_legendary_weapon_progression_state(
+            raw)) {
+        return false;
+    }
+    state = raw;
+    return true;
+}
+
+void write_backrooms_flashlight_state_extension(
+    BinaryWriter& writer,
+    const BackroomsFlashlightState& state) {
+    const auto sanitized =
+        sanitize_backrooms_flashlight_state(state);
+    writer.write_bytes(
+        kBackroomsFlashlightStateMagic.data(),
+        kBackroomsFlashlightStateMagic.size());
+    writer.write_value(
+        kBackroomsFlashlightStateFormatVersion);
+    writer.write_value(
+        sanitized.battery_charge);
+    write_bool(
+        writer,
+        sanitized.enabled);
+}
+
+auto read_backrooms_flashlight_state_extension(
+    BinaryReader& reader,
+    BackroomsFlashlightState& state) -> bool {
+    auto magic =
+        std::array<
+            char,
+            kBackroomsFlashlightStateMagic.size()> {};
+    auto format_version = std::uint8_t {0U};
+    BackroomsFlashlightState raw {};
+    if (!reader.read_bytes(
+            magic.data(),
+            magic.size()) ||
+        magic != kBackroomsFlashlightStateMagic ||
+        !reader.read_value(format_version) ||
+        format_version !=
+            kBackroomsFlashlightStateFormatVersion ||
+        !reader.read_value(raw.battery_charge) ||
+        !read_strict_bool(
+            reader,
+            raw.enabled) ||
+        !std::isfinite(raw.battery_charge) ||
+        raw.battery_charge < 0.0F ||
+        raw.battery_charge > 1.0F ||
+        (raw.enabled &&
+         raw.battery_charge <= 0.0F)) {
+        return false;
+    }
+    state =
+        sanitize_backrooms_flashlight_state(raw);
+    return true;
+}
+
+void write_backrooms_jack_state_extension(
+    BinaryWriter& writer,
+    const BackroomsJackState& state) {
+    // Je fixe BJCK v1 à 146 octets : magic/version/phase, trois vec3, onze
+    // floats, quatre ChunkCoord, compteur u8, dernier chunk, RNG u32,
+    // séquence u64 puis sept booléens stricts. Aucun chemin A* ni runtime
+    // dépendant du streaming n'entre dans ce payload.
+    writer.write_bytes(
+        kBackroomsJackStateMagic.data(),
+        kBackroomsJackStateMagic.size());
+    writer.write_value(
+        kBackroomsJackStateFormatVersion);
+    write_enum(writer, state.phase);
+    write_vec3(writer, state.position);
+    write_vec3(
+        writer,
+        state.last_seen_player_position);
+    write_vec3(
+        writer,
+        state.previous_player_position);
+    writer.write_value(state.body_yaw_degrees);
+    writer.write_value(state.head_yaw_degrees);
+    writer.write_value(state.hunch_ratio);
+    writer.write_value(state.motion_amount);
+    writer.write_value(state.phase_seconds);
+    writer.write_value(state.suspicion);
+    writer.write_value(state.lost_sight_seconds);
+    writer.write_value(
+        state.unseen_travel_distance);
+    writer.write_value(state.spawn_check_seconds);
+    writer.write_value(state.cooldown_seconds);
+    writer.write_value(state.footstep_distance);
+    for (const auto& chunk : state.evaded_chunks) {
+        writer.write_value(
+            static_cast<std::int32_t>(chunk.x));
+        writer.write_value(
+            static_cast<std::int32_t>(chunk.z));
+    }
+    writer.write_value(
+        static_cast<std::uint8_t>(
+            state.evaded_chunk_count));
+    writer.write_value(
+        static_cast<std::int32_t>(
+            state.last_evade_chunk.x));
+    writer.write_value(
+        static_cast<std::int32_t>(
+            state.last_evade_chunk.z));
+    writer.write_value(state.random_state);
+    writer.write_value(state.next_event_sequence);
+    write_bool(writer, state.active);
+    write_bool(
+        writer,
+        state.has_previous_player_position);
+    write_bool(
+        writer,
+        state.has_last_evade_chunk);
+    write_bool(
+        writer,
+        state.next_step_is_wooden);
+    write_bool(
+        writer,
+        state.notice_event_emitted);
+    write_bool(
+        writer,
+        state.chase_event_emitted);
+    write_bool(
+        writer,
+        state.screamer_event_emitted);
+}
+
+auto read_backrooms_jack_state_extension(
+    BinaryReader& reader,
+    BackroomsJackState& state) -> bool {
+    auto magic =
+        std::array<
+            char,
+            kBackroomsJackStateMagic.size()> {};
+    auto format_version = std::uint8_t {0U};
+    auto raw_count = std::uint8_t {0U};
+    BackroomsJackState raw {};
+    if (!reader.read_bytes(
+            magic.data(),
+            magic.size()) ||
+        magic != kBackroomsJackStateMagic ||
+        !reader.read_value(format_version) ||
+        format_version !=
+            kBackroomsJackStateFormatVersion ||
+        !read_enum(reader, raw.phase) ||
+        !read_vec3(reader, raw.position) ||
+        !read_vec3(
+            reader,
+            raw.last_seen_player_position) ||
+        !read_vec3(
+            reader,
+            raw.previous_player_position) ||
+        !reader.read_value(raw.body_yaw_degrees) ||
+        !reader.read_value(raw.head_yaw_degrees) ||
+        !reader.read_value(raw.hunch_ratio) ||
+        !reader.read_value(raw.motion_amount) ||
+        !reader.read_value(raw.phase_seconds) ||
+        !reader.read_value(raw.suspicion) ||
+        !reader.read_value(raw.lost_sight_seconds) ||
+        !reader.read_value(
+            raw.unseen_travel_distance) ||
+        !reader.read_value(raw.spawn_check_seconds) ||
+        !reader.read_value(raw.cooldown_seconds) ||
+        !reader.read_value(raw.footstep_distance)) {
+        return false;
+    }
+    for (auto& chunk : raw.evaded_chunks) {
+        auto chunk_x = std::int32_t {0};
+        auto chunk_z = std::int32_t {0};
+        if (!reader.read_value(chunk_x) ||
+            !reader.read_value(chunk_z)) {
+            return false;
+        }
+        chunk = {
+            static_cast<int>(chunk_x),
+            static_cast<int>(chunk_z),
+        };
+    }
+
+    auto last_chunk_x = std::int32_t {0};
+    auto last_chunk_z = std::int32_t {0};
+    if (!reader.read_value(raw_count) ||
+        !reader.read_value(last_chunk_x) ||
+        !reader.read_value(last_chunk_z) ||
+        !reader.read_value(raw.random_state) ||
+        !reader.read_value(
+            raw.next_event_sequence) ||
+        !read_strict_bool(reader, raw.active) ||
+        !read_strict_bool(
+            reader,
+            raw.has_previous_player_position) ||
+        !read_strict_bool(
+            reader,
+            raw.has_last_evade_chunk) ||
+        !read_strict_bool(
+            reader,
+            raw.next_step_is_wooden) ||
+        !read_strict_bool(
+            reader,
+            raw.notice_event_emitted) ||
+        !read_strict_bool(
+            reader,
+            raw.chase_event_emitted) ||
+        !read_strict_bool(
+            reader,
+            raw.screamer_event_emitted)) {
+        return false;
+    }
+    raw.evaded_chunk_count =
+        static_cast<std::size_t>(raw_count);
+    raw.last_evade_chunk = {
+        static_cast<int>(last_chunk_x),
+        static_cast<int>(last_chunk_z),
+    };
+    if (!is_valid_backrooms_jack_save_state(raw)) {
+        return false;
+    }
+    state = raw;
+    return true;
+}
+
+void write_backrooms_level_state_extension(
+    BinaryWriter& writer,
+    std::int32_t logical_level) {
+    // Je garde le niveau dans une extension terminale autonome : le corps
+    // historique et le contrat BJCK v1 restent ainsi strictement inchangés.
+    writer.write_bytes(
+        kBackroomsLevelStateMagic.data(),
+        kBackroomsLevelStateMagic.size());
+    writer.write_value(
+        kBackroomsLevelStateFormatVersion);
+    writer.write_value(logical_level);
+}
+
+auto read_backrooms_level_state_extension(
+    BinaryReader& reader,
+    std::int32_t& logical_level) -> bool {
+    auto magic =
+        std::array<
+            char,
+            kBackroomsLevelStateMagic.size()> {};
+    auto format_version = std::uint8_t {0U};
+    auto raw_level = std::int32_t {0};
+    if (!reader.read_bytes(
+            magic.data(),
+            magic.size()) ||
+        magic != kBackroomsLevelStateMagic ||
+        !reader.read_value(format_version) ||
+        format_version !=
+            kBackroomsLevelStateFormatVersion ||
+        !reader.read_value(raw_level) ||
+        !is_valid_backrooms_logical_level(
+            raw_level)) {
+        return false;
+    }
+    logical_level = raw_level;
+    return true;
 }
 
 void write_player_state(BinaryWriter& writer, const PlayerState& state) {
@@ -2459,10 +2996,59 @@ auto load_save_slot(const std::filesystem::path& root_directory,
             snapshot)) {
         return std::nullopt;
     }
+    if (version >= kSaveVersionLegendaryWeapon &&
+        !read_legendary_weapon_state_extension(
+            reader,
+            snapshot.legendary_weapon)) {
+        return std::nullopt;
+    }
+    if (version >= kSaveVersionBackroomsFlashlight &&
+        !read_backrooms_flashlight_state_extension(
+            reader,
+            snapshot.backrooms_flashlight)) {
+        return std::nullopt;
+    }
+    if (version >= kSaveVersionBackroomsJack) {
+        if (!read_backrooms_jack_state_extension(
+                reader,
+                snapshot.backrooms_jack)) {
+            return std::nullopt;
+        }
+    } else {
+        // Je migre v1-v16 vers un Jack dormant neuf, dérivé du seed du slot.
+        // Aucun monstre actif ne peut ainsi surgir immédiatement au chargement
+        // d'une sauvegarde qui ne connaissait pas encore son état.
+        snapshot.backrooms_jack =
+            initialize_backrooms_jack(
+                static_cast<std::uint32_t>(
+                    snapshot.metadata.seed));
+    }
+    if (version >= kSaveVersionBackroomsLevel) {
+        if (!read_backrooms_level_state_extension(
+                reader,
+                snapshot.backrooms_level) ||
+            (snapshot.metadata.game_mode !=
+                     GameMode::Backrooms &&
+             snapshot.backrooms_level != 0)) {
+            return std::nullopt;
+        }
+    } else {
+        // Les sauvegardes v1-v17 ne connaissaient qu'un étage Backrooms.
+        snapshot.backrooms_level = 0;
+    }
+    snapshot.world_save_plan.backrooms_level =
+        snapshot.backrooms_level;
+    snapshot.backrooms_jack.logical_level =
+        snapshot.backrooms_level;
     normalize_inventory_state(snapshot.inventory, snapshot.hotbar);
     for (auto& drop : snapshot.item_drops) {
         normalize_item_stack(drop.stack);
     }
+    static_cast<void>(
+        inventory_reconcile_legendary_weapon(
+            snapshot.inventory,
+            snapshot.hotbar,
+            snapshot.legendary_weapon.weapon_owned));
     if (!report_load_progress(input, total_bytes, SaveLoadPhase::Finalizing, progress_callback, true)) {
         return std::nullopt;
     }
@@ -2677,6 +3263,25 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
     write_item_instance_state_extension(
         writer,
         snapshot);
+    // Je separe l'etat permanent de l'arme de tous ses runtimes de combat :
+    // un chargement repart donc toujours au repos avec ses jauges recreees.
+    write_legendary_weapon_state_extension(
+        writer,
+        snapshot.legendary_weapon);
+    // Je termine par l'état propre aux Backrooms afin que la recharge ne
+    // puisse jamais être contournée par une simple sauvegarde/reprise.
+    write_backrooms_flashlight_state_extension(
+        writer,
+        snapshot.backrooms_flashlight);
+    // Je garde BJCK inchangé et place BRLV après lui pour une migration
+    // append-only depuis le format v17.
+    write_backrooms_jack_state_extension(
+        writer,
+        snapshot.backrooms_jack);
+    // Je termine par le niveau logique borné sans modifier BJCK v1.
+    write_backrooms_level_state_extension(
+        writer,
+        snapshot.backrooms_level);
 
     output.flush();
     if (!writer.ok() || !output.good()) {

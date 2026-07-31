@@ -566,6 +566,495 @@ void fill_ship_atlas_tiles(std::vector<std::uint8_t>& pixels) {
     });
 }
 
+void fill_backrooms_wall_tile(
+    std::vector<std::uint8_t>& pixels,
+    int tile_x,
+    float red,
+    float green,
+    float blue,
+    int seed) {
+
+    fill_tile(
+        pixels,
+        tile_x,
+        kBackroomsAtlasRow,
+        [red, green, blue, seed](int x, int y) {
+            const auto grain = tile_noise(x, y, seed) - 0.5F;
+            const auto broad_stain =
+                tile_noise(x / 3 + 7, y / 3 + 11, seed + 37) - 0.5F;
+            const auto vertical_fiber =
+                (x % 4 == 0 ? -4.5F : 0.0F) +
+                (x % 4 == 1 ? 2.0F : 0.0F);
+            const auto lower_damp =
+                y >= 12
+                    ? static_cast<float>(y - 11) *
+                          (tile_noise(x, y, seed + 71) > 0.48F
+                               ? -2.4F
+                               : -0.8F)
+                    : 0.0F;
+            const auto hairline =
+                ((x + seed) % 13 == 0 && y >= 4 && y <= 12)
+                    ? -11.0F
+                    : 0.0F;
+            const auto variation =
+                grain * 18.0F +
+                broad_stain * 12.0F +
+                vertical_fiber +
+                lower_damp +
+                hairline;
+            return make_rgba(
+                red + variation,
+                green + variation * 0.88F,
+                blue + variation * 0.68F,
+                255.0F);
+        });
+}
+
+void fill_backrooms_atlas_tiles(
+    std::vector<std::uint8_t>& pixels) {
+
+    // Les teintes restent volontairement proches et sales : les changements
+    // de palette perturbent la mémoire spatiale sans transformer l'étage en
+    // décor multicolore.
+    fill_backrooms_wall_tile(
+        pixels,
+        0,
+        174.0F,
+        163.0F,
+        91.0F,
+        601);
+    fill_backrooms_wall_tile(
+        pixels,
+        1,
+        116.0F,
+        137.0F,
+        92.0F,
+        607);
+    fill_backrooms_wall_tile(
+        pixels,
+        2,
+        102.0F,
+        126.0F,
+        138.0F,
+        613);
+    fill_backrooms_wall_tile(
+        pixels,
+        3,
+        142.0F,
+        108.0F,
+        106.0F,
+        617);
+    fill_backrooms_wall_tile(
+        pixels,
+        4,
+        139.0F,
+        91.0F,
+        58.0F,
+        619);
+
+    fill_tile(
+        pixels,
+        5,
+        kBackroomsAtlasRow,
+        [](int x, int y) {
+            const auto aggregate =
+                tile_noise(x * 2, y * 2, 631);
+            const auto pit =
+                tile_noise(x + 13, y + 5, 641) > 0.88F
+                    ? -27.0F
+                    : 0.0F;
+            const auto form_line =
+                (x == 0 || y == 0) ? -13.0F : 0.0F;
+            const auto base =
+                92.0F + aggregate * 45.0F + pit + form_line;
+            return make_rgba(
+                base,
+                base * 0.96F,
+                base * 0.86F,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        6,
+        kBackroomsAtlasRow,
+        [](int x, int y) {
+            const auto fiber =
+                tile_noise(x * 3, y * 3, 653);
+            const auto weave =
+                ((x + y) % 3 == 0 ? 6.0F : -2.0F);
+            const auto old_stain =
+                tile_noise(x / 4 + 3, y / 4 + 9, 659) > 0.66F
+                    ? -17.0F
+                    : 0.0F;
+            return make_rgba(
+                104.0F + fiber * 32.0F + weave + old_stain,
+                96.0F + fiber * 27.0F + weave * 0.72F + old_stain,
+                55.0F + fiber * 18.0F + old_stain * 0.65F,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        7,
+        kBackroomsAtlasRow,
+        [](int x, int y) {
+            const auto border =
+                x == 0 || y == 0 ||
+                x == kBlockAtlasTileSize - 1 ||
+                y == kBlockAtlasTileSize - 1;
+            const auto pinhole =
+                tile_noise(x, y, 673) > 0.91F;
+            const auto grain =
+                tile_noise(x, y, 677) * 13.0F;
+            if (border) {
+                return make_rgba(
+                    91.0F,
+                    88.0F,
+                    67.0F,
+                    255.0F);
+            }
+            const auto hole = pinhole ? -34.0F : 0.0F;
+            return make_rgba(
+                169.0F + grain + hole,
+                164.0F + grain + hole,
+                126.0F + grain * 0.62F + hole,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        8,
+        kBackroomsAtlasRow,
+        [](int x, int y) {
+            const auto frame =
+                x <= 1 || x >= 14 || y <= 2 || y >= 13;
+            const auto tube =
+                y >= 5 && y <= 10 && x >= 2 && x <= 13;
+            const auto core =
+                y >= 6 && y <= 9 && x >= 3 && x <= 12;
+            if (frame) {
+                return make_rgba(
+                    86.0F,
+                    84.0F,
+                    68.0F,
+                    255.0F);
+            }
+            if (core) {
+                return make_rgba(
+                    250.0F,
+                    251.0F,
+                    213.0F,
+                    255.0F);
+            }
+            if (tube) {
+                return make_rgba(
+                    218.0F,
+                    225.0F,
+                    183.0F,
+                    255.0F);
+            }
+            return make_rgba(
+                142.0F,
+                137.0F,
+                105.0F,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        9,
+        kBackroomsAtlasRow,
+        [](int x, int y) {
+            const auto frame =
+                x <= 1 || x >= 14 || y <= 2 || y >= 13;
+            const auto tube =
+                y >= 5 && y <= 10 && x >= 2 && x <= 13;
+            const auto broken =
+                tube && ((x + y * 3) % 7 == 0);
+            if (frame) {
+                return make_rgba(
+                    58.0F,
+                    57.0F,
+                    49.0F,
+                    255.0F);
+            }
+            if (broken) {
+                return make_rgba(
+                    24.0F,
+                    25.0F,
+                    23.0F,
+                    255.0F);
+            }
+            if (tube) {
+                return make_rgba(
+                    103.0F,
+                    106.0F,
+                    91.0F,
+                    255.0F);
+            }
+            return make_rgba(
+                76.0F,
+                74.0F,
+                61.0F,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        10,
+        kBackroomsAtlasRow,
+        [](int x, int y) {
+            const auto frame =
+                x <= 1 || x >= 14 || y <= 2 || y >= 13;
+            const auto core =
+                y >= 6 && y <= 9 && x >= 3 && x <= 12;
+            if (frame) {
+                return make_rgba(
+                    66.0F,
+                    35.0F,
+                    29.0F,
+                    255.0F);
+            }
+            if (core) {
+                return make_rgba(
+                    246.0F,
+                    72.0F,
+                    48.0F,
+                    255.0F);
+            }
+            return make_rgba(
+                139.0F,
+                44.0F,
+                35.0F,
+                255.0F);
+        });
+}
+
+void fill_poolrooms_atlas_tiles(
+    std::vector<std::uint8_t>& pixels) {
+
+    const auto fill_ceramic =
+        [&pixels](
+            int tile_x,
+            float red,
+            float green,
+            float blue,
+            float wetness,
+            int seed) {
+            fill_tile(
+                pixels,
+                tile_x,
+                kPoolroomsAtlasRow,
+                [red, green, blue, wetness, seed](int x, int y) {
+                    // Je dessine quatre carreaux par bloc avec un joint continu
+                    // d'un pixel ; le motif reste lisible sans produire de gros
+                    // damiers lorsque la pièce s'étend sur plusieurs chunks.
+                    const auto grout = x % 4 == 0 || y % 4 == 0;
+                    const auto corner_dirt =
+                        (x % 4 <= 1 && y % 4 <= 1)
+                            ? tile_noise(x, y, seed + 31) * 8.0F
+                            : 0.0F;
+                    const auto grain =
+                        (tile_noise(x, y, seed) - 0.5F) * 7.0F;
+                    const auto wet_streak =
+                        wetness > 0.0F &&
+                                ((x + y * 2 + seed) % 11 == 0)
+                            ? 19.0F * wetness
+                            : 0.0F;
+                    if (grout) {
+                        return make_rgba(
+                            65.0F - wetness * 14.0F - corner_dirt,
+                            79.0F - wetness * 5.0F - corner_dirt,
+                            79.0F + wetness * 5.0F - corner_dirt,
+                            255.0F);
+                    }
+                    return make_rgba(
+                        red + grain - wetness * 18.0F + wet_streak * 0.38F,
+                        green + grain - wetness * 7.0F + wet_streak * 0.72F,
+                        blue + grain + wetness * 5.0F + wet_streak,
+                        255.0F);
+                });
+        };
+
+    fill_ceramic(0, 218.0F, 224.0F, 218.0F, 0.0F, 701);
+    fill_ceramic(1, 177.0F, 202.0F, 199.0F, 1.0F, 709);
+    fill_ceramic(2, 82.0F, 101.0F, 102.0F, 0.34F, 719);
+
+    fill_tile(
+        pixels,
+        3,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto seam = x == 0 || y == 0;
+            const auto brushing =
+                static_cast<float>((x + y * 5) % 7) - 3.0F;
+            const auto oxidation =
+                tile_noise(x, y, 727) > 0.91F ? -24.0F : 0.0F;
+            const auto base =
+                94.0F + brushing * 2.4F + oxidation -
+                (seam ? 25.0F : 0.0F);
+            return make_rgba(
+                base * 0.88F,
+                base * 0.98F,
+                base,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        4,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto mould_line =
+                x == 0 || x == 15 || y == 0 || y == 15;
+            const auto sheen =
+                std::sin(
+                    (static_cast<float>(x) +
+                     static_cast<float>(y) * 0.45F) *
+                    0.52F) *
+                7.0F;
+            const auto scuff =
+                tile_noise(x, y, 733) > 0.94F ? -22.0F : 0.0F;
+            return make_rgba(
+                31.0F + sheen * 0.35F + scuff,
+                137.0F + sheen + scuff * 0.55F -
+                    (mould_line ? 21.0F : 0.0F),
+                154.0F + sheen * 1.15F + scuff * 0.40F -
+                    (mould_line ? 18.0F : 0.0F),
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        5,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto frame =
+                x <= 1 || x >= 14 || y <= 2 || y >= 13;
+            const auto diffuser =
+                x >= 2 && x <= 13 && y >= 3 && y <= 12;
+            const auto core =
+                x >= 4 && x <= 11 && y >= 5 && y <= 10;
+            if (frame) {
+                return make_rgba(69.0F, 83.0F, 86.0F, 255.0F);
+            }
+            if (core) {
+                return make_rgba(226.0F, 255.0F, 252.0F, 255.0F);
+            }
+            if (diffuser) {
+                return make_rgba(172.0F, 223.0F, 220.0F, 255.0F);
+            }
+            return make_rgba(82.0F, 102.0F, 104.0F, 255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        6,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto frame =
+                x <= 1 || x >= 14 || y <= 2 || y >= 13;
+            const auto diffuser =
+                x >= 2 && x <= 13 && y >= 3 && y <= 12;
+            const auto crack =
+                diffuser &&
+                (std::abs((x - 3) - (y - 4)) <= 1 ||
+                 std::abs((14 - x) - (y - 6)) == 0);
+            if (frame) {
+                return make_rgba(43.0F, 52.0F, 54.0F, 255.0F);
+            }
+            if (crack) {
+                return make_rgba(19.0F, 24.0F, 25.0F, 255.0F);
+            }
+            return make_rgba(78.0F, 94.0F, 94.0F, 255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        7,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto edge =
+                x == 0 || x == 15 || y == 0 || y == 15;
+            const auto laminate =
+                (tile_noise(x, y, 743) - 0.5F) * 14.0F;
+            return make_rgba(
+                117.0F + laminate - (edge ? 22.0F : 0.0F),
+                102.0F + laminate * 0.68F - (edge ? 18.0F : 0.0F),
+                72.0F + laminate * 0.42F - (edge ? 14.0F : 0.0F),
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        8,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto stitch =
+                y == 2 || y == 13 || x == 2 || x == 13;
+            const auto grain =
+                (tile_noise(x, y, 751) - 0.5F) * 13.0F;
+            return make_rgba(
+                37.0F + grain + (stitch ? 7.0F : 0.0F),
+                46.0F + grain + (stitch ? 8.0F : 0.0F),
+                48.0F + grain + (stitch ? 9.0F : 0.0F),
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        9,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto stem =
+                (x == 7 || x == 8) && y >= 8;
+            const auto leaf_left =
+                y >= 3 && y <= 11 &&
+                x >= 2 && x <= 7 &&
+                std::abs((x + y) - 10) <= 3;
+            const auto leaf_right =
+                y >= 2 && y <= 10 &&
+                x >= 8 && x <= 13 &&
+                std::abs((x - y) - 5) <= 3;
+            if (!(stem || leaf_left || leaf_right)) {
+                return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+            }
+            const auto grain =
+                tile_noise(x, y, 757) * 21.0F;
+            return make_rgba(
+                29.0F + grain * 0.35F,
+                82.0F + grain,
+                48.0F + grain * 0.52F,
+                255.0F);
+        });
+
+    fill_tile(
+        pixels,
+        10,
+        kPoolroomsAtlasRow,
+        [](int x, int y) {
+            const auto dx = static_cast<float>(x) - 7.5F;
+            const auto dy = static_cast<float>(y) - 7.5F;
+            const auto distance =
+                std::sqrt(dx * dx + dy * dy);
+            const auto ring =
+                distance >= 3.4F && distance <= 6.6F;
+            if (!ring) {
+                return make_rgba(0.0F, 0.0F, 0.0F, 0.0F);
+            }
+            const auto highlight =
+                dx < -1.0F && dy < 1.0F ? 28.0F : 0.0F;
+            const auto stripe =
+                (x + y) % 7 <= 1 ? 34.0F : 0.0F;
+            return make_rgba(
+                210.0F + highlight,
+                55.0F + highlight * 0.30F + stripe,
+                31.0F + stripe * 0.42F,
+                255.0F);
+        });
+}
+
 } // namespace
 
 auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
@@ -574,7 +1063,7 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4), 0);
 
     // The terrain family below is baked from the authored PNG sources in Textures/.
-    // The renderer and mesher still consume the exact same 8x8 block atlas as before.
+    // Le mesher consomme désormais un atlas 16x16, sans déplacer les tuiles historiques.
     blit_packed_tile(pixels, 0, 0, kGrassTopTile);
     blit_packed_tile(pixels, 1, 0, kGrassSideTile);
     blit_packed_tile(pixels, 2, 0, kDirtTile);
@@ -976,6 +1465,8 @@ auto build_block_atlas_pixels() -> std::vector<std::uint8_t> {
     }
 
     fill_ship_atlas_tiles(pixels);
+    fill_backrooms_atlas_tiles(pixels);
+    fill_poolrooms_atlas_tiles(pixels);
 
     return pixels;
 }

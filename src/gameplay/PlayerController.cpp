@@ -28,6 +28,7 @@ constexpr float kJumpBufferSeconds = 0.12F;
 constexpr float kGravity = 24.0F;
 constexpr float kWadeMoveSpeed = 4.0F;
 constexpr float kWadeSprintMoveSpeed = 4.8F;
+constexpr float kPoolroomsWadeSpeedMultiplier = 0.95F;
 constexpr float kWadeGravity = 18.0F;
 constexpr float kWadeJumpVelocity = 6.2F;
 constexpr float kSwimMoveSpeed = 3.8F;
@@ -544,7 +545,17 @@ void PlayerController::update(
             consume_jump_assist();
         }
     } else if (water_contact_before_move.feet_in_water) {
-        const auto move_speed = (sprinting ? kWadeSprintMoveSpeed : kWadeMoveSpeed) * movement_speed_multiplier_;
+        // Dans les Poolrooms, je conserve presque toute la mobilité au lieu
+        // d'appliquer la pénalité lourde prévue pour la mer et les rivières.
+        const auto move_speed =
+            (water_movement_profile_ ==
+                     PlayerWaterMovementProfile::Poolrooms
+                 ? (sprinting ? kSprintMoveSpeed : kMoveSpeed) *
+                       kPoolroomsWadeSpeedMultiplier
+                 : (sprinting
+                        ? kWadeSprintMoveSpeed
+                        : kWadeMoveSpeed)) *
+            movement_speed_multiplier_;
         state_.velocity.x = wish.x * move_speed;
         state_.velocity.z = wish.z * move_speed;
         state_.velocity.y -= kWadeGravity * clamped_dt;
@@ -859,6 +870,11 @@ auto PlayerController::movement_speed_multiplier() const noexcept -> float {
     return movement_speed_multiplier_;
 }
 
+auto PlayerController::water_movement_profile() const noexcept
+    -> PlayerWaterMovementProfile {
+    return water_movement_profile_;
+}
+
 auto PlayerController::block_break_speed_multiplier() const noexcept -> float {
     return block_break_speed_multiplier_;
 }
@@ -989,6 +1005,21 @@ void PlayerController::set_fall_safety_multiplier(float multiplier) noexcept {
 
 void PlayerController::set_movement_speed_multiplier(float multiplier) noexcept {
     movement_speed_multiplier_ = std::clamp(finite_or(multiplier, 1.0F), 0.25F, 2.0F);
+}
+
+void PlayerController::set_water_movement_profile(
+    PlayerWaterMovementProfile profile) noexcept {
+    switch (profile) {
+    case PlayerWaterMovementProfile::Poolrooms:
+        water_movement_profile_ =
+            PlayerWaterMovementProfile::Poolrooms;
+        break;
+    case PlayerWaterMovementProfile::Standard:
+    default:
+        water_movement_profile_ =
+            PlayerWaterMovementProfile::Standard;
+        break;
+    }
 }
 
 void PlayerController::set_block_break_speed_multiplier(float multiplier) noexcept {

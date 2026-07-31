@@ -104,6 +104,18 @@ inline constexpr auto is_musket_item(const HotbarSlot& slot) noexcept -> bool {
            block_item_id(slot.block_id) == to_block_id(BlockType::Musket);
 }
 
+inline constexpr auto is_legendary_weapon_item(
+    const HotbarSlot& slot) noexcept -> bool {
+    return hotbar_slot_has_item(slot) &&
+           is_legendary_weapon_item(slot.block_id);
+}
+
+inline constexpr auto item_stack_can_be_dropped(
+    const HotbarSlot& slot) noexcept -> bool {
+    return hotbar_slot_has_item(slot) &&
+           !is_undroppable_item(slot.block_id);
+}
+
 inline constexpr auto is_musket_loaded(const HotbarSlot& slot) noexcept -> bool {
     return is_musket_item(slot) &&
            (slot.instance_state & kMusketLoadedInstanceState) != 0U;

@@ -59,6 +59,7 @@ inline constexpr auto item_equipment_slot(BlockId block_id) noexcept -> std::opt
         return EquipmentSlot::Shield;
     case BlockType::Sword:
     case BlockType::Spear:
+    case BlockType::LeviathanSpine:
         return EquipmentSlot::Weapon;
     case BlockType::Pants:
         return EquipmentSlot::Legs;
@@ -161,6 +162,7 @@ inline constexpr auto armor_resistance_percent(BlockId block_id) noexcept -> flo
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     default:
         return 0.0F;
     }
@@ -211,15 +213,27 @@ inline constexpr auto weapon_stats(BlockId block_id) noexcept -> std::optional<W
     case BlockType::Axe:
     case BlockType::Shovel:
     case BlockType::Musket:
+    case BlockType::LeviathanSpine:
     default:
         return std::nullopt;
     }
 }
 
-inline constexpr auto equipped_resistance_percent(const std::array<HotbarSlot, kEquipmentSlotCount>& equipment_slots) noexcept -> float {
+inline constexpr auto equipped_resistance_percent(
+    const std::array<HotbarSlot, kEquipmentSlotCount>& equipment_slots,
+    bool suppress_shield = false) noexcept -> float {
     auto total = 0.0F;
-    for (const auto& slot : equipment_slots) {
+    for (std::size_t index = 0U;
+         index < equipment_slots.size();
+         ++index) {
+        const auto& slot = equipment_slots[index];
         if (!hotbar_slot_has_item(slot)) {
+            continue;
+        }
+        if (suppress_shield &&
+            index ==
+                equipment_slot_index(
+                    EquipmentSlot::Shield)) {
             continue;
         }
         total += armor_resistance_percent(slot.block_id);
@@ -231,9 +245,9 @@ inline constexpr auto equipped_weapon_stats(const std::array<HotbarSlot, kEquipm
                                             const HotbarState& hotbar) noexcept -> std::optional<WeaponStats> {
     const auto& equipped_weapon = equipment_slots[equipment_slot_index(EquipmentSlot::Weapon)];
     if (hotbar_slot_has_item(equipped_weapon)) {
-        if (const auto stats = weapon_stats(equipped_weapon.block_id); stats.has_value()) {
-            return stats;
-        }
+        // Je ne rabats pas une arme legendaire sur les statistiques de l'objet
+        // selectionne : son systeme colossal doit etre l'unique source d'attaque.
+        return weapon_stats(equipped_weapon.block_id);
     }
 
     if (hotbar_slot_has_item(hotbar.selected_slot())) {

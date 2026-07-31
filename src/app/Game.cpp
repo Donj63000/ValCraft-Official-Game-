@@ -7,11 +7,13 @@
 #include "gameplay/StartingPort.h"
 #include "gameplay/progression/VanguardTargeting.h"
 #include "player/PlayerGeometry.h"
+#include "render/BackroomsVisibility.h"
 #include "render/SeaHorizon.h"
 #include "render/ShipMesh.h"
 #include "render/StylizedShipMesh.h"
 #include "world/OceanAdventureLayout.h"
 #include "world/OceanSimulation.h"
+#include "world/BackroomsGenerator.h"
 
 #include <glm/geometric.hpp>
 #include <glm/trigonometric.hpp>
@@ -182,6 +184,770 @@ auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept 
     };
 }
 
+auto backrooms_spawn_position(
+    int seed,
+    int logical_level = 0) noexcept -> glm::vec3 {
+    const BackroomsGenerator generator(seed, logical_level);
+    const auto block = generator.spawn_block();
+    return {
+        static_cast<float>(block.x) + 0.5F,
+        static_cast<float>(block.y) + 0.001F,
+        static_cast<float>(block.z) + 0.5F,
+    };
+}
+
+constexpr int kBackroomsBlackoutSmokeSearchModules = 24;
+constexpr int kBackroomsBlackoutFixtureClearance = 15;
+constexpr int kBackroomsBlackoutMinimumSightline = 9;
+constexpr int kPoolroomsSmokeSearchRadius = kBackroomsModuleSize * 2;
+constexpr int kPoolroomsSmokeMaximumBasinDistance = 8;
+constexpr int kPoolroomsSmokeSightline = 18;
+constexpr int kPoolroomsSmokeMinimumWetDepth = 5;
+constexpr int kPoolroomsSmokeMinimumWetWidth = 3;
+constexpr int kPoolroomsSmokeLightSearchRadius = 7;
+
+struct BackroomsSmokeCameraPose {
+    glm::vec3 position {0.0F};
+    float yaw_degrees = -90.0F;
+};
+
+[[nodiscard]] auto backrooms_blackout_smoke_pose(
+    int seed) -> std::optional<BackroomsSmokeCameraPose> {
+    const BackroomsGenerator generator {seed};
+    constexpr std::array<BackroomsJackGridPoint, 4U> directions {{
+        {0, -1},
+        {1, 0},
+        {0, 1},
+        {-1, 0},
+    }};
+    constexpr std::array<float, 4U> direction_yaws {{
+        -90.0F,
+        0.0F,
+        90.0F,
+        180.0F,
+    }};
+    const auto fixture_clearance_squared =
+        kBackroomsBlackoutFixtureClearance *
+        kBackroomsBlackoutFixtureClearance;
+
+    // Je privilegie le vrai archetype Blackout, puis je garde les autres
+    // volumes de tension Blackout comme repli deterministe.
+    for (const auto require_blackout_archetype :
+         {true, false}) {
+        for (auto module_radius = 1;
+             module_radius <=
+                 kBackroomsBlackoutSmokeSearchModules;
+             ++module_radius) {
+            for (auto module_z = -module_radius;
+                 module_z <= module_radius;
+                 ++module_z) {
+                for (auto module_x = -module_radius;
+                     module_x <= module_radius;
+                     ++module_x) {
+                    if (std::max(
+                            std::abs(module_x),
+                            std::abs(module_z)) !=
+                        module_radius) {
+                        continue;
+                    }
+
+                    const auto descriptor =
+                        generator.module_descriptor(
+                            module_x,
+                            module_z);
+                    if (descriptor.tension !=
+                            BackroomsTension::Blackout ||
+                        (require_blackout_archetype &&
+                         descriptor.archetype !=
+                             BackroomsArchetype::Blackout)) {
+                        continue;
+                    }
+
+                    const auto origin_x =
+                        module_x *
+                        kBackroomsModuleSize;
+                    const auto origin_z =
+                        module_z *
+                        kBackroomsModuleSize;
+                    std::vector<
+                        BackroomsJackGridPoint>
+                        luminous_fixtures {};
+                    luminous_fixtures.reserve(256U);
+                    for (auto world_z =
+                             origin_z -
+                             kBackroomsBlackoutFixtureClearance;
+                         world_z <=
+                             origin_z +
+                                 kBackroomsModuleSize - 1 +
+                                 kBackroomsBlackoutFixtureClearance;
+                         ++world_z) {
+                        for (auto world_x =
+                                 origin_x -
+                                 kBackroomsBlackoutFixtureClearance;
+                             world_x <=
+                                 origin_x +
+                                     kBackroomsModuleSize - 1 +
+                                     kBackroomsBlackoutFixtureClearance;
+                             ++world_x) {
+                            const auto light_state =
+                                generator
+                                    .sample_column(
+                                        world_x,
+                                        world_z)
+                                    .light_state;
+                            if (light_state ==
+                                    BackroomsLightState::Active ||
+                                light_state ==
+                                    BackroomsLightState::Emergency) {
+                                luminous_fixtures.push_back({
+                                    world_x,
+                                    world_z,
+                                });
+                            }
+                        }
+                    }
+
+                    for (auto local_z = 3;
+                         local_z <
+                         kBackroomsModuleSize - 3;
+                         local_z += 2) {
+                        for (auto local_x = 3;
+                             local_x <
+                             kBackroomsModuleSize - 3;
+                             local_x += 2) {
+                            const auto world_x =
+                                origin_x + local_x;
+                            const auto world_z =
+                                origin_z + local_z;
+                            if (!generator.is_walkable(
+                                    world_x,
+                                    world_z)) {
+                                continue;
+                            }
+
+                            const auto too_close_to_light =
+                                std::ranges::any_of(
+                                    luminous_fixtures,
+                                    [&](const auto& fixture) {
+                                        const auto delta_x =
+                                            fixture.x -
+                                            world_x;
+                                        const auto delta_z =
+                                            fixture.z -
+                                            world_z;
+                                        return
+                                            delta_x * delta_x +
+                                                delta_z * delta_z <=
+                                            fixture_clearance_squared;
+                                    });
+                            if (too_close_to_light) {
+                                continue;
+                            }
+
+                            auto best_direction =
+                                std::size_t {0U};
+                            auto best_sightline = 0;
+                            for (std::size_t direction_index = 0U;
+                                 direction_index <
+                                 directions.size();
+                                 ++direction_index) {
+                                auto sightline = 0;
+                                for (auto step = 1;
+                                     step <= 16;
+                                     ++step) {
+                                    const auto sample_x =
+                                        world_x +
+                                        directions[
+                                            direction_index]
+                                                .x *
+                                            step;
+                                    const auto sample_z =
+                                        world_z +
+                                        directions[
+                                            direction_index]
+                                                .z *
+                                            step;
+                                    if (!generator.is_walkable(
+                                            sample_x,
+                                            sample_z)) {
+                                        break;
+                                    }
+                                    sightline = step;
+                                }
+                                if (sightline >
+                                    best_sightline) {
+                                    best_sightline =
+                                        sightline;
+                                    best_direction =
+                                        direction_index;
+                                }
+                            }
+                            if (best_sightline <
+                                kBackroomsBlackoutMinimumSightline) {
+                                continue;
+                            }
+
+                            const auto column =
+                                generator.sample_column(
+                                    world_x,
+                                    world_z);
+                            return BackroomsSmokeCameraPose {
+                                {
+                                    static_cast<float>(
+                                        world_x) +
+                                        0.5F,
+                                    static_cast<float>(
+                                        column.floor_y + 1) +
+                                        0.001F,
+                                    static_cast<float>(
+                                        world_z) +
+                                        0.5F,
+                                },
+                                direction_yaws[
+                                    best_direction],
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] auto backrooms_poolrooms_smoke_pose(
+    int seed,
+    int logical_level) -> std::optional<BackroomsSmokeCameraPose> {
+
+    const BackroomsGenerator generator {
+        seed,
+        logical_level,
+    };
+    const auto spawn = generator.spawn_block();
+    constexpr std::array<BackroomsJackGridPoint, 4U> directions {{
+        {0, -1},
+        {1, 0},
+        {0, 1},
+        {-1, 0},
+    }};
+    constexpr std::array<float, 4U> direction_yaws {{
+        -90.0F,
+        0.0F,
+        90.0F,
+        180.0F,
+    }};
+
+    const auto column_is_walkable =
+        [](const BackroomsColumnSample& column) noexcept {
+            return !column.wall &&
+                   column.ceiling_y - column.floor_y >= 5;
+        };
+    const auto column_is_wet =
+        [](const BackroomsColumnSample& column) noexcept {
+            return water_level_from_state(
+                       column.water_state) >
+                   0U;
+        };
+
+    const auto find_pose =
+        [&](bool require_active_light,
+            bool require_broad_basin)
+        -> std::optional<BackroomsSmokeCameraPose> {
+
+        // Je parcours des anneaux fixes autour du spawn pour garder exactement
+        // le meme cadrage avec une seed et un niveau identiques.
+        for (auto radius = 0;
+             radius <= kPoolroomsSmokeSearchRadius;
+             ++radius) {
+            std::optional<BackroomsSmokeCameraPose>
+                best_pose {};
+            auto best_score =
+                (std::numeric_limits<int>::min)();
+
+            for (auto offset_z = -radius;
+                 offset_z <= radius;
+                 ++offset_z) {
+                for (auto offset_x = -radius;
+                     offset_x <= radius;
+                     ++offset_x) {
+                    if (radius > 0 &&
+                        std::abs(offset_x) != radius &&
+                        std::abs(offset_z) != radius) {
+                        continue;
+                    }
+
+                    const auto camera_x =
+                        spawn.x + offset_x;
+                    const auto camera_z =
+                        spawn.z + offset_z;
+                    const auto camera_column =
+                        generator.sample_column(
+                            camera_x,
+                            camera_z);
+                    if (!column_is_walkable(
+                            camera_column) ||
+                        column_is_wet(
+                            camera_column)) {
+                        continue;
+                    }
+
+                    for (std::size_t direction_index =
+                             0U;
+                         direction_index <
+                         directions.size();
+                         ++direction_index) {
+                        const auto direction =
+                            directions[direction_index];
+                        auto first_wet_step = 0;
+                        auto wet_depth = 0;
+
+                        // Je garde le carrelage sec au premier plan et une
+                        // ligne d'eau continue derriere, sans mur intermediaire.
+                        for (auto step = 1;
+                             step <=
+                             kPoolroomsSmokeSightline;
+                             ++step) {
+                            const auto sight_column =
+                                generator.sample_column(
+                                    camera_x +
+                                        direction.x *
+                                            step,
+                                    camera_z +
+                                        direction.z *
+                                            step);
+                            if (!column_is_walkable(
+                                    sight_column)) {
+                                break;
+                            }
+
+                            if (column_is_wet(
+                                    sight_column)) {
+                                if (first_wet_step == 0) {
+                                    first_wet_step =
+                                        step;
+                                }
+                                ++wet_depth;
+                            } else if (
+                                first_wet_step != 0) {
+                                break;
+                            }
+                        }
+
+                        if (first_wet_step == 0 ||
+                            first_wet_step >
+                                kPoolroomsSmokeMaximumBasinDistance ||
+                            wet_depth <
+                                (require_broad_basin
+                                     ? kPoolroomsSmokeMinimumWetDepth
+                                     : 3)) {
+                            continue;
+                        }
+
+                        const auto basin_depth_step =
+                            first_wet_step +
+                            std::min(wet_depth - 1, 2);
+                        const BackroomsJackGridPoint
+                            lateral {
+                                -direction.z,
+                                direction.x,
+                            };
+                        auto wet_width = 0;
+                        for (auto lateral_step = -2;
+                             lateral_step <= 2;
+                             ++lateral_step) {
+                            const auto basin_column =
+                                generator.sample_column(
+                                    camera_x +
+                                        direction.x *
+                                            basin_depth_step +
+                                        lateral.x *
+                                            lateral_step,
+                                    camera_z +
+                                        direction.z *
+                                            basin_depth_step +
+                                        lateral.z *
+                                            lateral_step);
+                            if (column_is_walkable(
+                                    basin_column) &&
+                                column_is_wet(
+                                    basin_column)) {
+                                ++wet_width;
+                            }
+                        }
+
+                        // Je vérifie aussi le voisinage réel du bassin. Une
+                        // rampe aperçue tout au fond du couloir ne suffit pas :
+                        // la capture doit recevoir son éclairage sur l'eau.
+                        const auto basin_center_x =
+                            camera_x +
+                            direction.x *
+                                basin_depth_step;
+                        const auto basin_center_z =
+                            camera_z +
+                            direction.z *
+                                basin_depth_step;
+                        auto active_light_near_basin =
+                            false;
+                        for (auto light_z =
+                                 -kPoolroomsSmokeLightSearchRadius;
+                             light_z <=
+                                 kPoolroomsSmokeLightSearchRadius &&
+                             !active_light_near_basin;
+                             ++light_z) {
+                            for (auto light_x =
+                                     -kPoolroomsSmokeLightSearchRadius;
+                                 light_x <=
+                                     kPoolroomsSmokeLightSearchRadius;
+                                 ++light_x) {
+                                if (light_x * light_x +
+                                        light_z * light_z >
+                                    kPoolroomsSmokeLightSearchRadius *
+                                        kPoolroomsSmokeLightSearchRadius) {
+                                    continue;
+                                }
+                                active_light_near_basin =
+                                    generator
+                                        .sample_column(
+                                            basin_center_x +
+                                                light_x,
+                                            basin_center_z +
+                                                light_z)
+                                        .light_state ==
+                                    BackroomsLightState::
+                                        Active;
+                                if (active_light_near_basin) {
+                                    break;
+                                }
+                            }
+                        }
+                        if ((require_broad_basin &&
+                             wet_width <
+                                 kPoolroomsSmokeMinimumWetWidth) ||
+                            (require_active_light &&
+                             !active_light_near_basin)) {
+                            continue;
+                        }
+
+                        const auto score =
+                            wet_depth * 16 +
+                            wet_width * 8 -
+                            first_wet_step * 2 +
+                            (active_light_near_basin
+                                 ? 28
+                                 : 0) +
+                            (camera_column.light_state ==
+                                     BackroomsLightState::
+                                         Active
+                                 ? 12
+                                 : 0);
+                        if (score <= best_score) {
+                            continue;
+                        }
+
+                        best_score = score;
+                        best_pose =
+                            BackroomsSmokeCameraPose {
+                                {
+                                    static_cast<float>(
+                                        camera_x) +
+                                        0.5F,
+                                    static_cast<float>(
+                                        camera_column
+                                                .floor_y +
+                                            1) +
+                                        0.001F,
+                                    static_cast<float>(
+                                        camera_z) +
+                                        0.5F,
+                                },
+                                direction_yaws[
+                                    direction_index],
+                            };
+                    }
+                }
+            }
+
+            if (best_pose.has_value()) {
+                return best_pose;
+            }
+        }
+        return std::nullopt;
+    };
+
+    // Je privilegie un bassin large sous un neon actif. Les replis ne
+    // relachent qu'un critere a la fois afin de toujours montrer de l'eau.
+    if (const auto lit_broad_pose =
+            find_pose(true, true);
+        lit_broad_pose.has_value()) {
+        return lit_broad_pose;
+    }
+    if (const auto broad_pose =
+            find_pose(false, true);
+        broad_pose.has_value()) {
+        return broad_pose;
+    }
+    if (const auto lit_pose =
+            find_pose(true, false);
+        lit_pose.has_value()) {
+        return lit_pose;
+    }
+    return find_pose(false, false);
+}
+
+[[nodiscard]] auto backrooms_smoke_camera_pose(
+    int seed,
+    bool blackout,
+    int logical_level = 0)
+    -> std::optional<BackroomsSmokeCameraPose> {
+    if (blackout && logical_level >= -1) {
+        return backrooms_blackout_smoke_pose(
+            seed);
+    }
+    if (logical_level <= -2) {
+        if (const auto poolrooms_pose =
+                backrooms_poolrooms_smoke_pose(
+                    seed,
+                    logical_level);
+            poolrooms_pose.has_value()) {
+            return poolrooms_pose;
+        }
+    }
+    return BackroomsSmokeCameraPose {
+        backrooms_spawn_position(
+            seed,
+            logical_level),
+        -90.0F,
+    };
+}
+
+void sanitize_backrooms_player_state(
+    PlayerState& state,
+    int seed,
+    int logical_level = 0) noexcept {
+    const BackroomsGenerator generator(seed, logical_level);
+    const auto fallback =
+        backrooms_spawn_position(seed, logical_level);
+    state.position = finite_vec3_or(state.position, fallback);
+
+    const auto block_x = static_cast<int>(std::floor(state.position.x));
+    const auto block_z = static_cast<int>(std::floor(state.position.z));
+    const auto column =
+        generator.sample_column(block_x, block_z);
+    const auto minimum_y =
+        static_cast<float>(column.floor_y) + 0.75F;
+    const auto maximum_y =
+        static_cast<float>(column.ceiling_y) + 0.25F;
+    if (state.position.y < minimum_y ||
+        state.position.y > maximum_y ||
+        !generator.is_walkable(block_x, block_z)) {
+        state.position = fallback;
+    }
+
+    // Une sauvegarde manipulée ou issue d'un ancien prototype ne doit jamais
+    // réactiver le vol ou une interaction de bloc. Le contact aquatique sera
+    // recalculé par la physique dès la première frame des Poolrooms.
+    state.velocity = {};
+    state.fly_mode = false;
+    state.head_underwater = false;
+    state.swimming = false;
+    state.primary_action_active = false;
+    state.secondary_action_active = false;
+    state.primary_action_progress = 0.0F;
+    state.secondary_action_progress = 0.0F;
+    state.dead = false;
+    state.death_cause = PlayerDeathCause::None;
+    state.health = std::max(finite_or(state.health, 20.0F), 1.0F);
+    state.air_seconds = 10.0F;
+    state.hurt_timer = 0.0F;
+    state.damage_cooldown = 0.0F;
+    state.drowning_tick_timer = 0.0F;
+    state.fall_start_y = state.position.y;
+    state.airborne_time = 0.0F;
+    state.on_ground = false;
+}
+
+void configure_backrooms_smoke_camera(
+    PlayerController& player,
+    int seed,
+    const glm::vec3& position,
+    float yaw_degrees,
+    int logical_level = 0,
+    bool ceiling_view = false) noexcept {
+
+    auto state = player.state();
+    state.position = position;
+    sanitize_backrooms_player_state(
+        state,
+        seed,
+        logical_level);
+
+    // Je conserve le grand axe choisi par la pose. Le smoke normal regarde le
+    // nord depuis le hub et la variante Blackout choisit son plus long couloir.
+    state.yaw_degrees =
+        finite_or(
+            yaw_degrees,
+            -90.0F);
+    // Dans les Poolrooms je baisse un peu plus le regard : le premier plan
+    // montre ainsi la rive et la surface turquoise, pas uniquement le mur
+    // opposé. Les bureaux gardent leur cadrage historique plus horizontal.
+    state.pitch_degrees =
+        ceiling_view
+            ? 32.0F
+            : logical_level <= -2
+                  ? -15.0F
+                  : -8.0F;
+    state.body_yaw_degrees = state.yaw_degrees;
+    state.animation_time = 0.0F;
+    state.step_phase = 0.0F;
+    state.landing_impact = 0.0F;
+    state.look_sway_yaw = 0.0F;
+    state.look_sway_pitch = 0.0F;
+    state.fall_start_y = state.position.y;
+    state.airborne_time = 0.0F;
+    state.on_ground = true;
+    player.load_state(state);
+}
+
+struct BackroomsJackWorldLight {
+    float sky_light = 0.0F;
+    float block_light = 0.0F;
+};
+
+[[nodiscard]] auto safe_light_block_coordinate(
+    float coordinate) noexcept -> std::optional<int> {
+    if (!std::isfinite(coordinate)) {
+        return std::nullopt;
+    }
+    constexpr auto minimum =
+        static_cast<double>(
+            std::numeric_limits<int>::lowest());
+    constexpr auto maximum_exclusive =
+        static_cast<double>(
+            std::numeric_limits<int>::max()) +
+        1.0;
+    const auto value =
+        static_cast<double>(coordinate);
+    if (value < minimum ||
+        value >= maximum_exclusive) {
+        return std::nullopt;
+    }
+    return static_cast<int>(
+        std::floor(value));
+}
+
+[[nodiscard]] auto sample_backrooms_jack_world_light(
+    const World& world,
+    const BackroomsJackRenderView& view)
+    -> BackroomsJackWorldLight {
+    if (!view.visible ||
+        !std::isfinite(view.position.x) ||
+        !std::isfinite(view.position.y) ||
+        !std::isfinite(view.position.z)) {
+        return {};
+    }
+
+    const auto hunch =
+        std::clamp(
+            std::isfinite(view.hunch_ratio)
+                ? view.hunch_ratio
+                : 0.0F,
+            0.0F,
+            1.0F);
+    const auto body_height =
+        kBackroomsJackStandingHeight +
+        (kBackroomsJackBentHeight -
+         kBackroomsJackStandingHeight) *
+            hunch;
+    const auto torso_y =
+        body_height * 0.47F;
+    const auto head_y =
+        body_height - 0.28F;
+    const std::array<glm::vec3, 7U> samples {{
+        view.position +
+            glm::vec3 {0.0F, 0.20F, 0.0F},
+        view.position +
+            glm::vec3 {0.0F, torso_y, 0.0F},
+        view.position +
+            glm::vec3 {0.42F, torso_y, 0.0F},
+        view.position +
+            glm::vec3 {-0.42F, torso_y, 0.0F},
+        view.position +
+            glm::vec3 {0.0F, torso_y, 0.42F},
+        view.position +
+            glm::vec3 {0.0F, torso_y, -0.42F},
+        view.position +
+            glm::vec3 {0.0F, head_y, 0.0F},
+    }};
+
+    auto maximum_sky =
+        std::uint8_t {0U};
+    auto maximum_block =
+        std::uint8_t {0U};
+    for (const auto& sample : samples) {
+        const auto x =
+            safe_light_block_coordinate(
+                sample.x);
+        const auto y =
+            safe_light_block_coordinate(
+                sample.y);
+        const auto z =
+            safe_light_block_coordinate(
+                sample.z);
+        if (!x.has_value() ||
+            !y.has_value() ||
+            !z.has_value() ||
+            !is_world_y_valid(*y)) {
+            continue;
+        }
+
+        // Je distingue une vraie valeur nulle d'un chunk absent. Jack ne doit
+        // jamais devenir artificiellement lumineux pendant le streaming.
+        const auto chunk_coord =
+            world.world_to_chunk(
+                *x,
+                *z);
+        if (world.find_chunk(
+                chunk_coord) == nullptr) {
+            continue;
+        }
+        maximum_sky =
+            std::max(
+                maximum_sky,
+                world.get_sky_light(
+                    *x,
+                    *y,
+                    *z));
+        maximum_block =
+            std::max(
+                maximum_block,
+                world.get_block_light(
+                    *x,
+                    *y,
+                    *z));
+    }
+
+    constexpr auto inverse_maximum_light =
+        1.0F / 15.0F;
+    return {
+        std::clamp(
+            static_cast<float>(
+                std::min<std::uint8_t>(
+                    maximum_sky,
+                    15U)) *
+                inverse_maximum_light,
+            0.0F,
+            1.0F),
+        std::clamp(
+            static_cast<float>(
+                std::min<std::uint8_t>(
+                    maximum_block,
+                    15U)) *
+                inverse_maximum_light,
+            0.0F,
+            1.0F),
+    };
+}
+
 auto safe_drop_direction(const glm::vec3& look_direction) noexcept -> glm::vec3 {
     if (!std::isfinite(look_direction.x) ||
         !std::isfinite(look_direction.y) ||
@@ -190,6 +956,402 @@ auto safe_drop_direction(const glm::vec3& look_direction) noexcept -> glm::vec3 
         return {0.0F, 0.0F, -1.0F};
     }
     return glm::normalize(look_direction);
+}
+
+constexpr auto kIssouArenaProtectionRegionId =
+    UINT64_C(0x4953534F550001);
+constexpr auto kStartingVillageProtectionRegionId =
+    UINT64_C(0x56494C4C41474501);
+
+auto safe_horizontal_direction(
+    const glm::vec3& direction,
+    const glm::vec3& fallback =
+        glm::vec3 {0.0F, 0.0F, -1.0F}) noexcept
+    -> glm::vec3 {
+    auto horizontal = glm::vec3 {
+        direction.x,
+        0.0F,
+        direction.z,
+    };
+    const auto length_squared =
+        glm::dot(horizontal, horizontal);
+    if (!std::isfinite(length_squared) ||
+        length_squared <= 1.0e-6F) {
+        return fallback;
+    }
+    return horizontal /
+           std::sqrt(length_squared);
+}
+
+constexpr auto kBackroomsJackScreamerHoldSeconds = 1.15F;
+constexpr auto kBackroomsJackAudioReferenceDistance = 18.0F;
+constexpr auto kRadiansToDegrees = 57.29577951308232F;
+
+struct BackroomsJackSpatialAudio {
+    float pan = 0.0F;
+    float attenuation = 1.0F;
+};
+
+[[nodiscard]] auto backrooms_jack_event_sfx(
+    BackroomsJackEventKind kind) noexcept
+    -> std::optional<GameSfxKind> {
+    switch (kind) {
+    case BackroomsJackEventKind::Notice:
+        return GameSfxKind::JackNotice;
+    case BackroomsJackEventKind::Chase:
+        return GameSfxKind::JackChase;
+    case BackroomsJackEventKind::BootStep:
+        return GameSfxKind::JackBootStep;
+    case BackroomsJackEventKind::WoodenLegStep:
+        return GameSfxKind::JackPegStep;
+    case BackroomsJackEventKind::Screamer:
+        return GameSfxKind::JackScreamer;
+    case BackroomsJackEventKind::Vanished:
+    default:
+        // Je garde la disparition silencieuse : elle doit laisser le joueur
+        // douter de la présence de Jack au lieu de confirmer son départ.
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] auto backrooms_jack_event_volume(
+    BackroomsJackEventKind kind) noexcept -> float {
+    switch (kind) {
+    case BackroomsJackEventKind::Notice:
+        return 0.78F;
+    case BackroomsJackEventKind::Chase:
+        return 0.96F;
+    case BackroomsJackEventKind::BootStep:
+        return 0.76F;
+    case BackroomsJackEventKind::WoodenLegStep:
+        return 0.88F;
+    case BackroomsJackEventKind::Screamer:
+        return 1.0F;
+    case BackroomsJackEventKind::Vanished:
+    default:
+        return 0.0F;
+    }
+}
+
+[[nodiscard]] auto backrooms_jack_spatial_audio(
+    const glm::vec3& listener_position,
+    const glm::vec3& listener_look,
+    const glm::vec3& source_position) noexcept
+    -> BackroomsJackSpatialAudio {
+    auto offset = finite_vec3_or(
+        source_position - listener_position,
+        glm::vec3 {0.0F});
+    offset.y = 0.0F;
+    const auto distance_squared =
+        glm::dot(offset, offset);
+    if (!std::isfinite(distance_squared) ||
+        distance_squared <= 1.0e-6F) {
+        return {};
+    }
+
+    const auto distance =
+        std::sqrt(distance_squared);
+    const auto direction =
+        offset / distance;
+    const auto forward =
+        safe_horizontal_direction(listener_look);
+    const auto right =
+        glm::cross(
+            forward,
+            glm::vec3 {0.0F, 1.0F, 0.0F});
+    const auto normalized_distance =
+        distance /
+        kBackroomsJackAudioReferenceDistance;
+    return {
+        std::clamp(
+            glm::dot(direction, right),
+            -1.0F,
+            1.0F),
+        std::clamp(
+            1.0F /
+                (1.0F +
+                 normalized_distance *
+                     normalized_distance),
+            0.0F,
+            1.0F),
+    };
+}
+
+[[nodiscard]] auto backrooms_jack_chunk_readiness(
+    const World& world,
+    const glm::vec3& player_position) noexcept
+    -> BackroomsJackChunkReadiness {
+    BackroomsJackChunkReadiness readiness {};
+    readiness.center_chunk =
+        backrooms_jack_chunk_at(player_position);
+    for (auto delta_z = -1;
+         delta_z <= 1;
+         ++delta_z) {
+        for (auto delta_x = -1;
+             delta_x <= 1;
+             ++delta_x) {
+            const auto index =
+                static_cast<std::size_t>(
+                    (delta_z + 1) * 3 +
+                    delta_x + 1);
+            const auto chunk_x =
+                static_cast<std::int64_t>(
+                    readiness.center_chunk.x) +
+                delta_x;
+            const auto chunk_z =
+                static_cast<std::int64_t>(
+                    readiness.center_chunk.z) +
+                delta_z;
+            if (chunk_x <
+                    std::numeric_limits<int>::lowest() ||
+                chunk_x >
+                    std::numeric_limits<int>::max() ||
+                chunk_z <
+                    std::numeric_limits<int>::lowest() ||
+                chunk_z >
+                    std::numeric_limits<int>::max()) {
+                readiness.ready[index] = false;
+                continue;
+            }
+            readiness.ready[index] =
+                world.find_chunk({
+                    static_cast<int>(chunk_x),
+                    static_cast<int>(chunk_z),
+                }) != nullptr;
+        }
+    }
+    return readiness;
+}
+
+[[nodiscard]] auto requested_backrooms_jack_smoke_pose(
+    BackroomsJackSmokeMode mode) noexcept
+    -> std::optional<BackroomsJackSmokePose> {
+    switch (mode) {
+    case BackroomsJackSmokeMode::Standing:
+        return BackroomsJackSmokePose::Standing;
+    case BackroomsJackSmokeMode::Hunched:
+        return BackroomsJackSmokePose::Bent;
+    case BackroomsJackSmokeMode::Stare:
+        return BackroomsJackSmokePose::Watching;
+    case BackroomsJackSmokeMode::Chase:
+        return BackroomsJackSmokePose::Chasing;
+    case BackroomsJackSmokeMode::Jumpscare:
+        return BackroomsJackSmokePose::Jumpscare;
+    case BackroomsJackSmokeMode::None:
+    default:
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] auto backrooms_jack_yaw_facing(
+    const glm::vec3& from,
+    const glm::vec3& target) noexcept -> float {
+    const auto direction =
+        safe_horizontal_direction(
+            target - from,
+            glm::vec3 {0.0F, 0.0F, 1.0F});
+    return std::atan2(
+               direction.x,
+               -direction.z) *
+           kRadiansToDegrees;
+}
+
+[[nodiscard]] auto backrooms_jack_blocks_input_event(
+    Uint32 event_type) noexcept -> bool {
+    switch (event_type) {
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+    case SDL_TEXTEDITING:
+    case SDL_TEXTINPUT:
+    case SDL_MOUSEMOTION:
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+    case SDL_MOUSEWHEEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+auto colossal_target_weight(
+    EntityWeight weight) noexcept -> ColossalTargetWeight {
+    switch (weight) {
+    case EntityWeight::Normal:
+        return ColossalTargetWeight::Normal;
+    case EntityWeight::Heavy:
+        return ColossalTargetWeight::Heavy;
+    case EntityWeight::Boss:
+        return ColossalTargetWeight::Boss;
+    case EntityWeight::Light:
+    default:
+        return ColossalTargetWeight::Light;
+    }
+}
+
+auto colossal_cell_material(
+    BlockId block_id) noexcept -> ColossalCellMaterial {
+    switch (static_cast<BlockType>(
+        block_item_id(block_id))) {
+    case BlockType::RedFlower:
+    case BlockType::YellowFlower:
+        return ColossalCellMaterial::FragileFlower;
+    case BlockType::TallGrass:
+    case BlockType::DeadShrub:
+        return ColossalCellMaterial::FragileGrass;
+    case BlockType::Leaves:
+    case BlockType::PineLeaves:
+        return ColossalCellMaterial::FragileLeaves;
+    case BlockType::Glass:
+        return ColossalCellMaterial::FragileGlass;
+    case BlockType::Torch:
+    case BlockType::TorchWallPositiveX:
+    case BlockType::TorchWallNegativeX:
+    case BlockType::TorchWallPositiveZ:
+    case BlockType::TorchWallNegativeZ:
+        return ColossalCellMaterial::LightDecoration;
+    case BlockType::Grass:
+    case BlockType::Dirt:
+    case BlockType::Sand:
+    case BlockType::Gravel:
+    case BlockType::Snow:
+        return ColossalCellMaterial::Soil;
+    case BlockType::Wood:
+    case BlockType::PineWood:
+    case BlockType::Planks:
+    case BlockType::Cactus:
+        return ColossalCellMaterial::Wood;
+    case BlockType::CoalOre:
+    case BlockType::IronOre:
+    case BlockType::GoldOre:
+    case BlockType::DiamondOre:
+    case BlockType::MetallicAlloyOre:
+        return ColossalCellMaterial::Ore;
+    case BlockType::Pastron:
+    case BlockType::RoundShield:
+    case BlockType::Sword:
+    case BlockType::Spear:
+    case BlockType::Pickaxe:
+    case BlockType::Axe:
+    case BlockType::Shovel:
+    case BlockType::Musket:
+    case BlockType::LeviathanSpine:
+        return ColossalCellMaterial::Metal;
+    case BlockType::Water:
+        return ColossalCellMaterial::Liquid;
+    case BlockType::Stone:
+    case BlockType::Cobblestone:
+    case BlockType::MossyStone:
+        return ColossalCellMaterial::Stone;
+    case BlockType::Air:
+    default:
+        return ColossalCellMaterial::Unknown;
+    }
+}
+
+auto colossus_zone_center(
+    const ChainedColossusState& state,
+    DamageZoneId zone_id) noexcept -> glm::vec3 {
+    auto local = glm::vec3 {0.0F, 2.55F, 0.0F};
+    switch (zone_id) {
+    case kColossusHeadZone:
+        local = {0.0F, 4.15F, 0.0F};
+        break;
+    case kColossusLeftArmZone:
+        local = {-1.10F, 2.85F, 0.0F};
+        break;
+    case kColossusRightArmZone:
+        local = {1.10F, 2.85F, 0.0F};
+        break;
+    case kColossusLeftLegZone:
+        local = {-0.48F, 1.05F, 0.0F};
+        break;
+    case kColossusRightLegZone:
+        local = {0.48F, 1.05F, 0.0F};
+        break;
+    case kColossusHornZone:
+        local = {0.0F, 4.72F, 0.03F};
+        break;
+    case kColossusTorsoZone:
+    default:
+        break;
+    }
+    const auto cosine = std::cos(state.yaw_radians);
+    const auto sine = std::sin(state.yaw_radians);
+    return state.position +
+           glm::vec3 {
+               local.x * cosine -
+                   local.z * sine,
+               local.y,
+               local.x * sine +
+                   local.z * cosine,
+           };
+}
+
+auto colossal_blade_pose(
+    const PlayerController& player,
+    const ColossalWeaponStateSnapshot& weapon,
+    LegendaryWeaponAwakening awakening)
+    -> ColossalBladePose {
+    const auto forward =
+        safe_horizontal_direction(
+            player.look_direction());
+    auto right =
+        glm::cross(
+            forward,
+            glm::vec3 {0.0F, 1.0F, 0.0F});
+    const auto right_length_squared =
+        glm::dot(right, right);
+    if (right_length_squared <= 1.0e-6F) {
+        right = {1.0F, 0.0F, 0.0F};
+    } else {
+        right /=
+            std::sqrt(right_length_squared);
+    }
+
+    auto actor_transform = glm::mat4 {1.0F};
+    actor_transform[0] = glm::vec4 {
+        right,
+        0.0F,
+    };
+    actor_transform[1] = glm::vec4 {
+        0.0F,
+        1.0F,
+        0.0F,
+        0.0F,
+    };
+    actor_transform[2] = glm::vec4 {
+        -forward,
+        0.0F,
+    };
+    actor_transform[3] = glm::vec4 {
+        player.eye_position(),
+        1.0F,
+    };
+    const auto pose =
+        solve_leviathan_weapon_pose({
+            actor_transform,
+            LeviathanViewMode::FirstPerson,
+            weapon.state,
+            weapon.attack,
+            awakening,
+            weapon.state_progress,
+            weapon.charge_progress,
+            player.state().animation_time,
+            weapon.contextual_vertical,
+        });
+    return {
+        glm::vec3 {
+            pose.root_transform *
+            glm::vec4 {0.0F, 0.04F, 0.0F, 1.0F}},
+        glm::vec3 {
+            pose.root_transform *
+            glm::vec4 {
+                0.0F,
+                kLeviathanWeaponVisualLengthBlocks,
+                0.0F,
+                1.0F,
+            }},
+    };
 }
 
 auto block_coord_from_position(const glm::vec3& position) noexcept -> BlockCoord {
@@ -725,11 +1887,16 @@ auto Game::run() -> int {
             update_world_pipeline(frame_stats);
 
             const auto audio_begin = clock::now();
-            const auto environment_state = environment_.current_state();
+            const auto environment_state = current_environment_state();
             const auto creature_cycle = environment_.current_creature_cycle();
             const auto front_end_is_visible = front_end_visible();
             const auto maritime_gameplay_active =
-                active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active();
+                active_game_mode_ == GameMode::SeaAdventure &&
+                sea_adventure_.active();
+            const auto backrooms_gameplay_active =
+                backrooms_active();
+            const auto jack_session_active =
+                session_backrooms_supports_jack();
             float voyage_motion = 0.0F;
             float maritime_danger = 0.0F;
 
@@ -759,6 +1926,8 @@ auto Game::run() -> int {
                 .has_active_session = has_active_session_,
                 .front_end_visible = front_end_is_visible,
                 .maritime_gameplay_active = maritime_gameplay_active,
+                .backrooms_gameplay_active =
+                    backrooms_gameplay_active,
                 .voyage_motion = voyage_motion,
                 .danger = maritime_danger,
                 .world_seed = world_.seed(),
@@ -781,8 +1950,39 @@ auto Game::run() -> int {
             // Je reflete la selection des cette image, meme si aucun pas fixe
             // n'a encore active le controleur depuis le changement de slot.
             render_musket.active =
+                !backrooms_active() &&
                 selected_musket_active() &&
                 !player_.is_dead();
+            prepare_legendary_presentation(
+                environment_
+                    .weather_time_seconds());
+            if (jack_session_active &&
+                !front_end_is_visible) {
+                auto jack_render_view =
+                    backrooms_jack_last_result_
+                        .render;
+                const auto jack_world_light =
+                    sample_backrooms_jack_world_light(
+                        world_,
+                        jack_render_view);
+                // Je prends ici la lumiere effectivement propagee dans le
+                // monde. Jack reste donc noir dans une poche sans source et
+                // retrouve naturellement ses details sous un vrai luminaire.
+                jack_render_view.sky_light =
+                    jack_world_light.sky_light;
+                jack_render_view.block_light =
+                    jack_world_light.block_light;
+                renderer_.set_backrooms_jack(
+                    jack_render_view,
+                    backrooms_jack_last_result_
+                        .light_interference);
+            } else {
+                // Je écrase chaque frame la vue précédente : Jack ne peut pas
+                // survivre visuellement à une sortie ou un changement de mode.
+                renderer_.set_backrooms_jack(
+                    {},
+                    {});
+            }
             frame_stats.render_preparation_ms =
                 std::chrono::duration<double, std::milli>(clock::now() - render_preparation_begin).count();
 
@@ -817,6 +2017,9 @@ auto Game::run() -> int {
                 sea_adventure_.ship_render_state(),
                 progression_.state(),
                 super_vision_active_ && progression_.has_super_vision_power(),
+                make_backrooms_flashlight_hud_view(
+                    backrooms_flashlight_,
+                    backrooms_gameplay_active),
                 current_gameplay_announcement_view(),
                 current_maritime_hud_view(),
                 command_console_.view(),
@@ -1000,23 +2203,24 @@ auto Game::initialize() -> bool {
     }
 
     save_root_directory_ = resolve_save_root_directory();
-    if (options_.smoke_test && options_.smoke_session != SmokeSessionMode::Menu) {
+    if (options_.smoke_test &&
+        smoke_session_starts_gameplay(options_.smoke_session)) {
         const auto unique_suffix = std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count());
         const auto temp_directory = std::filesystem::temp_directory_path();
         for (std::size_t attempt = 0U; attempt < 64U && !smoke_temp_root_.has_value(); ++attempt) {
             const auto candidate = temp_directory /
-                                   (std::string("valcraft-sea-smoke-") + unique_suffix + "-" +
-                                    std::to_string(attempt));
+                                   (std::string("valcraft-session-smoke-") + unique_suffix + "-" +
+                                     std::to_string(attempt));
             std::error_code create_error {};
             if (std::filesystem::create_directory(candidate, create_error)) {
                 smoke_temp_root_ = candidate;
             } else if (create_error) {
-                throw std::runtime_error("Unable to create the isolated maritime smoke directory");
+                throw std::runtime_error("Unable to create the isolated session smoke directory");
             }
         }
         if (!smoke_temp_root_.has_value()) {
-            throw std::runtime_error("Unable to reserve an isolated maritime smoke directory");
+            throw std::runtime_error("Unable to reserve an isolated session smoke directory");
         }
         save_root_directory_ = *smoke_temp_root_;
     }
@@ -1052,7 +2256,8 @@ auto Game::initialize() -> bool {
     confirm_dialog_.cursor_x = static_cast<float>(window_width_) * 0.5F;
     confirm_dialog_.cursor_y = static_cast<float>(window_height_) * 0.5F;
 
-    if (options_.smoke_test && options_.smoke_session != SmokeSessionMode::Menu) {
+    if (options_.smoke_test &&
+        smoke_session_starts_gameplay(options_.smoke_session)) {
         if (!start_smoke_session()) {
             return false;
         }
@@ -1167,7 +2372,7 @@ void Game::shutdown() {
         const auto normalized_temp = std::filesystem::temp_directory_path().lexically_normal();
         const auto filename = normalized_root.filename().string();
         if (normalized_root.parent_path() == normalized_temp &&
-            filename.starts_with("valcraft-sea-smoke-")) {
+            filename.starts_with("valcraft-session-smoke-")) {
             std::error_code cleanup_error {};
             std::filesystem::remove_all(normalized_root, cleanup_error);
         }
@@ -1199,6 +2404,18 @@ void Game::process_events() {
                 window_width_ = std::max(event.window.data1, 1);
                 window_height_ = std::max(event.window.data2, 1);
             }
+            continue;
+        }
+
+        if (backrooms_jack_jumpscare_active() &&
+            backrooms_jack_blocks_input_event(
+                event.type)) {
+            // Je laisse uniquement les événements de fenêtre et de fermeture
+            // traverser le screamer. Aucun mouvement, regard, menu ou F ne
+            // peut interrompre sa durée volontairement très courte.
+            command_console_toggle_.cancel();
+            pending_look_x_ = 0.0F;
+            pending_look_y_ = 0.0F;
             continue;
         }
 
@@ -1482,8 +2699,20 @@ void Game::process_events() {
                     AuditPriority::Normal);
                 break;
             }
+            if (backrooms_active()) {
+                // Dans les BackRooms, les clics restent réservés à la reprise
+                // de capture de la souris : aucun bloc ni objet n'est manipulable.
+                break;
+            }
             if (event.button.button == SDL_BUTTON_LEFT) {
-                if (selected_musket_active()) {
+                if (selected_colossal_weapon_active()) {
+                    colossal_primary_held_ = true;
+                    pending_colossal_primary_press_ = true;
+                    pending_colossal_primary_release_ = false;
+                    pending_break_block_ = false;
+                    pending_primary_attack_ = false;
+                    player_.cancel_block_breaking();
+                } else if (selected_musket_active()) {
                     musket_fire_held_ = true;
                     pending_musket_fire_press_ = true;
                     pending_break_block_ = false;
@@ -1503,7 +2732,12 @@ void Game::process_events() {
                     }),
                     AuditPriority::Normal);
             } else if (event.button.button == SDL_BUTTON_RIGHT) {
-                if (selected_musket_active()) {
+                if (selected_colossal_weapon_active()) {
+                    colossal_guard_held_ = true;
+                    pending_colossal_guard_press_ = true;
+                    pending_colossal_guard_release_ = false;
+                    pending_place_block_ = false;
+                } else if (selected_musket_active()) {
                     musket_aim_held_ = true;
                     pending_place_block_ = false;
                 } else {
@@ -1522,6 +2756,10 @@ void Game::process_events() {
             break;
         case SDL_MOUSEBUTTONUP:
             if (event.button.button == SDL_BUTTON_LEFT) {
+                if (colossal_primary_held_) {
+                    pending_colossal_primary_release_ = true;
+                }
+                colossal_primary_held_ = false;
                 musket_fire_held_ = false;
                 pending_break_block_ = false;
                 pending_primary_attack_ = false;
@@ -1540,12 +2778,17 @@ void Game::process_events() {
             } else if (
                 event.button.button ==
                 SDL_BUTTON_RIGHT) {
+                if (colossal_guard_held_) {
+                    pending_colossal_guard_release_ = true;
+                }
+                colossal_guard_held_ = false;
                 musket_aim_held_ = false;
                 pending_place_block_ = false;
             }
             break;
         case SDL_MOUSEWHEEL: {
-            if (confirm_dialog_.visible || death_screen_visible_ || paused_ || inventory_visible_ ||
+            if (backrooms_active() ||
+                confirm_dialog_.visible || death_screen_visible_ || paused_ || inventory_visible_ ||
                 progression_menu_.visible() ||
                 save_slot_menu_.visible || options_menu_.visible || main_menu_.visible) {
                 break;
@@ -1742,7 +2985,8 @@ void Game::process_events() {
                 break;
             }
 
-            if (event.key.repeat == 0 &&
+            if (!backrooms_active() &&
+                event.key.repeat == 0 &&
                 is_progression_menu_key(
                     event.key.keysym)) {
                 set_progression_menu_visible(true);
@@ -1759,6 +3003,20 @@ void Game::process_events() {
                         {"paused", audit_json_bool(paused_)},
                     }),
                     AuditPriority::Normal);
+                break;
+            }
+
+            if (event.key.keysym.sym ==
+                    SDLK_r &&
+                issou_scenario_.active() &&
+                (issou_scenario_.state()
+                         .phase ==
+                     IssouArenaPhase::Victory ||
+                 issou_scenario_.state()
+                         .phase ==
+                     IssouArenaPhase::Defeat)) {
+                static_cast<void>(
+                    reset_issou_scenario());
                 break;
             }
 
@@ -1787,16 +3045,32 @@ void Game::process_events() {
                 break;
             }
 
+            if (backrooms_active()) {
+                if (is_backrooms_flashlight_action_key(
+                        event.key.keysym)) {
+                    static_cast<void>(
+                        toggle_backrooms_flashlight(
+                            backrooms_flashlight_));
+                    mark_session_dirty();
+                }
+                // Les déplacements sont lus en continu plus bas ; toutes les
+                // autres touches d'inventaire, pouvoir, vol et équipement sont
+                // ignorées.
+                break;
+            }
+
             if (event.key.keysym.sym == SDLK_e) {
-                set_inventory_visible(true);
-                record_audit_event(
-                    AuditEventCategory::InputAction,
-                    "inventory_open",
-                    AuditSeverity::Info,
-                    audit_json_object({
-                        {"visible", audit_json_bool(inventory_visible_)},
-                    }),
-                    AuditPriority::Normal);
+                if (!try_interact_legendary_weapon_quest()) {
+                    set_inventory_visible(true);
+                    record_audit_event(
+                        AuditEventCategory::InputAction,
+                        "inventory_open",
+                        AuditSeverity::Info,
+                        audit_json_object({
+                            {"visible", audit_json_bool(inventory_visible_)},
+                        }),
+                        AuditPriority::Normal);
+                }
             } else if (const auto ability_slot =
                            ability_slot_from_key(
                                event.key.keysym);
@@ -1891,8 +3165,18 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
     if (!options_.smoke_test && front_end_visible()) {
         sync_menu_preview_environment();
         update_menu_preview_camera(dt);
-        const auto environment_state = environment_.current_state();
-        creatures_.update(dt, world_, preview_player_.position(), environment_state, environment_.current_creature_cycle());
+        const auto environment_state =
+            current_environment_state();
+        if (backrooms_active()) {
+            creatures_.clear();
+        } else {
+            creatures_.update(
+                dt,
+                world_,
+                preview_player_.position(),
+                environment_state,
+                environment_.current_creature_cycle());
+        }
         if (const auto creature_stats = creatures_.consume_audit_stats();
             audit_ && audit_->enabled() &&
             (creature_stats.spawned != 0 || creature_stats.despawned != 0 || creature_stats.attacks != 0)) {
@@ -1926,12 +3210,23 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         return;
     }
 
+    if (backrooms_active()) {
+        update_backrooms_simulation(dt);
+        (void)frame_stats;
+        return;
+    }
+
     update_gameplay_announcements(dt);
     ability_system_.update(
         player_build_,
         dt,
         player_ability_energy_parameters(
             player_build_));
+    static_cast<void>(
+        leviathan_knight_synergy_
+            .advance(
+                player_build_,
+                dt));
     const auto ability_effect_update =
         player_ability_effects_.update(
             dt);
@@ -2093,6 +3388,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         if (gameplay_input_enabled &&
             pending_place_block_ &&
             !selected_musket_active() &&
+            !selected_colossal_weapon_active() &&
             !player_.is_dead()) {
 
             player_.trigger_secondary_action();
@@ -2111,6 +3407,12 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
             maritime_ocean.has_value()
                 ? &*maritime_ocean
                 : nullptr);
+
+        update_colossal_weapon(
+            dt,
+            input,
+            gameplay_input_enabled,
+            maritime_session_active);
 
         if (maritime_session_active) {
             const auto sea_result = sea_adventure_.update(
@@ -2329,6 +3631,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         }
         if (gameplay_input_enabled &&
             pending_primary_attack_ &&
+            !selected_colossal_weapon_active() &&
             !player_.is_dead() &&
             melee_attack_cooldown_remaining_ <=
                 0.0F) {
@@ -2613,7 +3916,8 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         }
 
         if (gameplay_input_enabled &&
-            pending_break_block_) {
+            pending_break_block_ &&
+            !selected_colossal_weapon_active()) {
             const auto break_target = player_.current_target(world_);
             const auto target_was_player_placed =
                 break_target.hit &&
@@ -2662,6 +3966,7 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         }
         if (gameplay_input_enabled &&
             pending_place_block_ &&
+            !selected_colossal_weapon_active() &&
             !player_.is_dead()) {
 
             auto& selected_slot = hotbar_.slots[hotbar_.selected_index];
@@ -2730,8 +4035,19 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         creatures_.clear_secondary_population_interest();
     }
 
-    creatures_.update(dt, world_, player_.position(), environment_state, creature_cycle);
-    update_summoned_footman(
+    if (!issou_scenario_.active()) {
+        creatures_.update(
+            dt,
+            world_,
+            player_.position(),
+            environment_state,
+            creature_cycle);
+        update_summoned_footman(
+            dt,
+            maritime_session_active);
+    }
+    update_legendary_weapon_quest();
+    update_legendary_encounters(
         dt,
         maritime_session_active);
     if (maritime_session_active) {
@@ -3079,18 +4395,21 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                     to_attacker);
             const auto look_length_squared =
                 glm::dot(look, look);
-            const auto frontal =
+            const auto frontal_alignment =
                 to_attacker_length_squared >
-                    1.0e-6F &&
-                look_length_squared > 1.0e-6F &&
-                glm::dot(
-                    to_attacker /
-                        std::sqrt(
-                            to_attacker_length_squared),
-                    look /
-                        std::sqrt(
-                            look_length_squared)) >=
-                    0.5F;
+                            1.0e-6F &&
+                        look_length_squared >
+                            1.0e-6F
+                    ? glm::dot(
+                          to_attacker /
+                              std::sqrt(
+                                  to_attacker_length_squared),
+                          look /
+                              std::sqrt(
+                                  look_length_squared))
+                    : -1.0F;
+            const auto frontal =
+                frontal_alignment >= 0.5F;
             const auto temporary_effects =
                 player_ability_effects_
                     .aggregate(
@@ -3108,8 +4427,72 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
                         1.0F);
             }
 
+            auto colossal_guard_blocked = false;
+            if (colossal_weapon_drawn()) {
+                const auto attacker_profile =
+                    creature_combat_profile(
+                        attack.species,
+                        CreaturePhase::Night);
+                const auto target_weight =
+                    static_cast<ColossalTargetWeight>(
+                        static_cast<std::uint8_t>(
+                            attacker_profile.weight));
+                const auto weapon_state =
+                    colossal_weapon_.snapshot();
+                const auto guard_result =
+                    intercept_colossal_guard({
+                            remaining_damage,
+                            1.0F,
+                            frontal_alignment,
+                            weapon_state.stability,
+                            weapon_state.state ==
+                                    ColossalWeaponState::Guard
+                                ? weapon_state
+                                      .state_elapsed_seconds
+                                : 0.0F,
+                            target_weight,
+                            attack.kind ==
+                                    CreatureAttackKind::
+                                        Projectile
+                                ? ColossalIncomingAttackKind::
+                                      Projectile
+                                : ColossalIncomingAttackKind::
+                                      Melee,
+                            weapon_state.state ==
+                                ColossalWeaponState::Guard,
+                            false,
+                        });
+                if (guard_result.blocked) {
+                    colossal_guard_blocked = true;
+                    remaining_damage =
+                        guard_result.resulting_damage;
+                    record_legendary_quest_tutorial(
+                        LegendaryQuestAction::
+                            TutorialGuardSucceeded,
+                        attack.target_id == 0U
+                            ? 1U
+                            : attack.target_id,
+                        attack.damage);
+                    if (guard_result.perfect) {
+                        issou_scenario_.notify_combat_event(
+                            IssouArenaCombatEvent::
+                                PerfectGuard);
+                        music_.play_sfx(
+                            GameSfxKind::
+                                PerfectGuard,
+                            1.0F);
+                        queue_gameplay_announcement(
+                            "GARDE PARFAITE",
+                            "L'IMPACT EST RETOURNE",
+                            1.35F);
+                    }
+                }
+            }
+
             const auto shield_blocking =
                 frontal &&
+                !colossal_guard_blocked &&
+                !colossal_weapon_drawn() &&
                 inventory_slot_has_item(
                     inventory_menu_
                         .equipment_slots[
@@ -3192,6 +4575,9 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         consume_ability_logical_events();
 
         if (player_.is_dead()) {
+            if (issou_scenario_.active()) {
+                issou_scenario_.notify_player_death();
+            }
             record_audit_event(
                 AuditEventCategory::Player,
                 "player_death",
@@ -4906,6 +6292,49 @@ void Game::resolve_pending_player_ability(
             "construction_plan");
     }
 
+    const auto leviathan_activation =
+        leviathan_knight_synergy_
+            .activate(
+                player_build_,
+                {
+                    result.resolution.id,
+                    result.resolution
+                        .cast_sequence,
+                    result.resolution
+                        .duration_seconds,
+                    true,
+                    true,
+                });
+    if (leviathan_activation.accepted() &&
+        leviathan_activation.synergy ==
+            LeviathanKnightSynergyKind::
+                BulwarkCharge) {
+        const auto weapon_state =
+            colossal_weapon_.snapshot().state;
+        // La, je ne consomme la charge du rempart que si l'arme peut
+        // garantir le balayage force sur la prochaine attaque.
+        if (weapon_state ==
+                ColossalWeaponState::Idle ||
+            weapon_state ==
+                ColossalWeaponState::Guard) {
+            const auto sweep =
+                leviathan_knight_synergy_
+                    .complete_bulwark_charge(
+                        player_build_,
+                        {
+                            result.resolution
+                                .cast_sequence,
+                            true,
+                        });
+            static_cast<void>(
+                colossal_weapon_
+                    .queue_next_attack_override(
+                        sweep,
+                        result.resolution
+                            .cast_sequence));
+        }
+    }
+
     if (ability_effects_contain(
             result.resolution.effects,
             AbilityEffectFlag::
@@ -5432,12 +6861,19 @@ void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
     }
 
     const auto stream_start = clock::now();
-    const auto active_stream_radius =
+    const auto resolved_stream_radius =
         options_.performance.adaptive_quality
             ? resolve_adaptive_stream_radius(
                   options_.performance.stream_radius,
                   renderer_.last_frame_stats().resolved_quality)
             : options_.performance.stream_radius;
+    const auto active_stream_radius =
+        backrooms_active()
+            // Je garde l'anneau resident des Backrooms stable : une remontée
+            // de qualite ne doit jamais devancer la generation d'une frame.
+            ? backrooms_stream_radius(
+                  options_.performance.stream_radius)
+            : resolved_stream_radius;
     const auto stream_stats =
         world_.update_streaming(
             streaming_focus_position(),
@@ -5515,6 +6951,7 @@ void Game::set_mouse_capture(bool captured) {
     if (!captured) {
         pending_break_block_ = false;
         pending_primary_attack_ = false;
+        clear_colossal_weapon_input();
         musket_fire_held_ = false;
         pending_musket_fire_press_ = false;
         musket_aim_held_ = false;
@@ -5764,6 +7201,88 @@ void Game::submit_command_console() {
                 },
             }),
             AuditPriority::High);
+        return;
+    }
+
+    if (parsed.family ==
+        CommandConsoleFamily::Issou) {
+        auto succeeded = false;
+        auto feedback =
+            std::string {"ACTION /ISSOU REFUSEE"};
+        switch (parsed.command) {
+        case CommandConsoleCommand::EnterIssou:
+            succeeded = issou_scenario_.active()
+                ? reset_issou_scenario()
+                : enter_issou_scenario();
+            feedback = succeeded
+                ? "ARENE DU COLOSSE PRETE"
+                : "IMPOSSIBLE D'OUVRIR L'ARENE";
+            break;
+        case CommandConsoleCommand::ResetIssou:
+            succeeded = reset_issou_scenario();
+            feedback = succeeded
+                ? "ARENE REINITIALISEE"
+                : "AUCUNE ARENE ACTIVE";
+            break;
+        case CommandConsoleCommand::ExitIssou:
+            succeeded = exit_issou_scenario();
+            feedback = succeeded
+                ? "PARTIE PRECEDENTE RESTAUREE"
+                : "AUCUNE ARENE ACTIVE";
+            break;
+        case CommandConsoleCommand::SkipIssouCountdown:
+            succeeded =
+                issou_scenario_.skip_countdown();
+            feedback = succeeded
+                ? "COMPTE A REBOURS PASSE"
+                : "LE COMBAT A DEJA COMMENCE";
+            break;
+        case CommandConsoleCommand::DisableIssouGore:
+            succeeded =
+                issou_scenario_.set_gore_mode(
+                    IssouGoreMode::Disabled);
+            feedback = succeeded
+                ? "GORE DESACTIVE"
+                : "AUCUNE ARENE ACTIVE";
+            break;
+        case CommandConsoleCommand::EnableIssouGore:
+            succeeded =
+                issou_scenario_.set_gore_mode(
+                    IssouGoreMode::Full);
+            feedback = succeeded
+                ? "GORE COMPLET ACTIVE"
+                : "AUCUNE ARENE ACTIVE";
+            break;
+        case CommandConsoleCommand::SetIssouAwakening0:
+        case CommandConsoleCommand::SetIssouAwakening1:
+        case CommandConsoleCommand::SetIssouAwakening2:
+        case CommandConsoleCommand::SetIssouAwakening3: {
+            const auto awakening =
+                static_cast<std::uint8_t>(
+                    static_cast<std::uint8_t>(
+                        parsed.command) -
+                    static_cast<std::uint8_t>(
+                        CommandConsoleCommand::
+                            SetIssouAwakening0));
+            succeeded =
+                issou_scenario_
+                    .set_awakening_override(
+                        awakening);
+            feedback = succeeded
+                ? "EVEIL DE DEMONSTRATION : " +
+                      std::to_string(awakening)
+                : "AUCUNE ARENE ACTIVE";
+            break;
+        }
+        case CommandConsoleCommand::None:
+        case CommandConsoleCommand::StartTempest:
+        case CommandConsoleCommand::GiveMusket:
+        default:
+            break;
+        }
+        command_console_.set_feedback(
+            std::move(feedback),
+            !succeeded);
         return;
     }
 
@@ -6404,10 +7923,20 @@ void Game::set_confirm_dialog_visible(bool visible,
 void Game::activate_death_screen_action(DeathScreenAction action) {
     switch (action) {
     case DeathScreenAction::Respawn:
-        respawn_player();
+        if (issou_scenario_.active()) {
+            static_cast<void>(
+                reset_issou_scenario());
+        } else {
+            respawn_player();
+        }
         break;
     case DeathScreenAction::Quit:
-        running_ = false;
+        if (issou_scenario_.active()) {
+            static_cast<void>(
+                exit_issou_scenario());
+        } else {
+            running_ = false;
+        }
         break;
     default:
         break;
@@ -6420,9 +7949,29 @@ void Game::activate_pause_menu_action(PauseMenuAction action) {
         set_paused(false);
         break;
     case PauseMenuAction::Save:
-        open_save_slot_menu(SaveSlotMenuMode::SaveGame, SaveSlotMenuParent::PauseMenu);
+        if (!scenario_session_.saves_allowed() ||
+            issou_scenario_
+                .saving_suspended()) {
+            queue_gameplay_announcement(
+                "SAUVEGARDE SUSPENDUE",
+                "QUITTEZ L'ARENE POUR RETROUVER VOTRE PARTIE",
+                2.6F);
+        } else {
+            open_save_slot_menu(
+                SaveSlotMenuMode::SaveGame,
+                SaveSlotMenuParent::
+                    PauseMenu);
+        }
         break;
     case PauseMenuAction::Load:
+        if (issou_scenario_.active() &&
+            !exit_issou_scenario()) {
+            queue_gameplay_announcement(
+                "CHARGEMENT REFUSE",
+                "LA SESSION NORMALE N'A PAS PU ETRE RESTAUREE",
+                3.0F);
+            break;
+        }
         open_save_slot_menu(SaveSlotMenuMode::LoadGame, SaveSlotMenuParent::PauseMenu);
         break;
     case PauseMenuAction::Options:
@@ -6443,6 +7992,12 @@ void Game::activate_main_menu_action(MainMenuAction action) {
         break;
     case MainMenuAction::SeaAdventure:
         open_save_slot_menu(SaveSlotMenuMode::NewGame, SaveSlotMenuParent::MainMenu, GameMode::SeaAdventure);
+        break;
+    case MainMenuAction::Backrooms:
+        open_save_slot_menu(
+            SaveSlotMenuMode::NewGame,
+            SaveSlotMenuParent::MainMenu,
+            GameMode::Backrooms);
         break;
     case MainMenuAction::Load:
         open_save_slot_menu(SaveSlotMenuMode::LoadGame, SaveSlotMenuParent::MainMenu);
@@ -6694,6 +8249,15 @@ void Game::drop_selected_hotbar_items(bool full_stack) noexcept {
     }
 
     auto& selected_slot = hotbar_.slots[hotbar_.selected_index];
+    if (!item_stack_can_be_dropped(selected_slot)) {
+        // Je protège l'identité de l'arme légendaire avant toute mutation de
+        // l'inventaire : le système de drops ne doit jamais avoir à la rendre.
+        queue_gameplay_announcement(
+            "OBJET LEGENDAIRE",
+            "L'ECHINE DU LEVIATHAN NE PEUT PAS ETRE ABANDONNEE",
+            2.5F);
+        return;
+    }
     const auto removed = inventory_take_from_slot(
         selected_slot,
         full_stack ? selected_slot.count : static_cast<std::uint8_t>(1));
@@ -6716,6 +8280,19 @@ void Game::drop_hovered_inventory_stack(bool full_stack) noexcept {
         return;
     }
 
+    const auto* hovered_slot =
+        inventory_slot_ptr(
+            inventory_menu_,
+            hotbar_,
+            *inventory_menu_.hovered_slot);
+    if (hovered_slot == nullptr ||
+        !item_stack_can_be_dropped(*hovered_slot)) {
+        queue_gameplay_announcement(
+            "OBJET LEGENDAIRE",
+            "L'ECHINE DU LEVIATHAN NE PEUT PAS ETRE ABANDONNEE",
+            2.5F);
+        return;
+    }
     const auto removed = inventory_take_from_ref(
         inventory_menu_,
         hotbar_,
@@ -6735,6 +8312,14 @@ void Game::drop_hovered_inventory_stack(bool full_stack) noexcept {
 }
 
 void Game::drop_carried_inventory_stack(bool full_stack) noexcept {
+    if (!item_stack_can_be_dropped(
+            inventory_menu_.carried_slot)) {
+        queue_gameplay_announcement(
+            "OBJET LEGENDAIRE",
+            "L'ECHINE DU LEVIATHAN NE PEUT PAS ETRE ABANDONNEE",
+            2.5F);
+        return;
+    }
     auto removed = inventory_take_from_slot(
         inventory_menu_.carried_slot,
         full_stack ? inventory_menu_.carried_slot.count : static_cast<std::uint8_t>(1));
@@ -6760,6 +8345,12 @@ void Game::award_player_experience(
     const ExperienceAwardEvent& event,
     const BlockCoord& activity_block,
     std::string_view source) {
+    if (!scenario_session_
+             .permanent_rewards_allowed() ||
+        !issou_scenario_
+             .permanent_rewards_allowed()) {
+        return;
+    }
     const auto award =
         experience_awards_.award(
             event);
@@ -7059,12 +8650,4374 @@ auto Game::current_maritime_hud_view() const noexcept -> MaritimeHudView {
     return view;
 }
 
+void Game::prepare_legendary_presentation(
+    float animation_time_seconds) {
+    if (!has_active_session_ ||
+        front_end_visible()) {
+        pending_leviathan_visual_events_.clear();
+        renderer_
+            .clear_legendary_presentation();
+        return;
+    }
+
+    std::vector<LeviathanWeaponPartInstance>
+        weapon_parts {};
+    std::vector<ChainedColossusPartInstance>
+        colossus_parts {};
+    std::vector<IssouCrowdInstance>
+        crowd {};
+    std::vector<IssouArenaDecorInstance>
+        arena_decor {};
+    std::vector<IssouHudElement>
+        issou_hud {};
+    auto issou_results =
+        std::optional<
+            IssouResultsPresentation> {};
+    auto visual_events =
+        std::exchange(
+            pending_leviathan_visual_events_,
+            {});
+    std::array<
+        LegendaryEnemyRenderSnapshot,
+        kMaximumLegendaryEnemies>
+        enemy_snapshots {};
+    const auto enemy_count =
+        legendary_enemies_
+            .render_snapshots(
+                enemy_snapshots);
+    auto sea_snapshot =
+        std::optional<
+            SeaLeviathanRenderSnapshot> {};
+
+    const auto weapon =
+        colossal_weapon_.snapshot();
+    if (!player_.is_dead() &&
+        (selected_colossal_weapon_active() ||
+         weapon.state !=
+             ColossalWeaponState::Holstered)) {
+        const auto awakening_level =
+            issou_scenario_.active()
+                ? issou_scenario_.state()
+                      .awakening_override
+                : static_cast<std::uint8_t>(
+                      legendary_weapon_progression_
+                          .state()
+                          .awakening);
+        auto up = glm::vec3 {0.0F, 1.0F, 0.0F};
+        if (sea_adventure_.active()) {
+            up =
+                sea_adventure_.ship_entity()
+                    .local_to_world_direction(
+                        {0.0F, 1.0F, 0.0F});
+            const auto up_length = glm::length(up);
+            up = std::isfinite(up_length) &&
+                         up_length > 1.0e-5F
+                     ? up / up_length
+                     : glm::vec3 {0.0F, 1.0F, 0.0F};
+        }
+        auto forward = player_.look_direction();
+        const auto forward_length = glm::length(forward);
+        forward =
+            std::isfinite(forward_length) &&
+                    forward_length > 1.0e-5F
+                ? forward / forward_length
+                : glm::vec3 {0.0F, 0.0F, -1.0F};
+        auto right = glm::cross(forward, up);
+        const auto right_length = glm::length(right);
+        if (!std::isfinite(right_length) ||
+            right_length <= 1.0e-5F) {
+            right = {1.0F, 0.0F, 0.0F};
+        } else {
+            right /= right_length;
+        }
+        forward = glm::normalize(
+            glm::cross(up, right));
+        auto actor_transform = glm::mat4 {1.0F};
+        actor_transform[0] =
+            glm::vec4 {right, 0.0F};
+        actor_transform[1] =
+            glm::vec4 {up, 0.0F};
+        actor_transform[2] =
+            glm::vec4 {-forward, 0.0F};
+        actor_transform[3] =
+            glm::vec4 {
+                player_.eye_position(),
+                1.0F,
+            };
+        const auto pose =
+            solve_leviathan_weapon_pose({
+                actor_transform,
+                LeviathanViewMode::FirstPerson,
+                weapon.state,
+                weapon.attack,
+                static_cast<
+                    LegendaryWeaponAwakening>(
+                    std::min<std::uint8_t>(
+                        awakening_level,
+                        static_cast<std::uint8_t>(
+                            LegendaryWeaponAwakening::
+                                Awakened))),
+                weapon.state_progress,
+                weapon.charge_progress,
+                animation_time_seconds,
+                weapon.contextual_vertical,
+            });
+        if (pose.visible) {
+            weapon_parts = pose.parts;
+            auto trail =
+                build_leviathan_visual_events({
+                    player_.eye_position() +
+                        forward * 1.4F,
+                    forward,
+                    weapon.attack,
+                    LeviathanImpactSurface::Flesh,
+                    LeviathanImpactWeight::Light,
+                    static_cast<
+                        LegendaryWeaponAwakening>(
+                        std::min<std::uint8_t>(
+                            awakening_level,
+                            static_cast<std::uint8_t>(
+                                LegendaryWeaponAwakening::
+                                    Awakened))),
+                    {},
+                    weapon.state_progress,
+                    false,
+                    false,
+                });
+            visual_events.insert(
+                visual_events.end(),
+                trail.begin(),
+                trail.end());
+        }
+    }
+
+    if (issou_scenario_.active()) {
+        const auto& arena =
+            issou_scenario_.state();
+        const auto& boss =
+            chained_colossus_.state();
+        const auto stagger =
+            chained_colossus_
+                .stagger_state();
+        auto hidden_parts_mask =
+            std::uint32_t {0U};
+        auto wounded_zones_mask =
+            boss.health <
+                    kChainedColossusMaximumHealth
+                ? (std::uint32_t {1U} <<
+                   kColossusTorsoZone)
+                : 0U;
+        const auto hidden_part_for_zone =
+            [](DamageZoneId zone_id) noexcept {
+                switch (zone_id) {
+                case kColossusHeadZone:
+                    return ColossusHiddenPart::Head;
+                case kColossusLeftArmZone:
+                    return ColossusHiddenPart::LeftArm;
+                case kColossusRightArmZone:
+                    return ColossusHiddenPart::RightArm;
+                case kColossusLeftLegZone:
+                    return ColossusHiddenPart::LeftLeg;
+                case kColossusRightLegZone:
+                    return ColossusHiddenPart::RightLeg;
+                case kColossusHornZone:
+                    return ColossusHiddenPart::Horn;
+                default:
+                    return ColossusHiddenPart::None;
+                }
+            };
+        for (const auto& limb :
+             chained_colossus_
+                 .limb_views()) {
+            if (limb.zone_id < 32U &&
+                (limb.condition !=
+                     DamageZoneCondition::Intact ||
+                 limb.armor ==
+                     ColossusArmorState::Broken)) {
+                wounded_zones_mask |=
+                    std::uint32_t {1U} <<
+                    limb.zone_id;
+            }
+            if (limb.part_state ==
+                DismembermentPartState::Severed) {
+                hidden_parts_mask |=
+                    static_cast<std::uint32_t>(
+                        hidden_part_for_zone(
+                            limb.zone_id));
+            }
+        }
+        const auto boss_x =
+            static_cast<int>(
+                std::floor(boss.position.x));
+        const auto boss_y =
+            std::clamp(
+                static_cast<int>(
+                    std::floor(
+                        boss.position.y +
+                        2.0F)),
+                kWorldMinY,
+                kWorldMaxY);
+        const auto boss_z =
+            static_cast<int>(
+                std::floor(boss.position.z));
+        const auto gore =
+            arena.gore_mode ==
+                    IssouGoreMode::Disabled
+                ? GorePresentationMode::Disabled
+                : arena.gore_mode ==
+                          IssouGoreMode::Reduced
+                      ? GorePresentationMode::Reduced
+                      : GorePresentationMode::Full;
+        colossus_parts =
+            build_chained_colossus_parts({
+                boss.position,
+                boss.yaw_radians,
+                boss.animation_seconds,
+                std::clamp(
+                    boss.health /
+                        kChainedColossusMaximumHealth,
+                    0.0F,
+                    1.0F),
+                stagger.maximum > 0.0F
+                    ? std::clamp(
+                          stagger.current /
+                              stagger.maximum,
+                          0.0F,
+                          1.0F)
+                    : 0.0F,
+                boss.movement_amount,
+                boss.phase,
+                boss.attack,
+                boss.attack_stage,
+                boss.armor_states,
+                hidden_parts_mask,
+                wounded_zones_mask,
+                gore,
+                static_cast<float>(
+                    world_.get_sky_light(
+                        boss_x,
+                        boss_y,
+                        boss_z)) /
+                    15.0F,
+                static_cast<float>(
+                    world_.get_block_light(
+                        boss_x,
+                        boss_y,
+                        boss_z)) /
+                    15.0F,
+            });
+        crowd =
+            build_issou_crowd(
+                arena.layout,
+                {
+                    render_player()
+                        .eye_position(),
+                    140U,
+                    12U,
+                    static_cast<std::uint32_t>(
+                        arena.layout.seed) ^
+                        arena.run_sequence,
+                    animation_time_seconds,
+                    arena.crowd_excitement,
+                    latest_issou_event_,
+                    false,
+                });
+        arena_decor =
+            build_issou_arena_decor(
+                arena);
+        const auto weapon_stability_ratio =
+            weapon.maximum_stability > 0.0F
+                ? weapon.stability /
+                      weapon.maximum_stability
+                : 0.0F;
+        issou_hud =
+            build_issou_arena_hud({
+                arena.phase,
+                static_cast<float>(
+                    window_width_),
+                static_cast<float>(
+                    window_height_),
+                std::clamp(
+                    boss.health /
+                        kChainedColossusMaximumHealth,
+                    0.0F,
+                    1.0F),
+                stagger.maximum > 0.0F
+                    ? stagger.current /
+                          stagger.maximum
+                    : 0.0F,
+                std::clamp(
+                    weapon_stability_ratio,
+                    0.0F,
+                    1.0F),
+                weapon.charge_progress,
+                arena.countdown_seconds,
+                weapon.momentum,
+                {},
+            });
+        if (arena.phase ==
+                IssouArenaPhase::Victory ||
+            arena.phase ==
+                IssouArenaPhase::Defeat) {
+            issou_results =
+                build_issou_results(
+                    arena.statistics,
+                    arena.phase ==
+                        IssouArenaPhase::Victory);
+        }
+    }
+
+    if (sea_adventure_.active() &&
+        sea_leviathan_.active()) {
+        const auto& ship =
+            sea_adventure_
+                .ship_entity();
+        sea_snapshot =
+            sea_leviathan_
+                .render_snapshot({
+                    ship.world_origin(),
+                    ship.local_to_world_direction(
+                        {1.0F, 0.0F, 0.0F}),
+                    ship.local_to_world_direction(
+                        {0.0F, 1.0F, 0.0F}),
+                    ship.local_to_world_direction(
+                        {0.0F, 0.0F, 1.0F}),
+                });
+    }
+
+    renderer_.set_legendary_presentation({
+        std::span<const LeviathanWeaponPartInstance> {
+            weapon_parts},
+        std::span<const ChainedColossusPartInstance> {
+            colossus_parts},
+        issou_scenario_.active()
+            ? colossus_blood_traces_
+                  .traces()
+            : std::span<
+                  const ColossusBloodTrace> {},
+        std::span<const IssouCrowdInstance> {
+            crowd},
+        std::span<const IssouArenaDecorInstance> {
+            arena_decor},
+        std::span<const LegendaryEnemyRenderSnapshot> {
+            enemy_snapshots.data(),
+            enemy_count,
+        },
+        sea_snapshot,
+        std::span<const IssouHudElement> {
+            issou_hud},
+        issou_results,
+        std::span<const LeviathanVisualEvent> {
+            visual_events},
+    });
+}
+
 auto Game::selected_musket_active() const noexcept -> bool {
     const auto& selected =
         hotbar_.selected_slot();
     return inventory_slot_has_item(selected) &&
            block_item_id(selected.block_id) ==
                to_block_id(BlockType::Musket);
+}
+
+auto Game::selected_colossal_weapon_active() const noexcept
+    -> bool {
+    const auto& selected =
+        hotbar_.selected_slot();
+    if (is_legendary_weapon_item(selected)) {
+        return true;
+    }
+    // Je ne vole pas la sélection d'un outil, d'une arme ou d'un bloc :
+    // l'arme équipée prend la main uniquement sur un emplacement réellement vide.
+    return !inventory_slot_has_item(selected) &&
+           inventory_has_equipped_legendary_weapon(
+               inventory_menu_);
+}
+
+auto Game::colossal_weapon_drawn() const noexcept -> bool {
+    return colossal_weapon_.snapshot().state !=
+           ColossalWeaponState::Holstered;
+}
+
+auto Game::intercept_colossal_guard(
+    const ColossalGuardRequest& request,
+    std::uint8_t allies_behind) noexcept
+    -> ColossalGuardResult {
+    const auto preview =
+        resolve_colossal_guard(request);
+    auto adjusted = request;
+    const auto synergy =
+        leviathan_knight_synergy_
+            .modify_guard(
+                player_build_,
+                {
+                    preview.stability_lost,
+                    allies_behind,
+                    request.guard_active,
+                    preview.blocked,
+                    request.attack_kind ==
+                        ColossalIncomingAttackKind::
+                            Projectile,
+                });
+    if (preview.stability_lost >
+            1.0e-6F &&
+        synergy.stability_loss >= 0.0F &&
+        std::isfinite(
+            synergy.stability_loss)) {
+        adjusted.attack_coefficient *=
+            std::clamp(
+                synergy.stability_loss /
+                    preview.stability_lost,
+                0.0F,
+                1.0F);
+    }
+    const auto result =
+        colossal_weapon_
+            .intercept_incoming_attack(
+                adjusted);
+    if (result.perfect) {
+        const auto view =
+            leviathan_knight_synergy_
+                .view();
+        const auto index =
+            static_cast<std::size_t>(
+                LeviathanKnightSynergyKind::
+                    PerfectRiposte);
+        if (view.active[index]) {
+            const auto riposte =
+                leviathan_knight_synergy_
+                    .consume_perfect_riposte(
+                        player_build_,
+                        {
+                            view.activation_sequences[
+                                index],
+                            true,
+                            true,
+                        });
+            static_cast<void>(
+                colossal_weapon_
+                    .queue_next_attack_override(
+                        riposte,
+                        view.activation_sequences[
+                            index]));
+        }
+    }
+    return result;
+}
+
+void Game::clear_colossal_weapon_input() noexcept {
+    pending_colossal_primary_release_ =
+        pending_colossal_primary_release_ ||
+        colossal_primary_held_;
+    pending_colossal_guard_release_ =
+        pending_colossal_guard_release_ ||
+        colossal_guard_held_;
+    colossal_primary_held_ = false;
+    colossal_guard_held_ = false;
+    pending_colossal_primary_press_ = false;
+    pending_colossal_guard_press_ = false;
+}
+
+void Game::update_colossal_weapon(
+    float dt,
+    const PlayerInput& movement_input,
+    bool gameplay_input_enabled,
+    bool maritime_session_active) {
+    const auto selected =
+        selected_colossal_weapon_active();
+    const auto before =
+        colossal_weapon_.snapshot();
+    if (!selected &&
+        before.state ==
+            ColossalWeaponState::Holstered) {
+        colossal_weapon_was_selected_ = false;
+        colossal_blade_pose_valid_ = false;
+        clear_colossal_weapon_input();
+        return;
+    }
+
+    const auto look =
+        safe_horizontal_direction(
+            player_.look_direction());
+    auto right =
+        glm::cross(
+            look,
+            glm::vec3 {0.0F, 1.0F, 0.0F});
+    const auto right_length_squared =
+        glm::dot(right, right);
+    right =
+        right_length_squared > 1.0e-6F
+            ? right /
+                  std::sqrt(
+                      right_length_squared)
+            : glm::vec3 {1.0F, 0.0F, 0.0F};
+    constexpr auto kTunnelHalfProbe = 1.45F;
+    const auto left_hit =
+        world_.raycast_collidable(
+            player_.eye_position(),
+            -right,
+            kTunnelHalfProbe);
+    const auto right_hit =
+        world_.raycast_collidable(
+            player_.eye_position(),
+            right,
+            kTunnelHalfProbe);
+    const auto horizontal_clearance =
+        (left_hit.hit
+             ? left_hit.distance
+             : kTunnelHalfProbe) +
+        (right_hit.hit
+             ? right_hit.distance
+             : kTunnelHalfProbe);
+
+    const auto strength =
+        player_attribute_value(
+            player_build_.attributes,
+            PlayerAttribute::Strength);
+    const auto demonstration_strength =
+        issou_scenario_.active()
+            ? kLeviathanSpineDefinition
+                  .demonstration_strength
+            : strength;
+    const auto level =
+        static_cast<std::uint16_t>(
+            std::min<std::uint32_t>(
+                progression_.level(),
+                (std::numeric_limits<
+                    std::uint16_t>::max)()));
+    const auto fully_immersed =
+        player_.state().head_underwater &&
+        player_.state().swimming;
+
+    ColossalWeaponInput input {};
+    input.toggle_draw_pressed =
+        (selected &&
+         (!colossal_weapon_was_selected_ ||
+          (before.state ==
+               ColossalWeaponState::Holstered &&
+           before.last_rejection !=
+               ColossalWeaponRejection::
+                   RequirementsNotMet &&
+           !fully_immersed))) ||
+        (!selected &&
+         before.state !=
+             ColossalWeaponState::Holstered &&
+         before.can_change_equipment);
+    input.primary_pressed =
+        gameplay_input_enabled &&
+        selected &&
+        std::exchange(
+            pending_colossal_primary_press_,
+            false);
+    input.primary_held =
+        gameplay_input_enabled &&
+        selected &&
+        colossal_primary_held_;
+    input.primary_released =
+        std::exchange(
+            pending_colossal_primary_release_,
+            false);
+    input.guard_pressed =
+        gameplay_input_enabled &&
+        selected &&
+        std::exchange(
+            pending_colossal_guard_press_,
+            false);
+    input.guard_held =
+        gameplay_input_enabled &&
+        selected &&
+        colossal_guard_held_;
+    input.guard_released =
+        std::exchange(
+            pending_colossal_guard_release_,
+            false);
+    input.cancel_pressed =
+        player_.is_dead() ||
+        !gameplay_input_enabled;
+
+    const ColossalWeaponUpdateContext context {
+        level,
+        demonstration_strength,
+        progression_.attack_damage_multiplier(),
+        player_build_.val_energy,
+        issou_scenario_.active(),
+        fully_immersed,
+        movement_input.sprint,
+        horizontal_clearance < 2.75F,
+    };
+    const auto events =
+        colossal_weapon_.update(
+            input,
+            context,
+            dt);
+    for (const auto& event : events) {
+        switch (event.type) {
+        case ColossalWeaponEventType::
+            ChargeResourceCommit: {
+            const auto cost =
+                std::max(
+                    event.primary_value,
+                    0.0F);
+            if (std::isfinite(cost) &&
+                player_build_.val_energy >= cost) {
+                player_build_.val_energy -= cost;
+                if (player_build_.revision !=
+                    (std::numeric_limits<
+                        std::uint64_t>::max)()) {
+                    ++player_build_.revision;
+                }
+                mark_session_dirty();
+            }
+            break;
+        }
+        case ColossalWeaponEventType::AttackStarted:
+            player_.trigger_primary_action();
+            player_.cancel_block_breaking();
+            colossal_hit_ledger_.begin_attack(
+                event.attack_sequence);
+            colossal_wall_impact_sequence_ = 0U;
+            colossal_shockwave_sequence_ = 0U;
+            colossal_blade_pose_valid_ = false;
+            music_.play_sfx(
+                GameSfxKind::HeavySwing,
+                event.attack ==
+                        ColossalAttackKind::
+                            ChargedExecution
+                    ? 1.0F
+                    : 0.84F);
+            break;
+        case ColossalWeaponEventType::
+            RunningAdvanceRequested: {
+            auto velocity =
+                player_.state().velocity;
+            const auto duration =
+                std::max(
+                    event.secondary_value,
+                    0.10F);
+            const auto advance_speed =
+                std::clamp(
+                    event.primary_value /
+                        duration,
+                    0.0F,
+                    7.0F);
+            velocity.x +=
+                look.x * advance_speed;
+            velocity.z +=
+                look.z * advance_speed;
+            player_.set_velocity(
+                velocity);
+            break;
+        }
+        case ColossalWeaponEventType::DrawCompleted:
+            issou_scenario_.notify_combat_event(
+                IssouArenaCombatEvent::
+                    WeaponDrawn);
+            break;
+        case ColossalWeaponEventType::AttackMissed:
+            issou_scenario_.notify_combat_event(
+                IssouArenaCombatEvent::
+                    AttackMissed);
+            break;
+        case ColossalWeaponEventType::AutoSheathed:
+            queue_gameplay_announcement(
+                "ARME RANGEE",
+                "L'ECHINE EST TROP LOURDE SOUS L'EAU",
+                2.0F);
+            break;
+        case ColossalWeaponEventType::ActionRejected:
+        case ColossalWeaponEventType::ChargeRejected:
+            if (event.rejection ==
+                ColossalWeaponRejection::
+                    RequirementsNotMet) {
+                queue_gameplay_announcement(
+                    "ARME TROP LOURDE",
+                    "NIVEAU 35 ET FORCE 4 REQUIS",
+                    2.4F);
+            } else if (
+                event.rejection ==
+                ColossalWeaponRejection::
+                    InsufficientEnergy) {
+                queue_gameplay_announcement(
+                    "ENERGIE INSUFFISANTE",
+                    "35 POINTS DE VAL REQUIS",
+                    2.0F);
+            }
+            break;
+        case ColossalWeaponEventType::StateChanged:
+        case ColossalWeaponEventType::SheathCompleted:
+        case ColossalWeaponEventType::AttackBecameActive:
+        case ColossalWeaponEventType::AttackFinished:
+        case ColossalWeaponEventType::AttackImpact:
+        case ColossalWeaponEventType::MomentumChanged:
+        case ColossalWeaponEventType::StabilityChanged:
+        case ColossalWeaponEventType::GuardStarted:
+        case ColossalWeaponEventType::GuardEnded:
+        case ColossalWeaponEventType::PerfectGuard:
+        case ColossalWeaponEventType::GuardBroken:
+            break;
+        }
+    }
+
+    const auto after =
+        colossal_weapon_.snapshot();
+    if (after.state ==
+        ColossalWeaponState::Active) {
+        resolve_colossal_weapon_sweep(
+            maritime_session_active);
+    } else if (
+        after.attack_sequence !=
+            before.attack_sequence) {
+        colossal_blade_pose_valid_ = false;
+    }
+
+    if (selected ||
+        after.state !=
+            ColossalWeaponState::Holstered) {
+        pending_break_block_ = false;
+        pending_primary_attack_ = false;
+        pending_place_block_ = false;
+        player_.cancel_block_breaking();
+    }
+    colossal_weapon_was_selected_ =
+        selected;
+    sync_selected_hotbar_slot();
+}
+
+void Game::resolve_colossal_weapon_sweep(
+    bool maritime_session_active) {
+    const auto weapon =
+        colossal_weapon_.snapshot();
+    const auto* attack =
+        colossal_weapon_
+            .current_attack_definition();
+    if (attack == nullptr ||
+        weapon.state !=
+            ColossalWeaponState::Active ||
+        weapon.attack_sequence == 0U) {
+        return;
+    }
+    const auto attack_synergy =
+        leviathan_knight_synergy_
+            .prepare_attack(
+                player_build_,
+                {
+                    weapon.attack_sequence,
+                    weapon.attack,
+                    attack->maximum_targets,
+                });
+    const auto effective_range =
+        attack->range_blocks;
+    const auto effective_shockwave_radius =
+        std::max(
+            0.0F,
+            attack->shockwave_radius_blocks +
+                attack_synergy
+                    .additional_shockwave_radius_blocks);
+    const auto effective_arc =
+        attack->arc_degrees;
+    const auto effective_maximum_targets =
+        std::max(
+            attack_synergy.maximum_targets ==
+                    0U
+                ? attack->maximum_targets
+                : attack_synergy
+                      .maximum_targets,
+            attack->maximum_targets);
+    const auto* base_attack =
+        colossal_attack_definition(
+            weapon.attack);
+    const auto attack_override_stagger_multiplier =
+        base_attack != nullptr &&
+                base_attack->stagger_power >
+                    1.0e-6F
+            ? attack->stagger_power /
+                  base_attack->stagger_power
+            : 1.0F;
+
+    const auto awakening_level =
+        issou_scenario_.active()
+            ? issou_scenario_.state()
+                  .awakening_override
+            : static_cast<std::uint8_t>(
+                  legendary_weapon_progression_
+                      .state()
+                      .awakening);
+    const auto awakening =
+        static_cast<LegendaryWeaponAwakening>(
+            std::min<std::uint8_t>(
+                awakening_level,
+                static_cast<std::uint8_t>(
+                    LegendaryWeaponAwakening::
+                        Awakened)));
+    const auto current_pose =
+        colossal_blade_pose(
+            player_,
+            weapon,
+            awakening);
+    if (!colossal_blade_pose_valid_ ||
+        colossal_hit_ledger_
+                .attack_sequence() !=
+            weapon.attack_sequence) {
+        previous_colossal_blade_pose_ =
+            current_pose;
+        colossal_blade_pose_valid_ = true;
+    }
+
+    enum class TargetRouteKind : std::uint8_t {
+        Creature = 0,
+        LegendaryEnemy,
+        Colossus,
+        SeaLeviathan,
+    };
+    struct TargetRoute {
+        ColossalCombatTargetId combat_id = 0U;
+        TargetRouteKind kind =
+            TargetRouteKind::Creature;
+        std::uint64_t runtime_id = 0U;
+        ColossalTargetWeight weight =
+            ColossalTargetWeight::Light;
+        bool corrupted = false;
+    };
+
+    std::array<
+        ColossalSweepCandidate,
+        kMaximumColossalSweepCandidates>
+        candidates {};
+    std::array<
+        TargetRoute,
+        kMaximumColossalSweepCandidates>
+        routes {};
+    auto candidate_count = std::size_t {0U};
+    auto route_count = std::size_t {0U};
+    const auto add_route =
+        [&](TargetRouteKind kind,
+            std::uint64_t runtime_id,
+            ColossalTargetWeight weight,
+            bool corrupted)
+            -> ColossalCombatTargetId {
+        if (route_count >= routes.size()) {
+            return 0U;
+        }
+        constexpr auto kPayloadMask =
+            (std::uint64_t {1U} << 60U) - 1U;
+        const auto route_namespace =
+            static_cast<std::uint64_t>(kind) + 1U;
+        const auto payload =
+            (kind == TargetRouteKind::Colossus ||
+             kind == TargetRouteKind::SeaLeviathan)
+                ? 1U
+                : runtime_id & kPayloadMask;
+        const auto id =
+            (route_namespace << 60U) |
+            std::max<std::uint64_t>(payload, 1U);
+        routes[route_count++] = {
+            id,
+            kind,
+            runtime_id,
+            weight,
+            corrupted,
+        };
+        return id;
+    };
+    const auto append_candidate =
+        [&](ColossalSweepCandidate candidate) {
+        if (candidate_count >=
+                candidates.size() ||
+            candidate.target_id == 0U) {
+            return;
+        }
+        candidates[candidate_count++] =
+            candidate;
+    };
+
+    if (issou_scenario_.state().phase ==
+        IssouArenaPhase::Combat) {
+        const auto colossus_id =
+            add_route(
+                TargetRouteKind::Colossus,
+                0U,
+                ColossalTargetWeight::Boss,
+                false);
+        const auto& state =
+            chained_colossus_.state();
+        const auto limbs =
+            chained_colossus_.limb_views();
+        const auto zone_is_severed =
+            [&](DamageZoneId zone_id) {
+            const auto found =
+                std::find_if(
+                    limbs.begin(),
+                    limbs.end(),
+                    [zone_id](
+                        const ChainedColossusLimbView&
+                            limb) {
+                        return limb.zone_id ==
+                               zone_id;
+                    });
+            return found != limbs.end() &&
+                   found->part_state ==
+                       DismembermentPartState::
+                           Severed;
+        };
+        constexpr std::array<
+            DamageZoneId,
+            7U>
+            zones {{
+                kColossusTorsoZone,
+                kColossusHeadZone,
+                kColossusLeftArmZone,
+                kColossusRightArmZone,
+                kColossusLeftLegZone,
+                kColossusRightLegZone,
+                kColossusHornZone,
+            }};
+        for (const auto zone_id : zones) {
+            const auto torso =
+                zone_id ==
+                kColossusTorsoZone;
+            const auto head =
+                zone_id ==
+                kColossusHeadZone;
+            const auto horn =
+                zone_id ==
+                kColossusHornZone;
+            append_candidate({
+                colossus_id,
+                zone_id,
+                colossus_zone_center(
+                    state,
+                    zone_id),
+                torso
+                    ? 0.95F
+                    : (head
+                           ? 0.52F
+                           : (horn
+                                  ? 0.30F
+                                  : 0.58F)),
+                static_cast<std::uint8_t>(
+                    horn
+                        ? 6U
+                        : (head
+                               ? 5U
+                               : (torso
+                                      ? 1U
+                                      : 4U))),
+                !zone_is_severed(zone_id),
+                false,
+            });
+        }
+    }
+
+    std::optional<SeaLeviathanCombatSnapshot>
+        sea_combat {};
+    if (maritime_session_active &&
+        sea_leviathan_.active()) {
+        const auto& ship =
+            sea_adventure_.ship_entity();
+        const ShipLocalFrame frame {
+            ship.world_origin(),
+            ship.local_to_world_direction(
+                {1.0F, 0.0F, 0.0F}),
+            ship.local_to_world_direction(
+                {0.0F, 1.0F, 0.0F}),
+            ship.local_to_world_direction(
+                {0.0F, 0.0F, 1.0F}),
+        };
+        sea_combat =
+            sea_leviathan_.combat_snapshot(
+                frame);
+        if (sea_combat.has_value()) {
+            const auto sea_leviathan_id =
+                add_route(
+                    TargetRouteKind::SeaLeviathan,
+                    0U,
+                    ColossalTargetWeight::Boss,
+                    false);
+            for (std::size_t index = 0U;
+                 index <
+                 sea_combat->hit_volume_count;
+                 ++index) {
+                const auto& volume =
+                    sea_combat
+                        ->hit_volumes[index];
+                if (!volume.enabled) {
+                    continue;
+                }
+                append_candidate({
+                    sea_leviathan_id,
+                    static_cast<
+                        ColossalCombatZoneId>(
+                        volume.part),
+                    volume.center_world,
+                    volume.radius,
+                    static_cast<std::uint8_t>(
+                        volume.sectionable
+                            ? 5U
+                            : 3U),
+                    true,
+                    false,
+                });
+            }
+        }
+    }
+
+    std::array<
+        LegendaryEnemyCombatSnapshot,
+        kMaximumLegendaryEnemies>
+        legendary_snapshots {};
+    const auto legendary_count =
+        legendary_enemies_.combat_snapshots(
+            legendary_snapshots);
+    for (std::size_t index = 0U;
+         index < legendary_count;
+         ++index) {
+        const auto& enemy =
+            legendary_snapshots[index];
+        if (!enemy.damageable) {
+            continue;
+        }
+        const auto id =
+            add_route(
+                TargetRouteKind::
+                    LegendaryEnemy,
+                enemy.id,
+                colossal_target_weight(
+                    enemy.weight),
+                enemy.corrupted);
+        append_candidate({
+            id,
+            0U,
+            enemy.hit_center,
+            enemy.hit_radius,
+            static_cast<std::uint8_t>(
+                enemy.weight ==
+                        EntityWeight::Heavy
+                    ? 3U
+                    : 2U),
+            true,
+            enemy.faction ==
+                Faction::Ally,
+        });
+    }
+
+    for (const auto& creature :
+         creatures_.active_creatures()) {
+        if (candidate_count >=
+            candidates.size()) {
+            break;
+        }
+        const auto profile =
+            creature_combat_profile(
+                creature);
+        const auto id =
+            add_route(
+                TargetRouteKind::Creature,
+                creature_id_from_anchor(
+                    creature.anchor),
+                colossal_target_weight(
+                    profile.weight),
+                profile.faction ==
+                    Faction::Hostile);
+        append_candidate({
+            id,
+            0U,
+            creature.position +
+                glm::vec3 {
+                    0.0F,
+                    0.75F,
+                    0.0F,
+                },
+            profile.weight ==
+                    EntityWeight::Heavy
+                ? 0.72F
+                : 0.58F,
+            static_cast<std::uint8_t>(
+                profile.weight ==
+                        EntityWeight::Heavy
+                    ? 2U
+                    : 1U),
+            true,
+            creature.anchor.species ==
+                CreatureSpecies::Villager,
+        });
+    }
+
+    const auto direction =
+        safe_horizontal_direction(
+            player_.look_direction());
+    const auto sweep_previous_pose =
+        previous_colossal_blade_pose_;
+    const ColossalSweepQuery query {
+        weapon.attack_sequence,
+        sweep_previous_pose,
+        current_pose,
+        player_.position() +
+            glm::vec3 {
+                0.0F,
+                0.90F,
+                0.0F,
+            },
+        direction,
+        0.18F,
+        effective_range,
+        effective_arc,
+        effective_maximum_targets,
+        weapon.attack_shape ==
+                ColossalAttackShape::
+                    HorizontalArc ||
+            weapon.attack_shape ==
+                ColossalAttackShape::
+                    ReverseHorizontalArc ||
+            weapon.attack_shape ==
+                ColossalAttackShape::
+                    DiagonalArc,
+        false,
+    };
+    const ColossalSweepCallbacks callbacks {
+        this,
+        +[](void* user_data,
+            const ColossalSweepOcclusionRequest&
+                request) noexcept {
+            const auto& game =
+                *static_cast<Game*>(
+                    user_data);
+            const auto delta =
+                request.target_center -
+                request.origin;
+            const auto distance =
+                glm::length(delta);
+            if (!std::isfinite(distance) ||
+                distance <= 0.08F) {
+                return false;
+            }
+            const auto ray = delta / distance;
+            const auto maximum =
+                std::max(
+                    distance - 0.08F,
+                    0.0F);
+            if (game.world_
+                    .raycast_collidable(
+                        request.origin,
+                        ray,
+                        maximum)
+                    .hit) {
+                return true;
+            }
+            return game.sea_adventure_.active() &&
+                   game.sea_adventure_
+                       .ship_entity()
+                       .raycast_collidable_distance(
+                           request.origin,
+                           ray,
+                           maximum)
+                       .has_value();
+        },
+    };
+    const auto result =
+        resolve_colossal_sweep(
+            query,
+            std::span<
+                const ColossalSweepCandidate> {
+                candidates.data(),
+                candidate_count,
+            },
+            colossal_hit_ledger_,
+            callbacks);
+    struct ColossalResolvedContact {
+        ColossalSweepHit hit {};
+        bool shockwave_only = false;
+    };
+    std::array<
+        ColossalResolvedContact,
+        kMaximumColossalSweepHits * 2U>
+        resolved_contacts {};
+    auto resolved_contact_count = std::size_t {0U};
+    for (const auto& hit : result.accepted_hits()) {
+        resolved_contacts[resolved_contact_count++] = {
+            hit,
+            false,
+        };
+    }
+
+    auto shockwave_triggered = false;
+    if (effective_shockwave_radius > 0.0F &&
+        colossal_shockwave_sequence_ !=
+            weapon.attack_sequence &&
+        weapon.state_progress >= 0.45F) {
+        auto shockwave_origin =
+            player_.position() +
+            direction *
+                std::min(effective_range * 0.78F, 2.75F);
+        shockwave_origin.y += 0.15F;
+        if (!result.accepted_hits().empty()) {
+            shockwave_origin =
+                result.accepted_hits().front().contact_point;
+        }
+        colossal_shockwave_sequence_ =
+            weapon.attack_sequence;
+        shockwave_triggered = true;
+        const auto remaining_targets =
+            effective_maximum_targets >
+                    resolved_contact_count
+                ? static_cast<std::uint8_t>(
+                      effective_maximum_targets -
+                      resolved_contact_count)
+                : std::uint8_t {0U};
+        if (remaining_targets > 0U) {
+            const auto shockwave =
+                resolve_colossal_shockwave(
+                    {
+                        weapon.attack_sequence,
+                        shockwave_origin,
+                        effective_shockwave_radius,
+                        remaining_targets,
+                        false,
+                    },
+                    std::span<
+                        const ColossalSweepCandidate> {
+                        candidates.data(),
+                        candidate_count,
+                    },
+                    colossal_hit_ledger_,
+                    callbacks);
+            for (const auto& hit :
+                 shockwave.accepted_hits()) {
+                if (resolved_contact_count >=
+                    resolved_contacts.size()) {
+                    break;
+                }
+                resolved_contacts[
+                    resolved_contact_count++] = {
+                    hit,
+                    true,
+                };
+            }
+        }
+    }
+    auto titan_synergy =
+        LeviathanTitanImpactResult {};
+    if (resolved_contact_count > 0U &&
+        (weapon.attack ==
+             ColossalAttackKind::
+                 ChargedExecution ||
+         weapon.attack ==
+             ColossalAttackKind::
+                 Earthbreaker)) {
+        const auto synergy_view =
+            leviathan_knight_synergy_
+                .view();
+        const auto index =
+            static_cast<std::size_t>(
+                LeviathanKnightSynergyKind::
+                    TitanJudgment);
+        if (synergy_view.active[index]) {
+            titan_synergy =
+                leviathan_knight_synergy_
+                    .prepare_titan_impact(
+                        player_build_,
+                        {
+                            synergy_view
+                                .activation_sequences[
+                                    index],
+                            true,
+                        });
+        }
+    }
+    previous_colossal_blade_pose_ =
+        current_pose;
+
+    const auto effective_strength =
+        issou_scenario_.active()
+            ? kLeviathanSpineDefinition
+                  .demonstration_strength
+            : player_attribute_value(
+                  player_build_.attributes,
+                  PlayerAttribute::Strength);
+    const auto first_awakening =
+        awakening_level >=
+        static_cast<std::uint8_t>(
+            LegendaryWeaponAwakening::
+                Corrupted);
+    const auto final_awakening =
+        awakening_level >=
+        static_cast<std::uint8_t>(
+            LegendaryWeaponAwakening::
+                Awakened);
+    auto heaviest =
+        ColossalTargetWeight::Light;
+    auto accepted_hits =
+        std::uint8_t {0U};
+    auto severed_limb = false;
+    auto total_damage = 0.0F;
+    const auto collision_safe_knockback_distance =
+        [&](const glm::vec3& origin,
+            const glm::vec3& raw_direction,
+            float requested_distance) {
+        auto horizontal =
+            glm::vec3 {
+                raw_direction.x,
+                0.0F,
+                raw_direction.z,
+            };
+        const auto length_squared =
+            glm::dot(horizontal, horizontal);
+        if (!std::isfinite(length_squared) ||
+            length_squared <= 1.0e-6F ||
+            !std::isfinite(requested_distance) ||
+            requested_distance <= 0.0F) {
+            return 0.0F;
+        }
+        horizontal /=
+            std::sqrt(length_squared);
+        auto allowed =
+            std::clamp(
+                requested_distance,
+                0.0F,
+                4.0F);
+        const auto world_hit =
+            world_.raycast_collidable(
+                origin,
+                horizontal,
+                allowed);
+        if (world_hit.hit) {
+            allowed =
+                std::min(
+                    allowed,
+                    std::max(
+                        world_hit.distance -
+                            0.20F,
+                        0.0F));
+        }
+        if (maritime_session_active) {
+            const auto ship_hit =
+                sea_adventure_.ship_entity()
+                    .raycast_collidable_distance(
+                        origin,
+                        horizontal,
+                        allowed);
+            if (ship_hit.has_value()) {
+                allowed =
+                    std::min(
+                        allowed,
+                        std::max(
+                            *ship_hit - 0.20F,
+                            0.0F));
+            }
+        }
+        return allowed;
+    };
+
+    for (std::size_t contact_index = 0U;
+         contact_index < resolved_contact_count;
+         ++contact_index) {
+        const auto& contact =
+            resolved_contacts[contact_index];
+        const auto& hit = contact.hit;
+        const auto route =
+            std::find_if(
+                routes.begin(),
+                routes.begin() +
+                    static_cast<
+                        std::ptrdiff_t>(
+                        route_count),
+                [&](const TargetRoute& candidate) {
+                    return candidate.combat_id ==
+                           hit.target_id;
+                });
+        if (route ==
+            routes.begin() +
+                static_cast<std::ptrdiff_t>(
+                    route_count)) {
+            continue;
+        }
+
+        auto damage =
+            resolve_colossal_damage({
+                weapon.attack,
+                route->weight,
+                progression_
+                    .attack_damage_multiplier(),
+                effective_strength,
+                1.0F,
+                1.0F,
+                1.0F,
+                weapon.momentum,
+                route->corrupted,
+                first_awakening,
+            });
+        if (final_awakening &&
+            route->weight ==
+                ColossalTargetWeight::Boss) {
+            damage.stagger_power *= 1.10F;
+        }
+        damage.stagger_power *=
+            attack_override_stagger_multiplier *
+            titan_synergy
+                .stagger_multiplier;
+        if (contact.shockwave_only) {
+            damage.stagger_power *= 0.65F;
+            damage.sever_power = 0.0F;
+        }
+        const auto health_damage =
+            (contact.shockwave_only
+                 ? damage.shockwave_damage
+                 : damage.direct_damage +
+                       damage.shockwave_damage) *
+                titan_synergy
+                    .damage_multiplier +
+            attack_synergy
+                .additional_shockwave_damage;
+        auto hit_accepted = false;
+        auto hit_severed = false;
+        auto applied_health_damage = 0.0F;
+        switch (route->kind) {
+        case TargetRouteKind::Creature: {
+            const auto creature_hit =
+                creatures_.apply_damage(
+                    route->runtime_id,
+                    health_damage,
+                    CreatureDamageSource::Player,
+                    hit.target_center -
+                        player_.position());
+            hit_accepted = creature_hit.hit;
+            applied_health_damage =
+                creature_hit.damage;
+            if (creature_hit.hit) {
+                const auto stagger_seconds =
+                    std::clamp(
+                        damage.stagger_power /
+                            100.0F,
+                        0.15F,
+                        1.20F);
+                static_cast<void>(
+                    creatures_.apply_stagger(
+                        route->runtime_id,
+                        stagger_seconds));
+                if (!creature_hit.killed) {
+                    static_cast<void>(
+                        creatures_.apply_knockback(
+                            route->runtime_id,
+                            hit.target_center -
+                                player_.position(),
+                            collision_safe_knockback_distance(
+                                hit.target_center,
+                                hit.target_center -
+                                    player_.position(),
+                                3.25F *
+                                    damage
+                                        .knockback_multiplier *
+                                    (contact.shockwave_only
+                                         ? 0.75F
+                                         : 1.0F))));
+                }
+            }
+            if (creature_hit.killed) {
+                grant_creature_kill_rewards(
+                    creature_hit,
+                    "leviathan_spine");
+                if (route->corrupted &&
+                    !issou_scenario_.active()) {
+                    static_cast<void>(
+                        legendary_weapon_progression_
+                            .record_corrupted_kills());
+                }
+            }
+            break;
+        }
+        case TargetRouteKind::LegendaryEnemy: {
+            const auto enemy_hit =
+                legendary_enemies_.apply_hit(
+                    route->runtime_id,
+                    {
+                        health_damage,
+                        damage.stagger_power,
+                        true,
+                        awakening_level,
+                    });
+            hit_accepted =
+                enemy_hit.accepted;
+            applied_health_damage =
+                enemy_hit.applied_health_damage;
+            if (enemy_hit.accepted &&
+                !enemy_hit.killed_now) {
+                static_cast<void>(
+                    legendary_enemies_
+                        .apply_knockback(
+                            route->runtime_id,
+                            hit.target_center -
+                                player_.position(),
+                            collision_safe_knockback_distance(
+                                hit.target_center,
+                                hit.target_center -
+                                    player_.position(),
+                                3.25F *
+                                    damage
+                                        .knockback_multiplier *
+                                    (contact.shockwave_only
+                                         ? 0.75F
+                                         : 1.0F))));
+            }
+            if (enemy_hit.killed_now &&
+                route->corrupted &&
+                !issou_scenario_.active()) {
+                static_cast<void>(
+                    legendary_weapon_progression_
+                        .record_corrupted_kills());
+            }
+            break;
+        }
+        case TargetRouteKind::Colossus: {
+            const auto gore =
+                issou_scenario_.state()
+                            .gore_mode ==
+                        IssouGoreMode::Disabled
+                    ? GorePresentationMode::
+                          Disabled
+                    : (issou_scenario_.state()
+                                   .gore_mode ==
+                               IssouGoreMode::Reduced
+                           ? GorePresentationMode::
+                                 Reduced
+                           : GorePresentationMode::
+                                 Full);
+            const auto execution =
+                !contact.shockwave_only &&
+                hit.zone_id ==
+                    kColossusHeadZone &&
+                weapon.attack ==
+                    ColossalAttackKind::
+                        ChargedExecution &&
+                chained_colossus_
+                    .can_execute();
+            const auto boss_hit =
+                chained_colossus_.apply_hit({
+                    hit.zone_id,
+                    health_damage,
+                    damage.stagger_power,
+                    damage.sever_power,
+                    gore,
+                    true,
+                    execution,
+                });
+            hit_accepted = boss_hit.accepted;
+            applied_health_damage =
+                boss_hit.health_damage;
+            hit_severed =
+                boss_hit.limb_severed;
+            if (boss_hit.accepted) {
+                colossus_blood_traces_
+                    .add_impact(
+                        hit.contact_point,
+                        -direction,
+                        hit_severed
+                            ? 1.0F
+                            : 0.55F,
+                        static_cast<
+                            std::uint32_t>(
+                            weapon.attack_sequence ^
+                            hit.zone_id),
+                        gore);
+                if (boss_hit.armor_broken_now) {
+                    issou_scenario_
+                        .notify_combat_event(
+                            IssouArenaCombatEvent::
+                                ArmorBroken);
+                }
+                if (boss_hit.limb_severed) {
+                    issou_scenario_
+                        .notify_combat_event(
+                            IssouArenaCombatEvent::
+                                LimbSevered);
+                }
+                if (boss_hit.killed) {
+                    issou_scenario_
+                        .notify_combat_event(
+                            boss_hit
+                                    .execution_completed
+                                ? IssouArenaCombatEvent::
+                                      BossExecuted
+                                : IssouArenaCombatEvent::
+                                      BossKilled);
+                }
+            }
+            break;
+        }
+        case TargetRouteKind::SeaLeviathan: {
+            const auto sea_hit =
+                sea_leviathan_.apply_hit({
+                    static_cast<SeaLeviathanPart>(
+                        hit.zone_id),
+                    health_damage,
+                    damage.stagger_power,
+                    !contact.shockwave_only &&
+                        weapon.attack ==
+                        ColossalAttackKind::
+                            ChargedExecution,
+                    damage.sever_power > 0.0F,
+                    awakening_level,
+                });
+            hit_accepted = sea_hit.accepted;
+            applied_health_damage =
+                sea_hit.applied_health_damage;
+            hit_severed =
+                sea_hit
+                    .tentacle_severed_now;
+            if (sea_hit.defeated_now &&
+                !issou_scenario_.active()) {
+                static_cast<void>(
+                    legendary_weapon_progression_
+                        .record_major_boss_defeat());
+            }
+            break;
+        }
+        }
+
+        if (!hit_accepted) {
+            continue;
+        }
+        ++accepted_hits;
+        total_damage +=
+            std::max(applied_health_damage, 0.0F);
+        heaviest =
+            static_cast<std::uint8_t>(
+                route->weight) >
+                    static_cast<std::uint8_t>(
+                        heaviest)
+                ? route->weight
+                : heaviest;
+        severed_limb =
+            severed_limb ||
+            hit_severed;
+    }
+
+    auto wall_hit = false;
+    auto protected_surface = false;
+    auto impact_material =
+        ColossalImpactMaterial::Organic;
+    auto block_hit = RaycastHit {};
+    const auto probe_blade_segment =
+        [&](const glm::vec3& from,
+            const glm::vec3& to) {
+        const auto delta = to - from;
+        const auto length = glm::length(delta);
+        if (!std::isfinite(length) ||
+            length <= 0.02F) {
+            return;
+        }
+        const auto candidate =
+            world_.raycast_collidable(
+                from,
+                delta / length,
+                length);
+        if (candidate.hit &&
+            (!block_hit.hit ||
+             candidate.distance <
+                 block_hit.distance)) {
+            block_hit = candidate;
+        }
+    };
+    // Je sonde le volume réellement balayé par la lame entre les deux poses,
+    // pas seulement le rayon central du viseur.
+    probe_blade_segment(
+        sweep_previous_pose.hilt,
+        sweep_previous_pose.tip);
+    probe_blade_segment(
+        current_pose.hilt,
+        current_pose.tip);
+    probe_blade_segment(
+        sweep_previous_pose.tip,
+        current_pose.tip);
+    probe_blade_segment(
+        sweep_previous_pose.hilt,
+        current_pose.hilt);
+    probe_blade_segment(
+        (sweep_previous_pose.hilt +
+         sweep_previous_pose.tip) *
+            0.5F,
+        (current_pose.hilt + current_pose.tip) *
+            0.5F);
+    if (block_hit.hit &&
+        colossal_wall_impact_sequence_ !=
+            weapon.attack_sequence) {
+        wall_hit = true;
+        const auto material =
+            colossal_cell_material(
+                world_.get_block(
+                    block_hit.block.x,
+                    block_hit.block.y,
+                    block_hit.block.z));
+        impact_material =
+            colossal_cell_impact_material(
+                material);
+        const ColossalWorldCell cell {
+            block_hit.block.x,
+            block_hit.block.y,
+            block_hit.block.z,
+        };
+        protected_surface =
+            world_.was_player_placed(
+                cell.x,
+                cell.y,
+                cell.z) ||
+            colossal_world_protections_
+                    .protection_at(cell) !=
+                WorldProtectionFlag::None;
+        colossal_wall_impact_sequence_ =
+            weapon.attack_sequence;
+    }
+    if (maritime_session_active) {
+        auto ship_hit = std::optional<float> {};
+        const auto probe_ship_segment =
+            [&](const glm::vec3& from,
+                const glm::vec3& to) {
+            const auto delta = to - from;
+            const auto length = glm::length(delta);
+            if (!std::isfinite(length) ||
+                length <= 0.02F) {
+                return;
+            }
+            const auto candidate =
+                sea_adventure_.ship_entity()
+                    .raycast_collidable_distance(
+                        from,
+                        delta / length,
+                        length);
+            if (candidate.has_value() &&
+                (!ship_hit.has_value() ||
+                 *candidate < *ship_hit)) {
+                ship_hit = candidate;
+            }
+        };
+        probe_ship_segment(
+            sweep_previous_pose.hilt,
+            sweep_previous_pose.tip);
+        probe_ship_segment(
+            current_pose.hilt,
+            current_pose.tip);
+        probe_ship_segment(
+            sweep_previous_pose.tip,
+            current_pose.tip);
+        if (ship_hit.has_value()) {
+            wall_hit =
+                wall_hit ||
+                colossal_wall_impact_sequence_ !=
+                    weapon.attack_sequence;
+            protected_surface = true;
+            impact_material =
+                ColossalImpactMaterial::Ship;
+            colossal_wall_impact_sequence_ =
+                weapon.attack_sequence;
+        }
+    }
+
+    if (wall_hit &&
+        weapon.attack ==
+            ColossalAttackKind::
+                ChargedExecution &&
+        block_hit.hit) {
+        std::array<
+            ColossalFragileCellCandidate,
+            kMaximumColossalCellCandidates>
+            fragile_candidates {};
+        auto fragile_count =
+            std::size_t {0U};
+        for (auto y = -2;
+             y <= 2 &&
+             fragile_count <
+                 fragile_candidates.size();
+             ++y) {
+            for (auto x = -4;
+                 x <= 4 &&
+                 fragile_count <
+                     fragile_candidates.size();
+                 ++x) {
+                for (auto z = -4;
+                     z <= 4 &&
+                     fragile_count <
+                         fragile_candidates.size();
+                     ++z) {
+                    const ColossalWorldCell cell {
+                        block_hit.block.x + x,
+                        block_hit.block.y + y,
+                        block_hit.block.z + z,
+                    };
+                    const auto block =
+                        world_.get_block(
+                            cell.x,
+                            cell.y,
+                            cell.z);
+                    const auto material =
+                        colossal_cell_material(
+                            block);
+                    if (!colossal_cell_is_fragile(
+                            material)) {
+                        continue;
+                    }
+                    const auto delta =
+                        glm::vec3 {
+                            static_cast<float>(x),
+                            static_cast<float>(y),
+                            static_cast<float>(z),
+                        };
+                    const auto protections =
+                        colossal_world_protections_
+                            .protection_at(cell);
+                    fragile_candidates[
+                        fragile_count++] = {
+                        cell,
+                        material,
+                        glm::dot(delta, delta),
+                        block,
+                        true,
+                        world_.was_player_placed(
+                            cell.x,
+                            cell.y,
+                            cell.z),
+                        false,
+                        world_protection_contains(
+                            protections,
+                            WorldProtectionFlag::
+                                ImportantStructure),
+                        world_protection_contains(
+                            protections,
+                            WorldProtectionFlag::
+                                QuestStructure),
+                    };
+                }
+            }
+        }
+        const auto plan =
+            build_colossal_fragile_impact_plan(
+                {
+                    weapon.attack_sequence,
+                    kLeviathanSpineDefinition
+                        .maximum_fragile_cells,
+                    true,
+                },
+                std::span<
+                    const ColossalFragileCellCandidate> {
+                    fragile_candidates.data(),
+                    fragile_count,
+                },
+                colossal_world_protections_);
+        for (const auto& edit :
+             plan.accepted_edits()) {
+            const auto current =
+                world_.get_block(
+                    edit.cell.x,
+                    edit.cell.y,
+                    edit.cell.z);
+            if (current !=
+                static_cast<BlockId>(
+                    edit.expected_block_token)) {
+                continue;
+            }
+            world_.set_block(
+                edit.cell.x,
+                edit.cell.y,
+                edit.cell.z,
+                to_block_id(
+                    BlockType::Air));
+        }
+    }
+
+    if (accepted_hits > 0U ||
+        wall_hit ||
+        shockwave_triggered) {
+        auto impact_origin =
+            player_.position() +
+            direction *
+                std::min(effective_range * 0.78F, 2.75F);
+        impact_origin.y += 0.15F;
+        if (resolved_contact_count > 0U) {
+            impact_origin =
+                resolved_contacts[0U]
+                    .hit.contact_point;
+        } else if (block_hit.hit) {
+            impact_origin = {
+                static_cast<float>(block_hit.block.x) +
+                    0.5F,
+                static_cast<float>(block_hit.block.y) +
+                    0.5F,
+                static_cast<float>(block_hit.block.z) +
+                    0.5F,
+            };
+        }
+        auto surface =
+            LeviathanImpactSurface::Flesh;
+        switch (impact_material) {
+        case ColossalImpactMaterial::Wood:
+            surface = LeviathanImpactSurface::Wood;
+            break;
+        case ColossalImpactMaterial::Stone:
+        case ColossalImpactMaterial::Earth:
+        case ColossalImpactMaterial::ProtectedStructure:
+            surface = LeviathanImpactSurface::Stone;
+            break;
+        case ColossalImpactMaterial::Metal:
+        case ColossalImpactMaterial::Ship:
+            surface = LeviathanImpactSurface::Metal;
+            break;
+        default:
+            break;
+        }
+        const auto weight =
+            severed_limb ||
+                    heaviest ==
+                        ColossalTargetWeight::Boss
+                ? LeviathanImpactWeight::
+                      BossOrSection
+                : heaviest ==
+                          ColossalTargetWeight::Heavy
+                      ? LeviathanImpactWeight::Heavy
+                      : LeviathanImpactWeight::Light;
+        auto events =
+            build_leviathan_visual_events({
+                impact_origin,
+                direction,
+                weapon.attack,
+                surface,
+                weight,
+                awakening,
+                {},
+                weapon.state_progress,
+                true,
+                severed_limb,
+            });
+        constexpr auto kMaximumQueuedVisualEvents =
+            std::size_t {64U};
+        for (const auto& event : events) {
+            if (pending_leviathan_visual_events_
+                    .size() >=
+                kMaximumQueuedVisualEvents) {
+                break;
+            }
+            pending_leviathan_visual_events_
+                .push_back(event);
+        }
+    }
+
+    if (wall_hit) {
+        music_.play_sfx(
+            impact_material ==
+                        ColossalImpactMaterial::
+                            Metal ||
+                    impact_material ==
+                        ColossalImpactMaterial::
+                            Ship
+                ? GameSfxKind::MetalImpact
+                : GameSfxKind::BoneImpact,
+            protected_surface
+                ? 0.72F
+                : 0.90F,
+            0.0F,
+            1.0F,
+            static_cast<std::uint32_t>(
+                weapon.attack_sequence));
+    }
+
+    if (accepted_hits > 0U) {
+        record_legendary_quest_tutorial(
+            weapon.attack ==
+                    ColossalAttackKind::
+                        ChargedExecution
+                ? LegendaryQuestAction::
+                      TutorialChargedHit
+                : LegendaryQuestAction::
+                      TutorialSweepHit,
+            weapon.attack_sequence,
+            total_damage);
+        issou_scenario_
+            .acknowledge_first_successful_action();
+        issou_scenario_.notify_combat_event(
+            weapon.attack ==
+                    ColossalAttackKind::
+                        ChargedExecution
+                ? IssouArenaCombatEvent::
+                      ChargedAttackHit
+                : (weapon.attack ==
+                           ColossalAttackKind::
+                               Earthbreaker
+                       ? IssouArenaCombatEvent::
+                             ComboFinisherHit
+                       : IssouArenaCombatEvent::
+                             AttackHit),
+            total_damage,
+            accepted_hits);
+        music_.play_sfx(
+            heaviest ==
+                    ColossalTargetWeight::Boss
+                ? GameSfxKind::BoneImpact
+                : GameSfxKind::CreatureHit,
+            heaviest ==
+                    ColossalTargetWeight::Boss
+                ? 1.0F
+                : 0.82F);
+    }
+
+    static_cast<void>(
+        colossal_weapon_
+            .notify_attack_resolution({
+                accepted_hits,
+                heaviest,
+                impact_material,
+                wall_hit,
+                protected_surface,
+                severed_limb,
+            }));
+}
+
+void Game::configure_legendary_weapon_quest() {
+    const auto configured =
+        legendary_weapon_quest_.configure(
+            static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(
+                    world_.seed())),
+            active_game_mode_);
+    legendary_weapon_quest_
+        .reset_transient_progress();
+    legendary_quest_world_content_.reset();
+    legendary_quest_world_scenes_applied_
+        .fill(false);
+    if (configured) {
+        legendary_quest_world_content_ =
+            generate_legendary_quest_world_content(
+                legendary_weapon_quest_
+                    .layout());
+        static_cast<void>(
+            apply_legendary_quest_world_content());
+    }
+    legendary_quest_guardian_id_ = 0U;
+    legendary_quest_tutorial_spawned_ =
+        false;
+}
+
+auto Game::apply_legendary_quest_world_content()
+    -> bool {
+    if (!legendary_quest_world_content_
+             .has_value() ||
+        !is_valid_legendary_quest_world_content(
+            *legendary_quest_world_content_)) {
+        legendary_quest_world_scenes_applied_
+            .fill(false);
+        return false;
+    }
+
+    const auto& plan =
+        *legendary_quest_world_content_;
+    for (const auto& cell : plan.edits()) {
+        world_.ensure_chunk_loaded(
+            world_.world_to_chunk(
+                cell.coordinate.x,
+                cell.coordinate.z));
+    }
+
+    WorldEditTransactionCallbacks callbacks {};
+    callbacks.validate_cell =
+        [this](const WorldEditCell& cell) {
+            if (!is_world_y_valid(
+                    cell.coordinate.y)) {
+                return false;
+            }
+            const auto current =
+                world_.get_block(
+                    cell.coordinate.x,
+                    cell.coordinate.y,
+                    cell.coordinate.z);
+            // La, je preserve une construction du joueur tout en acceptant
+            // sans ambiguite un bloc identique deja place par une ancienne
+            // version de la scene.
+            return current ==
+                       cell.block_id ||
+                   !world_.was_player_placed(
+                       cell.coordinate.x,
+                       cell.coordinate.y,
+                       cell.coordinate.z);
+        };
+    callbacks.cell_contains_player_or_creature =
+        [](const BlockCoord&) {
+            // Les scenes sont installees pendant l'ecran de chargement, avant
+            // que les acteurs du nouveau monde deviennent actifs.
+            return false;
+        };
+    callbacks.read_current =
+        [this](const BlockCoord& coordinate)
+        -> std::optional<WorldEditCellState> {
+        const auto snapshot =
+            world_.capture_cell_snapshot(
+                coordinate.x,
+                coordinate.y,
+                coordinate.z);
+        if (!snapshot.has_value()) {
+            return std::nullopt;
+        }
+        return WorldEditCellState {
+            snapshot->coordinate,
+            snapshot->block,
+            snapshot->water_state,
+            snapshot->player_placed,
+        };
+    };
+    callbacks.commit_cell =
+        [this](const WorldEditCell& cell) {
+        world_.set_block(
+            cell.coordinate.x,
+            cell.coordinate.y,
+            cell.coordinate.z,
+            cell.block_id);
+        return world_.get_block(
+                   cell.coordinate.x,
+                   cell.coordinate.y,
+                   cell.coordinate.z) ==
+               cell.block_id;
+    };
+    callbacks.rollback_cell =
+        [this](const WorldEditCellState& cell) {
+        static_cast<void>(
+            world_.restore_cell_snapshot({
+                cell.coordinate,
+                cell.block_id,
+                cell.water_state,
+                cell.player_placed,
+            }));
+    };
+    callbacks.materials_available =
+        [](BlockId, std::uint32_t) {
+            return true;
+        };
+    callbacks.consume_materials =
+        [](BlockId, std::uint32_t) {
+            return true;
+        };
+    callbacks.refund_materials =
+        [](BlockId, std::uint32_t) {};
+
+    auto all_scenes_applied = true;
+    for (std::size_t scene_index = 0U;
+         scene_index < plan.scenes.size();
+         ++scene_index) {
+        const auto result =
+            execute_legendary_quest_world_scene(
+                plan,
+                scene_index,
+                callbacks);
+        legendary_quest_world_scenes_applied_[
+            scene_index] =
+            result.succeeded();
+        all_scenes_applied =
+            all_scenes_applied &&
+            result.succeeded();
+    }
+    return all_scenes_applied;
+}
+
+auto Game::process_legendary_quest_request(
+    const LegendaryQuestRequest& request)
+    -> LegendaryQuestProcessResult {
+    const auto before =
+        legendary_weapon_progression_
+            .state();
+    const auto inventory_count_before =
+        inventory_legendary_weapon_count(
+            inventory_menu_,
+            hotbar_);
+    LegendaryQuestCallbacks callbacks {};
+    callbacks.commit_hear_rumor =
+        [this] {
+            return legendary_weapon_progression_
+                .hear_rumor();
+        };
+    callbacks.commit_map_fragment =
+        [this] {
+            return legendary_weapon_progression_
+                .collect_map_fragment();
+        };
+    callbacks.commit_forge_discovery =
+        [this] {
+            return legendary_weapon_progression_
+                .discover_forge();
+        };
+    callbacks.commit_guardian_defeat =
+        [this] {
+            return legendary_weapon_progression_
+                .defeat_guardian();
+        };
+    callbacks.try_commit_weapon_to_inventory =
+        [this](std::uint64_t unique_weapon_id) {
+            if (unique_weapon_id == 0U) {
+                return false;
+            }
+            return inventory_try_grant_legendary_weapon(
+                       inventory_menu_,
+                       hotbar_)
+                .has_value();
+        };
+    callbacks.commit_weapon_claim =
+        [this](
+            std::uint64_t unique_weapon_id,
+            std::uint32_t player_level,
+            std::uint8_t strength) {
+            return legendary_weapon_progression_
+                .claim_weapon(
+                    unique_weapon_id,
+                    player_level,
+                    strength);
+        };
+    callbacks.rollback_weapon_from_inventory =
+        [this](std::uint64_t unique_weapon_id) {
+            return unique_weapon_id != 0U &&
+                   inventory_remove_all_legendary_weapons(
+                       inventory_menu_,
+                       hotbar_) > 0U;
+        };
+    callbacks.commit_first_combat =
+        [this] {
+            return legendary_weapon_progression_
+                .complete_first_combat();
+        };
+
+    const auto level =
+        progression_.level();
+    const auto strength =
+        player_attribute_value(
+            player_build_.attributes,
+            PlayerAttribute::Strength);
+    const auto result =
+        legendary_weapon_quest_.process(
+            request,
+            {
+                before,
+                level,
+                strength,
+                scenario_session_.active() ||
+                    issou_scenario_.active(),
+            },
+            callbacks);
+    const auto after =
+        legendary_weapon_progression_
+            .state();
+    const auto inventory_count_after =
+        inventory_legendary_weapon_count(
+            inventory_menu_,
+            hotbar_);
+    if (after != before ||
+        inventory_count_after !=
+            inventory_count_before) {
+        normalize_inventory_state(
+            inventory_menu_,
+            hotbar_);
+        sync_selected_hotbar_slot();
+        mark_session_dirty();
+    }
+    consume_legendary_quest_events();
+    return result;
+}
+
+auto Game::try_interact_legendary_weapon_quest()
+    -> bool {
+    if (!has_active_session_ ||
+        scenario_session_.active() ||
+        issou_scenario_.active() ||
+        !legendary_weapon_quest_
+             .configured()) {
+        return false;
+    }
+
+    const auto progression =
+        legendary_weapon_progression_
+            .state();
+    if (progression.weapon_owned &&
+        progression.corrupted_kills >=
+            kLegendaryWeaponFinalAwakeningKills &&
+        progression.astral_boss_defeated &&
+        progression.major_boss_defeated &&
+        !progression.forge_ritual_complete) {
+        const auto& forge_anchor =
+            legendary_weapon_quest_
+                .layout()
+                .forge;
+        auto forge_point =
+            forge_anchor.position;
+        auto forge_radius =
+            std::max(
+                forge_anchor.discovery_radius,
+                4.0F);
+        auto forge_vertical_tolerance = 24.0F;
+        if (legendary_quest_world_content_
+                .has_value()) {
+            if (const auto placement =
+                    legendary_quest_world_content_
+                        ->anchor(forge_anchor.id);
+                placement.has_value()) {
+                forge_point =
+                    placement->interaction_position;
+                forge_radius =
+                    std::max(
+                        placement
+                            ->horizontal_interaction_radius,
+                        2.0F);
+                forge_vertical_tolerance =
+                    std::max(
+                        placement
+                            ->vertical_tolerance,
+                        2.0F);
+            }
+        }
+        if (is_legendary_quest_near_horizontal(
+                {
+                    player_.position().x,
+                    player_.position().y,
+                    player_.position().z,
+                },
+                legendary_quest_spatial_point(
+                    forge_point),
+                forge_radius,
+                forge_vertical_tolerance) &&
+            legendary_weapon_progression_
+                .complete_forge_ritual()) {
+            static_cast<void>(
+                legendary_weapon_progression_
+                    .unlock_upgrades(
+                        kLegendaryWeaponKnownUpgradeMask));
+            static_cast<void>(
+                legendary_weapon_progression_
+                    .set_cosmetic(
+                        LegendaryWeaponCosmetic::
+                            Sovereign));
+            mark_session_dirty();
+            queue_gameplay_announcement(
+                "ECHINE EVEILLEE",
+                "LA FORGE A REUNI LA CHAIR, L'ASTRAL ET LE TITAN",
+                4.5F);
+            music_.play_sfx(
+                GameSfxKind::BoneImpact,
+                1.0F);
+            return true;
+        }
+    }
+    const auto presentation =
+        legendary_weapon_quest_
+            .presentation_state(
+                progression,
+                progression_.level(),
+                player_attribute_value(
+                    player_build_
+                        .attributes,
+                    PlayerAttribute::
+                        Strength));
+    if (!presentation.valid ||
+        presentation.completed) {
+        return false;
+    }
+    auto interaction_point =
+        presentation.target.position;
+    auto interaction_radius =
+        std::max(
+            presentation.target
+                .discovery_radius,
+            3.5F);
+    auto vertical_tolerance = 24.0F;
+    if (legendary_quest_world_content_
+            .has_value()) {
+        if (const auto placement =
+                legendary_quest_world_content_
+                    ->anchor(
+                        presentation.target.id);
+            placement.has_value()) {
+            interaction_point =
+                placement
+                    ->interaction_position;
+            interaction_radius =
+                std::max(
+                    placement
+                        ->horizontal_interaction_radius,
+                    1.0F);
+            vertical_tolerance =
+                std::max(
+                    placement
+                        ->vertical_tolerance,
+                    1.0F);
+        }
+    }
+    if (!is_legendary_quest_near_horizontal(
+            {
+                player_.position().x,
+                player_.position().y,
+                player_.position().z,
+            },
+            legendary_quest_spatial_point(
+                interaction_point),
+            interaction_radius,
+            vertical_tolerance)) {
+        return false;
+    }
+
+    LegendaryQuestRequest request {};
+    request.anchor_id =
+        presentation.target.id;
+    switch (progression.quest_stage) {
+    case LegendaryWeaponQuestStage::
+        NotStarted:
+        request.action =
+            LegendaryQuestAction::
+                HearRumor;
+        break;
+    case LegendaryWeaponQuestStage::
+        RumorHeard:
+        request.action =
+            LegendaryQuestAction::
+                CollectMapFragment;
+        request.fragment_index =
+            progression
+                .map_fragments_collected;
+        break;
+    case LegendaryWeaponQuestStage::
+        MapFragmentsComplete:
+        request.action =
+            LegendaryQuestAction::
+                DiscoverForge;
+        break;
+    case LegendaryWeaponQuestStage::
+        GuardianDefeated:
+        request.action =
+            LegendaryQuestAction::
+                InteractWithBlade;
+        break;
+    case LegendaryWeaponQuestStage::
+        ForgeDiscovered:
+        queue_gameplay_announcement(
+            "LE GARDIEN BLOQUE LA FORGE",
+            "BRISEZ SON ARMURE ET DESEQUILIBREZ-LE",
+            2.6F);
+        return true;
+    case LegendaryWeaponQuestStage::
+        WeaponClaimed:
+    case LegendaryWeaponQuestStage::
+        FirstCombatComplete:
+    default:
+        return false;
+    }
+    static_cast<void>(
+        process_legendary_quest_request(
+            request));
+    return true;
+}
+
+void Game::record_legendary_quest_tutorial(
+    LegendaryQuestAction action,
+    std::uint64_t target_id,
+    float combat_value) {
+    if (legendary_weapon_progression_
+            .state()
+            .quest_stage !=
+        LegendaryWeaponQuestStage::
+            WeaponClaimed) {
+        return;
+    }
+    static_cast<void>(
+        process_legendary_quest_request({
+            action,
+            0U,
+            0U,
+            target_id == 0U
+                ? 1U
+                : target_id,
+            std::max(
+                combat_value,
+                0.01F),
+        }));
+}
+
+void Game::consume_legendary_quest_events() {
+    std::array<
+        LegendaryQuestEvent,
+        kLegendaryQuestEventCapacity>
+        events {};
+    const auto count =
+        legendary_weapon_quest_
+            .drain_events(events);
+    for (std::size_t index = 0U;
+         index < count;
+         ++index) {
+        const auto& event =
+            events[index];
+        switch (event.type) {
+        case LegendaryQuestEventType::
+            RumorHeard:
+            queue_gameplay_announcement(
+                "UNE RUMEUR ANCIENNE",
+                "RETROUVEZ LES TROIS FRAGMENTS DE CARTE",
+                3.3F);
+            break;
+        case LegendaryQuestEventType::
+            MapFragmentCollected:
+            queue_gameplay_announcement(
+                "FRAGMENT DE CARTE",
+                "UN NOUVEL INDICE MENE A LA FORGE",
+                2.6F);
+            break;
+        case LegendaryQuestEventType::
+            MapCompleted:
+            queue_gameplay_announcement(
+                "CARTE RECONSTITUEE",
+                "LA FORGE ABANDONNEE EST LOCALISEE",
+                3.0F);
+            break;
+        case LegendaryQuestEventType::
+            ForgeDiscovered:
+            queue_gameplay_announcement(
+                "LA FORGE INTERDITE",
+                "UN GARDIEN LOURD PROTEGE LA LAME",
+                3.1F);
+            break;
+        case LegendaryQuestEventType::
+            GuardianDefeated:
+            queue_gameplay_announcement(
+                "LE GARDIEN EST TOMBE",
+                "LA DERNIERE SALLE EST OUVERTE",
+                2.8F);
+            break;
+        case LegendaryQuestEventType::
+            BladeRefused:
+            queue_gameplay_announcement(
+                "LA LAME NE BOUGE PAS",
+                "NIVEAU 35 ET FORCE 4 REQUIS",
+                3.2F);
+            music_.play_sfx(
+                GameSfxKind::CreatureHit,
+                0.78F);
+            break;
+        case LegendaryQuestEventType::
+            BladeRequirementsMissing:
+            queue_gameplay_announcement(
+                "PUISSANCE INSUFFISANTE",
+                "NIVEAU 35 ET FORCE 4 REQUIS",
+                2.8F);
+            break;
+        case LegendaryQuestEventType::
+            InventoryFull:
+            queue_gameplay_announcement(
+                "INVENTAIRE PLEIN",
+                "LIBEREZ UNE PLACE POUR LA LAME",
+                2.4F);
+            break;
+        case LegendaryQuestEventType::
+            WeaponAcquired:
+            queue_gameplay_announcement(
+                "L'ECHINE DU LEVIATHAN",
+                "LA LAME COLOSSALE VOUS RECONNAIT",
+                4.0F);
+            music_.play_sfx(
+                GameSfxKind::CreatureHit,
+                1.0F);
+            break;
+        case LegendaryQuestEventType::
+            TutorialEncounterRequested:
+            queue_gameplay_announcement(
+                "PREMIER COMBAT",
+                "BALAYAGE - GARDE - ATTAQUE CHARGEE",
+                4.0F);
+            break;
+        case LegendaryQuestEventType::
+            TutorialObjectiveCompleted:
+            queue_gameplay_announcement(
+                "MAITRISE PROGRESSE",
+                "POURSUIVEZ L'EPREUVE DE LA LAME",
+                1.9F);
+            break;
+        case LegendaryQuestEventType::
+            QuestCompleted:
+            queue_gameplay_announcement(
+                "QUETE TERMINEE",
+                "LE FER QUI N'AURAIT JAMAIS DU ETRE FORGE",
+                4.5F);
+            break;
+        case LegendaryQuestEventType::
+            TemporarySessionBlocked:
+            queue_gameplay_announcement(
+                "QUETE SUSPENDUE",
+                "L'ARENE NE MODIFIE PAS VOTRE PARTIE",
+                2.2F);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void Game::update_legendary_weapon_quest() {
+    if (!has_active_session_ ||
+        scenario_session_.active() ||
+        issou_scenario_.active() ||
+        !legendary_weapon_quest_
+             .configured()) {
+        return;
+    }
+    const auto progression =
+        legendary_weapon_progression_
+            .state();
+    const auto& layout =
+        legendary_weapon_quest_.layout();
+    const auto quest_anchor_position =
+        [this](const LegendaryQuestAnchor& anchor) {
+            auto point = anchor.position;
+            if (legendary_quest_world_content_
+                    .has_value()) {
+                if (const auto placement =
+                        legendary_quest_world_content_
+                            ->anchor(anchor.id);
+                    placement.has_value()) {
+                    point =
+                        placement
+                            ->interaction_position;
+                }
+            }
+            return glm::vec3 {
+                static_cast<float>(point.x) +
+                    0.5F,
+                static_cast<float>(point.y),
+                static_cast<float>(point.z) +
+                    0.5F,
+            };
+        };
+    if (progression.quest_stage ==
+            LegendaryWeaponQuestStage::
+                MapFragmentsComplete) {
+        auto target =
+            layout.forge.position;
+        auto radius =
+            layout.forge
+                .discovery_radius;
+        auto vertical_tolerance = 40.0F;
+        if (legendary_quest_world_content_
+                .has_value()) {
+            if (const auto placement =
+                    legendary_quest_world_content_
+                        ->anchor(
+                            layout.forge.id);
+                placement.has_value()) {
+                target =
+                    placement
+                        ->interaction_position;
+                radius =
+                    placement
+                        ->horizontal_interaction_radius;
+                vertical_tolerance =
+                    placement
+                        ->vertical_tolerance;
+            }
+        }
+        if (is_legendary_quest_near_horizontal(
+                {
+                    player_.position().x,
+                    player_.position().y,
+                    player_.position().z,
+                },
+                legendary_quest_spatial_point(
+                    target),
+                radius,
+                vertical_tolerance)) {
+            static_cast<void>(
+                process_legendary_quest_request({
+                    LegendaryQuestAction::
+                        DiscoverForge,
+                    layout.forge.id,
+                }));
+        }
+    }
+
+    const auto current =
+        legendary_weapon_progression_
+            .state();
+    if (current.quest_stage ==
+            LegendaryWeaponQuestStage::
+                ForgeDiscovered &&
+        legendary_quest_guardian_id_ ==
+            0U) {
+        const auto guardian_position =
+            quest_anchor_position(
+                layout.guardian);
+        const auto spawned =
+            legendary_enemies_.spawn({
+                LegendaryEnemyArchetype::
+                    ForgeGuardian,
+                static_cast<std::uint32_t>(
+                    layout.signature),
+                guardian_position,
+                0.0F,
+            });
+        if (spawned.spawned) {
+            legendary_quest_guardian_id_ =
+                spawned.id;
+        }
+    }
+    if (current.quest_stage ==
+            LegendaryWeaponQuestStage::
+                WeaponClaimed &&
+        !legendary_quest_tutorial_spawned_) {
+        constexpr std::array<
+            LegendaryEnemyArchetype,
+            3U>
+            kTutorialEnemies {{
+                LegendaryEnemyArchetype::
+                    CorruptedBrute,
+                LegendaryEnemyArchetype::
+                    SwiftHunter,
+                LegendaryEnemyArchetype::
+                    ArmoredGuard,
+            }};
+        const auto blade =
+            quest_anchor_position(
+                layout.blade);
+        auto spawned_count =
+            std::size_t {0U};
+        for (std::size_t index = 0U;
+             index <
+             kTutorialEnemies.size();
+             ++index) {
+            const auto angle =
+                static_cast<float>(index) *
+                2.0943951F;
+            const auto result =
+                legendary_enemies_.spawn({
+                    kTutorialEnemies[index],
+                    static_cast<std::uint32_t>(
+                        layout.signature ^
+                        (index + 1U)),
+                    blade +
+                        glm::vec3 {
+                            std::cos(angle) *
+                                5.0F,
+                            0.0F,
+                            std::sin(angle) *
+                                5.0F,
+                        },
+                    angle +
+                        3.14159265F,
+                });
+            spawned_count +=
+                result.spawned
+                    ? 1U
+                    : 0U;
+        }
+        legendary_quest_tutorial_spawned_ =
+            spawned_count ==
+            kTutorialEnemies.size();
+    }
+
+    if (current.weapon_owned &&
+        current.corrupted_kills >=
+            kLegendaryWeaponFirstAwakeningKills &&
+        !current.astral_boss_defeated &&
+        legendary_astral_boss_id_ == 0U) {
+        const auto forge =
+            quest_anchor_position(layout.forge);
+        const auto delta =
+            player_.position() - forge;
+        const auto horizontal_distance_squared =
+            delta.x * delta.x + delta.z * delta.z;
+        if (horizontal_distance_squared <=
+                18.0F * 18.0F &&
+            std::abs(delta.y) <= 12.0F) {
+            const auto spawned =
+                legendary_enemies_.spawn({
+                    LegendaryEnemyArchetype::
+                        AstralBoss,
+                    static_cast<std::uint32_t>(
+                        layout.signature ^
+                        0xA57A1B05ULL),
+                    forge +
+                        glm::vec3 {
+                            8.0F,
+                            0.0F,
+                            0.0F,
+                        },
+                    -1.5707963F,
+                });
+            if (spawned.spawned) {
+                legendary_astral_boss_id_ =
+                    spawned.id;
+                queue_gameplay_announcement(
+                    "LE SOUVERAIN ASTRAL",
+                    "L'ECHINE SOUILLEE PEUT FENDRE SON NOYAU",
+                    3.4F);
+            }
+        }
+    }
+}
+
+void Game::update_legendary_encounters(
+    float dt,
+    bool maritime_session_active) {
+    if (issou_scenario_.active()) {
+        update_issou_scenario(dt);
+    }
+
+    const auto weapon =
+        colossal_weapon_.snapshot();
+    static_cast<void>(
+        legendary_enemies_.update(
+            dt,
+            {
+                player_.position(),
+                !player_.is_dead(),
+                weapon.state ==
+                        ColossalWeaponState::Windup ||
+                    weapon.state ==
+                        ColossalWeaponState::Charge,
+                weapon.state ==
+                    ColossalWeaponState::Recovery,
+            }));
+
+    std::array<
+        LegendaryEnemyEvent,
+        kMaximumLegendaryEnemyEvents>
+        enemy_events {};
+    const auto enemy_event_count =
+        legendary_enemies_.consume_events(
+            enemy_events);
+    for (std::size_t index = 0U;
+         index < enemy_event_count;
+         ++index) {
+        const auto& event =
+            enemy_events[index];
+        if (event.kind ==
+                LegendaryEnemyEventKind::
+                    AttackActive &&
+            event.targets_player_only &&
+            event.amount > 0.0F &&
+            !player_.is_dead()) {
+            auto to_attacker =
+                event.local_position -
+                player_.position();
+            to_attacker.y = 0.0F;
+            const auto direction =
+                safe_horizontal_direction(
+                    to_attacker,
+                    -safe_horizontal_direction(
+                        player_.look_direction()));
+            const auto frontal_alignment =
+                glm::dot(
+                    safe_horizontal_direction(
+                        player_.look_direction()),
+                    direction);
+            auto resulting_damage =
+                event.amount;
+            if (colossal_weapon_drawn()) {
+                const auto guard =
+                    intercept_colossal_guard({
+                            event.amount,
+                            1.0F,
+                            frontal_alignment,
+                            weapon.stability,
+                            weapon.state ==
+                                    ColossalWeaponState::Guard
+                                ? weapon
+                                      .state_elapsed_seconds
+                                : 0.0F,
+                            colossal_target_weight(
+                                legendary_enemy_profile(
+                                    event.archetype)
+                                    .weight),
+                            ColossalIncomingAttackKind::
+                                Melee,
+                            weapon.state ==
+                                ColossalWeaponState::Guard,
+                            false,
+                        });
+                resulting_damage =
+                    guard.resulting_damage;
+                if (guard.blocked) {
+                    record_legendary_quest_tutorial(
+                        LegendaryQuestAction::
+                            TutorialGuardSucceeded,
+                        event.enemy_id,
+                        event.amount);
+                }
+                if (guard.perfect) {
+                    static_cast<void>(
+                        legendary_enemies_
+                            .apply_hit(
+                                event.enemy_id,
+                                {
+                                    0.0F,
+                                    guard
+                                        .attacker_stagger,
+                                    true,
+                                    static_cast<
+                                        std::uint8_t>(
+                                        legendary_weapon_progression_
+                                            .state()
+                                            .awakening),
+                                }));
+                    issou_scenario_
+                        .notify_combat_event(
+                            IssouArenaCombatEvent::
+                                PerfectGuard);
+                    music_.play_sfx(
+                        GameSfxKind::
+                            PerfectGuard,
+                        1.0F);
+                    queue_gameplay_announcement(
+                        "GARDE PARFAITE",
+                        "L'ENNEMI EST DESEQUILIBRE",
+                        1.4F);
+                }
+            }
+            const auto damage =
+                player_
+                    .apply_external_damage_report(
+                        resulting_damage,
+                        PlayerDeathCause::Zombie);
+            if (damage.applied()) {
+                auto velocity =
+                    player_.state().velocity;
+                velocity.x -=
+                    direction.x * 1.7F;
+                velocity.z -=
+                    direction.z * 1.7F;
+                player_.set_velocity(
+                    velocity);
+                issou_scenario_
+                    .notify_combat_event(
+                        IssouArenaCombatEvent::
+                            PlayerHit);
+                music_.play_sfx(
+                    GameSfxKind::CreatureAttack,
+                    0.72F);
+            }
+        }
+        if (event.kind ==
+                LegendaryEnemyEventKind::Died &&
+            event.enemy_id != 0U &&
+            event.enemy_id ==
+                legendary_quest_guardian_id_ &&
+            legendary_weapon_progression_
+                    .state()
+                    .quest_stage ==
+                LegendaryWeaponQuestStage::
+                    ForgeDiscovered) {
+            static_cast<void>(
+                process_legendary_quest_request({
+                    LegendaryQuestAction::
+                        DefeatGuardian,
+                    legendary_weapon_quest_
+                        .layout()
+                        .guardian.id,
+                    0U,
+                    event.enemy_id,
+                    1.0F,
+                }));
+        }
+        if (event.kind ==
+                LegendaryEnemyEventKind::Died &&
+            event.enemy_id != 0U &&
+            event.enemy_id ==
+                legendary_astral_boss_id_ &&
+            !issou_scenario_.active()) {
+            legendary_astral_boss_id_ = 0U;
+            if (legendary_weapon_progression_
+                    .record_astral_boss_defeat()) {
+                mark_session_dirty();
+                queue_gameplay_announcement(
+                    "LAME ASTRALE",
+                    "LE NOYAU DU SOUVERAIN A EVEILLE LES RUNES",
+                    4.0F);
+            }
+        }
+        if (event.kind ==
+                LegendaryEnemyEventKind::
+                    RewardAvailable &&
+            event.reward.experience_points >
+                0U &&
+            scenario_session_
+                .permanent_rewards_allowed()) {
+            award_player_experience(
+                CombatExperienceEvent {
+                    event.reward
+                        .experience_points,
+                    true,
+                    maritime_session_active,
+                    environment_
+                        .current_creature_cycle()
+                        .phase,
+                },
+                block_coord_from_position(
+                    event.local_position),
+                "legendary_enemy");
+        }
+    }
+
+    if (!maritime_session_active ||
+        !sea_adventure_.active()) {
+        return;
+    }
+
+    constexpr auto kSeaLeviathanRouteTrigger =
+        420.0F;
+    const auto& sea_state =
+        sea_adventure_.save_state();
+    if (!sea_leviathan_started_for_session_ &&
+        sea_state.voyage_phase ==
+            SeaVoyagePhase::Underway &&
+        sea_state.route_distance >=
+            kSeaLeviathanRouteTrigger &&
+        inventory_has_legendary_weapon(
+            inventory_menu_,
+            hotbar_)) {
+        const auto started =
+            sea_leviathan_.start({
+                static_cast<std::uint32_t>(
+                    world_.seed()) ^
+                    0x1E71A7A5U,
+                {0.0F, -1.5F, 7.0F},
+            });
+        sea_leviathan_started_for_session_ =
+            started.started;
+    }
+    if (!sea_leviathan_.active()) {
+        return;
+    }
+
+    const auto& ship =
+        sea_adventure_.ship_entity();
+    const ShipLocalFrame frame {
+        ship.world_origin(),
+        ship.local_to_world_direction(
+            {1.0F, 0.0F, 0.0F}),
+        ship.local_to_world_direction(
+            {0.0F, 1.0F, 0.0F}),
+        ship.local_to_world_direction(
+            {0.0F, 0.0F, 1.0F}),
+    };
+    const auto current_weapon =
+        colossal_weapon_.snapshot();
+    static_cast<void>(
+        sea_leviathan_.update(
+            dt,
+            {
+                frame,
+                player_.position(),
+                !player_.is_dead(),
+                current_weapon.state ==
+                    ColossalWeaponState::Guard,
+                current_weapon.state ==
+                        ColossalWeaponState::Guard &&
+                    current_weapon
+                            .state_elapsed_seconds <=
+                        kLeviathanSpineDefinition
+                            .perfect_guard_window_seconds,
+            }));
+    std::array<
+        SeaLeviathanEvent,
+        kMaximumSeaLeviathanEvents>
+        sea_events {};
+    const auto sea_event_count =
+        sea_leviathan_.consume_events(
+            sea_events);
+    for (std::size_t index = 0U;
+         index < sea_event_count;
+         ++index) {
+        const auto& event =
+            sea_events[index];
+        if (event.damage.player_damage >
+                0.0F &&
+            !player_.is_dead()) {
+            const auto damage =
+                player_
+                    .apply_external_damage_report(
+                        event.damage
+                            .player_damage,
+                        PlayerDeathCause::Zombie);
+            if (damage.applied()) {
+                music_.play_sfx(
+                    GameSfxKind::SeaLeviathan,
+                    0.9F);
+            }
+        }
+        switch (event.kind) {
+        case SeaLeviathanEventKind::
+            EncounterStarted:
+            music_.play_sfx(
+                GameSfxKind::SeaLeviathan,
+                1.0F);
+            queue_gameplay_announcement(
+                "LA MER SE DECHIRE",
+                "UN LEVIATHAN ATTAQUE L'AMELIE",
+                3.4F);
+            break;
+        case SeaLeviathanEventKind::
+            GuardWindowOpened:
+            queue_gameplay_announcement(
+                "TENIR LA LAME",
+                "GARDEZ LE COUP DE PONT",
+                2.2F);
+            break;
+        case SeaLeviathanEventKind::
+            ChargedOpeningRequested:
+            queue_gameplay_announcement(
+                "CARAPACE FRAGILE",
+                "PREPAREZ UNE ATTAQUE CHARGEE",
+                2.4F);
+            break;
+        case SeaLeviathanEventKind::
+            PerfectGuard:
+            record_legendary_quest_tutorial(
+                LegendaryQuestAction::
+                    TutorialGuardSucceeded,
+                event.simulation_tick == 0U
+                    ? 1U
+                    : event.simulation_tick,
+                std::max(
+                    event.amount,
+                    1.0F));
+            queue_gameplay_announcement(
+                "GARDE PARFAITE",
+                "LE NOYAU VA S'OUVRIR",
+                1.8F);
+            music_.play_sfx(
+                GameSfxKind::PerfectGuard,
+                1.0F);
+            break;
+        case SeaLeviathanEventKind::
+            TentacleSevered:
+            music_.play_sfx(
+                GameSfxKind::BoneImpact,
+                1.0F);
+            queue_gameplay_announcement(
+                "TENTACULE SECTIONNE",
+                "LE LEVIATHAN RECULE",
+                1.8F);
+            break;
+        case SeaLeviathanEventKind::Defeated:
+            music_.play_sfx(
+                GameSfxKind::SeaLeviathan,
+                0.82F);
+            queue_gameplay_announcement(
+                "LEVIATHAN VAINCU",
+                "L'AMELIE EST SAUVE",
+                3.2F);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void Game::process_colossus_attack_events() {
+    for (const auto& attack :
+         chained_colossus_
+             .consume_attack_events()) {
+        if (player_.is_dead()) {
+            continue;
+        }
+        const auto delta =
+            player_.position() -
+            attack.origin;
+        const auto distance_squared =
+            delta.x * delta.x +
+            delta.z * delta.z;
+        const auto contact_radius =
+            std::max(
+                attack.radius,
+                0.0F) +
+            0.55F;
+        if (!std::isfinite(
+                distance_squared) ||
+            distance_squared >
+                contact_radius *
+                    contact_radius) {
+            continue;
+        }
+
+        const auto to_attacker =
+            safe_horizontal_direction(
+                attack.origin -
+                    player_.position(),
+                -safe_horizontal_direction(
+                    player_.look_direction()));
+        const auto frontal_alignment =
+            glm::dot(
+                safe_horizontal_direction(
+                    player_.look_direction()),
+                to_attacker);
+        auto resulting_damage =
+            attack.damage;
+        if (colossal_weapon_drawn()) {
+            const auto weapon =
+                colossal_weapon_.snapshot();
+            const auto guard =
+                intercept_colossal_guard({
+                        attack.damage,
+                        attack
+                            .stability_coefficient,
+                        frontal_alignment,
+                        weapon.stability,
+                        weapon.state ==
+                                ColossalWeaponState::Guard
+                            ? weapon
+                                  .state_elapsed_seconds
+                            : 0.0F,
+                        ColossalTargetWeight::Boss,
+                        attack.kind ==
+                                ChainedColossusAttackKind::
+                                    GroundShockwave
+                            ? ColossalIncomingAttackKind::
+                                  GroundHazard
+                            : ColossalIncomingAttackKind::
+                                  Melee,
+                        weapon.state ==
+                            ColossalWeaponState::Guard,
+                        !attack
+                             .frontally_guardable,
+                    });
+            resulting_damage =
+                guard.resulting_damage;
+            if (guard.blocked) {
+                record_legendary_quest_tutorial(
+                    LegendaryQuestAction::
+                        TutorialGuardSucceeded,
+                    attack.sequence,
+                    attack.damage);
+            }
+            if (guard.perfect) {
+                static_cast<void>(
+                    chained_colossus_
+                        .apply_hit({
+                            kColossusTorsoZone,
+                            0.0F,
+                            guard
+                                .attacker_stagger,
+                            0.0F,
+                            GorePresentationMode::
+                                Disabled,
+                            true,
+                            false,
+                        }));
+                issou_scenario_
+                    .notify_combat_event(
+                        IssouArenaCombatEvent::
+                            PerfectGuard);
+                music_.play_sfx(
+                    GameSfxKind::PerfectGuard,
+                    1.0F);
+                queue_gameplay_announcement(
+                    "GARDE PARFAITE",
+                    "LE COLOSSE VACILLE",
+                    1.5F);
+            }
+        }
+        const auto damage =
+            player_
+                .apply_external_damage_report(
+                    resulting_damage,
+                    PlayerDeathCause::Zombie);
+        if (damage.applied()) {
+            issou_scenario_
+                .notify_combat_event(
+                    IssouArenaCombatEvent::
+                        PlayerHit);
+            auto velocity =
+                player_.state().velocity;
+            velocity.x +=
+                attack.direction.x *
+                attack
+                    .stability_coefficient *
+                2.1F;
+            velocity.z +=
+                attack.direction.z *
+                attack
+                    .stability_coefficient *
+                2.1F;
+            player_.set_velocity(
+                velocity);
+            music_.play_sfx(
+                GameSfxKind::CreatureAttack,
+                0.95F);
+        }
+    }
+}
+
+void Game::update_issou_scenario(
+    float dt) {
+    const auto previous_phase =
+        issou_scenario_.state().phase;
+    issou_scenario_.update(dt);
+    const auto phase =
+        issou_scenario_.state().phase;
+    if (previous_phase !=
+            IssouArenaPhase::Combat &&
+        phase ==
+            IssouArenaPhase::Combat) {
+        chained_colossus_.release();
+        chained_colossus_.set_invulnerable(
+            false);
+    }
+
+    chained_colossus_.update(
+        dt,
+        player_.position());
+    process_colossus_attack_events();
+    colossus_blood_traces_.update(dt);
+
+    const auto health_ratio =
+        chained_colossus_.state().health /
+        kChainedColossusMaximumHealth;
+    if (phase ==
+            IssouArenaPhase::Combat &&
+        health_ratio <= 0.75F &&
+        !issou_arena_minions_spawned_) {
+        const auto& layout =
+            issou_scenario_.state()
+                .layout;
+        constexpr std::array<
+            glm::vec3,
+            4U>
+            kOffsets {{
+                {-5.0F, 0.0F, -1.5F},
+                {-2.4F, 0.0F, -4.0F},
+                {2.4F, 0.0F, -4.0F},
+                {5.0F, 0.0F, -1.5F},
+            }};
+        auto spawned =
+            std::size_t {0U};
+        for (std::size_t index = 0U;
+             index < kOffsets.size();
+             ++index) {
+            const auto result =
+                legendary_enemies_.spawn({
+                    LegendaryEnemyArchetype::
+                        ArenaMinion,
+                    static_cast<std::uint32_t>(
+                        layout.seed) ^
+                        static_cast<std::uint32_t>(
+                            index * 0x9E37U),
+                    layout.colossus_spawn +
+                        kOffsets[index],
+                    0.0F,
+                });
+            spawned +=
+                result.spawned
+                    ? 1U
+                    : 0U;
+        }
+        issou_arena_minions_spawned_ =
+            spawned == kOffsets.size();
+        if (spawned > 0U) {
+            queue_gameplay_announcement(
+                "LES PORTES S'OUVRENT",
+                "FAUCHEZ LE GROUPE",
+                2.2F);
+        }
+    }
+    if (phase ==
+            IssouArenaPhase::Combat &&
+        health_ratio < 0.25F) {
+        issou_scenario_
+            .notify_combat_event(
+                IssouArenaCombatEvent::
+                    BossBelowQuarterHealth);
+    }
+    if (phase ==
+            IssouArenaPhase::Combat &&
+        chained_colossus_.state()
+                .phase ==
+            ChainedColossusPhase::Dead) {
+        issou_scenario_
+            .notify_combat_event(
+                chained_colossus_.state()
+                        .executed
+                    ? IssouArenaCombatEvent::
+                          BossExecuted
+                    : IssouArenaCombatEvent::
+                          BossKilled);
+    }
+    consume_issou_scenario_events();
+}
+
+void Game::consume_issou_scenario_events() {
+    for (const auto& event :
+         issou_scenario_
+             .consume_events()) {
+        latest_issou_event_ =
+            event.kind;
+        switch (event.kind) {
+        case IssouArenaEventKind::Horn:
+            music_.play_sfx(
+                GameSfxKind::Crowd,
+                0.70F);
+            break;
+        case IssouArenaEventKind::
+            WeaponTitle:
+            queue_gameplay_announcement(
+                "L'ECHINE DU LEVIATHAN",
+                "ARME LEGENDAIRE COLOSSALE",
+                2.8F);
+            break;
+        case IssouArenaEventKind::
+            CountdownStarted:
+            queue_gameplay_announcement(
+                "PREPAREZ-VOUS",
+                "LE COLOSSE SERA LIBERE DANS 10",
+                2.4F);
+            break;
+        case IssouArenaEventKind::
+            ChainStrain:
+        case IssouArenaEventKind::
+            ChainCrack:
+            music_.play_sfx(
+                GameSfxKind::ChainBreak,
+                std::max(
+                    event.intensity,
+                    0.45F),
+                0.0F,
+                1.0F,
+                event.sequence);
+            break;
+        case IssouArenaEventKind::
+            ColossusRoar:
+            music_.play_sfx(
+                GameSfxKind::ColossusRoar,
+                std::max(
+                    event.intensity,
+                    0.75F),
+                0.0F,
+                1.0F,
+                event.sequence);
+            break;
+        case IssouArenaEventKind::
+            CrowdMurmur:
+        case IssouArenaEventKind::
+            CrowdApplause:
+        case IssouArenaEventKind::CrowdBoo:
+        case IssouArenaEventKind::
+            CrowdCheer:
+        case IssouArenaEventKind::CrowdRoar:
+            music_.play_sfx(
+                GameSfxKind::Crowd,
+                std::max(
+                    event.intensity,
+                    0.22F),
+                0.0F,
+                1.0F,
+                event.sequence);
+            break;
+        case IssouArenaEventKind::
+            ChainsBroken:
+            chained_colossus_.release();
+            chained_colossus_
+                .set_invulnerable(
+                    false);
+            queue_gameplay_announcement(
+                "LES CHAINES CEDENT",
+                "COMBAT",
+                1.8F);
+            break;
+        case IssouArenaEventKind::Victory:
+            queue_gameplay_announcement(
+                "LE COLOSSE EST TOMBE",
+                "R POUR RECOMMENCER - /ISSOU EXIT POUR QUITTER",
+                5.0F);
+            break;
+        case IssouArenaEventKind::Defeat:
+            queue_gameplay_announcement(
+                "DEFAITE",
+                "RECOMMENCEZ POUR RELEVER LE DEFI",
+                3.2F);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+auto Game::enter_issou_scenario() -> bool {
+    if (!has_active_session_ ||
+        options_.smoke_test ||
+        issou_scenario_.active() ||
+        scenario_session_.active()) {
+        return false;
+    }
+
+    if (!finish_pending_save(true)) {
+        queue_gameplay_announcement(
+            "SAUVEGARDE NON SECURISEE",
+            "L'ARENE N'A PAS ETE OUVERTE POUR PROTEGER LA PARTIE",
+            4.0F);
+        return false;
+    }
+    const auto layout =
+        IssouArenaLayoutGenerator {
+            world_.seed() ^ 0x1550,
+        }
+            .build_layout();
+    auto arena_world =
+        World {
+            layout.seed,
+            options_.performance
+                .stream_radius,
+            WorldGenerationProfile::
+                Continental,
+            WorldGenerationVersion::Latest,
+            options_.visual_pipeline,
+        };
+    IssouArenaLayoutGenerator {
+        layout.seed,
+    }
+        .apply(
+            arena_world,
+            layout);
+
+    auto runtime_restore =
+        ScenarioLegendaryRuntimeRestore {};
+    runtime_restore.environment =
+        environment_;
+    runtime_restore.player =
+        player_;
+    runtime_restore.player_musket =
+        player_musket_;
+    runtime_restore.player_musket_effects =
+        player_musket_effects_;
+    runtime_restore.progression =
+        progression_;
+    runtime_restore.weapon_progression =
+        legendary_weapon_progression_;
+    runtime_restore.experience_awards =
+        experience_awards_;
+    runtime_restore.player_build =
+        player_build_;
+    runtime_restore.ability_system =
+        ability_system_;
+    runtime_restore.ability_effects =
+        player_ability_effects_;
+    runtime_restore.creatures =
+        creatures_;
+    runtime_restore.item_drops =
+        item_drops_;
+    runtime_restore.sea_adventure =
+        sea_adventure_;
+    runtime_restore.hotbar =
+        hotbar_;
+    runtime_restore.inventory =
+        inventory_menu_;
+    runtime_restore.starting_village =
+        starting_village_;
+    runtime_restore.summoned_footmen =
+        summoned_footmen_;
+    runtime_restore
+        .summoned_footman_ship_local_positions =
+        summoned_footman_ship_local_positions_;
+    runtime_restore
+        .summoned_footman_far_seconds =
+        summoned_footman_far_seconds_;
+    runtime_restore
+        .summoned_footman_cast_sequences =
+        summoned_footman_cast_sequences_;
+    runtime_restore.weapon =
+        colossal_weapon_;
+    runtime_restore.knight_synergy =
+        leviathan_knight_synergy_;
+    runtime_restore.hit_ledger =
+        colossal_hit_ledger_;
+    runtime_restore.previous_blade_pose =
+        previous_colossal_blade_pose_;
+    runtime_restore.protections =
+        colossal_world_protections_;
+    runtime_restore.blood_traces =
+        colossus_blood_traces_;
+    runtime_restore.enemies =
+        legendary_enemies_;
+    runtime_restore.sea_encounter =
+        sea_leviathan_;
+    runtime_restore.bound_musket_hotbar_slot =
+        bound_musket_hotbar_slot_;
+    runtime_restore.pending_ability_slot =
+        pending_ability_slot_;
+    runtime_restore.spawn_position =
+        spawn_position_;
+    runtime_restore.active_game_mode =
+        active_game_mode_;
+    runtime_restore.wall_impact_sequence =
+        colossal_wall_impact_sequence_;
+    runtime_restore.shockwave_sequence =
+        colossal_shockwave_sequence_;
+    runtime_restore.quest_guardian_id =
+        legendary_quest_guardian_id_;
+    runtime_restore.astral_boss_id =
+        legendary_astral_boss_id_;
+    runtime_restore
+        .wind_acceleration_cast_sequence =
+        wind_acceleration_cast_sequence_;
+    runtime_restore
+        .melee_attack_cooldown_remaining =
+        melee_attack_cooldown_remaining_;
+    runtime_restore.wind_acceleration_remaining =
+        wind_acceleration_remaining_;
+    runtime_restore.wind_movement_bonus =
+        wind_movement_bonus_;
+    runtime_restore.wind_recovery_bonus =
+        wind_recovery_bonus_;
+    runtime_restore.wind_dodge_remaining =
+        wind_dodge_remaining_;
+    runtime_restore
+        .seconds_since_successful_shield_block =
+        seconds_since_successful_shield_block_;
+    runtime_restore.backrooms_elapsed_seconds =
+        backrooms_elapsed_seconds_;
+    runtime_restore.backrooms_flashlight =
+        backrooms_flashlight_;
+    runtime_restore.backrooms_jack =
+        backrooms_jack_;
+    runtime_restore.backrooms_jack_runtime =
+        backrooms_jack_runtime_;
+    runtime_restore.backrooms_jack_last_result =
+        backrooms_jack_last_result_;
+    runtime_restore
+        .backrooms_jack_death_delay_seconds =
+        backrooms_jack_death_delay_seconds_;
+    runtime_restore
+        .backrooms_jack_death_pending =
+        backrooms_jack_death_pending_;
+    runtime_restore.blade_pose_valid =
+        colossal_blade_pose_valid_;
+    runtime_restore.weapon_was_selected =
+        colossal_weapon_was_selected_;
+    runtime_restore.sea_encounter_started =
+        sea_leviathan_started_for_session_;
+    runtime_restore.wind_blade_available =
+        wind_blade_available_;
+    runtime_restore.super_vision_active =
+        super_vision_active_;
+    runtime_restore.starting_village_enabled =
+        starting_village_enabled_;
+    runtime_restore.quest_tutorial_spawned =
+        legendary_quest_tutorial_spawned_;
+
+    // Là, je capture les données dérivées avant de déplacer le monde actif.
+    auto preserved_snapshot =
+        make_world_snapshot();
+    auto preserved_world =
+        std::make_unique<World>(
+            std::move(world_));
+    if (!scenario_session_.capture(
+            std::move(preserved_world),
+            std::move(preserved_snapshot),
+            session_save_state_,
+            active_save_slot_)) {
+        return false;
+    }
+    scenario_legendary_runtime_restore_ =
+        std::move(runtime_restore);
+    world_ = std::move(arena_world);
+
+    ++issou_run_sequence_;
+    if (issou_run_sequence_ == 0U) {
+        issou_run_sequence_ = 1U;
+    }
+    if (!issou_scenario_.enter(
+            layout,
+            issou_run_sequence_)) {
+        if (auto restore =
+                scenario_session_.release();
+            restore.has_value()) {
+            restore_scenario_snapshot(
+                std::move(*restore));
+        }
+        return false;
+    }
+
+    session_save_state_.reset_clean();
+
+    renderer_.reset_world_resources();
+    world_.enqueue_loaded_mesh_uploads();
+    initialize_issou_run_state(
+        layout,
+        false);
+    queue_gameplay_announcement(
+        "L'ARENE DU COLOSSE",
+        "L'ECHINE DU LEVIATHAN",
+        3.8F);
+    queue_gameplay_announcement(
+        "COMMANDES DE L'ARME",
+        "CLIC G COMBO - MAINTENIR EXECUTION - CLIC D GARDE PARFAITE",
+        6.0F);
+    return true;
+}
+
+void Game::initialize_issou_run_state(
+    const IssouArenaLayout& layout,
+    bool rebuild_world) {
+    if (rebuild_world) {
+        IssouArenaLayoutGenerator {
+            layout.seed,
+        }
+            .apply(
+                world_,
+                layout);
+    }
+
+    // Je repars du meme socle a l'entree et apres chaque reset afin qu'aucun
+    // effet, invocation, projectile ou objet du combat precedent ne survive.
+    prepare_game_session();
+    active_game_mode_ =
+        GameMode::ClassicAdventure;
+    sea_adventure_.load_state(
+        {},
+        layout.seed);
+    sea_leviathan_.reset();
+    sea_leviathan_started_for_session_ =
+        false;
+    legendary_enemies_.clear();
+    legendary_quest_guardian_id_ = 0U;
+    legendary_astral_boss_id_ = 0U;
+    legendary_quest_tutorial_spawned_ =
+        false;
+    creatures_.clear();
+    item_drops_.clear();
+    item_drop_render_instances_.clear();
+    progression_creature_render_instances_
+        .clear();
+    issou_arena_minions_spawned_ = false;
+    latest_issou_event_ =
+        IssouArenaEventKind::CrowdMurmur;
+
+    for (auto& footman :
+         summoned_footmen_) {
+        footman.clear();
+    }
+    summoned_footman_ship_local_positions_
+        .fill(std::nullopt);
+    summoned_footman_far_seconds_.fill(
+        0.0F);
+    summoned_footman_cast_sequences_.fill(
+        0U);
+
+    hotbar_ = {};
+    inventory_menu_ = {};
+    static_cast<void>(
+        inventory_try_grant_legendary_weapon(
+            inventory_menu_,
+            hotbar_));
+
+    // Je reconstruis le build de demonstration depuis le build original :
+    // chaque reset recharge donc aussi l'energie et toutes les capacites.
+    if (scenario_legendary_runtime_restore_
+            .has_value()) {
+        player_build_ =
+            scenario_legendary_runtime_restore_
+                ->player_build;
+    }
+    player_build_.global_cooldown_remaining =
+        0.0F;
+    player_build_
+        .energy_regeneration_delay_remaining =
+        0.0F;
+    player_build_.cooldowns_remaining.fill(
+        0.0F);
+    player_build_.charges.fill(0U);
+    player_build_.successful_cast_sequence =
+        0U;
+    sanitize_player_build_state(
+        player_build_,
+        progression_.level());
+    player_build_.attributes.values[
+        player_attribute_index(
+            PlayerAttribute::Strength)] =
+        std::max<std::uint8_t>(
+            player_build_.attributes.values[
+                player_attribute_index(
+                    PlayerAttribute::Strength)],
+            kLeviathanSpineDefinition
+                .demonstration_strength);
+    player_build_.val_energy =
+        player_max_val_energy(
+            player_attribute_value(
+                player_build_.attributes,
+                PlayerAttribute::Wisdom));
+
+    ability_system_ = {};
+    player_ability_effects_.clear();
+    pending_ability_slot_.reset();
+    melee_attack_cooldown_remaining_ =
+        0.0F;
+    wind_acceleration_remaining_ = 0.0F;
+    wind_movement_bonus_ = 0.0F;
+    wind_recovery_bonus_ = 0.0F;
+    wind_dodge_remaining_ = 0.0F;
+    wind_blade_available_ = false;
+    wind_acceleration_cast_sequence_ = 0U;
+    seconds_since_successful_shield_block_ =
+        -1.0F;
+    super_vision_active_ = false;
+
+    spawn_position_ =
+        layout.player_spawn;
+    environment_.set_time_of_day(
+        19.25F);
+    environment_.set_weather_seed(
+        static_cast<std::uint32_t>(
+            layout.seed));
+    environment_.set_weather_time_seconds(
+        0.0F);
+    environment_.set_frozen(
+        options_.freeze_time ||
+        options_.smoke_test);
+    starting_village_enabled_ = false;
+    starting_village_ = {};
+
+    chained_colossus_.reset(
+        layout.colossus_spawn,
+        static_cast<std::uint32_t>(
+            layout.seed) ^
+            issou_scenario_.state()
+                .run_sequence);
+    chained_colossus_.set_invulnerable(
+        true);
+    colossus_blood_traces_.clear();
+    colossal_weapon_.reset();
+    leviathan_knight_synergy_.reset();
+    colossal_hit_ledger_.clear();
+    previous_colossal_blade_pose_ = {};
+    colossal_wall_impact_sequence_ = 0U;
+    colossal_shockwave_sequence_ = 0U;
+    colossal_blade_pose_valid_ = false;
+    colossal_weapon_was_selected_ = false;
+    clear_colossal_weapon_input();
+    rebuild_colossal_world_protections();
+
+    sync_selected_hotbar_slot();
+    player_.respawn(
+        layout.player_spawn);
+    player_.set_velocity({});
+    set_death_screen_visible(false);
+    set_mouse_capture(true);
+}
+
+auto Game::reset_issou_scenario() -> bool {
+    if (!issou_scenario_.reset()) {
+        return false;
+    }
+    const auto& layout =
+        issou_scenario_.state().layout;
+    initialize_issou_run_state(
+        layout,
+        true);
+    return true;
+}
+
+auto Game::exit_issou_scenario() -> bool {
+    if (!issou_scenario_.active() ||
+        !scenario_session_.active()) {
+        return false;
+    }
+    static_cast<void>(
+        issou_scenario_.request_exit());
+    auto restore =
+        scenario_session_.release();
+    if (!restore.has_value()) {
+        return false;
+    }
+    restore_scenario_snapshot(
+        std::move(*restore));
+    return true;
+}
+
+void Game::restore_scenario_snapshot(
+    ScenarioSessionRestore restore) {
+    if (restore.world == nullptr) {
+        return;
+    }
+    auto runtime_restore =
+        std::move(
+            scenario_legendary_runtime_restore_);
+    const auto snapshot =
+        std::move(restore.snapshot);
+    issou_scenario_ = {};
+    chained_colossus_ = {};
+    colossus_blood_traces_.clear();
+    legendary_enemies_.clear();
+    sea_leviathan_.reset();
+    issou_arena_minions_spawned_ = false;
+    latest_issou_event_ =
+        IssouArenaEventKind::CrowdMurmur;
+
+    renderer_.reset_world_resources();
+    world_ = std::move(
+        *restore.world);
+    world_.enqueue_loaded_mesh_uploads();
+    active_game_mode_ =
+        is_known_game_mode(
+            snapshot.metadata.game_mode)
+            ? snapshot.metadata.game_mode
+            : GameMode::ClassicAdventure;
+    sea_adventure_.load_state(
+        snapshot.sea_adventure,
+        snapshot.metadata.seed);
+
+    hotbar_ = snapshot.hotbar;
+    inventory_menu_ =
+        snapshot.inventory;
+    normalize_inventory_state(
+        inventory_menu_,
+        hotbar_);
+    inventory_menu_.visible = false;
+    inventory_menu_.hovered_slot.reset();
+    item_drops_.load_drops(
+        snapshot.item_drops);
+    progression_.load_state(
+        snapshot.progression);
+    legendary_weapon_progression_
+        .load_state(
+            snapshot.legendary_weapon);
+    experience_awards_.load_state(
+        snapshot.maritime_experience);
+    player_build_ =
+        snapshot.player_build;
+    sanitize_player_build_state(
+        player_build_,
+        progression_.level());
+
+    const auto robustness =
+        player_attribute_value(
+            player_build_.attributes,
+            PlayerAttribute::Robustness);
+    player_.set_max_health(
+        player_base_max_health(
+            progression_.level()) +
+        static_cast<float>(robustness));
+    player_.load_state(
+        snapshot.player_state);
+    environment_.set_time_of_day(
+        snapshot.metadata.time_of_day);
+    environment_.set_weather_seed(
+        static_cast<std::uint32_t>(
+            snapshot.metadata.seed));
+    environment_.set_weather_time_seconds(
+        snapshot.metadata
+            .weather_time_seconds);
+    environment_.set_frozen(
+        options_.freeze_time ||
+        options_.smoke_test);
+
+    starting_village_enabled_ =
+        active_game_mode_ ==
+            GameMode::ClassicAdventure &&
+        snapshot.metadata
+            .has_starting_village;
+    starting_village_ = {};
+    if (starting_village_enabled_) {
+        starting_village_ =
+            StartingVillageGenerator {
+                snapshot.metadata.seed,
+            }
+                .build_layout();
+        creatures_
+            .set_settlement_residents(
+                starting_village_
+                    .residents);
+    } else {
+        creatures_
+            .set_settlement_residents(
+                {});
+    }
+    creatures_.load_creatures(
+        snapshot.creatures,
+        environment_.current_state());
+    spawn_position_ =
+        finite_vec3_or(
+            snapshot.spawn_position,
+            {0.5F, 70.0F, 0.5F});
+    if (active_game_mode_ ==
+            GameMode::SeaAdventure &&
+        sea_adventure_.active()) {
+        spawn_position_ =
+            sea_adventure_
+                .deck_spawn_position();
+    }
+
+    prepare_game_session(
+        snapshot
+            .musket_shot_sequence);
+    const auto ability_runtime =
+        sanitize_player_ability_runtime_save_state(
+            snapshot.player_ability_runtime);
+    static_cast<void>(
+        player_ability_effects_
+            .load_state(
+                ability_runtime
+                    .player_effects));
+    ability_system_
+        .reserve_next_cast_sequence(
+            ability_runtime
+                .next_cast_sequence);
+    reserve_next_summoned_unit_id(
+        ability_runtime
+            .next_summoned_unit_id);
+    for (std::size_t index = 0U;
+         index <
+         summoned_footmen_.size();
+         ++index) {
+        summoned_footmen_[index].clear();
+        summoned_footman_ship_local_positions_[
+            index]
+            .reset();
+        summoned_footman_far_seconds_[
+            index] = 0.0F;
+        summoned_footman_cast_sequences_[
+            index] = 0U;
+        const auto& saved =
+            ability_runtime
+                .summoned_footmen[index];
+        const auto loaded =
+            summoned_footmen_[index]
+                .load_state(
+                    saved.runtime);
+        if (!loaded.restored) {
+            continue;
+        }
+        summoned_footman_ship_local_positions_[
+            index] =
+            active_game_mode_ ==
+                    GameMode::SeaAdventure
+                ? saved.ship_local_position
+                : std::nullopt;
+        summoned_footman_far_seconds_[index] =
+            saved.far_seconds;
+        summoned_footman_cast_sequences_[index] =
+            saved.cast_sequence;
+    }
+    wind_acceleration_remaining_ =
+        ability_runtime.wind
+            .remaining_seconds;
+    wind_movement_bonus_ =
+        ability_runtime.wind
+            .movement_bonus;
+    wind_recovery_bonus_ =
+        ability_runtime.wind
+            .recovery_bonus;
+    wind_dodge_remaining_ =
+        ability_runtime.wind
+            .dodge_remaining_seconds;
+    wind_blade_available_ =
+        ability_runtime.wind
+            .blade_armed;
+    wind_acceleration_cast_sequence_ =
+        ability_runtime.wind
+            .cast_sequence;
+
+    if (runtime_restore.has_value()) {
+        active_game_mode_ =
+            runtime_restore
+                ->active_game_mode;
+        environment_ =
+            runtime_restore
+                ->environment;
+        progression_ =
+            std::move(
+                runtime_restore
+                    ->progression);
+        legendary_weapon_progression_ =
+            std::move(
+                runtime_restore
+                    ->weapon_progression);
+        experience_awards_ =
+            std::move(
+                runtime_restore
+                    ->experience_awards);
+        player_build_ =
+            std::move(
+                runtime_restore
+                    ->player_build);
+        ability_system_ =
+            std::move(
+                runtime_restore
+                    ->ability_system);
+        player_ability_effects_ =
+            std::move(
+                runtime_restore
+                    ->ability_effects);
+        creatures_ =
+            std::move(
+                runtime_restore
+                    ->creatures);
+        item_drops_ =
+            std::move(
+                runtime_restore
+                    ->item_drops);
+        sea_adventure_ =
+            std::move(
+                runtime_restore
+                    ->sea_adventure);
+        hotbar_ =
+            std::move(
+                runtime_restore
+                    ->hotbar);
+        inventory_menu_ =
+            std::move(
+                runtime_restore
+                    ->inventory);
+        starting_village_ =
+            std::move(
+                runtime_restore
+                    ->starting_village);
+        starting_village_enabled_ =
+            runtime_restore
+                ->starting_village_enabled;
+        summoned_footmen_ =
+            std::move(
+                runtime_restore
+                    ->summoned_footmen);
+        summoned_footman_ship_local_positions_ =
+            std::move(
+                runtime_restore
+                    ->summoned_footman_ship_local_positions);
+        summoned_footman_far_seconds_ =
+            std::move(
+                runtime_restore
+                    ->summoned_footman_far_seconds);
+        summoned_footman_cast_sequences_ =
+            std::move(
+                runtime_restore
+                    ->summoned_footman_cast_sequences);
+        spawn_position_ =
+            runtime_restore
+                ->spawn_position;
+        bound_musket_hotbar_slot_ =
+            runtime_restore
+                ->bound_musket_hotbar_slot;
+        pending_ability_slot_ =
+            runtime_restore
+                ->pending_ability_slot;
+        melee_attack_cooldown_remaining_ =
+            runtime_restore
+                ->melee_attack_cooldown_remaining;
+        wind_acceleration_remaining_ =
+            runtime_restore
+                ->wind_acceleration_remaining;
+        wind_movement_bonus_ =
+            runtime_restore
+                ->wind_movement_bonus;
+        wind_recovery_bonus_ =
+            runtime_restore
+                ->wind_recovery_bonus;
+        wind_dodge_remaining_ =
+            runtime_restore
+                ->wind_dodge_remaining;
+        wind_blade_available_ =
+            runtime_restore
+                ->wind_blade_available;
+        wind_acceleration_cast_sequence_ =
+            runtime_restore
+                ->wind_acceleration_cast_sequence;
+        seconds_since_successful_shield_block_ =
+            runtime_restore
+                ->seconds_since_successful_shield_block;
+        backrooms_elapsed_seconds_ =
+            runtime_restore
+                ->backrooms_elapsed_seconds;
+        backrooms_flashlight_ =
+            sanitize_backrooms_flashlight_state(
+                runtime_restore
+                    ->backrooms_flashlight);
+        backrooms_jack_ =
+            sanitize_backrooms_jack_state(
+                runtime_restore
+                    ->backrooms_jack);
+        backrooms_jack_runtime_ =
+            std::move(
+                runtime_restore
+                    ->backrooms_jack_runtime);
+        backrooms_jack_last_result_ =
+            std::move(
+                runtime_restore
+                    ->backrooms_jack_last_result);
+        backrooms_jack_death_delay_seconds_ =
+            std::clamp(
+                finite_or(
+                    runtime_restore
+                        ->backrooms_jack_death_delay_seconds,
+                    0.0F),
+                0.0F,
+                kBackroomsJackScreamerHoldSeconds);
+        backrooms_jack_death_pending_ =
+            runtime_restore
+                ->backrooms_jack_death_pending &&
+            backrooms_jack_death_delay_seconds_ >
+                0.0F &&
+            backrooms_jack_.phase ==
+                BackroomsJackPhase::Jumpscare;
+        super_vision_active_ =
+            runtime_restore
+                ->super_vision_active;
+        colossal_weapon_ =
+            std::move(
+                runtime_restore->weapon);
+        leviathan_knight_synergy_ =
+            std::move(
+                runtime_restore
+                    ->knight_synergy);
+        colossal_hit_ledger_ =
+            std::move(
+                runtime_restore
+                    ->hit_ledger);
+        previous_colossal_blade_pose_ =
+            runtime_restore
+                ->previous_blade_pose;
+        colossal_world_protections_ =
+            std::move(
+                runtime_restore
+                    ->protections);
+        colossus_blood_traces_ =
+            std::move(
+                runtime_restore
+                    ->blood_traces);
+        legendary_enemies_ =
+            std::move(
+                runtime_restore
+                    ->enemies);
+        sea_leviathan_ =
+            std::move(
+                runtime_restore
+                    ->sea_encounter);
+        colossal_wall_impact_sequence_ =
+            runtime_restore
+                ->wall_impact_sequence;
+        colossal_shockwave_sequence_ =
+            runtime_restore
+                ->shockwave_sequence;
+        legendary_quest_guardian_id_ =
+            runtime_restore
+                ->quest_guardian_id;
+        legendary_astral_boss_id_ =
+            runtime_restore
+                ->astral_boss_id;
+        legendary_quest_tutorial_spawned_ =
+            runtime_restore
+                ->quest_tutorial_spawned;
+        colossal_blade_pose_valid_ =
+            runtime_restore
+                ->blade_pose_valid;
+        colossal_weapon_was_selected_ =
+            runtime_restore
+                ->weapon_was_selected;
+        sea_leviathan_started_for_session_ =
+            runtime_restore
+                ->sea_encounter_started;
+        player_ =
+            std::move(
+                runtime_restore
+                    ->player);
+        player_musket_ =
+            std::move(
+                runtime_restore
+                    ->player_musket);
+        player_musket_effects_ =
+            std::move(
+                runtime_restore
+                    ->player_musket_effects);
+    } else {
+        reset_backrooms_jack_runtime();
+        colossal_weapon_.reset();
+        colossal_hit_ledger_.clear();
+        colossal_wall_impact_sequence_ = 0U;
+        colossal_blade_pose_valid_ = false;
+        colossal_weapon_was_selected_ =
+            false;
+        sea_leviathan_started_for_session_ =
+            sea_leviathan_.active();
+        rebuild_colossal_world_protections();
+    }
+    scenario_legendary_runtime_restore_
+        .reset();
+    active_save_slot_ =
+        restore.active_save_slot;
+    session_save_state_ =
+        restore.save_state;
+    has_active_session_ = true;
+    gameplay_announcements_.clear();
+    if (!runtime_restore.has_value()) {
+        super_vision_active_ = false;
+        sync_selected_hotbar_slot();
+    }
+    menu_preview_time_of_day_ =
+        environment_.time_of_day();
+    preview_orbit_radians_ = 0.0F;
+    update_menu_preview_camera(0.0F);
+    static_cast<void>(
+        world_.update_streaming(
+            player_.position()));
+    queue_gameplay_announcement(
+        "RETOUR",
+        "LA PARTIE PRECEDENTE EST RESTAUREE",
+        2.8F);
+}
+
+void Game::rebuild_colossal_world_protections() noexcept {
+    colossal_world_protections_.clear();
+    if (issou_scenario_.active()) {
+        const auto& bounds =
+            issou_scenario_.state()
+                .layout.protected_bounds;
+        static_cast<void>(
+            colossal_world_protections_
+                .register_region({
+                    kIssouArenaProtectionRegionId,
+                    {
+                        bounds.min_x,
+                        bounds.min_y,
+                        bounds.min_z,
+                    },
+                    {
+                        bounds.max_x,
+                        bounds.max_y,
+                        bounds.max_z,
+                    },
+                    WorldProtectionFlag::
+                        ArenaBoundary |
+                        WorldProtectionFlag::
+                            ImportantStructure,
+                }));
+        return;
+    }
+    if (starting_village_enabled_) {
+        static_cast<void>(
+            colossal_world_protections_
+                .register_region({
+                    kStartingVillageProtectionRegionId,
+                    {
+                        starting_village_.min_x,
+                        starting_village_.base_y -
+                            4,
+                        starting_village_.min_z,
+                    },
+                    {
+                        starting_village_.max_x,
+                        starting_village_.base_y +
+                            20,
+                        starting_village_.max_z,
+                    },
+                    WorldProtectionFlag::
+                        ImportantStructure,
+                }));
+    }
+    if (legendary_quest_world_content_
+            .has_value()) {
+        const auto& volumes =
+            legendary_quest_world_content_
+                ->protection_volumes;
+        for (std::size_t index = 0U;
+             index < volumes.size();
+             ++index) {
+            if (!legendary_quest_world_scenes_applied_[
+                    index]) {
+                continue;
+            }
+            static_cast<void>(
+                colossal_world_protections_
+                    .register_region(
+                        volumes[index].region));
+        }
+    }
 }
 
 void Game::reset_musket_interaction(
@@ -7421,7 +13374,8 @@ void Game::sync_selected_hotbar_slot() noexcept {
     const auto armor_resistance =
         std::clamp(
             inventory_equipment_resistance_percent(
-                inventory_menu_) /
+                inventory_menu_,
+                colossal_weapon_drawn()) /
                 100.0F,
             0.0F,
             0.99F);
@@ -7465,6 +13419,11 @@ void Game::sync_selected_hotbar_slot() noexcept {
             level,
             agility) *
         std::clamp(
+            colossal_weapon_.snapshot()
+                .movement_multiplier,
+            0.0F,
+            1.0F) *
+        std::clamp(
             (1.0F +
              std::max(
                  wind_movement_bonus_,
@@ -7507,6 +13466,10 @@ auto Game::selected_tool_break_speed_multiplier(BlockId target_block_id) const n
 }
 
 void Game::select_hotbar_slot(std::size_t index) noexcept {
+    if (!colossal_weapon_.snapshot()
+             .can_change_equipment) {
+        return;
+    }
     const auto previous_index =
         normalize_hotbar_index(
             hotbar_.selected_index);
@@ -7520,6 +13483,10 @@ void Game::select_hotbar_slot(std::size_t index) noexcept {
 }
 
 void Game::cycle_hotbar_selection(int delta) noexcept {
+    if (!colossal_weapon_.snapshot()
+             .can_change_equipment) {
+        return;
+    }
     const auto previous_index =
         normalize_hotbar_index(
             hotbar_.selected_index);
@@ -7590,6 +13557,8 @@ void Game::respawn_player() {
     const auto maritime_respawn =
         active_game_mode_ == GameMode::SeaAdventure &&
         sea_adventure_.active();
+    const auto backrooms_respawn =
+        active_game_mode_ == GameMode::Backrooms;
 
     if (maritime_respawn) {
         // Le voyage continue, mais les jauges transitoires doivent laisser au
@@ -7600,9 +13569,39 @@ void Game::respawn_player() {
     spawn_position_ =
         maritime_respawn
             ? sea_adventure_.deck_spawn_position()
-            : find_initial_spawn_position();
+            : backrooms_respawn
+                  ? backrooms_spawn_position(
+                        world_.seed(),
+                        world_.backrooms_level())
+                  : find_initial_spawn_position();
+
+    if (backrooms_respawn) {
+        begin_loading_screen(
+            LoadingScreenTheme::Standard,
+            static_cast<std::uint32_t>(
+                world_.seed()) ^
+                static_cast<std::uint32_t>(
+                    world_.backrooms_level()));
+        update_loading_screen(
+            "BACKROOMS",
+            "RECOMPOSITION DU POINT DE REVEIL",
+            LoadingPhase::Preparation,
+            0.15F,
+            true);
+        if (!reset_renderer_world_resources_during_loading(
+                "BACKROOMS")) {
+            loading_active_ = false;
+            return;
+        }
+    }
 
     player_.respawn(spawn_position_);
+    player_.set_fly_mode_enabled(false);
+    player_.set_water_movement_profile(
+        backrooms_respawn &&
+                world_.backrooms_level() <= -2
+            ? PlayerWaterMovementProfile::Poolrooms
+            : PlayerWaterMovementProfile::Standard);
     const auto energy_parameters =
         player_ability_energy_parameters(
             player_build_);
@@ -7620,15 +13619,39 @@ void Game::respawn_player() {
     sync_selected_hotbar_slot();
     set_death_screen_visible(false);
 
-    (void)world_.update_streaming(
-        player_.position());
-
-    creatures_.update(
-        0.0F,
-        world_,
-        player_.position(),
-        environment_.current_state(),
-        environment_.current_creature_cycle());
+    if (backrooms_respawn) {
+        backrooms_level_transition_cooldown_seconds_ =
+            1.5F;
+        backrooms_level_transition_in_progress_ =
+            false;
+        reset_backrooms_jack_runtime();
+        creatures_.clear();
+        item_drops_.clear();
+        // Je reconstruis et transfère tout l'anneau visible sous le masque de
+        // chargement : aucune salle du point d'origine ne réapparaît en jeu.
+        prime_world_around(
+            world_,
+            player_.position(),
+            "BACKROOMS",
+            "ASSEMBLAGE DU POINT DE REVEIL HORS DE VUE");
+        if (running_) {
+            complete_loading_screen(
+                "BACKROOMS",
+                "VOUS VOUS REVEILLEZ AILLEURS");
+            SDL_SetWindowTitle(
+                window_,
+                kGameWindowTitle.data());
+        }
+    } else {
+        (void)world_.update_streaming(
+            player_.position());
+        creatures_.update(
+            0.0F,
+            world_,
+            player_.position(),
+            environment_.current_state(),
+            environment_.current_creature_cycle());
+    }
 
     record_audit_event(
         AuditEventCategory::Player,
@@ -7695,6 +13718,615 @@ auto Game::gameplay_interaction_blocked() const noexcept -> bool {
            front_end_visible();
 }
 
+auto Game::backrooms_active() const noexcept -> bool {
+    return has_active_session_ &&
+           active_game_mode_ == GameMode::Backrooms;
+}
+
+auto Game::session_backrooms_supports_jack() const noexcept
+    -> bool {
+    // Je rattache Jack à la famille de sessions Backrooms et non au thème
+    // visuel des bureaux. Les futurs niveaux réutiliseront donc la même FSM
+    // tant qu'ils restent dans ce mode.
+    return backrooms_active();
+}
+
+auto Game::backrooms_jack_jumpscare_active() const noexcept
+    -> bool {
+    return session_backrooms_supports_jack() &&
+           backrooms_jack_.active &&
+           backrooms_jack_.phase ==
+               BackroomsJackPhase::Jumpscare;
+}
+
+void Game::reset_backrooms_jack_runtime() noexcept {
+    // Je crée ici l'état neuf des nouvelles sessions et des réapparitions.
+    // Lors d'un chargement v17, l'état durable sauvegardé est réappliqué après
+    // cette remise à zéro, tandis que ce runtime et le screamer restent neufs.
+    const auto seed =
+        static_cast<std::uint32_t>(
+            world_.seed()) ^
+        (static_cast<std::uint32_t>(
+             world_.backrooms_level()) *
+         UINT32_C(0x9E3779B9)) ^
+        UINT32_C(0x4A41434B);
+    backrooms_jack_ =
+        initialize_backrooms_jack(
+            seed,
+            world_.backrooms_level());
+    backrooms_jack_runtime_ = {};
+    backrooms_jack_last_result_ = {};
+    backrooms_jack_death_delay_seconds_ =
+        0.0F;
+    backrooms_jack_death_pending_ = false;
+}
+
+auto Game::current_environment_state() const -> EnvironmentState {
+    if (!backrooms_active()) {
+        return environment_.current_state();
+    }
+
+    const auto& position = player_.position();
+    return make_backrooms_environment_state(
+        backrooms_elapsed_seconds_,
+        world_.seed(),
+        position.x,
+        position.z,
+        world_.backrooms_level() <= -2);
+}
+
+void Game::update_backrooms_simulation(float dt) {
+    // Le mode n'expose que la locomotion. Je purge chaque requête discrète
+    // afin qu'un clic ou une touche pressée juste avant le chargement ne puisse
+    // ni casser une cloison, ni activer un pouvoir dans l'étage.
+    pending_toggle_fly_ = false;
+    pending_break_block_ = false;
+    pending_primary_attack_ = false;
+    pending_place_block_ = false;
+    pending_fishing_ = false;
+    pending_musket_fire_press_ = false;
+    pending_musket_reload_ = false;
+    pending_ability_slot_.reset();
+    musket_fire_held_ = false;
+    musket_aim_held_ = false;
+    player_.cancel_block_breaking();
+    player_.set_fly_mode_enabled(false);
+    super_vision_active_ = false;
+
+    const auto safe_dt =
+        std::isfinite(dt)
+            ? std::clamp(dt, 0.0F, 0.10F)
+            : 0.0F;
+    backrooms_level_transition_cooldown_seconds_ =
+        std::max(
+            backrooms_level_transition_cooldown_seconds_ -
+                safe_dt,
+            0.0F);
+    player_.set_water_movement_profile(
+        world_.backrooms_level() <= -2
+            ? PlayerWaterMovementProfile::Poolrooms
+            : PlayerWaterMovementProfile::Standard);
+    static_cast<void>(
+        update_backrooms_flashlight(
+            backrooms_flashlight_,
+            safe_dt));
+    if (!std::isfinite(backrooms_elapsed_seconds_) ||
+        backrooms_elapsed_seconds_ < 0.0F) {
+        backrooms_elapsed_seconds_ = 0.0F;
+    }
+    // Le repli évite de perdre la précision des flottants après de très
+    // longues parties, sans produire de rupture visible dans les cycles lents.
+    constexpr auto kBackroomsClockPeriodSeconds = 86'400.0F;
+    backrooms_elapsed_seconds_ =
+        std::fmod(
+            backrooms_elapsed_seconds_ + safe_dt,
+            kBackroomsClockPeriodSeconds);
+
+    const auto gameplay_input_enabled =
+        !options_.smoke_test &&
+        !gameplay_interaction_blocked() &&
+        !backrooms_jack_jumpscare_active();
+    PlayerInput input {};
+    if (gameplay_input_enabled) {
+        input = read_player_movement_input(
+            SDL_GetKeyboardState(nullptr));
+    }
+    input.toggle_fly = false;
+    input.look_delta_x =
+        gameplay_input_enabled &&
+                mouse_captured_
+            ? std::exchange(pending_look_x_, 0.0F)
+            : 0.0F;
+    input.look_delta_y =
+        gameplay_input_enabled &&
+                mouse_captured_
+            ? std::exchange(pending_look_y_, 0.0F)
+            : 0.0F;
+
+    if (backrooms_jack_jumpscare_active()) {
+        // Je consomme aussi le regard accumulé avant la capture. Il ne sera
+        // pas réappliqué brutalement après le screamer ou au respawn.
+        pending_look_x_ = 0.0F;
+        pending_look_y_ = 0.0F;
+    } else {
+        player_.update(
+            input,
+            safe_dt,
+            world_,
+            nullptr,
+            nullptr);
+        if (!options_.smoke_test &&
+            gameplay_input_enabled &&
+            try_backrooms_level_transition()) {
+            // Le monde précédent a été remplacé atomiquement. Aucune logique
+            // de Jack ne doit continuer avec son ancien graphe de navigation.
+            return;
+        }
+    }
+
+    const auto smoke_pose =
+        options_.smoke_test
+            ? requested_backrooms_jack_smoke_pose(
+                  options_.smoke_backrooms_jack)
+            : std::nullopt;
+    auto caught_this_update = false;
+    if (!session_backrooms_supports_jack()) {
+        reset_backrooms_jack_runtime();
+    } else if (smoke_pose.has_value()) {
+        auto preview =
+            make_backrooms_jack_smoke_preview(
+                *smoke_pose,
+                static_cast<std::uint32_t>(
+                    world_.seed()) ^
+                    UINT32_C(0x4A41434B));
+        preview.state.logical_level =
+            world_.backrooms_level();
+        if (*smoke_pose !=
+            BackroomsJackSmokePose::Jumpscare) {
+            const auto forward =
+                safe_horizontal_direction(
+                    player_.look_direction());
+            preview.state.position =
+                player_.position() +
+                forward * 8.0F;
+            preview.state.position.y =
+                player_.position().y;
+            preview.state.body_yaw_degrees =
+                backrooms_jack_yaw_facing(
+                    preview.state.position,
+                    player_.position());
+            preview.state =
+                sanitize_backrooms_jack_state(
+                    preview.state);
+            preview.render =
+                make_backrooms_jack_render_view(
+                    preview.state,
+                    world_.backrooms_level());
+            preview.light_interference =
+                make_backrooms_jack_light_interference_view(
+                    preview.state,
+                    world_.backrooms_level());
+        }
+        preview.state =
+            sanitize_backrooms_jack_state(
+                preview.state);
+        preview.render =
+            make_backrooms_jack_render_view(
+                preview.state,
+                world_.backrooms_level());
+        preview.light_interference =
+            make_backrooms_jack_light_interference_view(
+                preview.state,
+                world_.backrooms_level());
+        backrooms_jack_ = preview.state;
+        backrooms_jack_runtime_ = {};
+        backrooms_jack_last_result_ = {
+            .render = preview.render,
+            .light_interference =
+                preview.light_interference,
+        };
+        backrooms_jack_death_delay_seconds_ =
+            0.0F;
+        backrooms_jack_death_pending_ = false;
+    } else {
+        const BackroomsGenerator generator {
+            world_.seed(),
+            world_.backrooms_level(),
+        };
+        const auto ui_blocks_simulation =
+            gameplay_interaction_blocked();
+        const BackroomsJackUpdateContext context {
+            .player = {
+                .feet_position =
+                    player_.position(),
+                .eye_position =
+                    player_.eye_position(),
+                .look_direction =
+                    player_.look_direction(),
+                .maximum_sprint_speed = 7.2F,
+            },
+            .chunk_readiness =
+                backrooms_jack_chunk_readiness(
+                    world_,
+                    player_.position()),
+            .allow_spawn =
+                !ui_blocks_simulation &&
+                !player_.is_dead(),
+            .simulation_frozen =
+                ui_blocks_simulation ||
+                backrooms_jack_jumpscare_active(),
+            .player_alive =
+                !player_.is_dead(),
+        };
+        backrooms_jack_last_result_ =
+            update_backrooms_jack(
+                backrooms_jack_,
+                backrooms_jack_runtime_,
+                generator,
+                context,
+                safe_dt);
+
+        const auto event_count =
+            std::min(
+                backrooms_jack_last_result_
+                    .event_count,
+                backrooms_jack_last_result_
+                    .events.size());
+        for (std::size_t index = 0U;
+             index < event_count;
+             ++index) {
+            const auto& event =
+                backrooms_jack_last_result_
+                    .events[index];
+            const auto kind =
+                backrooms_jack_event_sfx(
+                    event.kind);
+            if (!kind.has_value()) {
+                continue;
+            }
+            const auto spatial =
+                backrooms_jack_spatial_audio(
+                    player_.eye_position(),
+                    player_.look_direction(),
+                    event.position);
+            auto deterministic_seed =
+                static_cast<std::uint32_t>(
+                    event.sequence) ^
+                static_cast<std::uint32_t>(
+                    event.sequence >> 32U) ^
+                static_cast<std::uint32_t>(
+                    world_.seed());
+            if (deterministic_seed == 0U) {
+                deterministic_seed =
+                    UINT32_C(0x4A41434B);
+            }
+            music_.play_sfx(
+                *kind,
+                backrooms_jack_event_volume(
+                    event.kind),
+                spatial.pan,
+                spatial.attenuation,
+                deterministic_seed);
+        }
+
+        caught_this_update =
+            backrooms_jack_last_result_
+                .caught_player;
+        if (caught_this_update &&
+            !backrooms_jack_death_pending_) {
+            player_.force_death(
+                PlayerDeathCause::
+                    JackThePirate);
+            backrooms_jack_death_delay_seconds_ =
+                kBackroomsJackScreamerHoldSeconds;
+            backrooms_jack_death_pending_ = true;
+            pending_look_x_ = 0.0F;
+            pending_look_y_ = 0.0F;
+        }
+    }
+
+    if (backrooms_jack_death_pending_) {
+        if (!caught_this_update) {
+            backrooms_jack_death_delay_seconds_ =
+                std::max(
+                    backrooms_jack_death_delay_seconds_ -
+                        safe_dt,
+                    0.0F);
+        }
+        if (backrooms_jack_death_delay_seconds_ <=
+            0.0F) {
+            // Je retire la surimpression avant d'ouvrir l'écran de mort :
+            // les deux interfaces ne doivent jamais se superposer.
+            reset_backrooms_jack_runtime();
+            set_death_screen_visible(
+                true,
+                PlayerDeathCause::
+                    JackThePirate);
+        }
+    } else if (player_.is_dead() &&
+               !death_screen_visible_) {
+        const auto cause =
+            player_.state().death_cause;
+        reset_backrooms_jack_runtime();
+        set_death_screen_visible(
+            true,
+            cause);
+    }
+    if (has_active_session_) {
+        mark_session_dirty();
+    }
+}
+
+auto Game::try_backrooms_level_transition() -> bool {
+    if (!backrooms_active() ||
+        backrooms_level_transition_in_progress_ ||
+        backrooms_level_transition_cooldown_seconds_ > 0.0F ||
+        gameplay_interaction_blocked() ||
+        player_.is_dead()) {
+        return false;
+    }
+
+    const auto& position = player_.position();
+    const BackroomsGenerator generator {
+        world_.seed(),
+        world_.backrooms_level(),
+    };
+    const auto connector =
+        generator.connector_near(
+            static_cast<int>(std::floor(position.x)),
+            static_cast<int>(std::floor(position.y)),
+            static_cast<int>(std::floor(position.z)),
+            1);
+    if (!connector.has_value()) {
+        return false;
+    }
+
+    return transition_backrooms_level(
+        connector->destination_level,
+        connector->destination_landing_block,
+        connector->destination_yaw_degrees);
+}
+
+auto Game::transition_backrooms_level(
+    int destination_level,
+    const BlockCoord& destination_landing,
+    float destination_yaw_degrees) -> bool {
+    constexpr auto kMinimumLogicalLevel = -1'000'000;
+    constexpr auto kMaximumLogicalLevel = 1'000'000;
+    if (!backrooms_active() ||
+        backrooms_level_transition_in_progress_ ||
+        destination_level < kMinimumLogicalLevel ||
+        destination_level > kMaximumLogicalLevel ||
+        std::abs(destination_level - world_.backrooms_level()) != 1) {
+        return false;
+    }
+
+    backrooms_level_transition_in_progress_ = true;
+    const auto loading_title =
+        destination_level <= -2
+            ? std::string_view("POOLROOMS")
+            : std::string_view("BACKROOMS");
+    const auto loading_detail =
+        destination_level <= -2
+            ? std::string_view("L'EAU RECOUVRE LE NIVEAU")
+            : std::string_view("LES BUREAUX CONTINUENT");
+    auto renderer_staged = false;
+    auto world_committed = false;
+
+    try {
+        begin_loading_screen(
+            LoadingScreenTheme::Standard,
+            static_cast<std::uint32_t>(
+                world_.seed()) ^
+                static_cast<std::uint32_t>(
+                    destination_level));
+        update_loading_screen(
+            loading_title,
+            "FERMETURE DU PALIER",
+            LoadingPhase::Preparation,
+            0.25F,
+            true);
+        if (!wait_for_pending_save_during_loading(
+                loading_title) ||
+            !wait_for_pending_world_release_during_loading(
+                loading_title)) {
+            loading_active_ = false;
+            backrooms_level_transition_in_progress_ =
+                false;
+            SDL_SetWindowTitle(
+                window_,
+                kGameWindowTitle.data());
+            return false;
+        }
+
+        const auto seed = world_.seed();
+        const auto stream_radius =
+            world_.stream_radius();
+        const auto generation_version =
+            world_.generation_version();
+        const auto visual_pipeline =
+            world_.visual_pipeline();
+        World prepared_world(
+            seed,
+            stream_radius,
+            WorldGenerationProfile::Backrooms,
+            generation_version,
+            visual_pipeline,
+            destination_level);
+        const BackroomsGenerator destination_generator {
+            seed,
+            destination_level,
+        };
+
+        auto landing_block = destination_landing;
+        if (!is_world_y_valid(landing_block.y) ||
+            !destination_generator.is_walkable(
+                landing_block.x,
+                landing_block.z)) {
+            landing_block =
+                destination_generator.spawn_block();
+        }
+        auto landing_position = glm::vec3 {
+            static_cast<float>(landing_block.x) +
+                0.5F,
+            static_cast<float>(landing_block.y) +
+                0.001F,
+            static_cast<float>(landing_block.z) +
+                0.5F,
+        };
+
+        auto prepared_player_state =
+            player_.state();
+        prepared_player_state.position =
+            landing_position;
+        prepared_player_state.velocity = {};
+        prepared_player_state.yaw_degrees =
+            std::isfinite(destination_yaw_degrees)
+                ? destination_yaw_degrees
+                : prepared_player_state.yaw_degrees;
+        prepared_player_state.body_yaw_degrees =
+            prepared_player_state.yaw_degrees;
+        sanitize_backrooms_player_state(
+            prepared_player_state,
+            seed,
+            destination_level);
+        landing_position =
+            prepared_player_state.position;
+
+        update_loading_screen(
+            loading_title,
+            "PRECHARGEMENT DES SALLES",
+            LoadingPhase::Preparation,
+            0.85F,
+            true);
+        if (!reset_renderer_world_resources_during_loading(
+                loading_title)) {
+            loading_active_ = false;
+            backrooms_level_transition_in_progress_ =
+                false;
+            SDL_SetWindowTitle(
+                window_,
+                kGameWindowTitle.data());
+            return false;
+        }
+        renderer_staged = true;
+        prime_world_around(
+            prepared_world,
+            landing_position,
+            loading_title,
+            "ASSEMBLAGE DU NIVEAU HORS DE VUE");
+        if (!running_) {
+            backrooms_level_transition_in_progress_ =
+                false;
+            return false;
+        }
+
+        install_prepared_world(
+            std::move(prepared_world));
+        world_committed = true;
+        player_.load_state(
+            prepared_player_state);
+        player_.set_water_movement_profile(
+            destination_level <= -2
+                ? PlayerWaterMovementProfile::Poolrooms
+                : PlayerWaterMovementProfile::Standard);
+        // Je conserve le compte à rebours et la pression de Jack entre les
+        // étages. Seuls son graphe et sa vue de l'ancien niveau sont invalidés.
+        if (backrooms_jack_.active) {
+            backrooms_jack_.active = false;
+            backrooms_jack_.phase =
+                BackroomsJackPhase::Cooldown;
+            backrooms_jack_.cooldown_seconds =
+                std::max(
+                    backrooms_jack_.cooldown_seconds,
+                    kBackroomsJackMinimumCooldownSeconds);
+            backrooms_jack_.motion_amount = 0.0F;
+            backrooms_jack_.suspicion = 0.0F;
+            backrooms_jack_.lost_sight_seconds = 0.0F;
+        }
+        backrooms_jack_.logical_level =
+            destination_level;
+        backrooms_jack_runtime_ = {};
+        backrooms_jack_last_result_ = {};
+        backrooms_jack_death_delay_seconds_ =
+            0.0F;
+        backrooms_jack_death_pending_ = false;
+        backrooms_level_transition_cooldown_seconds_ =
+            2.25F;
+        backrooms_level_transition_in_progress_ =
+            false;
+        spawn_position_ =
+            backrooms_spawn_position(
+                seed,
+                destination_level);
+        mark_session_dirty();
+
+        if (!wait_for_pending_world_release_during_loading(
+                loading_title)) {
+            loading_active_ = false;
+            SDL_SetWindowTitle(
+                window_,
+                kGameWindowTitle.data());
+            return true;
+        }
+        queue_gameplay_announcement(
+            std::string("NIVEAU ") +
+                std::to_string(destination_level),
+            destination_level <= -2
+                ? "POOLROOMS"
+                : "BUREAUX",
+            3.0F);
+        complete_loading_screen(
+            loading_title,
+            loading_detail);
+        SDL_SetWindowTitle(
+            window_,
+            kGameWindowTitle.data());
+        return true;
+    } catch (const std::exception& exception) {
+        if (renderer_staged &&
+            !world_committed) {
+            try {
+                renderer_.reset_world_resources();
+                world_.enqueue_loaded_mesh_uploads();
+                // Je garde le masque jusqu'à la restauration complète de
+                // l'ancien monde. Un échec de transition ne doit jamais rendre
+                // un écran noir puis ré-uploader les salles sous les yeux.
+                prime_world_around(
+                    world_,
+                    player_.position(),
+                    loading_title,
+                    "RESTAURATION DE L'ETAGE PRECEDENT");
+            } catch (const std::exception&
+                         recovery_exception) {
+                std::cerr
+                    << "Backrooms renderer recovery failed: "
+                    << recovery_exception.what()
+                    << std::endl;
+                // Si même le rollback ne peut être préchargé, je ferme la
+                // boucle plutôt que d'exposer un monde graphiquement incomplet.
+                running_ = false;
+            }
+        }
+        backrooms_level_transition_in_progress_ =
+            false;
+        backrooms_level_transition_cooldown_seconds_ =
+            1.0F;
+        loading_active_ = false;
+        SDL_SetWindowTitle(
+            window_,
+            kGameWindowTitle.data());
+        std::cerr
+            << "Backrooms level transition warning: "
+            << exception.what()
+            << std::endl;
+        // Après le commit, revenir "false" ferait exécuter la fin de frame
+        // avec des hypothèses de l'ancien étage. Le monde installé reste donc
+        // la réussite transactionnelle, même si la finition UI a échoué.
+        return world_committed;
+    }
+}
+
 auto Game::render_player() const noexcept -> const PlayerController& {
     if (options_.smoke_test && options_.smoke_ship_view != SmokeShipView::None &&
         active_game_mode_ == GameMode::SeaAdventure && sea_adventure_.active()) {
@@ -7759,28 +14391,85 @@ auto Game::resolve_save_root_directory() const -> std::filesystem::path {
 
 auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     SaveGameSnapshot snapshot {};
-    snapshot.metadata.exists = true;
-    snapshot.metadata.seed = world_.seed();
-    snapshot.metadata.time_of_day = environment_.time_of_day();
-    snapshot.metadata.weather_time_seconds = environment_.weather_time_seconds();
-    snapshot.metadata.has_starting_village = starting_village_enabled_;
-    snapshot.metadata.game_mode = active_game_mode_;
+    const auto backrooms_mode =
+        active_game_mode_ == GameMode::Backrooms;
     const auto save_active_ship =
         active_game_mode_ == GameMode::SeaAdventure &&
         sea_adventure_.active();
+
+    snapshot.metadata.exists = true;
+    snapshot.metadata.seed = world_.seed();
+    snapshot.metadata.time_of_day =
+        backrooms_mode ? 0.0F : environment_.time_of_day();
+    // Le temps d'ambiance BackRooms est conservé dans le champ météo existant.
+    // Le format reste compact et compatible sans créer un second compteur.
+    snapshot.metadata.weather_time_seconds =
+        backrooms_mode
+            ? backrooms_elapsed_seconds_
+            : environment_.weather_time_seconds();
+    snapshot.metadata.has_starting_village =
+        !backrooms_mode && starting_village_enabled_;
+    snapshot.metadata.game_mode = active_game_mode_;
+    snapshot.backrooms_level =
+        backrooms_mode
+            ? world_.backrooms_level()
+            : 0;
+    snapshot.backrooms_flashlight =
+        backrooms_mode
+            ? sanitize_backrooms_flashlight_state(
+                  backrooms_flashlight_)
+            : BackroomsFlashlightState {};
+
     // Je sauvegarde le point de retour avec le navire courant, mais dans sa
     // pose neutre persistante afin qu'il reste exact apres le rechargement.
     snapshot.spawn_position =
         save_active_ship
             ? sea_adventure_.ship_entity().world_point_in_persisted_neutral_pose(
                   sea_adventure_.deck_spawn_position())
-            : spawn_position_;
+            : backrooms_mode
+                  ? backrooms_spawn_position(
+                        world_.seed(),
+                        world_.backrooms_level())
+                  : spawn_position_;
     snapshot.player_state = player_.state();
     snapshot.progression = progression_.state();
     snapshot.player_build = player_build_;
-    snapshot.sea_adventure = sea_adventure_.save_state();
+    snapshot.legendary_weapon =
+        legendary_weapon_progression_.state();
     snapshot.maritime_experience =
         experience_awards_.state();
+    snapshot.hotbar = hotbar_;
+    snapshot.inventory = inventory_menu_;
+    snapshot.inventory.visible = false;
+    snapshot.inventory.hovered_slot.reset();
+
+    if (backrooms_mode) {
+        // Le mode est volontairement sans objets, capacités ni entités. Cette
+        // normalisation rend aussi une sauvegarde robuste face à un changement
+        // de mode effectué depuis une ancienne version expérimentale.
+        // Je persiste uniquement la FSM durable de Jack. Sa grille, son chemin
+        // et ses événements audio/visuels seront reconstruits au chargement.
+        snapshot.backrooms_jack =
+            sanitize_backrooms_jack_state(
+                backrooms_jack_);
+        sanitize_backrooms_player_state(
+            snapshot.player_state,
+            world_.seed(),
+            world_.backrooms_level());
+        snapshot.progression = {};
+        snapshot.player_build = {};
+        snapshot.maritime_experience = {};
+        snapshot.hotbar = {};
+        snapshot.inventory = {};
+        snapshot.sea_adventure = {};
+        snapshot.player_ability_runtime = {};
+        snapshot.musket_shot_sequence = 0U;
+        snapshot.creatures.clear();
+        snapshot.item_drops.clear();
+        return snapshot;
+    }
+
+    snapshot.sea_adventure = sea_adventure_.save_state();
     snapshot.player_ability_runtime
         .player_effects =
         player_ability_effects_.snapshot();
@@ -7816,14 +14505,13 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
     snapshot.player_ability_runtime
         .next_cast_sequence =
         ability_system_.next_cast_sequence();
-    snapshot.hotbar = hotbar_;
-    snapshot.inventory = inventory_menu_;
     snapshot.musket_shot_sequence =
         player_musket_.view().shot_sequence;
-    snapshot.inventory.visible = false;
-    snapshot.inventory.hovered_slot.reset();
-    snapshot.creatures.assign(creatures_.active_creatures().begin(), creatures_.active_creatures().end());
+    snapshot.creatures.assign(
+        creatures_.active_creatures().begin(),
+        creatures_.active_creatures().end());
     snapshot.item_drops = item_drops_.drops();
+
     if (save_active_ship) {
         const auto& ship = sea_adventure_.ship_entity();
         (void)normalize_supported_player_for_ship_save(
@@ -7844,6 +14532,7 @@ void Game::configure_starting_village(bool enabled, bool apply_layout_to_world) 
     if (!enabled) {
         starting_village_ = {};
         creatures_.set_settlement_residents({});
+        rebuild_colossal_world_protections();
         return;
     }
 
@@ -7853,6 +14542,7 @@ void Game::configure_starting_village(bool enabled, bool apply_layout_to_world) 
         generator.apply(world_, starting_village_);
     }
     creatures_.set_settlement_residents(starting_village_.residents);
+    rebuild_colossal_world_protections();
 }
 
 auto Game::active_generation_profile() const noexcept -> WorldGenerationProfile {
@@ -8104,6 +14794,8 @@ auto Game::initial_preload_targets(const World& world, const glm::vec3& focus) c
     const auto stream_radius = std::max(world.stream_radius(), 0);
     const auto maritime =
         world.generation_profile() == WorldGenerationProfile::OceanAdventure;
+    const auto backrooms =
+        world.generation_profile() == WorldGenerationProfile::Backrooms;
     auto neighborhood_radius = std::min(
         std::max(options_.performance.spawn_preload_radius, 1),
         stream_radius);
@@ -8112,6 +14804,16 @@ auto Game::initial_preload_targets(const World& world, const glm::vec3& focus) c
         // surface et le fond immediat soient deja continus a la premiere frame.
         neighborhood_radius = std::min(
             std::max(neighborhood_radius, 2),
+            stream_radius);
+    }
+    if (backrooms) {
+        // Je termine aussi l'anneau de securite sur le GPU avant le gameplay.
+        // Le joueur peut apparaitre a quelques centimetres d'une frontiere :
+        // son premier pas ne doit donc jamais attendre une nouvelle salle.
+        neighborhood_radius = std::min(
+            std::max(
+                neighborhood_radius,
+                backrooms_initial_preload_radius(stream_radius)),
             stream_radius);
     }
 
@@ -8431,7 +15133,13 @@ void Game::prime_world_around(
                 std::abs(coord.z - center.z)));
     }
     const auto maritime = loading_theme_ == LoadingScreenTheme::Maritime;
-    const auto loading_deadline = clock::now() + std::chrono::seconds(60);
+    const auto backrooms =
+        world.generation_profile() == WorldGenerationProfile::Backrooms;
+    // Je prefere prolonger l'ecran de chargement sur une machine lente plutot
+    // que de rendre une Backroom avant la fin de son anneau de securite.
+    const auto loading_deadline =
+        clock::now() +
+        std::chrono::seconds(backrooms ? 120 : 60);
 
     const auto for_each_target = [&](const auto& visitor) {
         for (const auto& coord : preload_targets) {
@@ -8627,6 +15335,11 @@ void Game::prepare_game_session(
     death_screen_visible_ = false;
     death_screen_.visible = false;
     death_screen_.cause = PlayerDeathCause::None;
+    backrooms_level_transition_cooldown_seconds_ =
+        0.0F;
+    backrooms_level_transition_in_progress_ =
+        false;
+    reset_backrooms_jack_runtime();
     pending_fishing_ = false;
     player_musket_.reset(
         true,
@@ -8637,6 +15350,11 @@ void Game::prepare_game_session(
     pending_musket_fire_press_ = false;
     musket_aim_held_ = false;
     pending_musket_reload_ = false;
+    clear_colossal_weapon_input();
+    colossal_weapon_.reset();
+    colossal_hit_ledger_.clear();
+    colossal_blade_pose_valid_ = false;
+    colossal_weapon_was_selected_ = false;
     pending_ability_slot_.reset();
     melee_attack_cooldown_remaining_ = 0.0F;
     wind_acceleration_remaining_ = 0.0F;
@@ -8679,6 +15397,7 @@ void Game::initialize_preview_world() {
         WorldGenerationProfile::Continental,
         WorldGenerationVersion::Latest,
         options_.visual_pipeline);
+    reset_backrooms_jack_runtime();
     terrain_edit_stress_.reset();
     creatures_.clear();
     item_drops_.clear();
@@ -8713,6 +15432,7 @@ void Game::open_main_menu(bool from_session) {
     main_menu_.visible = true;
     reset_musket_interaction();
     player_musket_effects_.clear();
+    reset_backrooms_jack_runtime();
     if (command_console_.visible()) {
         set_command_console_visible(false);
     }
@@ -8838,6 +15558,14 @@ void Game::close_frontend_menu_to_parent() {
 }
 
 void Game::request_return_to_main_menu() {
+    if (issou_scenario_.active() &&
+        !exit_issou_scenario()) {
+        queue_gameplay_announcement(
+            "SORTIE IMPOSSIBLE",
+            "LA SESSION NORMALE N'A PAS PU ETRE RESTAUREE",
+            3.0F);
+        return;
+    }
     if (has_active_session_ && session_save_state_.dirty()) {
         set_confirm_dialog_visible(true, ConfirmDialogIntent::ReturnToMainMenu);
         return;
@@ -8847,14 +15575,38 @@ void Game::request_return_to_main_menu() {
 }
 
 void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
+    if (issou_scenario_.active() &&
+        !exit_issou_scenario()) {
+        return;
+    }
     using clock = std::chrono::steady_clock;
 
-    const auto next_game_mode = is_known_game_mode(game_mode) ? game_mode : GameMode::ClassicAdventure;
-    const auto sea_mode = next_game_mode == GameMode::SeaAdventure;
-    const auto generation_profile = sea_mode
-                                        ? WorldGenerationProfile::OceanAdventure
-                                        : WorldGenerationProfile::Continental;
-    const auto loading_title = sea_mode ? std::string_view("AVENTURE EN MER") : std::string_view("NOUVELLE PARTIE");
+    const auto next_game_mode = is_known_game_mode(game_mode)
+                                    ? game_mode
+                                    : GameMode::ClassicAdventure;
+    const auto sea_mode =
+        next_game_mode == GameMode::SeaAdventure;
+    const auto backrooms_mode =
+        next_game_mode == GameMode::Backrooms;
+    const auto backrooms_level =
+        backrooms_mode &&
+                options_.smoke_test &&
+                options_.smoke_session ==
+                    SmokeSessionMode::Backrooms
+            ? options_.smoke_backrooms_level
+            : 0;
+    const auto generation_profile =
+        backrooms_mode
+            ? WorldGenerationProfile::Backrooms
+            : sea_mode
+                  ? WorldGenerationProfile::OceanAdventure
+                  : WorldGenerationProfile::Continental;
+    const auto loading_title =
+        backrooms_mode
+            ? std::string_view("BACKROOMS")
+            : sea_mode
+                  ? std::string_view("AVENTURE EN MER")
+                  : std::string_view("NOUVELLE PARTIE");
     begin_loading_screen(
         sea_mode ? LoadingScreenTheme::Maritime : LoadingScreenTheme::Standard,
         static_cast<std::uint32_t>(slot_index));
@@ -8866,8 +15618,31 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         true);
 
     auto seed = 1337;
-    if (!(options_.smoke_test && options_.smoke_session != SmokeSessionMode::Menu)) {
+    if (!(options_.smoke_test &&
+          smoke_session_starts_gameplay(options_.smoke_session))) {
         seed = make_nonblocking_world_seed(slot_index);
+    }
+    backrooms_smoke_camera_pose_valid_ = false;
+    if (backrooms_mode &&
+        options_.smoke_test &&
+        options_.smoke_session ==
+            SmokeSessionMode::Backrooms) {
+        const auto smoke_pose =
+            backrooms_smoke_camera_pose(
+                seed,
+                options_
+                    .smoke_backrooms_blackout,
+                backrooms_level);
+        if (!smoke_pose.has_value()) {
+            throw std::runtime_error(
+                "Backrooms blackout smoke could not find a deterministic dark pocket");
+        }
+        backrooms_smoke_camera_position_ =
+            smoke_pose->position;
+        backrooms_smoke_camera_yaw_degrees_ =
+            smoke_pose->yaw_degrees;
+        backrooms_smoke_camera_pose_valid_ =
+            true;
     }
     loading_quote_seed_ = static_cast<std::uint32_t>(seed);
     auto renderer_staged = false;
@@ -8875,7 +15650,11 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
 
     update_loading_screen(
         loading_title,
-        sea_mode ? std::string_view("PREPARATION DU NAVIRE") : std::string_view("CONSTRUCTION DU VILLAGE"),
+        backrooms_mode
+            ? std::string_view("RECOMPOSITION DE L'ETAGE")
+            : sea_mode
+                  ? std::string_view("PREPARATION DU NAVIRE")
+                  : std::string_view("CONSTRUCTION DU VILLAGE"),
         LoadingPhase::Preparation,
         0.10F,
         true);
@@ -8891,15 +15670,23 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         const auto preparation_begin = clock::now();
         World prepared_world(
             seed,
-            options_.performance.stream_radius,
+            backrooms_mode
+                ? backrooms_stream_radius(
+                      options_.performance.stream_radius)
+                : options_.performance.stream_radius,
             generation_profile,
-            sea_mode ? WorldGenerationVersion::LivingOceanV3
-                     : WorldGenerationVersion::LegacyV1,
-            options_.visual_pipeline);
+            backrooms_mode
+                ? WorldGenerationVersion::BackroomsV1
+                : sea_mode
+                      ? WorldGenerationVersion::LivingOceanV3
+                      : WorldGenerationVersion::LegacyV1,
+            options_.visual_pipeline,
+            backrooms_level);
         SeaAdventureSystem prepared_sea_adventure {};
         StartingVillageLayout prepared_village {};
         CreatureSystem prepared_creatures {};
-        const auto prepared_village_enabled = !sea_mode;
+        const auto prepared_village_enabled =
+            !sea_mode && !backrooms_mode;
         auto preparation_finalize_begin = preparation_begin;
         if (sea_mode) {
             prepared_sea_adventure.reset(seed);
@@ -8935,6 +15722,16 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
             }
             port_future.get();
             preparation_finalize_begin = clock::now();
+        } else if (backrooms_mode) {
+            // Aucun décor persistant n'est estampillé : chaque voxel vient du
+            // profil procédural et peut être régénéré à partir de la graine.
+            prepared_sea_adventure.load_state({}, seed);
+            update_loading_screen(
+                loading_title,
+                "AGENCEMENT DES ESPACES IMPOSSIBLES",
+                LoadingPhase::Preparation,
+                0.70F,
+                true);
         } else {
             prepared_sea_adventure.load_state({}, seed);
             StartingVillageGenerator village_generator(seed);
@@ -8943,14 +15740,37 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
             prepared_creatures.set_settlement_residents(prepared_village.residents);
         }
 
-        auto prepared_hotbar = make_default_hotbar_state();
-        auto prepared_inventory = make_default_inventory_menu_state();
-        normalize_inventory_state(prepared_inventory, prepared_hotbar);
-        const auto prepared_spawn = sea_mode
-                                        ? prepared_sea_adventure.deck_spawn_position()
-                                        : find_initial_spawn_position(prepared_world, &prepared_village);
+        auto prepared_hotbar =
+            backrooms_mode
+                ? HotbarState {}
+                : make_default_hotbar_state();
+        auto prepared_inventory =
+            backrooms_mode
+                ? InventoryMenuState {}
+                : make_default_inventory_menu_state();
+        normalize_inventory_state(
+            prepared_inventory,
+            prepared_hotbar);
+        const auto prepared_spawn =
+            sea_mode
+                ? prepared_sea_adventure.deck_spawn_position()
+                : backrooms_mode
+                      ? backrooms_smoke_camera_pose_valid_
+                            ? backrooms_smoke_camera_position_
+                            : backrooms_spawn_position(
+                                  seed,
+                                  backrooms_level)
+                      : find_initial_spawn_position(
+                            prepared_world,
+                            &prepared_village);
         PlayerController prepared_player {};
         prepared_player.respawn(prepared_spawn);
+        prepared_player.set_fly_mode_enabled(false);
+        prepared_player.set_water_movement_profile(
+            backrooms_mode &&
+                    backrooms_level <= -2
+                ? PlayerWaterMovementProfile::Poolrooms
+                : PlayerWaterMovementProfile::Standard);
         EnvironmentClock prepared_environment {};
         prepared_environment.set_time_of_day(
             resolve_new_session_time_of_day(options_));
@@ -8978,14 +15798,18 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         if (!running_) {
             return;
         }
-        const auto creature_sync_begin = clock::now();
-        prepared_creatures.update(
-            0.0F,
-            prepared_world,
-            prepared_player.position(),
-            prepared_environment.current_state(),
-            prepared_environment.current_creature_cycle());
-        record_loading_step("creature_initial_sync", creature_sync_begin);
+        if (!backrooms_mode) {
+            const auto creature_sync_begin = clock::now();
+            prepared_creatures.update(
+                0.0F,
+                prepared_world,
+                prepared_player.position(),
+                prepared_environment.current_state(),
+                prepared_environment.current_creature_cycle());
+            record_loading_step(
+                "creature_initial_sync",
+                creature_sync_begin);
+        }
 
         if (sea_mode) {
             update_loading_screen(
@@ -9005,7 +15829,11 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         }
         update_loading_screen(
             loading_title,
-            sea_mode ? std::string_view("ASSEMBLAGE DU NAVIRE") : std::string_view("INITIALISATION DU RENDU"),
+            sea_mode
+                ? std::string_view("ASSEMBLAGE DU NAVIRE")
+                : backrooms_mode
+                      ? std::string_view("ALLUMAGE DES FLUORESCENTS")
+                      : std::string_view("INITIALISATION DU RENDU"),
             LoadingPhase::ShipPreparation,
             1.0F,
             true);
@@ -9021,6 +15849,16 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         creatures_ = std::move(prepared_creatures);
         item_drops_.clear();
         progression_.reset();
+        legendary_weapon_progression_.reset();
+        configure_legendary_weapon_quest();
+        legendary_enemies_.clear();
+        sea_leviathan_.reset();
+        sea_leviathan_started_for_session_ =
+            false;
+        chained_colossus_ = {};
+        colossus_blood_traces_.clear();
+        issou_arena_minions_spawned_ =
+            false;
         experience_awards_.reset();
         player_build_ = {};
         player_ability_effects_.clear();
@@ -9039,8 +15877,15 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         inventory_menu_ = std::move(prepared_inventory);
         player_ = std::move(prepared_player);
         environment_ = prepared_environment;
+        backrooms_elapsed_seconds_ = 0.0F;
+        backrooms_flashlight_ = {};
+        backrooms_level_transition_cooldown_seconds_ =
+            0.0F;
+        backrooms_level_transition_in_progress_ =
+            false;
         starting_village_enabled_ = prepared_village_enabled;
         starting_village_ = std::move(prepared_village);
+        rebuild_colossal_world_protections();
         spawn_position_ = prepared_spawn;
         super_vision_active_ = false;
         gameplay_announcements_.clear();
@@ -9080,7 +15925,11 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
             true);
         complete_loading_screen(
             loading_title,
-            sea_mode ? std::string_view("PRET A LARGUER LES AMARRES") : std::string_view("AVENTURE PRETE"));
+            backrooms_mode
+                ? std::string_view("L'ETAGE T'ATTEND")
+                : sea_mode
+                      ? std::string_view("PRET A LARGUER LES AMARRES")
+                      : std::string_view("AVENTURE PRETE"));
         SDL_SetWindowTitle(window_, kGameWindowTitle.data());
         record_audit_event(
             AuditEventCategory::Session,
@@ -9117,6 +15966,10 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
 }
 
 auto Game::load_game_from_slot(std::size_t slot_index) -> bool {
+    if (issou_scenario_.active() &&
+        !exit_issou_scenario()) {
+        return false;
+    }
     struct AsyncSaveProgress {
         std::atomic<std::uint8_t> phase {static_cast<std::uint8_t>(SaveLoadPhase::OpeningFile)};
         std::atomic<float> normalized {0.0F};
@@ -9126,11 +15979,23 @@ auto Game::load_game_from_slot(std::size_t slot_index) -> bool {
     const auto metadata = slot_index < save_slot_menu_.slots.size()
                               ? save_slot_menu_.slots[slot_index]
                               : SaveSlotMetadata {};
-    const auto expected_sea_mode = metadata.exists && metadata.game_mode == GameMode::SeaAdventure;
+    const auto expected_sea_mode =
+        metadata.exists &&
+        metadata.game_mode == GameMode::SeaAdventure;
+    const auto expected_backrooms_mode =
+        metadata.exists &&
+        metadata.game_mode == GameMode::Backrooms;
     begin_loading_screen(
-        expected_sea_mode ? LoadingScreenTheme::Maritime : LoadingScreenTheme::Standard,
+        expected_sea_mode
+            ? LoadingScreenTheme::Maritime
+            : LoadingScreenTheme::Standard,
         static_cast<std::uint32_t>(metadata.seed));
-    const auto loading_title = expected_sea_mode ? std::string_view("AVENTURE EN MER") : std::string_view("CHARGEMENT");
+    const auto loading_title =
+        expected_backrooms_mode
+            ? std::string_view("BACKROOMS")
+            : expected_sea_mode
+                  ? std::string_view("AVENTURE EN MER")
+                  : std::string_view("CHARGEMENT");
     update_loading_screen(
         loading_title,
         "OUVERTURE DU JOURNAL DE BORD",
@@ -9239,8 +16104,12 @@ auto Game::load_game_from_slot(std::size_t slot_index) -> bool {
         return false;
     }
 
-    const auto actual_sea_mode = snapshot->metadata.game_mode == GameMode::SeaAdventure;
-    loading_theme_ = actual_sea_mode ? LoadingScreenTheme::Maritime : LoadingScreenTheme::Standard;
+    const auto actual_sea_mode =
+        snapshot->metadata.game_mode == GameMode::SeaAdventure;
+    loading_theme_ =
+        actual_sea_mode
+            ? LoadingScreenTheme::Maritime
+            : LoadingScreenTheme::Standard;
     loading_quote_seed_ = static_cast<std::uint32_t>(snapshot->metadata.seed);
     try {
         return load_snapshot_into_session(std::move(*snapshot), slot_index);
@@ -9264,15 +16133,50 @@ auto Game::load_game_from_slot(std::size_t slot_index) -> bool {
 }
 
 auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<std::size_t> slot_index) -> bool {
+    if (issou_scenario_.active() &&
+        !exit_issou_scenario()) {
+        return false;
+    }
     using clock = std::chrono::steady_clock;
 
     const auto next_game_mode = is_known_game_mode(snapshot.metadata.game_mode)
                                     ? snapshot.metadata.game_mode
                                     : GameMode::ClassicAdventure;
-    const auto sea_mode = next_game_mode == GameMode::SeaAdventure;
-    const auto loading_title = sea_mode ? std::string_view("AVENTURE EN MER") : std::string_view("CHARGEMENT");
-    const auto generation_profile = snapshot.world_save_plan.generation_profile;
-    const auto generation_version = snapshot.world_save_plan.generation_version;
+    const auto sea_mode =
+        next_game_mode == GameMode::SeaAdventure;
+    const auto backrooms_mode =
+        next_game_mode == GameMode::Backrooms;
+    const auto backrooms_level =
+        backrooms_mode
+            ? snapshot.backrooms_level
+            : 0;
+    const auto loading_title =
+        backrooms_mode
+            ? std::string_view("BACKROOMS")
+            : sea_mode
+                  ? std::string_view("AVENTURE EN MER")
+                  : std::string_view("CHARGEMENT");
+    const auto generation_profile =
+        snapshot.world_save_plan.generation_profile;
+    const auto generation_version =
+        snapshot.world_save_plan.generation_version;
+    const auto expected_profile =
+        backrooms_mode
+            ? WorldGenerationProfile::Backrooms
+            : sea_mode
+                  ? WorldGenerationProfile::OceanAdventure
+                  : WorldGenerationProfile::Continental;
+    const auto expected_version =
+        backrooms_mode
+            ? WorldGenerationVersion::BackroomsV1
+            : generation_version;
+
+    if (generation_profile != expected_profile ||
+        (backrooms_mode &&
+         generation_version != expected_version)) {
+        throw std::invalid_argument(
+            "Save generation profile is incompatible with its game mode");
+    }
     auto renderer_staged = false;
     auto session_committed = false;
 
@@ -9285,10 +16189,14 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         const auto world_begin = clock::now();
         World prepared_world(
             snapshot.metadata.seed,
-            options_.performance.stream_radius,
+            backrooms_mode
+                ? backrooms_stream_radius(
+                      options_.performance.stream_radius)
+                : options_.performance.stream_radius,
             generation_profile,
             generation_version,
-            options_.visual_pipeline);
+            options_.visual_pipeline,
+            backrooms_level);
         prepared_world.begin_restore_save_plan(std::move(snapshot.world_save_plan));
         record_loading_step("save_restore_begin", world_begin);
         while (running_ && prepared_world.has_pending_save_restore()) {
@@ -9348,7 +16256,11 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         }
         update_loading_screen(
             loading_title,
-            sea_mode ? std::string_view("PREPARATION DU NAVIRE") : std::string_view("PREPARATION DU MONDE"),
+            sea_mode
+                ? std::string_view("PREPARATION DU NAVIRE")
+                : backrooms_mode
+                      ? std::string_view("RECONSTRUCTION DE L'ETAGE")
+                      : std::string_view("PREPARATION DU MONDE"),
             LoadingPhase::LegacyMigration,
             1.0F,
             true);
@@ -9400,13 +16312,33 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
                 drop.sleep_support_block = {};
             }
         }
+        if (backrooms_mode) {
+            sanitize_backrooms_player_state(
+                snapshot.player_state,
+                snapshot.metadata.seed,
+                backrooms_level);
+            snapshot.progression = {};
+            snapshot.player_build = {};
+            snapshot.maritime_experience = {};
+            snapshot.hotbar = {};
+            snapshot.inventory = {};
+            snapshot.item_drops.clear();
+            snapshot.creatures.clear();
+            snapshot.sea_adventure = {};
+            snapshot.player_ability_runtime = {};
+            snapshot.musket_shot_sequence = 0U;
+        }
+
         auto prepared_hotbar = snapshot.hotbar;
         auto prepared_inventory = snapshot.inventory;
         normalize_inventory_state(prepared_inventory, prepared_hotbar);
         prepared_inventory.visible = false;
         prepared_inventory.hovered_slot.reset();
         ItemDropSystem prepared_item_drops {};
-        prepared_item_drops.load_drops(snapshot.item_drops);
+        if (!backrooms_mode) {
+            prepared_item_drops.load_drops(
+                snapshot.item_drops);
+        }
         PlayerProgression prepared_progression {};
         prepared_progression.load_state(snapshot.progression);
         auto prepared_player_build =
@@ -9419,8 +16351,18 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         prepared_experience_awards.load_state(
             snapshot.maritime_experience);
         const auto prepared_ability_runtime =
-            sanitize_player_ability_runtime_save_state(
-                snapshot.player_ability_runtime);
+            backrooms_mode
+                ? PlayerAbilityRuntimeSaveState {}
+                : sanitize_player_ability_runtime_save_state(
+                      snapshot.player_ability_runtime);
+        const auto prepared_backrooms_jack =
+            backrooms_mode
+                ? sanitize_backrooms_jack_state(
+                      snapshot.backrooms_jack)
+                : initialize_backrooms_jack(
+                      static_cast<std::uint32_t>(
+                          snapshot.metadata.seed) ^
+                      UINT32_C(0x4A41434B));
         PlayerAbilityEffects
             prepared_player_ability_effects {};
         static_cast<void>(
@@ -9480,6 +16422,11 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
             static_cast<float>(
                 prepared_robustness));
         prepared_player.load_state(snapshot.player_state);
+        prepared_player.set_water_movement_profile(
+            backrooms_mode &&
+                    backrooms_level <= -2
+                ? PlayerWaterMovementProfile::Poolrooms
+                : PlayerWaterMovementProfile::Standard);
         EnvironmentClock prepared_environment {};
         prepared_environment.set_time_of_day(snapshot.metadata.time_of_day);
         prepared_environment.set_weather_seed(static_cast<std::uint32_t>(snapshot.metadata.seed));
@@ -9496,10 +16443,23 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
             prepared_village = village_generator.build_layout();
             prepared_creatures.set_settlement_residents(prepared_village.residents);
         }
-        prepared_creatures.load_creatures(snapshot.creatures, prepared_environment.current_state());
-        auto prepared_spawn = finite_vec3_or(snapshot.spawn_position, {0.5F, 70.0F, 0.5F});
+        if (!backrooms_mode) {
+            prepared_creatures.load_creatures(
+                snapshot.creatures,
+                prepared_environment.current_state());
+        }
+        auto prepared_spawn =
+            backrooms_mode
+                ? backrooms_spawn_position(
+                      snapshot.metadata.seed,
+                      backrooms_level)
+                : finite_vec3_or(
+                      snapshot.spawn_position,
+                      {0.5F, 70.0F, 0.5F});
         if (sea_mode && prepared_sea_adventure.active()) {
-            prepared_spawn = prepared_sea_adventure.deck_spawn_position();
+            prepared_spawn =
+                prepared_sea_adventure
+                    .deck_spawn_position();
         }
         record_loading_step("saved_session_prepare", state_begin);
 
@@ -9531,7 +16491,11 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         }
         update_loading_screen(
             loading_title,
-            sea_mode ? std::string_view("ASSEMBLAGE DU NAVIRE") : std::string_view("INITIALISATION DU RENDU"),
+            sea_mode
+                ? std::string_view("ASSEMBLAGE DU NAVIRE")
+                : backrooms_mode
+                      ? std::string_view("ALLUMAGE DES FLUORESCENTS")
+                      : std::string_view("INITIALISATION DU RENDU"),
             LoadingPhase::ShipPreparation,
             1.0F,
             true);
@@ -9547,13 +16511,44 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         inventory_menu_ = std::move(prepared_inventory);
         item_drops_ = std::move(prepared_item_drops);
         progression_ = std::move(prepared_progression);
+        legendary_weapon_progression_.load_state(
+            snapshot.legendary_weapon);
+        configure_legendary_weapon_quest();
+        legendary_enemies_.clear();
+        sea_leviathan_.reset();
+        sea_leviathan_started_for_session_ =
+            false;
+        chained_colossus_ = {};
+        colossus_blood_traces_.clear();
+        issou_arena_minions_spawned_ =
+            false;
         player_build_ =
             std::move(prepared_player_build);
         player_ = std::move(prepared_player);
         environment_ = prepared_environment;
+        backrooms_elapsed_seconds_ =
+            backrooms_mode
+                ? std::clamp(
+                      finite_or(
+                          snapshot.metadata
+                              .weather_time_seconds,
+                          0.0F),
+                      0.0F,
+                      86'400.0F)
+                : 0.0F;
+        backrooms_flashlight_ =
+            backrooms_mode
+                ? sanitize_backrooms_flashlight_state(
+                      snapshot.backrooms_flashlight)
+                : BackroomsFlashlightState {};
+        backrooms_level_transition_cooldown_seconds_ =
+            0.0F;
+        backrooms_level_transition_in_progress_ =
+            false;
         creatures_ = std::move(prepared_creatures);
         starting_village_enabled_ = prepared_village_enabled;
         starting_village_ = std::move(prepared_village);
+        rebuild_colossal_world_protections();
         spawn_position_ = prepared_spawn;
         super_vision_active_ = false;
         gameplay_announcements_.clear();
@@ -9566,6 +16561,28 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         session_save_state_.reset_clean();
         prepare_game_session(
             snapshot.musket_shot_sequence);
+        if (backrooms_mode) {
+            // Je restaure l'état durable seulement après la préparation, qui
+            // remet volontairement les runtimes de session à zéro. La grille
+            // 3x3 et le chemin seront recalculés autour du joueur au prochain
+            // pas, sans jamais réutiliser des pointeurs de chunks obsolètes.
+            backrooms_jack_ =
+                prepared_backrooms_jack;
+            backrooms_jack_runtime_ = {};
+            backrooms_jack_last_result_ = {
+                .render =
+                    make_backrooms_jack_render_view(
+                        backrooms_jack_,
+                        world_.backrooms_level()),
+                .light_interference =
+                    make_backrooms_jack_light_interference_view(
+                        backrooms_jack_,
+                        world_.backrooms_level()),
+            };
+            backrooms_jack_death_delay_seconds_ =
+                0.0F;
+            backrooms_jack_death_pending_ = false;
+        }
         experience_awards_ =
             prepared_experience_awards;
         player_ability_effects_ =
@@ -9628,7 +16645,11 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         record_loading_step("save_slots_refresh", slot_refresh_begin);
         complete_loading_screen(
             loading_title,
-            sea_mode ? std::string_view("PRET A LARGUER LES AMARRES") : std::string_view("AVENTURE PRETE"));
+            backrooms_mode
+                ? std::string_view("L'ETAGE T'ATTEND")
+                : sea_mode
+                      ? std::string_view("PRET A LARGUER LES AMARRES")
+                      : std::string_view("AVENTURE PRETE"));
         SDL_SetWindowTitle(window_, kGameWindowTitle.data());
         record_audit_event(
             AuditEventCategory::Session,
@@ -9663,6 +16684,12 @@ auto Game::start_smoke_session() -> bool {
 
     if (options_.smoke_session == SmokeSessionMode::SeaNew) {
         start_new_game_in_slot(kSmokeSlot, GameMode::SeaAdventure);
+    } else if (
+        options_.smoke_session ==
+        SmokeSessionMode::Backrooms) {
+        start_new_game_in_slot(
+            kSmokeSlot,
+            GameMode::Backrooms);
     } else if (options_.smoke_session ==
                SmokeSessionMode::SeaOpen) {
         constexpr auto kOpenSeaRouteDistance =
@@ -9841,6 +16868,173 @@ auto Game::start_smoke_session() -> bool {
     if (!running_) {
         return false;
     }
+    if (options_.smoke_session == SmokeSessionMode::Backrooms) {
+        if (!backrooms_smoke_camera_pose_valid_) {
+            throw std::runtime_error(
+                "Backrooms smoke camera pose was not prepared before loading");
+        }
+        configure_backrooms_smoke_camera(
+            player_,
+            kSmokeSeed,
+            backrooms_smoke_camera_position_,
+            backrooms_smoke_camera_yaw_degrees_,
+            options_.smoke_backrooms_level,
+            options_.smoke_backrooms_ceiling_view);
+        // Je reutilise l'horloge deterministe deja exposee par le smoke pour
+        // comparer visuellement un ballast allume et sa courte panne.
+        backrooms_elapsed_seconds_ =
+            options_.initial_weather_time_seconds;
+        if (options_.smoke_backrooms_flashlight) {
+            backrooms_flashlight_ = {
+                .battery_charge = 1.0F,
+                .enabled = true,
+            };
+        }
+
+        const BackroomsGenerator generator {
+            kSmokeSeed,
+            options_.smoke_backrooms_level,
+        };
+        const auto player_block_x =
+            static_cast<int>(
+                std::floor(
+                    player_.position().x));
+        const auto player_block_z =
+            static_cast<int>(
+                std::floor(
+                    player_.position().z));
+        const auto player_descriptor =
+            generator.descriptor_at(
+                player_block_x,
+                player_block_z);
+        auto luminous_fixture_near_blackout =
+            false;
+        auto maximum_actual_block_light =
+            std::uint8_t {0U};
+        auto blackout_light_chunks_loaded =
+            true;
+        if (options_.smoke_backrooms_blackout) {
+            const auto clearance_squared =
+                kBackroomsBlackoutFixtureClearance *
+                kBackroomsBlackoutFixtureClearance;
+            const auto player_block_y =
+                static_cast<int>(
+                    std::floor(
+                        player_.position().y));
+            for (auto delta_z =
+                     -kBackroomsBlackoutFixtureClearance;
+                 delta_z <=
+                 kBackroomsBlackoutFixtureClearance;
+                 ++delta_z) {
+                for (auto delta_x =
+                         -kBackroomsBlackoutFixtureClearance;
+                     delta_x <=
+                     kBackroomsBlackoutFixtureClearance;
+                     ++delta_x) {
+                    if (delta_x * delta_x +
+                            delta_z * delta_z >
+                        clearance_squared) {
+                        continue;
+                    }
+                    const auto light_state =
+                        generator
+                            .sample_column(
+                                player_block_x +
+                                    delta_x,
+                                player_block_z +
+                                    delta_z)
+                            .light_state;
+                    luminous_fixture_near_blackout =
+                        light_state ==
+                            BackroomsLightState::Active ||
+                        light_state ==
+                            BackroomsLightState::Emergency;
+                    if (luminous_fixture_near_blackout) {
+                        break;
+                    }
+
+                }
+                if (luminous_fixture_near_blackout) {
+                    break;
+                }
+            }
+
+            // Je valide la lumiere réellement reçue à la caméra. Le bord de
+            // la zone de sécurité peut légitimement recevoir la propagation
+            // d'une lampe située juste au-delà sans éclairer le joueur.
+            const auto player_chunk =
+                world_.world_to_chunk(
+                    player_block_x,
+                    player_block_z);
+            if (world_.find_chunk(player_chunk) == nullptr) {
+                blackout_light_chunks_loaded = false;
+            } else {
+                for (auto delta_y = 0;
+                     delta_y <= 2;
+                     ++delta_y) {
+                    maximum_actual_block_light =
+                        std::max(
+                            maximum_actual_block_light,
+                            world_.get_block_light(
+                                player_block_x,
+                                player_block_y +
+                                    delta_y,
+                                player_block_z));
+                }
+            }
+        }
+        if (!has_active_session_ ||
+            !backrooms_active() ||
+            sea_adventure_.active() ||
+            world_.seed() != kSmokeSeed ||
+            world_.generation_profile() !=
+                WorldGenerationProfile::Backrooms ||
+            world_.generation_version() !=
+                WorldGenerationVersion::BackroomsV1 ||
+            world_.backrooms_level() !=
+                options_.smoke_backrooms_level ||
+            !loading_completed_ ||
+            !loading_progress_.completed() ||
+            loading_progress_.progress() != 1.0F ||
+            loading_update_count_ < 2U ||
+            pending_save_.valid() ||
+            pending_world_release_.valid() ||
+            session_save_state_.failed() ||
+            session_save_state_.dirty() ||
+            !generator.is_walkable(
+                player_block_x,
+                player_block_z) ||
+            (options_.smoke_backrooms_blackout &&
+             (player_descriptor.tension !=
+                  BackroomsTension::Blackout ||
+              luminous_fixture_near_blackout ||
+              !blackout_light_chunks_loaded ||
+              maximum_actual_block_light !=
+                  std::uint8_t {0U}))) {
+            std::ostringstream details;
+            details
+                << "Backrooms smoke loading did not complete a valid deterministic session"
+                << " (position="
+                << player_block_x << ',' << player_block_z
+                << ", tension="
+                << static_cast<int>(player_descriptor.tension)
+                << ", luminous_fixture="
+                << luminous_fixture_near_blackout
+                << ", light_chunks_loaded="
+                << blackout_light_chunks_loaded
+                << ", maximum_block_light="
+                << static_cast<int>(maximum_actual_block_light)
+                << ')';
+            throw std::runtime_error(details.str());
+        }
+
+        // Je vérifie les chunks réellement nécessaires autour du joueur à
+        // chaque frame de smoke via validate_smoke_frame(). Je ne reconstruis
+        // pas ici une seconde liste de préchargement : elle peut légitimement
+        // évoluer après l'initialisation du profil Backrooms et produire un
+        // faux négatif alors que l'écran de chargement a bien rempli son contrat.
+        return true;
+    }
     if (!has_active_session_ || active_game_mode_ != GameMode::SeaAdventure ||
         !sea_adventure_.active() || !loading_completed_ || !loading_progress_.completed() ||
         loading_progress_.progress() != 1.0F || loading_update_count_ < 2U ||
@@ -9917,7 +17111,9 @@ auto Game::start_smoke_session() -> bool {
 }
 
 void Game::save_game_to_slot(std::size_t slot_index) {
-    if (!has_active_session_) {
+    if (!has_active_session_ ||
+        !scenario_session_.saves_allowed() ||
+        issou_scenario_.saving_suspended()) {
         return;
     }
 
@@ -9974,6 +17170,10 @@ void Game::save_game_to_slot(std::size_t slot_index) {
 }
 
 void Game::mark_session_dirty() noexcept {
+    if (!scenario_session_.saves_allowed() ||
+        issou_scenario_.saving_suspended()) {
+        return;
+    }
     session_save_state_.mark_dirty();
 }
 
@@ -10027,6 +17227,26 @@ void Game::update_menu_preview_camera(float dt) {
 
 void Game::update_smoke_player(float dt) {
     smoke_elapsed_seconds_ += dt;
+    if (options_.smoke_session == SmokeSessionMode::Backrooms) {
+        // Je garde la caméra du smoke dans le hub Backrooms : la trajectoire
+        // terrestre générique cherche une hauteur de surface extérieure et
+        // finirait au-dessus du plafond, avec uniquement le brouillard à l'écran.
+        configure_backrooms_smoke_camera(
+            player_,
+            world_.seed(),
+            backrooms_smoke_camera_pose_valid_
+                ? backrooms_smoke_camera_position_
+                : backrooms_spawn_position(
+                      world_.seed(),
+                      world_.backrooms_level()),
+            backrooms_smoke_camera_pose_valid_
+                ? backrooms_smoke_camera_yaw_degrees_
+                : -90.0F,
+            world_.backrooms_level(),
+            options_.smoke_backrooms_ceiling_view);
+        return;
+    }
+
     const auto streaming_stress =
         options_.performance.perf_scenario == "world_stress";
     const auto horizontal_pose =

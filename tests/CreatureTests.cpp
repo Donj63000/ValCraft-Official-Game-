@@ -1630,6 +1630,29 @@ TEST_CASE("creature stagger leaves the population unchanged when the target is a
     CHECK(unchanged.health == doctest::Approx(initial.health));
 }
 
+TEST_CASE("creature colossal knockback is horizontal bounded and validated") {
+    CreatureSystem system {};
+    const auto environment = EnvironmentClock::compute_state(12.0F);
+    auto anchor = make_test_resident_anchor({0, 12, 2});
+    const auto creature =
+        make_test_creature(anchor, anchor.spawn_position);
+    system.load_creatures({creature}, environment);
+    const auto target_id = creature_id_from_anchor(anchor);
+
+    CHECK_FALSE(system.apply_knockback(
+        target_id,
+        {0.0F, 0.0F, 0.0F},
+        1.0F));
+    REQUIRE(system.apply_knockback(
+        target_id,
+        {3.0F, 8.0F, 4.0F},
+        100.0F));
+    const auto moved = system.active_creatures().front().position;
+    CHECK(moved.y == doctest::Approx(creature.position.y));
+    CHECK(moved.x == doctest::Approx(creature.position.x + 2.4F));
+    CHECK(moved.z == doctest::Approx(creature.position.z + 3.2F));
+}
+
 TEST_CASE("creature stagger is deterministic and preserves unrelated state") {
     const auto environment = EnvironmentClock::compute_state(12.0F);
     auto anchor = make_test_resident_anchor({0, 12, 2});

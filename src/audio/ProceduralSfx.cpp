@@ -138,6 +138,10 @@ auto ProceduralSfxMixer::active_voice_count() const noexcept -> std::size_t {
             }));
 }
 
+auto ProceduralSfxMixer::maximum_voice_count() noexcept -> std::size_t {
+    return kMaximumVoices;
+}
+
 auto ProceduralSfxMixer::effect_duration(GameSfxKind kind) noexcept -> float {
     switch (kind) {
     case GameSfxKind::SwordSwing:
@@ -150,6 +154,32 @@ auto ProceduralSfxMixer::effect_duration(GameSfxKind kind) noexcept -> float {
         return 0.30F;
     case GameSfxKind::MusketShot:
         return 1.08F;
+    case GameSfxKind::HeavySwing:
+        return 0.58F;
+    case GameSfxKind::BoneImpact:
+        return 0.36F;
+    case GameSfxKind::MetalImpact:
+        return 0.82F;
+    case GameSfxKind::PerfectGuard:
+        return 0.62F;
+    case GameSfxKind::ChainBreak:
+        return 1.10F;
+    case GameSfxKind::ColossusRoar:
+        return 1.85F;
+    case GameSfxKind::Crowd:
+        return 1.65F;
+    case GameSfxKind::SeaLeviathan:
+        return 2.25F;
+    case GameSfxKind::JackBootStep:
+        return 0.34F;
+    case GameSfxKind::JackPegStep:
+        return 0.52F;
+    case GameSfxKind::JackNotice:
+        return 1.10F;
+    case GameSfxKind::JackChase:
+        return 1.55F;
+    case GameSfxKind::JackScreamer:
+        return 1.20F;
     }
     return 0.10F;
 }
@@ -251,6 +281,391 @@ auto ProceduralSfxMixer::render_voice_sample(Voice& voice) const noexcept -> flo
              std::sin(voice.phase * 0.37F) * 0.13F) *
             tail_envelope;
         sample = crack + boom + tail;
+        break;
+    }
+    case GameSfxKind::HeavySwing: {
+        // Je donne au balayage de l'Echine une masse grave, un souffle large
+        // et une pointe osseuse sans charger le moindre fichier externe.
+        const auto high_noise =
+            noise - voice.previous_noise * 0.62F;
+        voice.previous_noise = noise;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.075F;
+        const auto body_envelope =
+            std::sin(normalized_age * kPi) *
+            std::sqrt(std::max(decay, 0.0F));
+        const auto whoosh_envelope =
+            std::sin(normalized_age * kPi) *
+            std::sin(normalized_age * kPi);
+        const auto body_frequency =
+            124.0F - 78.0F * normalized_age;
+        const auto edge_frequency =
+            392.0F - 218.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * body_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * edge_frequency / sample_rate;
+        const auto body =
+            (std::sin(voice.phase) * 0.42F +
+             std::sin(voice.phase * 0.51F) * 0.19F) *
+            body_envelope;
+        const auto air =
+            (voice.filtered_noise * 0.48F +
+             high_noise * 0.12F) *
+            whoosh_envelope;
+        const auto edge =
+            std::sin(voice.secondary_phase) *
+            decay * 0.10F;
+        sample = body + air + edge;
+        break;
+    }
+    case GameSfxKind::BoneImpact: {
+        // Je separe le craquement sec de l'impact grave pour garder un retour
+        // immediatement reconnaissable sur la chair et les os.
+        const auto t = voice.age;
+        const auto transient = std::exp(-t * 52.0F);
+        const auto body_envelope = std::exp(-t * 9.0F);
+        const auto body_frequency =
+            102.0F - 54.0F * normalized_age;
+        const auto crack_frequency =
+            684.0F - 376.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * body_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * crack_frequency / sample_rate;
+        sample =
+            noise * transient * 0.46F +
+            std::sin(voice.secondary_phase) *
+                transient * 0.24F +
+            (std::sin(voice.phase) * 0.48F +
+             std::sin(voice.phase * 1.93F) * 0.17F) *
+                body_envelope;
+        break;
+    }
+    case GameSfxKind::MetalImpact: {
+        // Je construis la resonance metallique avec deux partiels
+        // volontairement inharmoniques et une attaque tres breve.
+        const auto t = voice.age;
+        const auto strike = std::exp(-t * 92.0F);
+        const auto resonance = std::exp(-t * 4.6F);
+        const auto primary_frequency =
+            486.0F - 172.0F * normalized_age;
+        const auto secondary_frequency =
+            731.0F - 238.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * primary_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * secondary_frequency / sample_rate;
+        sample =
+            noise * strike * 0.38F +
+            (std::sin(voice.phase) * 0.43F +
+             std::sin(voice.secondary_phase) * 0.31F +
+             std::sin(voice.phase * 1.4142F) * 0.18F) *
+                resonance;
+        break;
+    }
+    case GameSfxKind::PerfectGuard: {
+        // Je rends la garde parfaite plus brillante que les autres impacts,
+        // avec une cloche courte posee sur un choc grave.
+        const auto t = voice.age;
+        const auto strike = std::exp(-t * 105.0F);
+        const auto chime = std::exp(-t * 6.2F);
+        const auto low_frequency =
+            164.0F - 72.0F * normalized_age;
+        const auto chime_frequency =
+            910.0F - 322.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * low_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * chime_frequency / sample_rate;
+        sample =
+            noise * strike * 0.30F +
+            std::sin(voice.phase) * strike * 0.48F +
+            (std::sin(voice.secondary_phase) * 0.45F +
+             std::sin(voice.secondary_phase * 1.503F) * 0.22F) *
+                chime;
+        break;
+    }
+    case GameSfxKind::ChainBreak: {
+        // Je combine la rupture initiale, la traction grave et les maillons
+        // qui retombent; la modulation evite une simple copie de l'impact metal.
+        const auto t = voice.age;
+        const auto rupture = std::exp(-t * 76.0F);
+        const auto resonance = std::exp(-t * 3.7F);
+        const auto rattle =
+            std::max(
+                0.0F,
+                std::sin(t * kTwoPi * 17.0F)) *
+            std::exp(-t * 3.1F);
+        const auto low_frequency =
+            138.0F - 76.0F * normalized_age;
+        const auto link_frequency =
+            438.0F - 244.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * low_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * link_frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.16F;
+        sample =
+            noise * rupture * 0.52F +
+            std::sin(voice.phase) * resonance * 0.38F +
+            (std::sin(voice.secondary_phase) * 0.35F +
+             voice.filtered_noise * 0.22F) *
+                (resonance + rattle * 0.55F);
+        break;
+    }
+    case GameSfxKind::ColossusRoar: {
+        // Je reserve au colosse une voix basse et granuleuse dont l'attaque
+        // lente conserve sa presence meme au milieu du combat.
+        const auto t = voice.age;
+        const auto attack =
+            1.0F - std::exp(-t * 11.0F);
+        const auto release =
+            std::min(1.0F, decay * 5.0F);
+        const auto envelope = attack * release;
+        const auto growl_frequency =
+            66.0F - 21.0F * normalized_age +
+            std::sin(t * kTwoPi * 4.2F) * 5.0F;
+        const auto formant_frequency =
+            124.0F - 32.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * growl_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * formant_frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.035F;
+        sample =
+            (std::sin(voice.phase) * 0.50F +
+             std::sin(voice.phase * 0.49F) * 0.27F +
+             std::sin(voice.secondary_phase) * 0.20F +
+             voice.filtered_noise * 0.30F) *
+            envelope;
+        break;
+    }
+    case GameSfxKind::Crowd: {
+        // Je simule la foule comme une nappe de voix filtrees et modulees:
+        // une seule voix du mixeur suffit, donc le budget reste previsible.
+        const auto t = voice.age;
+        const auto attack =
+            std::min(1.0F, t * 8.0F);
+        const auto release =
+            std::min(1.0F, decay * 4.0F);
+        const auto envelope = attack * release;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.018F;
+        const auto chant_frequency =
+            102.0F +
+            std::sin(t * kTwoPi * 1.7F) * 13.0F;
+        const auto group_frequency =
+            171.0F +
+            std::sin(t * kTwoPi * 1.13F) * 19.0F;
+        voice.phase +=
+            kTwoPi * chant_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * group_frequency / sample_rate;
+        sample =
+            (voice.filtered_noise * 0.48F +
+             std::sin(voice.phase) * 0.17F +
+             std::sin(voice.secondary_phase) * 0.14F +
+             std::sin(voice.phase * 1.37F) * 0.09F) *
+            envelope;
+        break;
+    }
+    case GameSfxKind::SeaLeviathan: {
+        // Je fais emerger le leviathan marin par une sub-basse, un grondement
+        // humide et une longue expiration, sans allocation dans le callback.
+        const auto t = voice.age;
+        const auto attack =
+            1.0F - std::exp(-t * 6.5F);
+        const auto release =
+            std::min(1.0F, decay * 4.5F);
+        const auto surge =
+            0.72F +
+            std::sin(t * kTwoPi * 1.45F) * 0.28F;
+        const auto envelope = attack * release;
+        const auto sub_frequency =
+            39.0F - 13.0F * normalized_age;
+        const auto call_frequency =
+            88.0F - 31.0F * normalized_age +
+            std::sin(t * kTwoPi * 2.1F) * 4.0F;
+        voice.phase +=
+            kTwoPi * sub_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * call_frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.024F;
+        sample =
+            (std::sin(voice.phase) * 0.55F +
+             std::sin(voice.secondary_phase) * 0.25F +
+             std::sin(voice.secondary_phase * 0.503F) * 0.18F +
+             voice.filtered_noise * 0.34F) *
+            envelope * surge;
+        break;
+    }
+    case GameSfxKind::JackBootStep: {
+        // Je separe le choc mat de la semelle et son frottement afin que la
+        // botte reste identifiable lorsqu'elle alterne avec la jambe de bois.
+        const auto t = voice.age;
+        const auto impact = std::exp(-t * 34.0F);
+        const auto body = std::exp(-t * 10.0F);
+        const auto scrape =
+            (1.0F - std::exp(-t * 75.0F)) *
+            std::exp(-t * 18.0F);
+        const auto body_frequency =
+            74.0F - 31.0F * normalized_age;
+        const auto sole_frequency =
+            168.0F - 76.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * body_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * sole_frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.11F;
+        sample =
+            std::sin(voice.phase) * body * 0.46F +
+            std::sin(voice.secondary_phase) * impact * 0.13F +
+            noise * impact * 0.18F +
+            voice.filtered_noise * scrape * 0.20F;
+        break;
+    }
+    case GameSfxKind::JackPegStep: {
+        // Je donne a la jambe de bois un claquement sec, deux resonances
+        // inharmoniques et un retour grave transmis par le sol.
+        const auto t = voice.age;
+        const auto high_noise =
+            noise - voice.previous_noise * 0.58F;
+        voice.previous_noise = noise;
+        const auto strike = std::exp(-t * 76.0F);
+        const auto wood_resonance = std::exp(-t * 8.2F);
+        const auto floor_resonance = std::exp(-t * 5.4F);
+        const auto wood_frequency =
+            244.0F - 91.0F * normalized_age;
+        const auto knock_frequency =
+            526.0F - 184.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * wood_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * knock_frequency / sample_rate;
+        sample =
+            high_noise * strike * 0.38F +
+            std::sin(voice.secondary_phase) *
+                (strike * 0.31F +
+                 wood_resonance * 0.20F) +
+            std::sin(voice.phase) *
+                wood_resonance * 0.43F +
+            std::sin(voice.phase * 0.286F) *
+                floor_resonance * 0.29F;
+        break;
+    }
+    case GameSfxKind::JackNotice: {
+        // Je fais entendre son cou qui craque puis une respiration retenue :
+        // le signal avertit le joueur sans employer une voix enregistree.
+        const auto t = voice.age;
+        const auto attack =
+            1.0F - std::exp(-t * 18.0F);
+        const auto release =
+            std::min(1.0F, decay * 5.0F);
+        const auto envelope = attack * release;
+        const auto neck_offset =
+            (t - 0.16F) / 0.037F;
+        const auto neck_snap =
+            std::exp(
+                -(neck_offset * neck_offset));
+        const auto breath_frequency =
+            48.0F +
+            std::sin(t * kTwoPi * 2.3F) * 4.5F;
+        const auto throat_frequency =
+            119.0F -
+            24.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * breath_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * throat_frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.026F;
+        sample =
+            (std::sin(voice.phase) * 0.32F +
+             std::sin(voice.secondary_phase) * 0.17F +
+             voice.filtered_noise * 0.31F) *
+                envelope +
+            (noise * 0.24F +
+             std::sin(voice.secondary_phase * 2.17F) * 0.20F) *
+                neck_snap;
+        break;
+    }
+    case GameSfxKind::JackChase: {
+        // Je construis le depart de traque avec un ralement granuleux, deux
+        // formants instables et une montee rapide qui ne masque pas ses pas.
+        const auto t = voice.age;
+        const auto attack =
+            1.0F - std::exp(-t * 13.0F);
+        const auto release =
+            std::min(1.0F, decay * 4.5F);
+        const auto pulse =
+            0.78F +
+            std::sin(t * kTwoPi * 5.7F) * 0.22F;
+        const auto envelope =
+            attack * release * pulse;
+        const auto growl_frequency =
+            67.0F -
+            19.0F * normalized_age +
+            std::sin(t * kTwoPi * 3.6F) * 6.0F;
+        const auto formant_frequency =
+            153.0F -
+            47.0F * normalized_age +
+            std::sin(t * kTwoPi * 2.1F) * 9.0F;
+        voice.phase +=
+            kTwoPi * growl_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * formant_frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.045F;
+        sample =
+            (std::sin(voice.phase) * 0.48F +
+             std::sin(voice.phase * 0.51F) * 0.22F +
+             std::sin(voice.secondary_phase) * 0.25F +
+             voice.filtered_noise * 0.34F) *
+            envelope;
+        break;
+    }
+    case GameSfxKind::JackScreamer: {
+        // Je reserve au screamer une attaque tres rapide, un cri descendant
+        // et un coup subgrave. Le limiteur commun garde le sursaut sans clip.
+        const auto t = voice.age;
+        const auto high_noise =
+            noise - voice.previous_noise * 0.78F;
+        voice.previous_noise = noise;
+        const auto attack =
+            1.0F - std::exp(-t * 180.0F);
+        const auto release =
+            std::min(1.0F, decay * 6.0F);
+        const auto scream_envelope =
+            attack * release *
+            (0.84F +
+             std::sin(t * kTwoPi * 21.0F) * 0.16F);
+        const auto primary_frequency =
+            1'180.0F -
+            720.0F * normalized_age;
+        const auto secondary_frequency =
+            1'760.0F -
+            1'030.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * primary_frequency / sample_rate;
+        voice.secondary_phase +=
+            kTwoPi * secondary_frequency / sample_rate;
+        const auto sub_frequency =
+            61.0F -
+            20.0F * normalized_age;
+        const auto sub_impact =
+            std::sin(t * kTwoPi * sub_frequency) *
+            std::exp(-t * 6.0F);
+        sample =
+            (std::sin(voice.phase) * 0.44F +
+             std::sin(voice.secondary_phase) * 0.25F +
+             high_noise * 0.50F) *
+                scream_envelope +
+            sub_impact * 0.36F;
         break;
     }
     }

@@ -12,6 +12,19 @@ enum class GameSfxKind : std::uint8_t {
     CreatureDeath = 2,
     CreatureAttack = 3,
     MusketShot = 4,
+    HeavySwing = 5,
+    BoneImpact = 6,
+    MetalImpact = 7,
+    PerfectGuard = 8,
+    ChainBreak = 9,
+    ColossusRoar = 10,
+    Crowd = 11,
+    SeaLeviathan = 12,
+    JackBootStep = 13,
+    JackPegStep = 14,
+    JackNotice = 15,
+    JackChase = 16,
+    JackScreamer = 17,
 };
 
 struct ProceduralSfxRequest {
@@ -35,6 +48,7 @@ public:
 
     [[nodiscard]] auto active_voice_count() const noexcept -> std::size_t;
     [[nodiscard]] static auto effect_duration(GameSfxKind kind) noexcept -> float;
+    [[nodiscard]] static auto maximum_voice_count() noexcept -> std::size_t;
 
 private:
     struct Voice {
