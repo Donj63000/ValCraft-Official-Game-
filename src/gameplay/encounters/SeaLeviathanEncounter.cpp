@@ -46,10 +46,6 @@ constexpr std::array<glm::vec3, kSeaLeviathanTentacleCount>
     return false;
 }
 
-[[nodiscard]] auto squared(float value) noexcept -> float {
-    return value * value;
-}
-
 [[nodiscard]] auto tentacle_part(std::size_t index) noexcept
     -> SeaLeviathanPart {
     return static_cast<SeaLeviathanPart>(

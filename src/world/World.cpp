@@ -738,6 +738,79 @@ auto World::peek_water_level_or_generated(int x, int y, int z) const -> std::uin
     return water_level_from_state(generator_.sample_water_state(x, y, z));
 }
 
+auto World::peek_column_or_generated(
+    int x,
+    int z) const -> WorldGeneratedColumn {
+    WorldGeneratedColumn result {};
+    const auto chunk_coord = world_to_chunk(x, z);
+    const auto local = world_to_local(x, kWorldMinY, z);
+    if (const auto* chunk = find_chunk(chunk_coord);
+        chunk != nullptr) {
+        const auto& blocks = chunk->blocks();
+        const auto& water = chunk->water_state();
+        for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+            const auto column_index = static_cast<std::size_t>(y);
+            const auto chunk_index =
+                chunk_linear_index(local.x, y, local.z);
+            result.blocks[column_index] = blocks[chunk_index];
+            result.water_state[column_index] = water[chunk_index];
+        }
+        return result;
+    }
+
+    // Je calcule le halo procédural une seule fois par colonne. Backrooms V2
+    // mutualise ainsi son analyse des connexions pour les blocs et l'eau au
+    // lieu de la répéter pour chaque face de bassin en bord de streaming.
+    result = generator_.sample_generated_column(x, z);
+    const auto override_iterator =
+        chunk_overrides_.find(chunk_coord);
+    if (override_iterator == chunk_overrides_.end()) {
+        return result;
+    }
+
+    const auto& entry = override_iterator->second;
+    if (entry.dense != nullptr) {
+        for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+            const auto column_index = static_cast<std::size_t>(y);
+            const auto chunk_index =
+                chunk_linear_index(local.x, y, local.z);
+            result.blocks[column_index] =
+                entry.dense->blocks[chunk_index];
+            result.water_state[column_index] =
+                entry.dense->water_state[chunk_index];
+        }
+        return result;
+    }
+
+    for (const auto& cell : entry.sparse_cells) {
+        const auto chunk_index =
+            static_cast<std::size_t>(cell.index);
+        const auto cell_x =
+            static_cast<int>(
+                chunk_index %
+                static_cast<std::size_t>(kChunkSizeX));
+        const auto yz_index =
+            chunk_index /
+            static_cast<std::size_t>(kChunkSizeX);
+        const auto cell_z =
+            static_cast<int>(
+                yz_index %
+                static_cast<std::size_t>(kChunkSizeZ));
+        if (cell_x != local.x || cell_z != local.z) {
+            continue;
+        }
+        const auto y =
+            yz_index /
+            static_cast<std::size_t>(kChunkSizeZ);
+        if (y >= result.blocks.size()) {
+            continue;
+        }
+        result.blocks[y] = cell.block;
+        result.water_state[y] = cell.water_state;
+    }
+    return result;
+}
+
 auto World::get_sky_light(int x, int y, int z) const -> std::uint8_t {
     if (!is_world_y_valid(y)) {
         return 0;
@@ -1808,6 +1881,20 @@ auto World::generation_version() const noexcept -> WorldGenerationVersion {
 
 auto World::backrooms_level() const noexcept -> int {
     return generator_.backrooms_level();
+}
+
+auto World::backrooms_level_at_y(float world_y) const noexcept -> int {
+    return generator_.backrooms_level_at_y(world_y);
+}
+
+auto World::backrooms_theme_at_y(float world_y) const noexcept
+    -> BackroomsTheme {
+    return generator_.backrooms_theme_at_y(world_y);
+}
+
+auto World::backrooms_spawn_block(int logical_level) const noexcept
+    -> BlockCoord {
+    return generator_.backrooms_spawn_block(logical_level);
 }
 
 auto World::visual_pipeline() const noexcept -> VisualPipeline {
@@ -3236,11 +3323,6 @@ void World::process_lighting_queue(std::size_t budget, double max_ms, WorldWorkS
     std::size_t processed_since_deadline_check = 0;
     const auto backrooms_lighting =
         generation_profile() == WorldGenerationProfile::Backrooms;
-    const auto vertical_light_stride =
-        backrooms_lighting && backrooms_level() <= -2
-            ? kPoolroomsVerticalLightStride
-            : kBackroomsVerticalLightStride;
-
     while (true) {
         if (remaining == 0U) {
             break;
@@ -3347,6 +3429,13 @@ void World::process_lighting_queue(std::size_t budget, double max_ms, WorldWorkS
             }
 
             auto attenuation = std::uint8_t {1U};
+            const auto vertical_light_stride =
+                backrooms_lighting &&
+                        backrooms_theme_at_y(
+                            static_cast<float>(neighbor.y)) ==
+                            BackroomsTheme::Poolrooms
+                    ? kPoolroomsVerticalLightStride
+                    : kBackroomsVerticalLightStride;
             if (backrooms_lighting &&
                 offset.y != 0 &&
                 neighbor.y % vertical_light_stride != 0) {
@@ -4124,10 +4213,15 @@ void World::begin_modern_visual_remesh(ChunkRecord& record) {
     const auto coord = record.chunk.coord();
     const auto chunk_world_x = coord.x * kChunkSizeX;
     const auto chunk_world_z = coord.z * kChunkSizeZ;
+    // Je n'interprète jamais un bloc de bois placé dans les Backrooms comme
+    // le tronc d'un arbre. Ce profil ne génère aucune végétation naturelle :
+    // le bois y reste une architecture et évite un classement canonique de
+    // tout le volume 3D au premier bloc décoratif rencontré.
     const auto has_current_vegetation =
+        generation_profile() !=
+            WorldGenerationProfile::Backrooms &&
         chunk_has_visual_vegetation(record.chunk);
-    if (has_current_vegetation ||
-        record.published_vegetation_sections.any()) {
+    if (has_current_vegetation) {
         // Je classe le chunk sur toute sa hauteur une seule fois. Les
         // frontieres de sections ne peuvent donc plus couper un composant,
         // tronquer un cactus ou faire perdre le feuillage qui le qualifie.
@@ -4177,10 +4271,13 @@ void World::begin_modern_visual_remesh(ChunkRecord& record) {
                 state->vegetation_sections.set(section_index);
             }
         }
-
+    }
+    if (has_current_vegetation ||
+        record.published_vegetation_sections.any()) {
         // Une modification de composant peut changer la hauteur du tronc ou
-        // de la canopee loin de la cellule editee. Je republie donc toutes les
-        // anciennes et nouvelles partitions de ce chunk atomiquement.
+        // de la canopée loin de la cellule éditée. Je republie toutes les
+        // anciennes et nouvelles partitions, même lorsque la dernière source
+        // vient d'être retirée, sans rescanner un volume désormais vide.
         state->target_sections |=
             record.published_vegetation_sections;
         state->target_sections |=
@@ -4800,7 +4897,9 @@ auto World::normalize_water_state_for_generated(const BlockCoord& world_coord, W
 auto World::uses_static_poolrooms_water() const noexcept -> bool {
     return generator_.profile() ==
                WorldGenerationProfile::Backrooms &&
-           generator_.backrooms_level() <= -2;
+           (uses_backrooms_spatial_stack(
+                generator_.generation_version()) ||
+            generator_.backrooms_level() <= -2);
 }
 
 auto World::is_chunk_loaded_for_world(int x, int z) const noexcept -> bool {

@@ -81,6 +81,11 @@ enum class BackroomsPoolSurface : std::uint8_t {
     Water = 2,
 };
 
+enum class BackroomsPoolGeometryProfile : std::uint8_t {
+    LegacyFlat = 0,
+    RecessedOneBlock = 1,
+};
+
 struct BackroomsModuleDescriptor {
     int module_x = 0;
     int module_z = 0;
@@ -138,12 +143,19 @@ struct BackroomsLevelConnector {
 
 class BackroomsGenerator {
 public:
+    BackroomsGenerator() noexcept;
     explicit BackroomsGenerator(
-        int seed = 1337,
-        int logical_level = 0) noexcept;
+        int seed,
+        int logical_level = 0,
+        int connector_district_modules =
+            kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile pool_geometry_profile =
+            BackroomsPoolGeometryProfile::LegacyFlat) noexcept;
 
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto logical_level() const noexcept -> int;
+    [[nodiscard]] auto pool_geometry_profile() const noexcept
+        -> BackroomsPoolGeometryProfile;
     [[nodiscard]] auto theme() const noexcept -> BackroomsTheme;
     [[nodiscard]] auto is_poolrooms() const noexcept -> bool;
     [[nodiscard]] auto module_descriptor(int module_x, int module_z) const noexcept
@@ -166,6 +178,10 @@ public:
         int world_z,
         int horizontal_radius = 1) const noexcept
         -> std::optional<BackroomsLevelConnector>;
+    [[nodiscard]] auto connector_in_district(
+        BackroomsConnectorDirection direction,
+        int district_x,
+        int district_z) const noexcept -> BackroomsLevelConnector;
 
     [[nodiscard]] static auto module_coordinate(int world_coordinate) noexcept -> int;
     [[nodiscard]] static auto local_coordinate(int world_coordinate) noexcept -> int;
@@ -207,14 +223,13 @@ private:
         int world_z,
         int local_x,
         int local_z) const noexcept -> BackroomsColumnSample;
-    [[nodiscard]] auto connector_for_district(
-        BackroomsConnectorDirection direction,
-        int district_x,
-        int district_z) const noexcept -> BackroomsLevelConnector;
-
     int seed_ = 1337;
     int logical_level_ = 0;
     int layout_seed_ = 1337;
+    int connector_district_modules_ =
+        kBackroomsConnectorDistrictModules;
+    BackroomsPoolGeometryProfile pool_geometry_profile_ =
+        BackroomsPoolGeometryProfile::LegacyFlat;
 };
 
 } // namespace valcraft

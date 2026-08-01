@@ -727,8 +727,8 @@ TEST_CASE("la cadence du tireur est déterministe entre un grand pas et soixante
             return target(10U, 1.0F);
         };
         callbacks.fire_shot =
-            [&](const FleetShooterFireRequest& request) {
-                shots.push_back(request.shot_number);
+            [&](const FleetShooterFireRequest& fire_request) {
+                shots.push_back(fire_request.shot_number);
                 return FleetShooterFireResult {
                     true,
                 };

@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <doctest/doctest.h>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -349,7 +350,7 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
     CHECK(resolve_world_generation_version(WorldGenerationProfile::OceanAdventure) ==
           WorldGenerationVersion::LivingOceanV3);
     CHECK(resolve_world_generation_version(WorldGenerationProfile::Backrooms) ==
-          WorldGenerationVersion::BackroomsV1);
+          WorldGenerationVersion::BackroomsV3);
 
     constexpr auto seed = 424242;
     WorldGenerator latest(
@@ -395,9 +396,9 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
           WorldGenerationVersion::LivingOceanV3);
 
     World backrooms_world(seed, 0, WorldGenerationProfile::Backrooms);
-    CHECK(backrooms_world.generation_version() == WorldGenerationVersion::BackroomsV1);
+    CHECK(backrooms_world.generation_version() == WorldGenerationVersion::BackroomsV3);
     CHECK(backrooms_world.capture_save_plan().generation_version ==
-          WorldGenerationVersion::BackroomsV1);
+          WorldGenerationVersion::BackroomsV3);
     CHECK_THROWS_AS(
         WorldGenerator(
             seed,
@@ -422,6 +423,80 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
             WorldGenerationProfile::OceanAdventure,
             WorldGenerationVersion::BackroomsV1),
         std::invalid_argument);
+}
+
+TEST_CASE("Backrooms V3 helpers preserve legacy routing and migrate only Poolrooms heights") {
+    constexpr auto seed = 74'021;
+    constexpr auto anchor_level = 0;
+
+    CHECK(is_backrooms_generation_version(
+        WorldGenerationVersion::BackroomsV1));
+    CHECK(is_backrooms_generation_version(
+        WorldGenerationVersion::BackroomsV2));
+    CHECK(is_backrooms_generation_version(
+        WorldGenerationVersion::BackroomsV3));
+    CHECK_FALSE(uses_backrooms_spatial_stack(
+        WorldGenerationVersion::BackroomsV1));
+    CHECK(uses_backrooms_spatial_stack(
+        WorldGenerationVersion::BackroomsV2));
+    CHECK(uses_backrooms_spatial_stack(
+        WorldGenerationVersion::BackroomsV3));
+    CHECK(
+        backrooms_spatial_profile_for_version(
+            WorldGenerationVersion::BackroomsV2) ==
+        BackroomsSpatialProfile::LegacyV2);
+    CHECK(
+        backrooms_spatial_profile_for_version(
+            WorldGenerationVersion::BackroomsV3) ==
+        BackroomsSpatialProfile::RecessedPoolroomsV3);
+
+    // Je retrouve le niveau -2 depuis sa hauteur V2, puis j'applique le seul
+    // voxel ajouté par la cuve V3. Le bureau voisin ne doit jamais bouger.
+    CHECK(
+        backrooms_saved_logical_level_at_y(
+            seed,
+            anchor_level,
+            WorldGenerationVersion::BackroomsV2,
+            1.001F) == -2);
+    CHECK(
+        backrooms_v3_position_delta_y(
+            seed,
+            anchor_level,
+            WorldGenerationVersion::BackroomsV2,
+            1.001F) == 1);
+    CHECK(
+        backrooms_v3_position_delta_y(
+            seed,
+            anchor_level,
+            WorldGenerationVersion::BackroomsV2,
+            21.001F) == 0);
+
+    // V1 n'avait qu'un étage à Y=40 : son niveau logique sauvegardé reste la
+    // source de vérité, même si sa coordonnée Y est atypique ou corrompue.
+    CHECK(
+        backrooms_saved_logical_level_at_y(
+            seed,
+            -23,
+            WorldGenerationVersion::BackroomsV1,
+            41.001F) == -23);
+    CHECK(
+        backrooms_v3_position_delta_y(
+            seed,
+            -23,
+            WorldGenerationVersion::BackroomsV1,
+            41.001F) == 1);
+    CHECK(
+        backrooms_v3_position_delta_y(
+            seed,
+            4,
+            WorldGenerationVersion::BackroomsV1,
+            41.001F) == 0);
+    CHECK(
+        backrooms_v3_position_delta_y(
+            seed,
+            anchor_level,
+            WorldGenerationVersion::BackroomsV3,
+            2.001F) == 0);
 }
 
 TEST_CASE("living ocean V3 deepens and strengthens the relief of the guaranteed open-water route") {
@@ -1978,7 +2053,7 @@ TEST_CASE("crafted tools accelerate only their matching block families") {
 
 TEST_CASE("block atlas expands to 256 square pixels and preserves transparent decorative tiles") {
     CHECK(kBlockAtlasSize == 256);
-    CHECK(kBlockAtlasTilesPerAxis == 16);
+    CHECK(kBlockAtlasTilesPerAxis == 16.0F);
     const auto pixels = build_block_atlas_pixels();
     REQUIRE(pixels.size() == static_cast<std::size_t>(kBlockAtlasSize * kBlockAtlasSize * 4));
 
@@ -3082,6 +3157,87 @@ TEST_CASE("chunk mesher routes water into the dedicated translucent submesh") {
         return vertex.ao == doctest::Approx(1.0F);
     }));
     CHECK_FALSE(mesh.empty());
+}
+
+TEST_CASE("Backrooms V3 Poolrooms mesh exposes only contained water tops across chunk seams") {
+    constexpr auto seed = 74'021;
+    constexpr auto anchor_level = 0;
+    const WorldGenerator generator(
+        seed,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV3,
+        anchor_level);
+
+    struct SeamWaterSample {
+        ChunkCoord chunk {};
+        ChunkCoord neighbour {};
+    };
+    auto seam = std::optional<SeamWaterSample> {};
+    for (int chunk_z = -8;
+         chunk_z <= 8 && !seam.has_value();
+         ++chunk_z) {
+        for (int chunk_x = -8;
+             chunk_x <= 8 && !seam.has_value();
+             ++chunk_x) {
+            const auto base_x = chunk_x * kChunkSizeX;
+            const auto base_z = chunk_z * kChunkSizeZ;
+            for (int offset = 0;
+                 offset < kChunkSizeX && !seam.has_value();
+                 ++offset) {
+                for (int y = kWorldMinY;
+                     y <= 4 && !seam.has_value();
+                     ++y) {
+                    const auto edge_x = base_x + kChunkSizeX - 1;
+                    const auto sample_z = base_z + offset;
+                    if (generator.sample_water_state(edge_x, y, sample_z) != 0U &&
+                        generator.sample_water_state(edge_x + 1, y, sample_z) != 0U) {
+                        seam = SeamWaterSample {
+                            {chunk_x, chunk_z},
+                            {chunk_x + 1, chunk_z},
+                        };
+                        break;
+                    }
+
+                    const auto sample_x = base_x + offset;
+                    const auto edge_z = base_z + kChunkSizeZ - 1;
+                    if (generator.sample_water_state(sample_x, y, edge_z) != 0U &&
+                        generator.sample_water_state(sample_x, y, edge_z + 1) != 0U) {
+                        seam = SeamWaterSample {
+                            {chunk_x, chunk_z},
+                            {chunk_x, chunk_z + 1},
+                        };
+                    }
+                }
+            }
+        }
+    }
+    REQUIRE(seam.has_value());
+
+    World world(
+        seed,
+        0,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV3,
+        VisualPipeline::LegacyVoxel,
+        anchor_level);
+    world.ensure_chunk_loaded(seam->chunk);
+    REQUIRE(world.find_chunk(seam->chunk) != nullptr);
+    // Je laisse volontairement le voisin absent : le halo procédural doit
+    // fermer correctement la couture sans inventer une paroi d'eau temporaire.
+    CHECK(world.find_chunk(seam->neighbour) == nullptr);
+
+    const ChunkMesher mesher {};
+    const auto mesh =
+        mesher.build_mesh(world, seam->chunk);
+    REQUIRE_FALSE(mesh.water_vertices.empty());
+    CHECK(std::all_of(
+        mesh.water_vertices.begin(),
+        mesh.water_vertices.end(),
+        [](const WaterVertex& vertex) noexcept {
+            return vertex.nx == 0 &&
+                   vertex.ny == 127 &&
+                   vertex.nz == 0;
+        }));
 }
 
 TEST_CASE("chunk mesher range fills its halo at section and world height boundaries") {

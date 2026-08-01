@@ -1,4 +1,5 @@
 #include "app/SaveGame.h"
+#include "world/BackroomsSpatialStack.h"
 
 #include <algorithm>
 #include <array>
@@ -152,7 +153,7 @@ auto is_supported_world_generation_version(WorldGenerationProfile profile,
                version == WorldGenerationVersion::SparseArchipelagoV2 ||
                version == WorldGenerationVersion::LivingOceanV3;
     case WorldGenerationProfile::Backrooms:
-        return version == WorldGenerationVersion::BackroomsV1;
+        return is_backrooms_generation_version(version);
     default:
         return false;
     }
@@ -168,7 +169,8 @@ auto is_world_generation_version_compatible_with_save(std::uint32_t save_version
         // Le profil et ses identifiants de blocs n'existent qu'à partir de v15.
         // Une valeur BackRooms injectée dans une ancienne entête est rejetée.
         return save_version >= kSaveVersionBackrooms &&
-               generation_version == WorldGenerationVersion::BackroomsV1;
+               is_backrooms_generation_version(
+                   generation_version);
     }
 
     // Les formats v8/v9 possédaient déjà le champ, mais seule la géographie
@@ -2209,6 +2211,102 @@ auto load_metadata_from_file(const std::filesystem::path& file_path) -> std::opt
 }
 
 } // namespace
+
+void migrate_backrooms_snapshot_to_v3(
+    SaveGameSnapshot& snapshot,
+    WorldGenerationVersion source_version,
+    int logical_level) noexcept {
+    const auto seed = snapshot.metadata.seed;
+    const BackroomsSpatialStack target_stack(
+        seed,
+        logical_level,
+        BackroomsSpatialProfile::RecessedPoolroomsV3);
+    const auto fallback_block =
+        target_stack.spawn_block(logical_level);
+    const auto fallback = glm::vec3 {
+        static_cast<float>(fallback_block.x) + 0.5F,
+        static_cast<float>(fallback_block.y) + 0.001F,
+        static_cast<float>(fallback_block.z) + 0.5F,
+    };
+    constexpr std::array<int, 5U> vertical_offsets {{
+        0,
+        1,
+        -1,
+        2,
+        -2,
+    }};
+
+    const auto migrate_position =
+        [&](glm::vec3 position,
+            int required_height,
+            float half_width) noexcept {
+            if (std::isfinite(position.y)) {
+                position.y += static_cast<float>(
+                    backrooms_v3_position_delta_y(
+                        seed,
+                        logical_level,
+                        source_version,
+                        position.y));
+            }
+            position = {
+                std::isfinite(position.x) ? position.x : fallback.x,
+                std::isfinite(position.y) ? position.y : fallback.y,
+                std::isfinite(position.z) ? position.z : fallback.z,
+            };
+
+            // Je teste la position historique puis les quatre corrections Y
+            // autorisées, avec toute l'emprise physique du corps concerné.
+            for (const auto offset : vertical_offsets) {
+                const auto candidate =
+                    position + glm::vec3 {
+                                   0.0F,
+                                   static_cast<float>(offset),
+                                   0.0F,
+                    };
+                if (target_stack.has_body_clearance(
+                        candidate.x,
+                        candidate.y,
+                        candidate.z,
+                        required_height,
+                        half_width)) {
+                    return candidate;
+                }
+            }
+            return fallback;
+        };
+
+    snapshot.spawn_position =
+        migrate_position(snapshot.spawn_position, 3, 0.30F);
+    snapshot.player_state.position =
+        migrate_position(
+            snapshot.player_state.position,
+            3,
+            0.30F);
+    snapshot.player_state.fall_start_y =
+        snapshot.player_state.position.y;
+    snapshot.backrooms_jack.position =
+        migrate_position(
+            snapshot.backrooms_jack.position,
+            4,
+            0.42F);
+    snapshot.backrooms_jack.last_seen_player_position =
+        migrate_position(
+            snapshot.backrooms_jack.last_seen_player_position,
+            3,
+            0.30F);
+    snapshot.backrooms_jack.previous_player_position =
+        migrate_position(
+            snapshot.backrooms_jack.previous_player_position,
+            3,
+            0.30F);
+
+    // Je régénère toute la géométrie procédurale : aucun override
+    // V1/V2 ne doit être rejoué sur les nouveaux fonds et les margelles.
+    snapshot.world_save_plan.generation_version =
+        WorldGenerationVersion::BackroomsV3;
+    snapshot.world_save_plan.chunks.clear();
+    snapshot.metadata.modified_chunk_count = 0U;
+}
 
 auto sanitize_player_ability_runtime_save_state(
     const PlayerAbilityRuntimeSaveState& requested) noexcept

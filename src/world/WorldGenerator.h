@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world/BackroomsGenerator.h"
+#include "world/BackroomsSpatialStack.h"
 #include "world/Chunk.h"
 #include "world/OceanAdventureLayout.h"
 
@@ -24,7 +25,29 @@ enum class WorldGenerationVersion : std::uint32_t {
     SparseArchipelagoV2 = 2,
     LivingOceanV3 = 3,
     BackroomsV1 = 4,
+    BackroomsV2 = 5,
+    BackroomsV3 = 6,
 };
+
+[[nodiscard]] inline constexpr auto is_backrooms_generation_version(
+    WorldGenerationVersion version) noexcept -> bool {
+    return version == WorldGenerationVersion::BackroomsV1 ||
+           version == WorldGenerationVersion::BackroomsV2 ||
+           version == WorldGenerationVersion::BackroomsV3;
+}
+
+[[nodiscard]] inline constexpr auto uses_backrooms_spatial_stack(
+    WorldGenerationVersion version) noexcept -> bool {
+    return version == WorldGenerationVersion::BackroomsV2 ||
+           version == WorldGenerationVersion::BackroomsV3;
+}
+
+[[nodiscard]] inline constexpr auto backrooms_spatial_profile_for_version(
+    WorldGenerationVersion version) noexcept -> BackroomsSpatialProfile {
+    return version == WorldGenerationVersion::BackroomsV3
+               ? BackroomsSpatialProfile::RecessedPoolroomsV3
+               : BackroomsSpatialProfile::LegacyV2;
+}
 
 [[nodiscard]] inline constexpr auto resolve_world_generation_version(
     WorldGenerationProfile profile,
@@ -36,12 +59,28 @@ enum class WorldGenerationVersion : std::uint32_t {
     case WorldGenerationProfile::OceanAdventure:
         return WorldGenerationVersion::LivingOceanV3;
     case WorldGenerationProfile::Backrooms:
-        return WorldGenerationVersion::BackroomsV1;
+        return WorldGenerationVersion::BackroomsV3;
     case WorldGenerationProfile::Continental:
     default:
         return WorldGenerationVersion::LegacyV1;
     }
 }
+
+// Je centralise le repere historique utilise par la migration des sauvegardes :
+// V1 ne possedait qu'un etage, tandis que V2/V3 utilisent la pile spatiale.
+[[nodiscard]] auto backrooms_saved_logical_level_at_y(
+    int seed,
+    int anchor_level,
+    WorldGenerationVersion generation_version,
+    float world_y) noexcept -> int;
+
+// Je retourne uniquement le decalage vertical necessaire pour projeter une
+// position V1/V2 vers V3 sans modifier ses coordonnees horizontales.
+[[nodiscard]] auto backrooms_v3_position_delta_y(
+    int seed,
+    int anchor_level,
+    WorldGenerationVersion source_version,
+    float world_y) noexcept -> int;
 
 enum class BiomeType : std::uint8_t {
     Meadow = 0,
@@ -56,6 +95,13 @@ struct TerrainSurfaceSample {
     int surface_height = 0;
     int water_level = kWorldMinY - 1;
     BlockId surface_block = to_block_id(BlockType::Grass);
+};
+
+struct WorldGeneratedColumn {
+    std::array<BlockId, kChunkHeight> blocks {};
+    std::array<WaterState, kChunkHeight> water_state {};
+
+    auto operator==(const WorldGeneratedColumn&) const -> bool = default;
 };
 
 class WorldGenerator {
@@ -92,10 +138,17 @@ public:
     [[nodiscard]] auto profile() const noexcept -> WorldGenerationProfile;
     [[nodiscard]] auto generation_version() const noexcept -> WorldGenerationVersion;
     [[nodiscard]] auto backrooms_level() const noexcept -> int;
+    [[nodiscard]] auto backrooms_level_at_y(float world_y) const noexcept -> int;
+    [[nodiscard]] auto backrooms_theme_at_y(float world_y) const noexcept
+        -> BackroomsTheme;
+    [[nodiscard]] auto backrooms_spawn_block(int logical_level) const noexcept
+        -> BlockCoord;
     [[nodiscard]] auto biome_at(int world_x, int world_z) const noexcept -> BiomeType;
     [[nodiscard]] auto sample_surface(int world_x, int world_z) const noexcept -> TerrainSurfaceSample;
     [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept -> BlockId;
     [[nodiscard]] auto sample_water_state(int world_x, int y, int world_z) const noexcept -> WaterState;
+    [[nodiscard]] auto sample_generated_column(int world_x, int world_z) const noexcept
+        -> WorldGeneratedColumn;
 
 private:
     struct TerrainColumnSample {
@@ -152,6 +205,7 @@ private:
     WorldGenerationVersion generation_version_ = WorldGenerationVersion::LegacyV1;
     int logical_level_ = 0;
     BackroomsGenerator backrooms_generator_ {};
+    BackroomsSpatialStack backrooms_spatial_stack_ {};
     std::unique_ptr<FastNoiseLite> terrain_noise_ {};
     std::unique_ptr<FastNoiseLite> detail_noise_ {};
     std::unique_ptr<FastNoiseLite> temperature_noise_ {};

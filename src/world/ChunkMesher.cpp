@@ -42,6 +42,10 @@ struct FaceDefinition {
 constexpr auto kCachedSpanX = kChunkSizeX + 2;
 constexpr auto kCachedSpanZ = kChunkSizeZ + 2;
 constexpr auto kCachedNeighborhoodVolume = static_cast<std::size_t>(kCachedSpanX * kChunkHeight * kCachedSpanZ);
+constexpr auto kCachedHaloColumnCount =
+    static_cast<std::size_t>(
+        kCachedSpanX * kCachedSpanZ -
+        kChunkSizeX * kChunkSizeZ);
 constexpr float kWaterSurfaceRepeatBlocks = 8.0F;
 // Une maille de 0,5 m suffit pour le spectre choisi, dont la plus petite
 // longueur d'onde géométrique est de 2,4 m. Cela réduit fortement le trafic
@@ -74,6 +78,15 @@ auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::
 }
 
 struct Neighborhood {
+    struct GeneratedColumnCacheEntry {
+        int local_x = 0;
+        int local_z = 0;
+        WorldGeneratedColumn column {};
+    };
+
+    const World& world;
+    int chunk_world_x = 0;
+    int chunk_world_z = 0;
     std::array<const Chunk*, 9> chunks {};
     // Je laisse volontairement ces quatre caches sans remise a zero globale :
     // le constructeur remplit chaque cellule de la bande verticale consultable.
@@ -81,10 +94,20 @@ struct Neighborhood {
     std::array<std::uint8_t, kCachedNeighborhoodVolume> water_levels;
     std::array<std::uint8_t, kCachedNeighborhoodVolume> sky_light;
     std::array<std::uint8_t, kCachedNeighborhoodVolume> block_light;
+    mutable std::array<GeneratedColumnCacheEntry,
+                       kCachedHaloColumnCount> generated_columns {};
+    mutable std::size_t generated_column_count = 0U;
     int min_cached_y = kWorldMinY;
     int max_cached_y = kWorldMaxY;
 
-    Neighborhood(const World& world, const ChunkCoord& coord, int min_y, int max_y) {
+    Neighborhood(
+        const World& source_world,
+        const ChunkCoord& coord,
+        int min_y,
+        int max_y)
+        : world(source_world),
+          chunk_world_x(coord.x * kChunkSizeX),
+          chunk_world_z(coord.z * kChunkSizeZ) {
         // Je capture tout le halo horizontal [-1, taille] avant de remplir la
         // bande ; aucun accesseur ne peut ainsi observer une cellule indeterminee.
         for (int dz = -1; dz <= 1; ++dz) {
@@ -108,6 +131,37 @@ struct Neighborhood {
         local_z = z < 0 ? z + kChunkSizeZ : (z >= kChunkSizeZ ? z - kChunkSizeZ : z);
         const auto index = static_cast<std::size_t>((chunk_z + 1) * 3 + (chunk_x + 1));
         return chunks[index];
+    }
+
+    [[nodiscard]] auto generated_column_at(
+        int local_x,
+        int local_z) const -> const WorldGeneratedColumn& {
+        for (std::size_t index = 0U;
+             index < generated_column_count;
+             ++index) {
+            const auto& entry = generated_columns[index];
+            if (entry.local_x == local_x &&
+                entry.local_z == local_z) {
+                return entry.column;
+            }
+        }
+
+        // Le halo 18x18 ne possède que 68 colonnes extérieures distinctes.
+        // La branche de repli reste correcte même si cet invariant change.
+        auto slot_index = generated_column_count;
+        if (generated_column_count < generated_columns.size()) {
+            ++generated_column_count;
+        } else {
+            slot_index = generated_columns.size() - 1U;
+        }
+        auto& entry = generated_columns[slot_index];
+        entry.local_x = local_x;
+        entry.local_z = local_z;
+        entry.column =
+            world.peek_column_or_generated(
+                chunk_world_x + local_x,
+                chunk_world_z + local_z);
+        return entry.column;
     }
 
     [[nodiscard]] static auto cache_index(int x, int y, int z) noexcept -> std::size_t {
@@ -558,6 +612,228 @@ void append_cube_face(ChunkMeshData& mesh,
     append_face_geometry(mesh, definition, tile, positions, ao_values, sky_values, block_values, material_class);
 }
 
+[[nodiscard]] auto same_position(const Float3& lhs, const Float3& rhs) noexcept
+    -> bool {
+    return lhs[0] == rhs[0] && lhs[1] == rhs[1] && lhs[2] == rhs[2];
+}
+
+void append_ramp_polygon(
+    ChunkMeshData& mesh,
+    const Neighborhood& neighborhood,
+    BlockId block_id,
+    const BlockCoord& local_coord,
+    int chunk_world_x,
+    int chunk_world_z,
+    const std::array<Float3, 4>& local_positions,
+    const std::array<Float2, 4>& uvs,
+    std::size_t vertex_count,
+    const Float3& normal,
+    float face_shade,
+    const BlockCoord& light_offset) {
+    assert(vertex_count == 3U || vertex_count == 4U);
+
+    const auto adjacent = add_offset(local_coord, light_offset);
+    const auto sky_light = static_cast<float>(std::max(
+        neighborhood.sky_light_at(local_coord.x, local_coord.y, local_coord.z),
+        neighborhood.sky_light_at(adjacent.x, adjacent.y, adjacent.z))) / 15.0F;
+    const auto block_light = static_cast<float>(std::max(
+        neighborhood.block_light_at(local_coord.x, local_coord.y, local_coord.z),
+        neighborhood.block_light_at(adjacent.x, adjacent.y, adjacent.z))) / 15.0F;
+    const auto material_class = block_visual_material_value(block_id);
+    const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
+
+    for (std::size_t index = 0; index < vertex_count; ++index) {
+        const auto& position = local_positions[index];
+        mesh.vertices.push_back({
+            static_cast<float>(chunk_world_x + local_coord.x) + position[0],
+            static_cast<float>(local_coord.y) + position[1],
+            static_cast<float>(chunk_world_z + local_coord.z) + position[2],
+            uvs[index][0],
+            uvs[index][1],
+            normal[0],
+            normal[1],
+            normal[2],
+            face_shade,
+            1.0F,
+            sky_light,
+            block_light,
+            material_class,
+        });
+    }
+
+    if (vertex_count == 4U) {
+        append_quad_indices(
+            mesh.indices,
+            base_index,
+            base_index + 1U,
+            base_index + 2U,
+            base_index + 3U,
+            false);
+    } else {
+        mesh.indices.insert(mesh.indices.end(), {
+            base_index,
+            base_index + 1U,
+            base_index + 2U,
+        });
+    }
+    ++mesh.face_count;
+}
+
+void append_ramp_mesh(ChunkMeshData& mesh,
+                      const Neighborhood& neighborhood,
+                      BlockId block_id,
+                      const BlockCoord& local_coord,
+                      int chunk_world_x,
+                      int chunk_world_z) {
+    const auto rise = backrooms_ramp_rise_direction(block_id);
+    assert(rise.x != 0 || rise.z != 0);
+
+    const auto ramp_height = [block_id](float x, float z) noexcept {
+        return backrooms_ramp_surface_height(block_id, x, z);
+    };
+
+    // Je conserve le dessous parfaitement plan afin qu'il se raccorde sans
+    // fissure à un plancher cubique placé sous la rampe.
+    const auto& bottom_definition =
+        kFaceDefinitions[static_cast<std::size_t>(Face::NegativeY)];
+    const BlockCoord below {
+        local_coord.x,
+        local_coord.y - 1,
+        local_coord.z,
+    };
+    if (!is_block_opaque(neighborhood.block_at(below.x, below.y, below.z))) {
+        std::array<Float3, 4> bottom_positions {};
+        for (std::size_t index = 0;
+             index < bottom_definition.vertices.size();
+             ++index) {
+            bottom_positions[index] = bottom_definition.vertices[index].position;
+        }
+        append_ramp_polygon(
+            mesh,
+            neighborhood,
+            block_id,
+            local_coord,
+            chunk_world_x,
+            chunk_world_z,
+            bottom_positions,
+            tile_uvs(
+                block_atlas_tile(block_id, BlockVisualFace::NegativeY),
+                0.0F,
+                0.0F,
+                1.0F,
+                1.0F),
+            4U,
+            bottom_definition.normal,
+            bottom_definition.face_shade,
+            bottom_definition.neighbor_offset);
+    }
+
+    const std::array<Float3, 4> slope_positions {{
+        {0.0F, ramp_height(0.0F, 1.0F), 1.0F},
+        {1.0F, ramp_height(1.0F, 1.0F), 1.0F},
+        {1.0F, ramp_height(1.0F, 0.0F), 0.0F},
+        {0.0F, ramp_height(0.0F, 0.0F), 0.0F},
+    }};
+    constexpr float inverse_sqrt_two = 0.70710678118654752440F;
+    const Float3 slope_normal {
+        -static_cast<float>(rise.x) * inverse_sqrt_two,
+        inverse_sqrt_two,
+        -static_cast<float>(rise.z) * inverse_sqrt_two,
+    };
+    append_ramp_polygon(
+        mesh,
+        neighborhood,
+        block_id,
+        local_coord,
+        chunk_world_x,
+        chunk_world_z,
+        slope_positions,
+        tile_uvs(
+            block_atlas_tile(block_id, BlockVisualFace::PositiveY),
+            0.0F,
+            0.0F,
+            1.0F,
+            1.0F),
+        4U,
+        slope_normal,
+        1.0F,
+        {0, 1, 0});
+
+    constexpr std::array<Face, 4> side_faces {{
+        Face::PositiveX,
+        Face::NegativeX,
+        Face::PositiveZ,
+        Face::NegativeZ,
+    }};
+    for (const auto face : side_faces) {
+        const auto& definition =
+            kFaceDefinitions[static_cast<std::size_t>(face)];
+        const auto neighbor_coord = add_offset(
+            local_coord,
+            definition.neighbor_offset);
+        const auto neighbor_block = neighborhood.block_at(
+            neighbor_coord.x,
+            neighbor_coord.y,
+            neighbor_coord.z);
+        const auto parallel_to_rise =
+            rise.x * definition.neighbor_offset.x +
+                rise.z * definition.neighbor_offset.z !=
+            0;
+        if (is_block_opaque(neighbor_block) ||
+            (!parallel_to_rise && neighbor_block == block_id)) {
+            continue;
+        }
+
+        const auto face_uvs = tile_uvs(
+            block_atlas_tile(block_id, to_visual_face(face)),
+            0.0F,
+            0.0F,
+            1.0F,
+            1.0F);
+        std::array<Float3, 4> polygon_positions {};
+        std::array<Float2, 4> polygon_uvs {};
+        std::size_t polygon_size = 0U;
+        for (std::size_t index = 0;
+             index < definition.vertices.size();
+             ++index) {
+            auto position = definition.vertices[index].position;
+            if (position[1] > 0.5F) {
+                position[1] = ramp_height(position[0], position[2]);
+            }
+            if (polygon_size > 0U &&
+                same_position(polygon_positions[polygon_size - 1U], position)) {
+                continue;
+            }
+            polygon_positions[polygon_size] = position;
+            polygon_uvs[polygon_size] = face_uvs[index];
+            ++polygon_size;
+        }
+        if (polygon_size > 1U &&
+            same_position(
+                polygon_positions.front(),
+                polygon_positions[polygon_size - 1U])) {
+            --polygon_size;
+        }
+        if (polygon_size < 3U) {
+            continue;
+        }
+
+        append_ramp_polygon(
+            mesh,
+            neighborhood,
+            block_id,
+            local_coord,
+            chunk_world_x,
+            chunk_world_z,
+            polygon_positions,
+            polygon_uvs,
+            polygon_size,
+            definition.normal,
+            definition.face_shade,
+            definition.neighbor_offset);
+    }
+}
+
 auto should_emit_cube_face(BlockId block_id, BlockId neighbor_block_id) noexcept -> bool {
     if (is_block_opaque(neighbor_block_id)) {
         return false;
@@ -984,7 +1260,6 @@ auto sample_water_corner_heights(const Neighborhood& neighborhood, const BlockCo
 }
 
 void append_water_mesh(ChunkMeshData& mesh,
-                       const World& world,
                        const Neighborhood& neighborhood,
                        const BlockCoord& local_coord,
                        int chunk_world_x,
@@ -1004,6 +1279,11 @@ void append_water_mesh(ChunkMeshData& mesh,
 
         auto neighbor_block = neighborhood.block_at(neighbor.x, neighbor.y, neighbor.z);
         auto neighbor_water_level = neighborhood.water_level_at(neighbor.x, neighbor.y, neighbor.z);
+        auto neighbor_water_above_level =
+            neighborhood.water_level_at(
+                neighbor.x,
+                neighbor.y + 1,
+                neighbor.z);
         auto neighbor_local_x = neighbor.x;
         auto neighbor_local_z = neighbor.z;
         const auto* neighbor_chunk = neighborhood.sample_chunk(neighbor.x, neighbor.z, neighbor_local_x, neighbor_local_z);
@@ -1012,9 +1292,24 @@ void append_water_mesh(ChunkMeshData& mesh,
             // interpretes comme du vide pour l'eau, sinon on fabrique des parois
             // verticales temporaires qui disparaissent seulement apres le chargement
             // du voisin reel.
-            neighbor_block = world.peek_block_or_generated(chunk_world_x + neighbor.x, neighbor.y, chunk_world_z + neighbor.z);
+            const auto& generated_column =
+                neighborhood.generated_column_at(
+                    neighbor.x,
+                    neighbor.z);
+            const auto generated_y =
+                static_cast<std::size_t>(neighbor.y);
+            neighbor_block =
+                generated_column.blocks[generated_y];
             neighbor_water_level =
-                world.peek_water_level_or_generated(chunk_world_x + neighbor.x, neighbor.y, chunk_world_z + neighbor.z);
+                water_level_from_state(
+                    generated_column.water_state[generated_y]);
+            neighbor_water_above_level =
+                is_world_y_valid(neighbor.y + 1)
+                    ? water_level_from_state(
+                          generated_column.water_state[
+                              static_cast<std::size_t>(
+                                  neighbor.y + 1)])
+                    : 0U;
         }
 
         if (face == Face::PositiveY) {
@@ -1053,18 +1348,13 @@ void append_water_mesh(ChunkMeshData& mesh,
             continue;
         }
 
-        const auto neighbor_bottom_height = neighbor_water_level > 0
-                                                ? (world.peek_water_level_or_generated(
-                                                       chunk_world_x + neighbor.x,
-                                                       neighbor.y,
-                                                       chunk_world_z + neighbor.z) > 0 &&
-                                                   world.peek_water_level_or_generated(
-                                                       chunk_world_x + neighbor.x,
-                                                       neighbor.y + 1,
-                                                       chunk_world_z + neighbor.z) > 0
-                                                       ? 1.0F
-                                                       : static_cast<float>(neighbor_water_level) / static_cast<float>(kMaxWaterLevel))
-                                                : 0.0F;
+        const auto neighbor_bottom_height =
+            neighbor_water_level > 0
+                ? (neighbor_water_above_level > 0
+                       ? 1.0F
+                       : static_cast<float>(neighbor_water_level) /
+                             static_cast<float>(kMaxWaterLevel))
+                : 0.0F;
         if (is_block_opaque(neighbor_block) || neighbor_bottom_height >= current_top_height - 0.0001F) {
             continue;
         }
@@ -1142,7 +1432,7 @@ auto ChunkMesher::build_mesh_range(const World& world,
                 const auto block_id = chunk_blocks[chunk_linear_index(x, y, z)];
                 const BlockCoord local_coord {x, y, z};
                 if (neighborhood.water_level_at(x, y, z) > 0) {
-                    append_water_mesh(mesh, world, neighborhood, local_coord, chunk_world_x, chunk_world_z);
+                    append_water_mesh(mesh, neighborhood, local_coord, chunk_world_x, chunk_world_z);
                 }
                 if (!has_block_mesh(block_id)) {
                     continue;
@@ -1167,6 +1457,16 @@ auto ChunkMesher::build_mesh_range(const World& world,
                     continue;
                 }
                 if (block_mesh_type(block_id) == BlockMeshType::Water) {
+                    continue;
+                }
+                if (block_mesh_type(block_id) == BlockMeshType::Ramp) {
+                    append_ramp_mesh(
+                        mesh,
+                        neighborhood,
+                        block_id,
+                        local_coord,
+                        chunk_world_x,
+                        chunk_world_z);
                     continue;
                 }
 

@@ -14,6 +14,7 @@
 #include "world/OceanAdventureLayout.h"
 #include "world/OceanSimulation.h"
 #include "world/BackroomsGenerator.h"
+#include "world/BackroomsSpatialStack.h"
 
 #include <glm/geometric.hpp>
 #include <glm/trigonometric.hpp>
@@ -184,11 +185,73 @@ auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept 
     };
 }
 
+constexpr auto kBackroomsRuntimeSpatialProfile =
+    BackroomsSpatialProfile::RecessedPoolroomsV3;
+constexpr auto kBackroomsRuntimePoolGeometryProfile =
+    BackroomsPoolGeometryProfile::RecessedOneBlock;
+
+[[nodiscard]] auto backrooms_runtime_stack(
+    int seed,
+    int logical_level) noexcept -> BackroomsSpatialStack {
+    return BackroomsSpatialStack(
+        seed,
+        logical_level,
+        kBackroomsRuntimeSpatialProfile);
+}
+
 auto backrooms_spawn_position(
     int seed,
     int logical_level = 0) noexcept -> glm::vec3 {
-    const BackroomsGenerator generator(seed, logical_level);
-    const auto block = generator.spawn_block();
+    const auto stack =
+        backrooms_runtime_stack(seed, logical_level);
+    const auto block = stack.spawn_block(logical_level);
+    return {
+        static_cast<float>(block.x) + 0.5F,
+        static_cast<float>(block.y) + 0.001F,
+        static_cast<float>(block.z) + 0.5F,
+    };
+}
+
+[[nodiscard]] auto backrooms_runtime_anchor_y_offset(
+    int seed,
+    int logical_level) noexcept -> float {
+    const auto stack =
+        backrooms_runtime_stack(seed, logical_level);
+    const auto placement =
+        stack.placement_for_level(logical_level);
+    return placement.has_value()
+               ? static_cast<float>(
+                     placement->floor_y -
+                     kBackroomsFloorY)
+               : 0.0F;
+}
+
+void translate_backrooms_jack_state_y(
+    BackroomsJackState& state,
+    float delta_y) noexcept {
+    state.position.y += delta_y;
+    state.last_seen_player_position.y += delta_y;
+    state.previous_player_position.y += delta_y;
+}
+
+void translate_backrooms_jack_result_y(
+    BackroomsJackUpdateResult& result,
+    float delta_y) noexcept {
+    result.render.position.y += delta_y;
+    result.light_interference.position.y += delta_y;
+    const auto event_count =
+        std::min(result.event_count, result.events.size());
+    for (std::size_t index = 0U;
+         index < event_count;
+         ++index) {
+        result.events[index].position.y += delta_y;
+    }
+}
+
+auto backrooms_spawn_position(
+    const World& world,
+    int logical_level) noexcept -> glm::vec3 {
+    const auto block = world.backrooms_spawn_block(logical_level);
     return {
         static_cast<float>(block.x) + 0.5F,
         static_cast<float>(block.y) + 0.001F,
@@ -422,8 +485,18 @@ struct BackroomsSmokeCameraPose {
     const BackroomsGenerator generator {
         seed,
         logical_level,
+        kBackroomsSpatialConnectorDistrictModules,
+        kBackroomsRuntimePoolGeometryProfile,
     };
-    const auto spawn = generator.spawn_block();
+    const auto stack =
+        backrooms_runtime_stack(seed, logical_level);
+    const auto spawn =
+        stack.spawn_block(logical_level);
+    const auto placement =
+        stack.placement_for_level(logical_level);
+    if (!placement.has_value()) {
+        return std::nullopt;
+    }
     constexpr std::array<BackroomsJackGridPoint, 4U> directions {{
         {0, -1},
         {1, 0},
@@ -652,10 +725,8 @@ struct BackroomsSmokeCameraPose {
                                         camera_x) +
                                         0.5F,
                                     static_cast<float>(
-                                        camera_column
-                                                .floor_y +
-                                            1) +
-                                        0.001F,
+                                        placement->floor_y) +
+                                        1.001F,
                                     static_cast<float>(
                                         camera_z) +
                                         0.5F,
@@ -724,22 +795,20 @@ void sanitize_backrooms_player_state(
     PlayerState& state,
     int seed,
     int logical_level = 0) noexcept {
-    const BackroomsGenerator generator(seed, logical_level);
+    const auto stack =
+        backrooms_runtime_stack(seed, logical_level);
     const auto fallback =
         backrooms_spawn_position(seed, logical_level);
     state.position = finite_vec3_or(state.position, fallback);
 
-    const auto block_x = static_cast<int>(std::floor(state.position.x));
-    const auto block_z = static_cast<int>(std::floor(state.position.z));
-    const auto column =
-        generator.sample_column(block_x, block_z);
-    const auto minimum_y =
-        static_cast<float>(column.floor_y) + 0.75F;
-    const auto maximum_y =
-        static_cast<float>(column.ceiling_y) + 0.25F;
-    if (state.position.y < minimum_y ||
-        state.position.y > maximum_y ||
-        !generator.is_walkable(block_x, block_z)) {
+    // Je réutilise la validation volumique de la pile : une position de
+    // sauvegarde n'est légitime que si toute l'AABB du joueur est libre.
+    if (!stack.has_body_clearance(
+            state.position.x,
+            state.position.y,
+            state.position.z,
+            3,
+            0.30F)) {
         state.position = fallback;
     }
 
@@ -13571,7 +13640,7 @@ void Game::respawn_player() {
             ? sea_adventure_.deck_spawn_position()
             : backrooms_respawn
                   ? backrooms_spawn_position(
-                        world_.seed(),
+                        world_,
                         world_.backrooms_level())
                   : find_initial_spawn_position();
 
@@ -13599,7 +13668,9 @@ void Game::respawn_player() {
     player_.set_fly_mode_enabled(false);
     player_.set_water_movement_profile(
         backrooms_respawn &&
-                world_.backrooms_level() <= -2
+                world_.backrooms_theme_at_y(
+                    spawn_position_.y) ==
+                    BackroomsTheme::Poolrooms
             ? PlayerWaterMovementProfile::Poolrooms
             : PlayerWaterMovementProfile::Standard);
     const auto energy_parameters =
@@ -13620,10 +13691,6 @@ void Game::respawn_player() {
     set_death_screen_visible(false);
 
     if (backrooms_respawn) {
-        backrooms_level_transition_cooldown_seconds_ =
-            1.5F;
-        backrooms_level_transition_in_progress_ =
-            false;
         reset_backrooms_jack_runtime();
         creatures_.clear();
         item_drops_.clear();
@@ -13723,12 +13790,20 @@ auto Game::backrooms_active() const noexcept -> bool {
            active_game_mode_ == GameMode::Backrooms;
 }
 
+auto Game::current_backrooms_level() const noexcept -> int {
+    // Je dérive l'étage du déplacement vertical réel : le niveau du générateur
+    // reste uniquement l'ancre logique placée sur le plancher historique Y=40.
+    return world_.backrooms_level_at_y(
+        player_.position().y);
+}
+
 auto Game::session_backrooms_supports_jack() const noexcept
     -> bool {
-    // Je rattache Jack à la famille de sessions Backrooms et non au thème
-    // visuel des bureaux. Les futurs niveaux réutiliseront donc la même FSM
-    // tant qu'ils restent dans ce mode.
-    return backrooms_active();
+    // Je garde sa navigation 2D sur l'étage ancre. Hors de ce plan, Jack ne
+    // peut ni traverser une dalle ni réutiliser une grille à la mauvaise Y.
+    return backrooms_active() &&
+           current_backrooms_level() ==
+               world_.backrooms_level();
 }
 
 auto Game::backrooms_jack_jumpscare_active() const noexcept
@@ -13754,6 +13829,11 @@ void Game::reset_backrooms_jack_runtime() noexcept {
         initialize_backrooms_jack(
             seed,
             world_.backrooms_level());
+    translate_backrooms_jack_state_y(
+        backrooms_jack_,
+        backrooms_runtime_anchor_y_offset(
+            world_.seed(),
+            world_.backrooms_level()));
     backrooms_jack_runtime_ = {};
     backrooms_jack_last_result_ = {};
     backrooms_jack_death_delay_seconds_ =
@@ -13772,7 +13852,8 @@ auto Game::current_environment_state() const -> EnvironmentState {
         world_.seed(),
         position.x,
         position.z,
-        world_.backrooms_level() <= -2);
+        world_.backrooms_theme_at_y(position.y) ==
+            BackroomsTheme::Poolrooms);
 }
 
 void Game::update_backrooms_simulation(float dt) {
@@ -13797,13 +13878,10 @@ void Game::update_backrooms_simulation(float dt) {
         std::isfinite(dt)
             ? std::clamp(dt, 0.0F, 0.10F)
             : 0.0F;
-    backrooms_level_transition_cooldown_seconds_ =
-        std::max(
-            backrooms_level_transition_cooldown_seconds_ -
-                safe_dt,
-            0.0F);
     player_.set_water_movement_profile(
-        world_.backrooms_level() <= -2
+        world_.backrooms_theme_at_y(
+            player_.position().y) ==
+                BackroomsTheme::Poolrooms
             ? PlayerWaterMovementProfile::Poolrooms
             : PlayerWaterMovementProfile::Standard);
     static_cast<void>(
@@ -13855,13 +13933,14 @@ void Game::update_backrooms_simulation(float dt) {
             world_,
             nullptr,
             nullptr);
-        if (!options_.smoke_test &&
-            gameplay_input_enabled &&
-            try_backrooms_level_transition()) {
-            // Le monde précédent a été remplacé atomiquement. Aucune logique
-            // de Jack ne doit continuer avec son ancien graphe de navigation.
-            return;
-        }
+        // Je recalcule le profil après la physique : franchir une pente jusque
+        // dans les Poolrooms adapte l'eau sans attendre la frame suivante.
+        player_.set_water_movement_profile(
+            world_.backrooms_theme_at_y(
+                player_.position().y) ==
+                    BackroomsTheme::Poolrooms
+                ? PlayerWaterMovementProfile::Poolrooms
+                : PlayerWaterMovementProfile::Standard);
     }
 
     const auto smoke_pose =
@@ -13879,6 +13958,16 @@ void Game::update_backrooms_simulation(float dt) {
                 static_cast<std::uint32_t>(
                     world_.seed()) ^
                     UINT32_C(0x4A41434B));
+        const auto vertical_offset =
+            backrooms_runtime_anchor_y_offset(
+                world_.seed(),
+                world_.backrooms_level());
+        translate_backrooms_jack_state_y(
+            preview.state,
+            vertical_offset);
+        preview.render.position.y += vertical_offset;
+        preview.light_interference.position.y +=
+            vertical_offset;
         preview.state.logical_level =
             world_.backrooms_level();
         if (*smoke_pose !=
@@ -13932,15 +14021,29 @@ void Game::update_backrooms_simulation(float dt) {
         const BackroomsGenerator generator {
             world_.seed(),
             world_.backrooms_level(),
+            kBackroomsSpatialConnectorDistrictModules,
+            kBackroomsRuntimePoolGeometryProfile,
         };
+        const auto vertical_offset =
+            backrooms_runtime_anchor_y_offset(
+                world_.seed(),
+                world_.backrooms_level());
+        auto simulated_jack = backrooms_jack_;
+        translate_backrooms_jack_state_y(
+            simulated_jack,
+            -vertical_offset);
+        auto local_player_feet = player_.position();
+        local_player_feet.y -= vertical_offset;
+        auto local_player_eye = player_.eye_position();
+        local_player_eye.y -= vertical_offset;
         const auto ui_blocks_simulation =
             gameplay_interaction_blocked();
         const BackroomsJackUpdateContext context {
             .player = {
                 .feet_position =
-                    player_.position(),
+                    local_player_feet,
                 .eye_position =
-                    player_.eye_position(),
+                    local_player_eye,
                 .look_direction =
                     player_.look_direction(),
                 .maximum_sprint_speed = 7.2F,
@@ -13960,11 +14063,18 @@ void Game::update_backrooms_simulation(float dt) {
         };
         backrooms_jack_last_result_ =
             update_backrooms_jack(
-                backrooms_jack_,
+                simulated_jack,
                 backrooms_jack_runtime_,
                 generator,
                 context,
                 safe_dt);
+        backrooms_jack_ = simulated_jack;
+        translate_backrooms_jack_state_y(
+            backrooms_jack_,
+            vertical_offset);
+        translate_backrooms_jack_result_y(
+            backrooms_jack_last_result_,
+            vertical_offset);
 
         const auto event_count =
             std::min(
@@ -14054,276 +14164,6 @@ void Game::update_backrooms_simulation(float dt) {
     }
     if (has_active_session_) {
         mark_session_dirty();
-    }
-}
-
-auto Game::try_backrooms_level_transition() -> bool {
-    if (!backrooms_active() ||
-        backrooms_level_transition_in_progress_ ||
-        backrooms_level_transition_cooldown_seconds_ > 0.0F ||
-        gameplay_interaction_blocked() ||
-        player_.is_dead()) {
-        return false;
-    }
-
-    const auto& position = player_.position();
-    const BackroomsGenerator generator {
-        world_.seed(),
-        world_.backrooms_level(),
-    };
-    const auto connector =
-        generator.connector_near(
-            static_cast<int>(std::floor(position.x)),
-            static_cast<int>(std::floor(position.y)),
-            static_cast<int>(std::floor(position.z)),
-            1);
-    if (!connector.has_value()) {
-        return false;
-    }
-
-    return transition_backrooms_level(
-        connector->destination_level,
-        connector->destination_landing_block,
-        connector->destination_yaw_degrees);
-}
-
-auto Game::transition_backrooms_level(
-    int destination_level,
-    const BlockCoord& destination_landing,
-    float destination_yaw_degrees) -> bool {
-    constexpr auto kMinimumLogicalLevel = -1'000'000;
-    constexpr auto kMaximumLogicalLevel = 1'000'000;
-    if (!backrooms_active() ||
-        backrooms_level_transition_in_progress_ ||
-        destination_level < kMinimumLogicalLevel ||
-        destination_level > kMaximumLogicalLevel ||
-        std::abs(destination_level - world_.backrooms_level()) != 1) {
-        return false;
-    }
-
-    backrooms_level_transition_in_progress_ = true;
-    const auto loading_title =
-        destination_level <= -2
-            ? std::string_view("POOLROOMS")
-            : std::string_view("BACKROOMS");
-    const auto loading_detail =
-        destination_level <= -2
-            ? std::string_view("L'EAU RECOUVRE LE NIVEAU")
-            : std::string_view("LES BUREAUX CONTINUENT");
-    auto renderer_staged = false;
-    auto world_committed = false;
-
-    try {
-        begin_loading_screen(
-            LoadingScreenTheme::Standard,
-            static_cast<std::uint32_t>(
-                world_.seed()) ^
-                static_cast<std::uint32_t>(
-                    destination_level));
-        update_loading_screen(
-            loading_title,
-            "FERMETURE DU PALIER",
-            LoadingPhase::Preparation,
-            0.25F,
-            true);
-        if (!wait_for_pending_save_during_loading(
-                loading_title) ||
-            !wait_for_pending_world_release_during_loading(
-                loading_title)) {
-            loading_active_ = false;
-            backrooms_level_transition_in_progress_ =
-                false;
-            SDL_SetWindowTitle(
-                window_,
-                kGameWindowTitle.data());
-            return false;
-        }
-
-        const auto seed = world_.seed();
-        const auto stream_radius =
-            world_.stream_radius();
-        const auto generation_version =
-            world_.generation_version();
-        const auto visual_pipeline =
-            world_.visual_pipeline();
-        World prepared_world(
-            seed,
-            stream_radius,
-            WorldGenerationProfile::Backrooms,
-            generation_version,
-            visual_pipeline,
-            destination_level);
-        const BackroomsGenerator destination_generator {
-            seed,
-            destination_level,
-        };
-
-        auto landing_block = destination_landing;
-        if (!is_world_y_valid(landing_block.y) ||
-            !destination_generator.is_walkable(
-                landing_block.x,
-                landing_block.z)) {
-            landing_block =
-                destination_generator.spawn_block();
-        }
-        auto landing_position = glm::vec3 {
-            static_cast<float>(landing_block.x) +
-                0.5F,
-            static_cast<float>(landing_block.y) +
-                0.001F,
-            static_cast<float>(landing_block.z) +
-                0.5F,
-        };
-
-        auto prepared_player_state =
-            player_.state();
-        prepared_player_state.position =
-            landing_position;
-        prepared_player_state.velocity = {};
-        prepared_player_state.yaw_degrees =
-            std::isfinite(destination_yaw_degrees)
-                ? destination_yaw_degrees
-                : prepared_player_state.yaw_degrees;
-        prepared_player_state.body_yaw_degrees =
-            prepared_player_state.yaw_degrees;
-        sanitize_backrooms_player_state(
-            prepared_player_state,
-            seed,
-            destination_level);
-        landing_position =
-            prepared_player_state.position;
-
-        update_loading_screen(
-            loading_title,
-            "PRECHARGEMENT DES SALLES",
-            LoadingPhase::Preparation,
-            0.85F,
-            true);
-        if (!reset_renderer_world_resources_during_loading(
-                loading_title)) {
-            loading_active_ = false;
-            backrooms_level_transition_in_progress_ =
-                false;
-            SDL_SetWindowTitle(
-                window_,
-                kGameWindowTitle.data());
-            return false;
-        }
-        renderer_staged = true;
-        prime_world_around(
-            prepared_world,
-            landing_position,
-            loading_title,
-            "ASSEMBLAGE DU NIVEAU HORS DE VUE");
-        if (!running_) {
-            backrooms_level_transition_in_progress_ =
-                false;
-            return false;
-        }
-
-        install_prepared_world(
-            std::move(prepared_world));
-        world_committed = true;
-        player_.load_state(
-            prepared_player_state);
-        player_.set_water_movement_profile(
-            destination_level <= -2
-                ? PlayerWaterMovementProfile::Poolrooms
-                : PlayerWaterMovementProfile::Standard);
-        // Je conserve le compte à rebours et la pression de Jack entre les
-        // étages. Seuls son graphe et sa vue de l'ancien niveau sont invalidés.
-        if (backrooms_jack_.active) {
-            backrooms_jack_.active = false;
-            backrooms_jack_.phase =
-                BackroomsJackPhase::Cooldown;
-            backrooms_jack_.cooldown_seconds =
-                std::max(
-                    backrooms_jack_.cooldown_seconds,
-                    kBackroomsJackMinimumCooldownSeconds);
-            backrooms_jack_.motion_amount = 0.0F;
-            backrooms_jack_.suspicion = 0.0F;
-            backrooms_jack_.lost_sight_seconds = 0.0F;
-        }
-        backrooms_jack_.logical_level =
-            destination_level;
-        backrooms_jack_runtime_ = {};
-        backrooms_jack_last_result_ = {};
-        backrooms_jack_death_delay_seconds_ =
-            0.0F;
-        backrooms_jack_death_pending_ = false;
-        backrooms_level_transition_cooldown_seconds_ =
-            2.25F;
-        backrooms_level_transition_in_progress_ =
-            false;
-        spawn_position_ =
-            backrooms_spawn_position(
-                seed,
-                destination_level);
-        mark_session_dirty();
-
-        if (!wait_for_pending_world_release_during_loading(
-                loading_title)) {
-            loading_active_ = false;
-            SDL_SetWindowTitle(
-                window_,
-                kGameWindowTitle.data());
-            return true;
-        }
-        queue_gameplay_announcement(
-            std::string("NIVEAU ") +
-                std::to_string(destination_level),
-            destination_level <= -2
-                ? "POOLROOMS"
-                : "BUREAUX",
-            3.0F);
-        complete_loading_screen(
-            loading_title,
-            loading_detail);
-        SDL_SetWindowTitle(
-            window_,
-            kGameWindowTitle.data());
-        return true;
-    } catch (const std::exception& exception) {
-        if (renderer_staged &&
-            !world_committed) {
-            try {
-                renderer_.reset_world_resources();
-                world_.enqueue_loaded_mesh_uploads();
-                // Je garde le masque jusqu'à la restauration complète de
-                // l'ancien monde. Un échec de transition ne doit jamais rendre
-                // un écran noir puis ré-uploader les salles sous les yeux.
-                prime_world_around(
-                    world_,
-                    player_.position(),
-                    loading_title,
-                    "RESTAURATION DE L'ETAGE PRECEDENT");
-            } catch (const std::exception&
-                         recovery_exception) {
-                std::cerr
-                    << "Backrooms renderer recovery failed: "
-                    << recovery_exception.what()
-                    << std::endl;
-                // Si même le rollback ne peut être préchargé, je ferme la
-                // boucle plutôt que d'exposer un monde graphiquement incomplet.
-                running_ = false;
-            }
-        }
-        backrooms_level_transition_in_progress_ =
-            false;
-        backrooms_level_transition_cooldown_seconds_ =
-            1.0F;
-        loading_active_ = false;
-        SDL_SetWindowTitle(
-            window_,
-            kGameWindowTitle.data());
-        std::cerr
-            << "Backrooms level transition warning: "
-            << exception.what()
-            << std::endl;
-        // Après le commit, revenir "false" ferait exécuter la fin de frame
-        // avec des hypothèses de l'ancien étage. Le monde installé reste donc
-        // la réussite transactionnelle, même si la finition UI a échoué.
-        return world_committed;
     }
 }
 
@@ -14428,7 +14268,7 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
                   sea_adventure_.deck_spawn_position())
             : backrooms_mode
                   ? backrooms_spawn_position(
-                        world_.seed(),
+                        world_,
                         world_.backrooms_level())
                   : spawn_position_;
     snapshot.player_state = player_.state();
@@ -15335,10 +15175,6 @@ void Game::prepare_game_session(
     death_screen_visible_ = false;
     death_screen_.visible = false;
     death_screen_.cause = PlayerDeathCause::None;
-    backrooms_level_transition_cooldown_seconds_ =
-        0.0F;
-    backrooms_level_transition_in_progress_ =
-        false;
     reset_backrooms_jack_runtime();
     pending_fishing_ = false;
     player_musket_.reset(
@@ -15676,7 +15512,7 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
                 : options_.performance.stream_radius,
             generation_profile,
             backrooms_mode
-                ? WorldGenerationVersion::BackroomsV1
+                ? WorldGenerationVersion::BackroomsV3
                 : sea_mode
                       ? WorldGenerationVersion::LivingOceanV3
                       : WorldGenerationVersion::LegacyV1,
@@ -15758,7 +15594,7 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
                       ? backrooms_smoke_camera_pose_valid_
                             ? backrooms_smoke_camera_position_
                             : backrooms_spawn_position(
-                                  seed,
+                                  prepared_world,
                                   backrooms_level)
                       : find_initial_spawn_position(
                             prepared_world,
@@ -15768,7 +15604,9 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         prepared_player.set_fly_mode_enabled(false);
         prepared_player.set_water_movement_profile(
             backrooms_mode &&
-                    backrooms_level <= -2
+                    prepared_world.backrooms_theme_at_y(
+                        prepared_player.position().y) ==
+                        BackroomsTheme::Poolrooms
                 ? PlayerWaterMovementProfile::Poolrooms
                 : PlayerWaterMovementProfile::Standard);
         EnvironmentClock prepared_environment {};
@@ -15879,10 +15717,6 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
         environment_ = prepared_environment;
         backrooms_elapsed_seconds_ = 0.0F;
         backrooms_flashlight_ = {};
-        backrooms_level_transition_cooldown_seconds_ =
-            0.0F;
-        backrooms_level_transition_in_progress_ =
-            false;
         starting_village_enabled_ = prepared_village_enabled;
         starting_village_ = std::move(prepared_village);
         rebuild_colossal_world_protections();
@@ -16166,16 +16000,36 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
             : sea_mode
                   ? WorldGenerationProfile::OceanAdventure
                   : WorldGenerationProfile::Continental;
-    const auto expected_version =
+    const auto migrate_backrooms_to_v3 =
+        backrooms_mode &&
+        generation_profile == expected_profile &&
+        (generation_version ==
+             WorldGenerationVersion::BackroomsV1 ||
+         generation_version ==
+             WorldGenerationVersion::BackroomsV2) &&
+        snapshot.world_save_plan.backrooms_level ==
+            backrooms_level;
+    const auto runtime_generation_version =
         backrooms_mode
-            ? WorldGenerationVersion::BackroomsV1
+            ? WorldGenerationVersion::BackroomsV3
             : generation_version;
 
     if (generation_profile != expected_profile ||
         (backrooms_mode &&
-         generation_version != expected_version)) {
+         !is_backrooms_generation_version(
+             generation_version))) {
         throw std::invalid_argument(
             "Save generation profile is incompatible with its game mode");
+    }
+
+    if (migrate_backrooms_to_v3) {
+        // Je projette chaque position depuis son étage historique avant de
+        // reconstruire le monde. Les Poolrooms gagnent exactement un voxel,
+        // tandis que les bureaux conservent leur hauteur V1/V2.
+        migrate_backrooms_snapshot_to_v3(
+            snapshot,
+            generation_version,
+            backrooms_level);
     }
     auto renderer_staged = false;
     auto session_committed = false;
@@ -16194,7 +16048,7 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
                       options_.performance.stream_radius)
                 : options_.performance.stream_radius,
             generation_profile,
-            generation_version,
+            runtime_generation_version,
             options_.visual_pipeline,
             backrooms_level);
         prepared_world.begin_restore_save_plan(std::move(snapshot.world_save_plan));
@@ -16424,7 +16278,9 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         prepared_player.load_state(snapshot.player_state);
         prepared_player.set_water_movement_profile(
             backrooms_mode &&
-                    backrooms_level <= -2
+                    prepared_world.backrooms_theme_at_y(
+                        prepared_player.position().y) ==
+                        BackroomsTheme::Poolrooms
                 ? PlayerWaterMovementProfile::Poolrooms
                 : PlayerWaterMovementProfile::Standard);
         EnvironmentClock prepared_environment {};
@@ -16451,7 +16307,7 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         auto prepared_spawn =
             backrooms_mode
                 ? backrooms_spawn_position(
-                      snapshot.metadata.seed,
+                      prepared_world,
                       backrooms_level)
                 : finite_vec3_or(
                       snapshot.spawn_position,
@@ -16541,10 +16397,6 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
                 ? sanitize_backrooms_flashlight_state(
                       snapshot.backrooms_flashlight)
                 : BackroomsFlashlightState {};
-        backrooms_level_transition_cooldown_seconds_ =
-            0.0F;
-        backrooms_level_transition_in_progress_ =
-            false;
         creatures_ = std::move(prepared_creatures);
         starting_village_enabled_ = prepared_village_enabled;
         starting_village_ = std::move(prepared_village);
@@ -16635,6 +16487,22 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
             loading_active_ = false;
             SDL_SetWindowTitle(window_, kGameWindowTitle.data());
             return false;
+        }
+        if (migrate_backrooms_to_v3 &&
+            slot_index.has_value()) {
+            // Je réécris immédiatement le slot après le commit : la migration
+            // ne sera ainsi jamais rejouée au prochain lancement.
+            session_save_state_.mark_dirty();
+            save_game_to_slot(*slot_index);
+            if (!wait_for_pending_save_during_loading(
+                    loading_title)) {
+                if (!running_) {
+                    return false;
+                }
+                // Je conserve la session migrée et son état sale si le disque
+                // refuse l'écriture : le joueur pourra sécuriser le slot sans
+                // perdre le monde déjà installé.
+            }
         }
         const auto slot_refresh_begin = clock::now();
         try {
@@ -16990,7 +16858,7 @@ auto Game::start_smoke_session() -> bool {
             world_.generation_profile() !=
                 WorldGenerationProfile::Backrooms ||
             world_.generation_version() !=
-                WorldGenerationVersion::BackroomsV1 ||
+                WorldGenerationVersion::BackroomsV3 ||
             world_.backrooms_level() !=
                 options_.smoke_backrooms_level ||
             !loading_completed_ ||
@@ -17237,7 +17105,7 @@ void Game::update_smoke_player(float dt) {
             backrooms_smoke_camera_pose_valid_
                 ? backrooms_smoke_camera_position_
                 : backrooms_spawn_position(
-                      world_.seed(),
+                      world_,
                       world_.backrooms_level()),
             backrooms_smoke_camera_pose_valid_
                 ? backrooms_smoke_camera_yaw_degrees_

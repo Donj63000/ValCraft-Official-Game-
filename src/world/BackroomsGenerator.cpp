@@ -15,7 +15,6 @@ constexpr int kPortalMaximumCenter = kBackroomsModuleSize - 9;
 constexpr int kRouteHalfWidth = 2;
 constexpr int kHubHalfWidth = 4;
 constexpr int kConnectorRoomHalfWidth = 3;
-constexpr int kPoolroomsWetFloorY = kBackroomsFloorY;
 constexpr int kPoolroomsMinimumCeilingHeight = 8;
 constexpr std::uint8_t kPoolroomsShallowWaterLevel = 5U;
 constexpr int kPoolroomsBasinCellSize = 32;
@@ -160,6 +159,29 @@ constexpr int kPoolroomsRouteShoreWidth = 4;
         return BackroomsPoolSurface::Shore;
     }
     return BackroomsPoolSurface::Dry;
+}
+
+[[nodiscard]] auto poolrooms_basin_water_level(
+    int layout_seed,
+    int world_x,
+    int world_z) noexcept -> std::uint8_t {
+
+    const auto basin_cell_x =
+        floor_division(world_x, kPoolroomsBasinCellSize);
+    const auto basin_cell_z =
+        floor_division(world_z, kPoolroomsBasinCellSize);
+    const auto water_level_hash =
+        hash_position(
+            layout_seed,
+            basin_cell_x,
+            basin_cell_z,
+            0xC469A31DULL);
+
+    // Je choisis une seule hauteur pour toute la cuve : trois bassins sur
+    // quatre restent sous la margelle et le dernier affleure le sol sec.
+    return water_level_hash % 4U == 0U
+               ? kMaxWaterLevel
+               : kPoolroomsShallowWaterLevel;
 }
 
 [[nodiscard]] auto derive_layout_seed(
@@ -421,12 +443,23 @@ constexpr int kPoolroomsRouteShoreWidth = 4;
 
 } // namespace
 
+BackroomsGenerator::BackroomsGenerator() noexcept
+    : BackroomsGenerator(1337, 0) {}
+
 BackroomsGenerator::BackroomsGenerator(
     int seed,
-    int logical_level) noexcept
+    int logical_level,
+    int connector_district_modules,
+    BackroomsPoolGeometryProfile pool_geometry_profile) noexcept
     : seed_(seed),
       logical_level_(logical_level),
-      layout_seed_(derive_layout_seed(seed, logical_level)) {}
+      layout_seed_(derive_layout_seed(seed, logical_level)),
+      connector_district_modules_(
+          std::clamp(
+              connector_district_modules,
+              1,
+              kBackroomsConnectorDistrictModules)),
+      pool_geometry_profile_(pool_geometry_profile) {}
 
 auto BackroomsGenerator::seed() const noexcept -> int {
     return seed_;
@@ -434,6 +467,12 @@ auto BackroomsGenerator::seed() const noexcept -> int {
 
 auto BackroomsGenerator::logical_level() const noexcept -> int {
     return logical_level_;
+}
+
+auto BackroomsGenerator::pool_geometry_profile() const noexcept
+    -> BackroomsPoolGeometryProfile {
+
+    return pool_geometry_profile_;
 }
 
 auto BackroomsGenerator::theme() const noexcept -> BackroomsTheme {
@@ -579,7 +618,7 @@ auto BackroomsGenerator::descriptor_at(
         module_coordinate(world_z));
 }
 
-auto BackroomsGenerator::connector_for_district(
+auto BackroomsGenerator::connector_in_district(
     BackroomsConnectorDirection direction,
     int district_x,
     int district_z) const noexcept -> BackroomsLevelConnector {
@@ -603,15 +642,20 @@ auto BackroomsGenerator::connector_for_district(
             district_z,
             0xC39481F0276BAD5EULL);
 
+    const auto district_module_count =
+        static_cast<std::uint32_t>(
+            connector_district_modules_);
     const auto module_offset_x =
-        static_cast<int>(placement_hash % 4U);
+        static_cast<int>(
+            placement_hash % district_module_count);
     const auto module_offset_z =
-        static_cast<int>((placement_hash >> 2U) % 4U);
+        static_cast<int>(
+            (placement_hash >> 2U) % district_module_count);
     const auto module_x =
-        district_x * kBackroomsConnectorDistrictModules +
+        district_x * connector_district_modules_ +
         module_offset_x;
     const auto module_z =
-        district_z * kBackroomsConnectorDistrictModules +
+        district_z * connector_district_modules_ +
         module_offset_z;
     const auto local_x =
         15 + static_cast<int>((placement_hash >> 8U) % 34U);
@@ -674,8 +718,8 @@ auto BackroomsGenerator::connector_near(
     -> std::optional<BackroomsLevelConnector> {
 
     const auto radius = std::max(0, horizontal_radius);
-    constexpr auto district_world_size =
-        kBackroomsConnectorDistrictModules *
+    const auto district_world_size =
+        connector_district_modules_ *
         kBackroomsModuleSize;
     const auto center_district_x =
         floor_division(world_x, district_world_size);
@@ -699,7 +743,7 @@ auto BackroomsGenerator::connector_near(
              ++district_offset_x) {
             for (const auto direction : directions) {
                 const auto connector =
-                    connector_for_district(
+                    connector_in_district(
                         direction,
                         center_district_x + district_offset_x,
                         center_district_z + district_offset_z);
@@ -805,18 +849,18 @@ auto BackroomsGenerator::is_guaranteed_route_in_rectangle(
     const auto district_x =
         floor_division(
             descriptor.module_x,
-            kBackroomsConnectorDistrictModules);
+            connector_district_modules_);
     const auto district_z =
         floor_division(
             descriptor.module_z,
-            kBackroomsConnectorDistrictModules);
+            connector_district_modules_);
     constexpr std::array<BackroomsConnectorDirection, 2> directions {{
         BackroomsConnectorDirection::Up,
         BackroomsConnectorDirection::Down,
     }};
     for (const auto direction : directions) {
         const auto connector =
-            connector_for_district(
+            connector_in_district(
                 direction,
                 district_x,
                 district_z);
@@ -1377,10 +1421,6 @@ auto BackroomsGenerator::sample_poolrooms_column(
         pool_surface = BackroomsPoolSurface::Shore;
     }
 
-    auto wet =
-        pool_surface == BackroomsPoolSurface::Water;
-    auto floor_y = kPoolroomsWetFloorY;
-
     auto wall_block =
         to_block_id(BlockType::PoolroomsTile);
     const auto wall_variation =
@@ -1421,29 +1461,11 @@ auto BackroomsGenerator::sample_poolrooms_column(
         decoration_anchor &&
         decoration_hash % 100U < 22U) {
         wall = true;
-        wall_top_y = floor_y + 1;
+        wall_top_y = kBackroomsFloorY + 1;
         wall_block =
             decoration_hash % 3U == 0U
                 ? to_block_id(BlockType::PoolroomsPlastic)
                 : to_block_id(BlockType::PoolroomsMetal);
-    }
-
-    auto floor_block =
-        wet
-            ? to_block_id(BlockType::PoolroomsWetTile)
-            : pool_surface == BackroomsPoolSurface::Shore
-                  ? to_block_id(BlockType::PoolroomsMetal)
-                  : to_block_id(BlockType::PoolroomsTile);
-    if (pool_surface == BackroomsPoolSurface::Dry &&
-        hash_position(
-            layout_seed_,
-            floor_division(world_x, 8),
-            floor_division(world_z, 8),
-            0x4A62C1D7ULL) %
-                17U ==
-            0U) {
-        floor_block =
-            to_block_id(BlockType::PoolroomsDarkTile);
     }
 
     const auto connector =
@@ -1453,15 +1475,9 @@ auto BackroomsGenerator::sample_poolrooms_column(
             world_z,
             2);
     if (connector.has_value()) {
-        floor_y = kBackroomsFloorY;
-        wet = false;
         if (pool_surface != BackroomsPoolSurface::Dry) {
             pool_surface = BackroomsPoolSurface::Shore;
         }
-        floor_block =
-            connector->style == BackroomsConnectorStyle::Slide
-                ? to_block_id(BlockType::PoolroomsPlastic)
-                : to_block_id(BlockType::PoolroomsMetal);
     }
 
     const auto connector_structure =
@@ -1472,17 +1488,11 @@ auto BackroomsGenerator::sample_poolrooms_column(
             4);
     auto connector_arch = false;
     if (connector_structure.has_value()) {
-        wet = false;
         if (pool_surface != BackroomsPoolSurface::Dry) {
             pool_surface = BackroomsPoolSurface::Shore;
         }
         wall = false;
         wall_top_y = kBackroomsFloorY;
-        if (floor_block ==
-            to_block_id(BlockType::PoolroomsWetTile)) {
-            floor_block =
-                to_block_id(BlockType::PoolroomsMetal);
-        }
         const auto delta_x =
             world_x -
             connector_structure->trigger_block.x;
@@ -1520,7 +1530,6 @@ auto BackroomsGenerator::sample_poolrooms_column(
 
         if ((corner_post || side_rail) &&
             !guaranteed_route) {
-            wet = false;
             wall = true;
             wall_top_y =
                 kBackroomsFloorY +
@@ -1583,17 +1592,11 @@ auto BackroomsGenerator::sample_poolrooms_column(
             // Je garde tout le chemin réel au même niveau et je place la volée
             // architecturale au-dessus de la tête : aucun cube de marche ne
             // peut donc coincer le contrôleur voxel.
-            wet = false;
             if (pool_surface != BackroomsPoolSurface::Dry) {
                 pool_surface = BackroomsPoolSurface::Shore;
             }
             wall = false;
             wall_top_y = kBackroomsFloorY;
-            if (floor_block ==
-                to_block_id(BlockType::PoolroomsWetTile)) {
-                floor_block =
-                    to_block_id(BlockType::PoolroomsMetal);
-            }
         }
     }
 
@@ -1632,11 +1635,8 @@ auto BackroomsGenerator::sample_poolrooms_column(
         !guaranteed_route &&
         !connector_flight &&
         !connector_balcony) {
-        wet = false;
         if (pool_surface != BackroomsPoolSurface::Dry) {
             pool_surface = BackroomsPoolSurface::Shore;
-            floor_block =
-                to_block_id(BlockType::PoolroomsMetal);
         }
         wall = true;
         wall_top_y =
@@ -1780,14 +1780,66 @@ auto BackroomsGenerator::sample_poolrooms_column(
             BackroomsElevatedFeature::Arch;
     }
 
+    // Je fixe la géométrie seulement après avoir réservé les routes, les
+    // connecteurs et les supports. Une cellule asséchée ne peut ainsi laisser
+    // ni cuvette vide ni état d'eau résiduel.
+    const auto wet =
+        pool_surface == BackroomsPoolSurface::Water;
+    const auto recessed =
+        pool_geometry_profile_ ==
+        BackroomsPoolGeometryProfile::RecessedOneBlock;
+    const auto floor_y =
+        wet && recessed
+            ? kBackroomsFloorY - 1
+            : kBackroomsFloorY;
+    const auto water_y =
+        wet
+            ? recessed
+                  ? kBackroomsFloorY
+                  : kBackroomsFloorY + 1
+            : kWorldMinY - 1;
+
+    auto floor_block =
+        wet
+            ? to_block_id(BlockType::PoolroomsWetTile)
+            : pool_surface == BackroomsPoolSurface::Shore
+                  ? to_block_id(BlockType::PoolroomsMetal)
+                  : to_block_id(BlockType::PoolroomsTile);
+    if (pool_surface == BackroomsPoolSurface::Dry &&
+        hash_position(
+            layout_seed_,
+            floor_division(world_x, 8),
+            floor_division(world_z, 8),
+            0x4A62C1D7ULL) %
+                17U ==
+            0U) {
+        floor_block =
+            to_block_id(BlockType::PoolroomsDarkTile);
+    }
+    if (connector.has_value()) {
+        // Je conserve l'identité visuelle du palier, même lorsque celui-ci a
+        // remplacé une cellule qui appartenait initialement à un bassin.
+        floor_block =
+            connector->style == BackroomsConnectorStyle::Slide
+                ? to_block_id(BlockType::PoolroomsPlastic)
+                : to_block_id(BlockType::PoolroomsMetal);
+    }
+
+    const auto water_level =
+        wet && recessed
+            ? poolrooms_basin_water_level(
+                  layout_seed_,
+                  world_x,
+                  world_z)
+            : kPoolroomsShallowWaterLevel;
+
     return {
         .floor_y = floor_y,
         .ceiling_y = ceiling_y,
         .wall_top_y = wall_top_y,
         .overhead_bottom_y = overhead_bottom_y,
         .overhead_top_y = overhead_top_y,
-        .water_y =
-            wet ? kBackroomsFloorY + 1 : kWorldMinY - 1,
+        .water_y = water_y,
         .foundation_block =
             to_block_id(BlockType::PoolroomsDarkTile),
         .roof_block =
@@ -1799,7 +1851,7 @@ auto BackroomsGenerator::sample_poolrooms_column(
         .water_state =
             wet
                 ? make_water_state(
-                      kPoolroomsShallowWaterLevel,
+                      water_level,
                       true,
                       true)
                 : WaterState {0},

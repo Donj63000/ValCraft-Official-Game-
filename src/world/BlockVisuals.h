@@ -318,6 +318,14 @@ enum class ShipAtlasMaterial : std::uint8_t {
         return {9, kPoolroomsAtlasRow};
     case BlockType::PoolroomsFloat:
         return {10, kPoolroomsAtlasRow};
+    case BlockType::BackroomsConnectorStep:
+    case BlockType::BackroomsRampPositiveX:
+    case BlockType::BackroomsRampNegativeX:
+    case BlockType::BackroomsRampPositiveZ:
+    case BlockType::BackroomsRampNegativeZ:
+        // Je réemploie le béton Backrooms afin que les raccords restent
+        // cohérents sans ajouter de tuile ni modifier l'atlas sérialisé.
+        return {5, kBackroomsAtlasRow};
     case BlockType::Air:
     default:
         return {0, 0};
@@ -427,6 +435,11 @@ enum class ShipAtlasMaterial : std::uint8_t {
     case BlockType::PoolroomsTile:
     case BlockType::PoolroomsWetTile:
     case BlockType::PoolroomsDarkTile:
+    case BlockType::BackroomsConnectorStep:
+    case BlockType::BackroomsRampPositiveX:
+    case BlockType::BackroomsRampNegativeX:
+    case BlockType::BackroomsRampPositiveZ:
+    case BlockType::BackroomsRampNegativeZ:
         return BlockVisualMaterial::Rock;
     case BlockType::BackroomsFailedLight:
     case BlockType::PoolroomsMetal:

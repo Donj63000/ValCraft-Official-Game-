@@ -1120,7 +1120,8 @@ TEST_CASE(
   CHECK(to_block_id(BlockType::BackroomsPlant) == 62U);
   CHECK(to_block_id(BlockType::PoolroomsFloat) == 63U);
   CHECK(is_known_block_id(63U));
-  CHECK_FALSE(is_known_block_id(64U));
+  CHECK(is_known_block_id(64U));
+  CHECK_FALSE(is_known_block_id(69U));
 
   const auto light =
       block_properties(to_block_id(BlockType::PoolroomsLight));
@@ -2892,7 +2893,8 @@ TEST_CASE(
   for (const auto &viewport_size : viewports) {
     const auto layout = make_progression_ability_hud_layout(viewport_size[0U],
                                                             viewport_size[1U]);
-    CAPTURE(viewport_size[0U], viewport_size[1U]);
+    CAPTURE(viewport_size[0U]);
+    CAPTURE(viewport_size[1U]);
     REQUIRE(layout.valid());
     const auto viewport = ProgressionMenuRect{
         0.0F,

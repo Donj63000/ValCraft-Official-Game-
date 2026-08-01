@@ -238,6 +238,8 @@ public:
     // temporaires sur les frontieres de streaming.
     [[nodiscard]] auto peek_block_or_generated(int x, int y, int z) const -> BlockId;
     [[nodiscard]] auto peek_water_level_or_generated(int x, int y, int z) const -> std::uint8_t;
+    [[nodiscard]] auto peek_column_or_generated(int x, int z) const
+        -> WorldGeneratedColumn;
     [[nodiscard]] auto get_sky_light(int x, int y, int z) const -> std::uint8_t;
     [[nodiscard]] auto get_block_light(int x, int y, int z) const -> std::uint8_t;
     void set_block(int x, int y, int z, BlockId block_id);
@@ -318,6 +320,11 @@ public:
     [[nodiscard]] auto generation_profile() const noexcept -> WorldGenerationProfile;
     [[nodiscard]] auto generation_version() const noexcept -> WorldGenerationVersion;
     [[nodiscard]] auto backrooms_level() const noexcept -> int;
+    [[nodiscard]] auto backrooms_level_at_y(float world_y) const noexcept -> int;
+    [[nodiscard]] auto backrooms_theme_at_y(float world_y) const noexcept
+        -> BackroomsTheme;
+    [[nodiscard]] auto backrooms_spawn_block(int logical_level) const noexcept
+        -> BlockCoord;
     [[nodiscard]] auto visual_pipeline() const noexcept -> VisualPipeline;
     void set_visual_pipeline(VisualPipeline visual_pipeline);
     [[nodiscard]] auto stream_radius() const noexcept -> int;

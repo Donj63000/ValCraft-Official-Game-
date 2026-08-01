@@ -2533,7 +2533,7 @@ TEST_CASE("l'echine du leviathan est une arme unique non placable hors statistiq
         is_known_block_id(
             static_cast<BlockId>(
                 to_block_id(
-                    BlockType::PoolroomsFloat) +
+                    BlockType::BackroomsRampNegativeZ) +
                 1U)));
 
     const auto weapon =
@@ -4326,6 +4326,228 @@ TEST_CASE("save version 18 restaure le niveau Poolrooms et refuse un plan d'un a
             plan),
         std::runtime_error);
     std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("les sauvegardes Backrooms V3 font un round trip et rejettent une version future") {
+    const auto unique_suffix =
+        std::to_string(
+            static_cast<unsigned long long>(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count()));
+    const auto save_root =
+        std::filesystem::temp_directory_path() /
+        ("valcraft-save-backrooms-v3-" +
+         unique_suffix);
+    std::filesystem::remove_all(save_root);
+
+    SaveGameSnapshot snapshot {};
+    snapshot.metadata.seed = 91'337;
+    snapshot.metadata.game_mode =
+        GameMode::Backrooms;
+    snapshot.backrooms_level = -23;
+    snapshot.spawn_position = {4.5F, 42.001F, -6.5F};
+    snapshot.player_state.position = {11.5F, 42.001F, 3.5F};
+    snapshot.backrooms_jack.logical_level = -23;
+    snapshot.backrooms_jack.position = {-8.5F, 42.001F, 7.5F};
+
+    WorldSavePlan plan {};
+    plan.seed = snapshot.metadata.seed;
+    plan.generation_profile =
+        WorldGenerationProfile::Backrooms;
+    plan.generation_version =
+        WorldGenerationVersion::BackroomsV3;
+    plan.backrooms_level = snapshot.backrooms_level;
+    write_save_slot(
+        save_root,
+        0U,
+        snapshot,
+        plan);
+
+    const auto loaded =
+        load_save_slot(save_root, 0U);
+    REQUIRE(loaded.has_value());
+    CHECK(
+        loaded->world_save_plan.generation_version ==
+        WorldGenerationVersion::BackroomsV3);
+    CHECK(
+        loaded->world_save_plan.backrooms_level ==
+        snapshot.backrooms_level);
+    CHECK(
+        loaded->player_state.position.y ==
+        doctest::Approx(snapshot.player_state.position.y));
+    CHECK(
+        loaded->backrooms_jack.position.y ==
+        doctest::Approx(snapshot.backrooms_jack.position.y));
+
+    plan.generation_version =
+        WorldGenerationVersion::BackroomsV2;
+    write_save_slot(
+        save_root,
+        2U,
+        snapshot,
+        plan);
+    const auto loaded_v2 =
+        load_save_slot(save_root, 2U);
+    REQUIRE(loaded_v2.has_value());
+    CHECK(
+        loaded_v2->world_save_plan.generation_version ==
+        WorldGenerationVersion::BackroomsV2);
+    plan.generation_version =
+        WorldGenerationVersion::BackroomsV3;
+
+    // Je forge uniquement l'identifiant de génération pour vérifier que le
+    // lecteur refuse une géographie inconnue sans interpréter son payload.
+    write_save_slot(
+        save_root,
+        1U,
+        snapshot,
+        plan);
+    overwrite_save_generation_version(
+        save_slot_file_path(save_root, 1U),
+        static_cast<WorldGenerationVersion>(7U));
+    CHECK_FALSE(
+        load_save_slot(save_root, 1U)
+            .has_value());
+
+    std::filesystem::remove_all(save_root);
+}
+
+TEST_CASE("la migration Backrooms V1 V2 vide les chunks et projette toutes les positions persistantes en V3") {
+    constexpr auto seed = 74'021;
+    constexpr auto anchor = 0;
+    const BackroomsSpatialStack legacy_stack(
+        seed,
+        anchor,
+        BackroomsSpatialProfile::LegacyV2);
+    const auto pool_spawn = legacy_stack.spawn_block(-2);
+    const auto office_spawn = legacy_stack.spawn_block(-1);
+    const auto position_for =
+        [](const BlockCoord& block) noexcept {
+            return glm::vec3 {
+                static_cast<float>(block.x) + 0.5F,
+                static_cast<float>(block.y) + 0.001F,
+                static_cast<float>(block.z) + 0.5F,
+            };
+        };
+    const auto legacy_pool_position = position_for(pool_spawn);
+    const auto legacy_office_position = position_for(office_spawn);
+
+    SaveGameSnapshot v2 {};
+    v2.metadata.seed = seed;
+    v2.metadata.game_mode = GameMode::Backrooms;
+    v2.metadata.modified_chunk_count = 7U;
+    v2.backrooms_level = anchor;
+    v2.spawn_position = legacy_office_position;
+    v2.player_state.position = legacy_pool_position;
+    v2.player_state.fall_start_y = legacy_pool_position.y + 12.0F;
+    v2.backrooms_jack.position = legacy_pool_position;
+    v2.backrooms_jack.last_seen_player_position =
+        legacy_office_position;
+    v2.backrooms_jack.previous_player_position =
+        legacy_pool_position;
+    v2.world_save_plan.seed = seed;
+    v2.world_save_plan.generation_profile =
+        WorldGenerationProfile::Backrooms;
+    v2.world_save_plan.generation_version =
+        WorldGenerationVersion::BackroomsV2;
+    v2.world_save_plan.backrooms_level = anchor;
+    WorldSavePlanChunk modified_chunk {};
+    modified_chunk.coord = {3, -4};
+    modified_chunk.sparse_cells.push_back({
+        0U,
+        to_block_id(BlockType::PoolroomsTile),
+        WaterState {0},
+    });
+    v2.world_save_plan.chunks.push_back(
+        std::move(modified_chunk));
+
+    migrate_backrooms_snapshot_to_v3(
+        v2,
+        WorldGenerationVersion::BackroomsV2,
+        anchor);
+
+    CHECK(
+        v2.world_save_plan.generation_version ==
+        WorldGenerationVersion::BackroomsV3);
+    CHECK(v2.world_save_plan.chunks.empty());
+    CHECK(v2.metadata.modified_chunk_count == 0U);
+    CHECK(
+        v2.spawn_position.y ==
+        doctest::Approx(legacy_office_position.y));
+    CHECK(
+        v2.player_state.position.y ==
+        doctest::Approx(legacy_pool_position.y + 1.0F));
+    CHECK(
+        v2.player_state.fall_start_y ==
+        doctest::Approx(v2.player_state.position.y));
+    CHECK(
+        v2.backrooms_jack.position.y ==
+        doctest::Approx(legacy_pool_position.y + 1.0F));
+    CHECK(
+        v2.backrooms_jack.last_seen_player_position.y ==
+        doctest::Approx(legacy_office_position.y));
+    CHECK(
+        v2.backrooms_jack.previous_player_position.y ==
+        doctest::Approx(legacy_pool_position.y + 1.0F));
+    CHECK(v2.player_state.position.x == legacy_pool_position.x);
+    CHECK(v2.player_state.position.z == legacy_pool_position.z);
+    const BackroomsSpatialStack migrated_stack(
+        seed,
+        anchor,
+        BackroomsSpatialProfile::RecessedPoolroomsV3);
+    CHECK(
+        migrated_stack.has_body_clearance(
+            v2.player_state.position.x,
+            v2.player_state.position.y,
+            v2.player_state.position.z,
+            3,
+            0.30F));
+    CHECK(
+        migrated_stack.has_body_clearance(
+            v2.backrooms_jack.position.x,
+            v2.backrooms_jack.position.y,
+            v2.backrooms_jack.position.z,
+            4,
+            0.42F));
+
+    constexpr auto v1_level = -23;
+    const BackroomsGenerator v1_generator(seed, v1_level);
+    const auto v1_spawn = v1_generator.spawn_block();
+    SaveGameSnapshot v1 {};
+    v1.metadata.seed = seed;
+    v1.metadata.game_mode = GameMode::Backrooms;
+    v1.backrooms_level = v1_level;
+    v1.player_state.position = position_for(v1_spawn);
+    v1.spawn_position = v1.player_state.position;
+    v1.backrooms_jack.position = v1.player_state.position;
+    v1.backrooms_jack.last_seen_player_position =
+        v1.player_state.position;
+    v1.backrooms_jack.previous_player_position =
+        v1.player_state.position;
+    v1.world_save_plan.generation_profile =
+        WorldGenerationProfile::Backrooms;
+    v1.world_save_plan.generation_version =
+        WorldGenerationVersion::BackroomsV1;
+    v1.world_save_plan.backrooms_level = v1_level;
+    const auto historical_y = v1.player_state.position.y;
+
+    migrate_backrooms_snapshot_to_v3(
+        v1,
+        WorldGenerationVersion::BackroomsV1,
+        v1_level);
+    CHECK(
+        v1.world_save_plan.generation_version ==
+        WorldGenerationVersion::BackroomsV3);
+    CHECK(
+        v1.player_state.position.y ==
+        doctest::Approx(historical_y + 1.0F));
+    CHECK(
+        v1.spawn_position.y ==
+        doctest::Approx(historical_y + 1.0F));
+    CHECK(
+        v1.backrooms_jack.position.y ==
+        doctest::Approx(historical_y + 1.0F));
 }
 
 TEST_CASE("save game scanning and loading preserve slot metadata and payloads") {

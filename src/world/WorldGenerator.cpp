@@ -240,6 +240,62 @@ auto make_noise(int seed, FastNoiseLite::NoiseType type, float frequency) -> std
 
 } // namespace
 
+auto backrooms_saved_logical_level_at_y(
+    int seed,
+    int anchor_level,
+    WorldGenerationVersion generation_version,
+    float world_y) noexcept -> int {
+    if (!uses_backrooms_spatial_stack(generation_version)) {
+        return anchor_level;
+    }
+    const BackroomsSpatialStack stack(
+        seed,
+        anchor_level,
+        backrooms_spatial_profile_for_version(generation_version));
+    return stack.logical_level_at_y(world_y);
+}
+
+auto backrooms_v3_position_delta_y(
+    int seed,
+    int anchor_level,
+    WorldGenerationVersion source_version,
+    float world_y) noexcept -> int {
+    if (source_version == WorldGenerationVersion::BackroomsV3 ||
+        !is_backrooms_generation_version(source_version)) {
+        return 0;
+    }
+
+    const auto logical_level =
+        backrooms_saved_logical_level_at_y(
+            seed,
+            anchor_level,
+            source_version,
+            world_y);
+    const BackroomsSpatialStack target_stack(
+        seed,
+        anchor_level,
+        BackroomsSpatialProfile::RecessedPoolroomsV3);
+    const auto target =
+        target_stack.placement_for_level(logical_level);
+    if (!target.has_value()) {
+        return 0;
+    }
+
+    if (source_version == WorldGenerationVersion::BackroomsV1) {
+        return target->floor_y - kBackroomsFloorY;
+    }
+
+    const BackroomsSpatialStack source_stack(
+        seed,
+        anchor_level,
+        BackroomsSpatialProfile::LegacyV2);
+    const auto source =
+        source_stack.placement_for_level(logical_level);
+    return source.has_value()
+               ? target->floor_y - source->floor_y
+               : 0;
+}
+
 WorldGenerator::WorldGenerator(int seed,
                                WorldGenerationProfile profile,
                                WorldGenerationVersion generation_version,
@@ -249,6 +305,11 @@ WorldGenerator::WorldGenerator(int seed,
       generation_version_(resolve_world_generation_version(profile, generation_version)),
       logical_level_(logical_level),
       backrooms_generator_(seed, logical_level),
+      backrooms_spatial_stack_(
+          seed,
+          logical_level,
+          backrooms_spatial_profile_for_version(
+              generation_version_)),
       terrain_noise_(make_noise(seed, FastNoiseLite::NoiseType_OpenSimplex2, 0.0065F)),
       detail_noise_(make_noise(seed + 101, FastNoiseLite::NoiseType_Perlin, 0.018F)),
       temperature_noise_(make_noise(seed + 202, FastNoiseLite::NoiseType_OpenSimplex2, 0.0021F)),
@@ -263,7 +324,9 @@ WorldGenerator::WorldGenerator(int seed,
     if (generation_version_ != WorldGenerationVersion::LegacyV1 &&
         generation_version_ != WorldGenerationVersion::SparseArchipelagoV2 &&
         generation_version_ != WorldGenerationVersion::LivingOceanV3 &&
-        generation_version_ != WorldGenerationVersion::BackroomsV1) {
+        generation_version_ != WorldGenerationVersion::BackroomsV1 &&
+        generation_version_ != WorldGenerationVersion::BackroomsV2 &&
+        generation_version_ != WorldGenerationVersion::BackroomsV3) {
         throw std::invalid_argument("Unknown world generation version");
     }
 
@@ -276,7 +339,8 @@ WorldGenerator::WorldGenerator(int seed,
                    generation_version_ == WorldGenerationVersion::SparseArchipelagoV2 ||
                    generation_version_ == WorldGenerationVersion::LivingOceanV3;
         case WorldGenerationProfile::Backrooms:
-            return generation_version_ == WorldGenerationVersion::BackroomsV1;
+            return is_backrooms_generation_version(
+                generation_version_);
         default:
             return false;
         }
@@ -325,6 +389,38 @@ void WorldGenerator::advance_chunk_generation(ChunkGenerationState& state, std::
         const auto world_z = base_world_z + local_z;
 
         if (profile_ == WorldGenerationProfile::Backrooms) {
+            if (uses_backrooms_spatial_stack(
+                    generation_version_)) {
+                const auto column =
+                    backrooms_spatial_stack_.rasterize_column(
+                        world_x,
+                        world_z);
+                for (int y = kWorldMinY;
+                     y <= kWorldMaxY;
+                     ++y) {
+                    const auto index =
+                        static_cast<std::size_t>(y);
+                    if (column.blocks[index] !=
+                        to_block_id(BlockType::Air)) {
+                        state.chunk.set_local(
+                            local_x,
+                            y,
+                            local_z,
+                            column.blocks[index]);
+                    }
+                    if (column.water[index] != 0U) {
+                        state.chunk.set_water_state_local(
+                            local_x,
+                            y,
+                            local_z,
+                            column.water[index]);
+                    }
+                }
+
+                ++state.next_column;
+                ++processed_columns;
+                continue;
+            }
             const auto column =
                 backrooms_generator_.sample_column(world_x, world_z);
 
@@ -497,6 +593,38 @@ auto WorldGenerator::backrooms_level() const noexcept -> int {
     return logical_level_;
 }
 
+auto WorldGenerator::backrooms_level_at_y(
+    float world_y) const noexcept -> int {
+    return profile_ == WorldGenerationProfile::Backrooms &&
+                   uses_backrooms_spatial_stack(
+                       generation_version_)
+               ? backrooms_spatial_stack_.logical_level_at_y(
+                     world_y)
+               : logical_level_;
+}
+
+auto WorldGenerator::backrooms_theme_at_y(
+    float world_y) const noexcept -> BackroomsTheme {
+    if (profile_ == WorldGenerationProfile::Backrooms &&
+        uses_backrooms_spatial_stack(
+            generation_version_)) {
+        return backrooms_spatial_stack_.theme_at_y(
+            world_y);
+    }
+    return backrooms_generator_.theme();
+}
+
+auto WorldGenerator::backrooms_spawn_block(
+    int logical_level) const noexcept -> BlockCoord {
+    if (profile_ == WorldGenerationProfile::Backrooms &&
+        uses_backrooms_spatial_stack(
+            generation_version_)) {
+        return backrooms_spatial_stack_.spawn_block(
+            logical_level);
+    }
+    return backrooms_generator_.spawn_block();
+}
+
 auto WorldGenerator::biome_at(int world_x, int world_z) const noexcept -> BiomeType {
     return sample_column(world_x, world_z).biome;
 }
@@ -516,7 +644,16 @@ auto WorldGenerator::sample_block(int world_x, int y, int world_z) const noexcep
         return to_block_id(BlockType::Air);
     }
     if (profile_ == WorldGenerationProfile::Backrooms) {
-        return backrooms_generator_.sample_block(world_x, y, world_z);
+        return uses_backrooms_spatial_stack(
+                   generation_version_)
+                   ? backrooms_spatial_stack_.sample_block(
+                         world_x,
+                         y,
+                         world_z)
+                   : backrooms_generator_.sample_block(
+                         world_x,
+                         y,
+                         world_z);
     }
 
     const auto column = sample_column(world_x, world_z);
@@ -528,10 +665,16 @@ auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const n
         return 0;
     }
     if (profile_ == WorldGenerationProfile::Backrooms) {
-        return backrooms_generator_.sample_water_state(
-            world_x,
-            y,
-            world_z);
+        return uses_backrooms_spatial_stack(
+                   generation_version_)
+                   ? backrooms_spatial_stack_.sample_water_state(
+                         world_x,
+                         y,
+                         world_z)
+                   : backrooms_generator_.sample_water_state(
+                         world_x,
+                         y,
+                         world_z);
     }
 
     const auto column = sample_column(world_x, world_z);
@@ -541,8 +684,85 @@ auto WorldGenerator::sample_water_state(int world_x, int y, int world_z) const n
     return 0;
 }
 
+auto WorldGenerator::sample_generated_column(
+    int world_x,
+    int world_z) const noexcept -> WorldGeneratedColumn {
+    WorldGeneratedColumn result {};
+    result.blocks.fill(to_block_id(BlockType::Air));
+    result.water_state.fill(WaterState {0});
+
+    if (profile_ == WorldGenerationProfile::Backrooms &&
+        uses_backrooms_spatial_stack(generation_version_)) {
+        const auto spatial_column =
+            backrooms_spatial_stack_.rasterize_column(
+                world_x,
+                world_z);
+        result.blocks = spatial_column.blocks;
+        result.water_state = spatial_column.water;
+        return result;
+    }
+
+    if (profile_ == WorldGenerationProfile::Backrooms) {
+        // Je conserve V1 bit à bit : ce chemin de compatibilité est rare et
+        // privilégie l'identité historique à une optimisation spécifique.
+        for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+            const auto index = static_cast<std::size_t>(y);
+            result.blocks[index] =
+                backrooms_generator_.sample_block(
+                    world_x,
+                    y,
+                    world_z);
+            result.water_state[index] =
+                backrooms_generator_.sample_water_state(
+                    world_x,
+                    y,
+                    world_z);
+        }
+        return result;
+    }
+
+    const auto column = sample_column(world_x, world_z);
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        const auto index = static_cast<std::size_t>(y);
+        result.blocks[index] =
+            choose_terrain_block(
+                column,
+                world_x,
+                y,
+                world_z);
+        if (column.water_level > column.surface_height &&
+            y > column.surface_height &&
+            y <= column.water_level) {
+            result.water_state[index] =
+                make_water_state(
+                    kMaxWaterLevel,
+                    true,
+                    true);
+        }
+    }
+    return result;
+}
+
 auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> TerrainColumnSample {
     if (profile_ == WorldGenerationProfile::Backrooms) {
+        if (uses_backrooms_spatial_stack(
+                generation_version_)) {
+            const auto spawn =
+                backrooms_spatial_stack_.spawn_block(
+                    logical_level_);
+            TerrainColumnSample sample {};
+            sample.biome = BiomeType::Meadow;
+            sample.surface_height = spawn.y - 1;
+            sample.water_level = kWorldMinY - 1;
+            sample.surface_block =
+                backrooms_spatial_stack_.sample_block(
+                    world_x,
+                    sample.surface_height,
+                    world_z);
+            sample.filler_block =
+                to_block_id(BlockType::BackroomsConcrete);
+            return sample;
+        }
         const auto backrooms_column =
             backrooms_generator_.sample_column(world_x, world_z);
         TerrainColumnSample sample {};

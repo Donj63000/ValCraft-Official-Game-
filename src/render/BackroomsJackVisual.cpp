@@ -546,7 +546,10 @@ void append_torso_and_coat(
             parts,
             upper_root,
             glm::vec3 {
-                -0.075F + coat_sway * (0.12F + index * 0.015F),
+                -0.075F +
+                    coat_sway *
+                        (0.12F +
+                         static_cast<float>(index) * 0.015F),
                 1.17F - length * 0.12F,
                 kTailOffsets[index],
             },

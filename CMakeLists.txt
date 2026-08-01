@@ -218,6 +218,7 @@ add_library(valcraft_core
     src/creatures/legendary/LegendaryEnemySystem.cpp
     src/world/Chunk.cpp
     src/world/BackroomsGenerator.cpp
+    src/world/BackroomsSpatialStack.cpp
     src/world/BlockVisuals.cpp
     src/world/World.cpp
     src/world/WorldGenerator.cpp
@@ -398,6 +399,8 @@ add_executable(valcraft_tests
     tests/BackroomsJackScreamerTests.cpp
     tests/BackroomsJackTests.cpp
     tests/BackroomsJackVisualTests.cpp
+    tests/BackroomsConnectorBlockTests.cpp
+    tests/BackroomsSpatialStackTests.cpp
     tests/BackroomsLevelTests.cpp
     tests/BackroomsGeneratorTests.cpp
     tests/BackroomsVisibilityTests.cpp

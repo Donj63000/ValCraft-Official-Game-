@@ -528,6 +528,7 @@ private:
     [[nodiscard]] auto front_end_visible() const noexcept -> bool;
     [[nodiscard]] auto gameplay_interaction_blocked() const noexcept -> bool;
     [[nodiscard]] auto backrooms_active() const noexcept -> bool;
+    [[nodiscard]] auto current_backrooms_level() const noexcept -> int;
     [[nodiscard]] auto session_backrooms_supports_jack() const noexcept
         -> bool;
     [[nodiscard]] auto backrooms_jack_jumpscare_active() const noexcept
@@ -535,11 +536,6 @@ private:
     [[nodiscard]] auto current_environment_state() const -> EnvironmentState;
     void reset_backrooms_jack_runtime() noexcept;
     void update_backrooms_simulation(float dt);
-    [[nodiscard]] auto try_backrooms_level_transition() -> bool;
-    [[nodiscard]] auto transition_backrooms_level(
-        int destination_level,
-        const BlockCoord& destination_landing,
-        float destination_yaw_degrees) -> bool;
     [[nodiscard]] auto render_player() const noexcept -> const PlayerController&;
     [[nodiscard]] auto streaming_focus_position() const noexcept -> glm::vec3;
     [[nodiscard]] auto current_renderer_options() const noexcept -> RendererOptions;
@@ -787,10 +783,6 @@ private:
         backrooms_jack_last_result_ {};
     float backrooms_jack_death_delay_seconds_ = 0.0F;
     bool backrooms_jack_death_pending_ = false;
-    // Je neutralise le palier d'arrivée quelques secondes : le volume apparié
-    // ne peut pas renvoyer immédiatement le joueur vers l'étage précédent.
-    float backrooms_level_transition_cooldown_seconds_ = 0.0F;
-    bool backrooms_level_transition_in_progress_ = false;
     float menu_preview_time_of_day_ = 8.25F;
     float preview_orbit_radians_ = 0.0F;
     bool has_active_session_ = false;

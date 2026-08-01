@@ -82,6 +82,14 @@ enum class BlockType : BlockId {
     BackroomsChair = 61,
     BackroomsPlant = 62,
     PoolroomsFloat = 63,
+
+    // Je réserve une famille append-only aux connexions verticales : je peux
+    // ainsi faire évoluer leur géométrie sans réinterpréter une sauvegarde.
+    BackroomsConnectorStep = 64,
+    BackroomsRampPositiveX = 65,
+    BackroomsRampNegativeX = 66,
+    BackroomsRampPositiveZ = 67,
+    BackroomsRampNegativeZ = 68,
 };
 
 enum class BlockMeshType : std::uint8_t {
@@ -89,6 +97,7 @@ enum class BlockMeshType : std::uint8_t {
     Torch = 1,
     Cross = 2,
     Water = 3,
+    Ramp = 4,
 };
 
 struct BlockProperties {
@@ -156,7 +165,63 @@ inline constexpr auto to_block_id(BlockType type) noexcept -> BlockId {
 }
 
 inline constexpr auto is_known_block_id(BlockId block_id) noexcept -> bool {
-    return block_id <= to_block_id(BlockType::PoolroomsFloat);
+    return block_id <= to_block_id(BlockType::BackroomsRampNegativeZ);
+}
+
+inline constexpr auto is_backrooms_connector_step(BlockId block_id) noexcept
+    -> bool {
+    return block_id == to_block_id(BlockType::BackroomsConnectorStep);
+}
+
+inline constexpr auto is_backrooms_ramp(BlockId block_id) noexcept -> bool {
+    switch (static_cast<BlockType>(block_id)) {
+    case BlockType::BackroomsRampPositiveX:
+    case BlockType::BackroomsRampNegativeX:
+    case BlockType::BackroomsRampPositiveZ:
+    case BlockType::BackroomsRampNegativeZ:
+        return true;
+    default:
+        return false;
+    }
+}
+
+inline constexpr auto backrooms_ramp_rise_direction(BlockId block_id) noexcept
+    -> BlockCoord {
+    switch (static_cast<BlockType>(block_id)) {
+    case BlockType::BackroomsRampPositiveX:
+        return {1, 0, 0};
+    case BlockType::BackroomsRampNegativeX:
+        return {-1, 0, 0};
+    case BlockType::BackroomsRampPositiveZ:
+        return {0, 0, 1};
+    case BlockType::BackroomsRampNegativeZ:
+        return {0, 0, -1};
+    default:
+        return {};
+    }
+}
+
+[[nodiscard]] inline constexpr auto backrooms_ramp_surface_height(
+    BlockId block_id,
+    float local_x,
+    float local_z) noexcept -> float {
+    // Je borne les coordonnées locales pour fournir une hauteur stable aux
+    // appels effectués exactement sur une frontière de cellule.
+    local_x = std::clamp(local_x, 0.0F, 1.0F);
+    local_z = std::clamp(local_z, 0.0F, 1.0F);
+
+    switch (static_cast<BlockType>(block_id)) {
+    case BlockType::BackroomsRampPositiveX:
+        return local_x;
+    case BlockType::BackroomsRampNegativeX:
+        return 1.0F - local_x;
+    case BlockType::BackroomsRampPositiveZ:
+        return local_z;
+    case BlockType::BackroomsRampNegativeZ:
+        return 1.0F - local_z;
+    default:
+        return 0.0F;
+    }
 }
 
 inline constexpr WaterState kWaterSourceBit = static_cast<WaterState>(1U << 7U);
@@ -569,6 +634,13 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
         return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(11)};
     case BlockType::PoolroomsLight:
         return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(14)};
+    case BlockType::BackroomsRampPositiveX:
+    case BlockType::BackroomsRampNegativeX:
+    case BlockType::BackroomsRampPositiveZ:
+    case BlockType::BackroomsRampNegativeZ:
+        // Je laisse la collision AABB désactivée : le contrôleur applique la
+        // hauteur analytique de la pente, tout en la gardant comme support.
+        return {false, false, true, false, BlockMeshType::Ramp, static_cast<std::uint8_t>(0)};
     case BlockType::BackroomsPlant:
     case BlockType::PoolroomsFloat:
         // Je réserve ces deux éléments au décor clairsemé : leur croix ne
@@ -603,6 +675,7 @@ inline constexpr auto block_properties(BlockId block_id) noexcept -> BlockProper
     case BlockType::GoldOre:
     case BlockType::DiamondOre:
     case BlockType::MetallicAlloyOre:
+    case BlockType::BackroomsConnectorStep:
     default:
         return {true, true, true, false, BlockMeshType::FullCube, static_cast<std::uint8_t>(0)};
     }
@@ -669,6 +742,12 @@ inline constexpr auto block_break_duration_seconds(BlockId block_id) noexcept ->
         return 2.08F;
     case BlockType::MetallicAlloyOre:
         return 2.38F;
+    case BlockType::BackroomsConnectorStep:
+    case BlockType::BackroomsRampPositiveX:
+    case BlockType::BackroomsRampNegativeX:
+    case BlockType::BackroomsRampPositiveZ:
+    case BlockType::BackroomsRampNegativeZ:
+        return 1.30F;
     case BlockType::Sand:
         return 0.72F;
     case BlockType::Wood:

@@ -31,6 +31,7 @@ constexpr float kWadeSprintMoveSpeed = 4.8F;
 constexpr float kPoolroomsWadeSpeedMultiplier = 0.95F;
 constexpr float kWadeGravity = 18.0F;
 constexpr float kWadeJumpVelocity = 6.2F;
+constexpr float kPoolroomsWadeJumpVelocity = 6.6F;
 constexpr float kSwimMoveSpeed = 3.8F;
 constexpr float kSwimGravity = 5.5F;
 constexpr float kSwimBuoyancy = 7.0F;
@@ -65,6 +66,12 @@ constexpr float kDynamicOverlapRecoveryStep = 0.025F;
 constexpr float kDynamicOverlapRecoveryDistance = 1.50F;
 constexpr float kDynamicSupportClearanceStep = 0.025F;
 constexpr float kDynamicSupportMaximumClearance = 0.60F;
+constexpr float kBackroomsConnectorMaximumStepHeight = 1.05F;
+constexpr float kBackroomsConnectorSupportTolerance = 1.10F;
+constexpr float kBackroomsRampSupportProbeDepth = 2.0F;
+constexpr float kBackroomsConnectorCameraStepThreshold = 0.30F;
+constexpr float kBackroomsConnectorCameraMaximumLag = 1.10F;
+constexpr float kBackroomsConnectorCameraRecoverySharpness = 13.0F;
 constexpr float kBodyYawMoveThreshold = 0.15F;
 constexpr float kBodyYawMoveTurnSpeed = 540.0F;
 constexpr float kBodyYawIdleTurnSpeed = 360.0F;
@@ -560,7 +567,14 @@ void PlayerController::update(
         state_.velocity.z = wish.z * move_speed;
         state_.velocity.y -= kWadeGravity * clamped_dt;
         if (can_ground_jump()) {
-            state_.velocity.y = kWadeJumpVelocity;
+            // Dans les bassins encaisses, je garde une marge suffisante pour
+            // franchir proprement la rive haute d'un voxel sans escalade ni
+            // teleportation. Les autres eaux conservent leur saut historique.
+            state_.velocity.y =
+                water_movement_profile_ ==
+                        PlayerWaterMovementProfile::Poolrooms
+                    ? kPoolroomsWadeJumpVelocity
+                    : kWadeJumpVelocity;
             consume_jump_assist();
         }
     } else {
@@ -741,6 +755,34 @@ void PlayerController::update(
             }
         }
     }
+    const auto supported_by_backrooms_connector =
+        resolve_backrooms_connector_support(
+            world,
+            was_on_ground);
+    const auto connector_vertical_delta =
+        state_.position.y - start_position.y;
+    if (world.generation_profile() ==
+            WorldGenerationProfile::Backrooms &&
+        was_on_ground &&
+        supported_by_backrooms_connector &&
+        std::abs(connector_vertical_delta) >
+            kBackroomsConnectorCameraStepThreshold) {
+        // Je laisse les pieds suivre immédiatement la vraie marche dans les
+        // deux sens, puis je résorbe seulement le retard visuel de l'œil. La
+        // garde au sol exclut les chutes et les réceptions accidentelles.
+        connector_camera_offset_y_ =
+            std::clamp(
+                connector_camera_offset_y_ -
+                    connector_vertical_delta,
+                -kBackroomsConnectorCameraMaximumLag,
+                kBackroomsConnectorCameraMaximumLag);
+    }
+    connector_camera_offset_y_ =
+        damp_towards(
+            connector_camera_offset_y_,
+            0.0F,
+            kBackroomsConnectorCameraRecoverySharpness,
+            clamped_dt);
     const auto horizontal_displacement = glm::vec2 {
         state_.position.x - start_position.x,
         state_.position.z - start_position.z,
@@ -755,7 +797,8 @@ void PlayerController::update(
     auto landed_in_water = false;
 
     if (!state_.fly_mode) {
-        state_.on_ground = collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F}) ||
+        state_.on_ground = supported_by_backrooms_connector ||
+                           collides_at(world, state_.position + glm::vec3 {0.0F, -0.05F, 0.0F}) ||
                            standing_on_dynamic_obstacle(state_.position);
         if (state_.on_ground) {
             ground_coyote_timer_ = kJumpCoyoteSeconds;
@@ -783,7 +826,13 @@ void PlayerController::update(
         }
         if (state_.on_ground && has_buffered_jump() && !water_contact_after_move.swimming &&
             !dynamic_climb_jump_locked_) {
-            state_.velocity.y = water_contact_after_move.feet_in_water ? kWadeJumpVelocity : kJumpVelocity;
+            state_.velocity.y =
+                water_contact_after_move.feet_in_water
+                    ? (water_movement_profile_ ==
+                               PlayerWaterMovementProfile::Poolrooms
+                           ? kPoolroomsWadeJumpVelocity
+                           : kWadeJumpVelocity)
+                    : kJumpVelocity;
             state_.on_ground = false;
             state_.fall_start_y = state_.position.y;
             consume_jump_assist();
@@ -825,7 +874,12 @@ auto PlayerController::position() const noexcept -> const glm::vec3& {
 }
 
 auto PlayerController::eye_position() const noexcept -> glm::vec3 {
-    return state_.position + glm::vec3 {0.0F, kEyeHeight, 0.0F};
+    return state_.position +
+           glm::vec3 {
+               0.0F,
+               kEyeHeight + connector_camera_offset_y_,
+               0.0F,
+           };
 }
 
 auto PlayerController::look_direction() const noexcept -> glm::vec3 {
@@ -893,6 +947,7 @@ void PlayerController::load_state(const PlayerState& state) noexcept {
     block_break_progress_ = {};
     reset_jump_assist_state();
     reset_dynamic_climb_state();
+    connector_camera_offset_y_ = 0.0F;
     state_.position = finite_vec3_or(state_.position, defaults.position);
     state_.velocity = finite_vec3_or(state_.velocity, {});
     state_.yaw_degrees = wrap_degrees(finite_or(state_.yaw_degrees, defaults.yaw_degrees));
@@ -928,6 +983,7 @@ void PlayerController::set_position(const glm::vec3& position) noexcept {
     block_break_progress_ = {};
     reset_jump_assist_state();
     reset_dynamic_climb_state();
+    connector_camera_offset_y_ = 0.0F;
 }
 
 void PlayerController::translate_platform_delta(const glm::vec3& delta) noexcept {
@@ -1049,6 +1105,7 @@ void PlayerController::respawn(const glm::vec3& position) noexcept {
     block_break_progress_ = {};
     reset_jump_assist_state();
     reset_dynamic_climb_state();
+    connector_camera_offset_y_ = 0.0F;
     state_.position = finite_vec3_or(position, state_.position);
     state_.health = max_health_;
     state_.fall_start_y = state_.position.y;
@@ -1634,6 +1691,227 @@ void PlayerController::update_survival_state(float dt, const WaterContactState& 
     }
 }
 
+auto PlayerController::try_step_onto_backrooms_connector(
+    const glm::vec3& horizontal_candidate,
+    const World& world) -> bool {
+    // Je conserve la memoire d'appui du tick precedent : une rampe analytique
+    // n'est volontairement pas une AABB collidable, mais elle doit autoriser
+    // la derniere marche pleine exactement comme un plancher voxel.
+    if (world.generation_profile() !=
+            WorldGenerationProfile::Backrooms ||
+        state_.fly_mode ||
+        state_.velocity.y > 0.0F ||
+        (!state_.on_ground &&
+         ground_coyote_timer_ <= 0.0F &&
+         !collides_at(
+             world,
+             state_.position +
+                 glm::vec3 {0.0F, -0.08F, 0.0F}))) {
+        return false;
+    }
+
+    constexpr auto half_width = kPlayerWidth * 0.5F;
+    const auto minimum_x =
+        static_cast<int>(
+            std::floor(
+                horizontal_candidate.x -
+                half_width));
+    const auto maximum_x =
+        static_cast<int>(
+            std::floor(
+                horizontal_candidate.x +
+                half_width -
+                kCollisionEpsilon));
+    const auto minimum_z =
+        static_cast<int>(
+            std::floor(
+                horizontal_candidate.z -
+                half_width));
+    const auto maximum_z =
+        static_cast<int>(
+            std::floor(
+                horizontal_candidate.z +
+                half_width -
+                kCollisionEpsilon));
+    const auto minimum_y =
+        static_cast<int>(
+            std::floor(state_.position.y));
+    const auto maximum_y =
+        static_cast<int>(
+            std::floor(
+                state_.position.y +
+                kBackroomsConnectorMaximumStepHeight));
+
+    auto support_height =
+        -std::numeric_limits<float>::infinity();
+    for (int y = minimum_y; y <= maximum_y; ++y) {
+        for (int z = minimum_z; z <= maximum_z; ++z) {
+            for (int x = minimum_x; x <= maximum_x; ++x) {
+                if (!is_backrooms_connector_step(
+                        player_physics_block(
+                            world,
+                            x,
+                            y,
+                            z))) {
+                    continue;
+                }
+                const auto top =
+                    static_cast<float>(y + 1) +
+                    kCollisionEpsilon;
+                const auto rise =
+                    top - state_.position.y;
+                if (rise > kCollisionEpsilon &&
+                    rise <=
+                        kBackroomsConnectorMaximumStepHeight +
+                            kCollisionEpsilon) {
+                    support_height =
+                        std::max(support_height, top);
+                }
+            }
+        }
+    }
+    if (!std::isfinite(support_height)) {
+        return false;
+    }
+
+    auto stepped_position = horizontal_candidate;
+    stepped_position.y = support_height;
+    if (collides_at(world, stepped_position)) {
+        return false;
+    }
+
+    state_.position = stepped_position;
+    state_.velocity.y = 0.0F;
+    state_.on_ground = true;
+    state_.fall_start_y = state_.position.y;
+    state_.airborne_time = 0.0F;
+    return true;
+}
+
+auto PlayerController::resolve_backrooms_connector_support(
+    const World& world,
+    bool was_grounded) -> bool {
+    if (world.generation_profile() !=
+            WorldGenerationProfile::Backrooms ||
+        state_.fly_mode ||
+        state_.velocity.y > 0.0F) {
+        return false;
+    }
+
+    auto best_height =
+        -std::numeric_limits<float>::infinity();
+    constexpr auto half_width = kPlayerWidth * 0.5F;
+    const auto minimum_x =
+        static_cast<int>(
+            std::floor(state_.position.x - half_width));
+    const auto maximum_x =
+        static_cast<int>(
+            std::floor(
+                state_.position.x + half_width -
+                kCollisionEpsilon));
+    const auto minimum_z =
+        static_cast<int>(
+            std::floor(state_.position.z - half_width));
+    const auto maximum_z =
+        static_cast<int>(
+            std::floor(
+                state_.position.z + half_width -
+                kCollisionEpsilon));
+    const auto minimum_y =
+        std::max(
+            kWorldMinY,
+            static_cast<int>(
+                std::floor(
+                    state_.position.y -
+                    kBackroomsRampSupportProbeDepth)));
+    const auto maximum_y =
+        std::min(
+            kWorldMaxY,
+            static_cast<int>(
+                std::floor(
+                    state_.position.y + 1.0F)));
+
+    for (int y = minimum_y; y <= maximum_y; ++y) {
+        for (int z = minimum_z; z <= maximum_z; ++z) {
+            for (int x = minimum_x; x <= maximum_x; ++x) {
+                const auto block =
+                    player_physics_block(
+                        world,
+                        x,
+                        y,
+                        z);
+                if (!is_backrooms_connector_step(block)) {
+                    continue;
+                }
+                const auto height =
+                    static_cast<float>(y + 1) +
+                    kCollisionEpsilon;
+                if (std::abs(
+                        height - state_.position.y) <=
+                    kBackroomsConnectorSupportTolerance) {
+                    best_height =
+                        std::max(best_height, height);
+                }
+            }
+        }
+    }
+
+    const auto ramp_x =
+        static_cast<int>(std::floor(state_.position.x));
+    const auto ramp_z =
+        static_cast<int>(std::floor(state_.position.z));
+    for (int y = minimum_y; y <= maximum_y; ++y) {
+        const auto block =
+            player_physics_block(
+                world,
+                ramp_x,
+                y,
+                ramp_z);
+        if (!is_backrooms_ramp(block)) {
+            continue;
+        }
+        const auto local_x =
+            state_.position.x -
+            static_cast<float>(ramp_x);
+        const auto local_z =
+            state_.position.z -
+            static_cast<float>(ramp_z);
+        const auto height =
+            static_cast<float>(y) +
+            backrooms_ramp_surface_height(
+                block,
+                local_x,
+                local_z) +
+            kCollisionEpsilon;
+        if (std::abs(
+                height - state_.position.y) <=
+            kBackroomsConnectorSupportTolerance) {
+            best_height =
+                std::max(best_height, height);
+        }
+    }
+
+    if (!std::isfinite(best_height)) {
+        return false;
+    }
+    const auto climbs_to_support =
+        best_height >
+        state_.position.y + kCollisionEpsilon;
+    if (climbs_to_support && !was_grounded &&
+        !state_.on_ground) {
+        return false;
+    }
+
+    auto supported_position = state_.position;
+    supported_position.y = best_height;
+    if (collides_at(world, supported_position)) {
+        return false;
+    }
+    state_.position = supported_position;
+    state_.velocity.y = 0.0F;
+    return true;
+}
+
 void PlayerController::move_axis(float delta, int axis, const World& world, const ShipEntity* dynamic_obstacle) {
     if (std::abs(delta) <= 1.0e-6F) {
         return;
@@ -1657,8 +1935,20 @@ void PlayerController::move_axis(float delta, int axis, const World& world, cons
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int z = min_z; z <= max_z; ++z) {
-                if (!is_block_collidable(player_physics_block(world, block_x, y, z))) {
+                const auto physics_block =
+                    player_physics_block(
+                        world,
+                        block_x,
+                        y,
+                        z);
+                if (!is_block_collidable(physics_block)) {
                     continue;
+                }
+                if (is_backrooms_connector_step(physics_block) &&
+                    try_step_onto_backrooms_connector(
+                        next_position,
+                        world)) {
+                    return;
                 }
                 next_position.x = delta > 0.0F
                                       ? static_cast<float>(block_x) - half_width - kCollisionEpsilon
@@ -1669,6 +1959,79 @@ void PlayerController::move_axis(float delta, int axis, const World& world, cons
             }
         }
     } else if (axis == 1) {
+        if (delta < 0.0F &&
+            world.generation_profile() ==
+                WorldGenerationProfile::Backrooms) {
+            const auto ramp_x =
+                static_cast<int>(std::floor(next_position.x));
+            const auto ramp_z =
+                static_cast<int>(std::floor(next_position.z));
+            const auto minimum_ramp_y =
+                std::max(
+                    kWorldMinY,
+                    static_cast<int>(
+                        std::floor(next_position.y)) -
+                        1);
+            const auto maximum_ramp_y =
+                std::min(
+                    kWorldMaxY,
+                    static_cast<int>(
+                        std::floor(state_.position.y)));
+            auto crossed_surface =
+                -std::numeric_limits<float>::infinity();
+            for (int ramp_y = minimum_ramp_y;
+                 ramp_y <= maximum_ramp_y;
+                 ++ramp_y) {
+                const auto ramp_block =
+                    player_physics_block(
+                        world,
+                        ramp_x,
+                        ramp_y,
+                        ramp_z);
+                if (!is_backrooms_ramp(ramp_block)) {
+                    continue;
+                }
+                const auto surface_height =
+                    static_cast<float>(ramp_y) +
+                    backrooms_ramp_surface_height(
+                        ramp_block,
+                        next_position.x -
+                            static_cast<float>(ramp_x),
+                        next_position.z -
+                            static_cast<float>(ramp_z));
+                if (state_.position.y +
+                            kCollisionEpsilon >=
+                        surface_height &&
+                    next_position.y <=
+                        surface_height +
+                            kCollisionEpsilon) {
+                    crossed_surface =
+                        std::max(
+                            crossed_surface,
+                            surface_height);
+                }
+            }
+            if (std::isfinite(crossed_surface)) {
+                auto ramp_supported_position =
+                    next_position;
+                ramp_supported_position.y =
+                    crossed_surface +
+                    kCollisionEpsilon;
+                if (!collides_at(
+                        world,
+                        ramp_supported_position)) {
+                    // Je resous le croisement pendant le balayage vertical :
+                    // meme une chute rapide ne peut traverser la pente entre
+                    // deux resolutions de support en fin de tick.
+                    state_.position =
+                        ramp_supported_position;
+                    state_.velocity.y = 0.0F;
+                    state_.on_ground = true;
+                    return;
+                }
+            }
+        }
+
         const auto block_y = delta > 0.0F
                                  ? static_cast<int>(std::floor(max_corner.y - kCollisionEpsilon))
                                  : static_cast<int>(std::floor(min_corner.y + kCollisionEpsilon));
@@ -1704,8 +2067,20 @@ void PlayerController::move_axis(float delta, int axis, const World& world, cons
 
         for (int y = min_y; y <= max_y; ++y) {
             for (int x = min_x; x <= max_x; ++x) {
-                if (!is_block_collidable(player_physics_block(world, x, y, block_z))) {
+                const auto physics_block =
+                    player_physics_block(
+                        world,
+                        x,
+                        y,
+                        block_z);
+                if (!is_block_collidable(physics_block)) {
                     continue;
+                }
+                if (is_backrooms_connector_step(physics_block) &&
+                    try_step_onto_backrooms_connector(
+                        next_position,
+                        world)) {
+                    return;
                 }
                 next_position.z = delta > 0.0F
                                       ? static_cast<float>(block_z) - half_width - kCollisionEpsilon

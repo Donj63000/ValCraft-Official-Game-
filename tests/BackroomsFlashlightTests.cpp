@@ -154,7 +154,7 @@ TEST_CASE("la batterie reste deterministe aux frequences de rendu usuelles") {
 }
 
 TEST_CASE("le HUD de batterie reste fini et dans chaque viewport") {
-    for (const auto [width, height] :
+    for (const auto& [width, height] :
          {std::pair{480, 320},
           std::pair{1280, 720},
           std::pair{2560, 1080}}) {

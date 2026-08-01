@@ -119,6 +119,13 @@ struct SaveGameSnapshot {
     std::int32_t backrooms_level = 0;
 };
 
+// Je garde cette migration pure et testable avant l'installation du monde :
+// le slot historique ne peut ainsi contaminer ni le streaming ni le runtime.
+void migrate_backrooms_snapshot_to_v3(
+    SaveGameSnapshot& snapshot,
+    WorldGenerationVersion source_version,
+    int logical_level) noexcept;
+
 enum class SaveLoadPhase : std::uint8_t {
     OpeningFile,
     ReadingMetadata,

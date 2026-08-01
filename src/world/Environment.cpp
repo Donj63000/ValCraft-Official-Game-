@@ -627,10 +627,11 @@ auto make_backrooms_environment_state(
                 world_coordinate - module_floor * kModuleSize;
             const auto neighbour_weight =
                 [](double boundary_distance) noexcept {
-                    constexpr auto kBlendRadius = 4.0;
+                    constexpr auto kNeighbourBlendRadius = 4.0;
                     const auto normalized =
                         std::clamp(
-                            boundary_distance / kBlendRadius,
+                            boundary_distance /
+                                kNeighbourBlendRadius,
                             0.0,
                             1.0);
                     const auto eased =

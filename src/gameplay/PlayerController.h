@@ -227,6 +227,12 @@ private:
     void update_survival_state(float dt, const WaterContactState& water_contact);
     void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
     void move_axis(float delta, int axis, const World& world, const ShipEntity* dynamic_obstacle);
+    [[nodiscard]] auto try_step_onto_backrooms_connector(
+        const glm::vec3& horizontal_candidate,
+        const World& world) -> bool;
+    [[nodiscard]] auto resolve_backrooms_connector_support(
+        const World& world,
+        bool was_grounded) -> bool;
     auto apply_damage(
         float amount,
         PlayerDeathCause cause,
@@ -273,6 +279,9 @@ private:
     const ShipEntity* climbed_dynamic_obstacle_ = nullptr;
     bool dynamic_climb_regrab_locked_ = false;
     bool dynamic_climb_jump_locked_ = false;
+    // Je lisse uniquement la vue après une contremarche parcourue au sol dans
+    // les deux sens. Position, collisions et sauvegarde restent exactes.
+    float connector_camera_offset_y_ = 0.0F;
     static constexpr float kPlayerWidth = 0.6F;
     static constexpr float kPlayerHeight = 1.8F;
     static constexpr float kEyeHeight = 1.62F;

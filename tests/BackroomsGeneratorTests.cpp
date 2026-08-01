@@ -64,7 +64,7 @@ auto reachable_cells(
         const auto [x, z] = pending.front();
         pending.pop();
 
-        for (const auto [dx, dz] : directions) {
+        for (const auto& [dx, dz] : directions) {
             const auto next_x = x + dx;
             const auto next_z = z + dz;
             if (next_x < 0 ||
@@ -509,7 +509,7 @@ TEST_CASE("Poolrooms mix safe shallow basins dry paths and voxel volumes") {
                     z) ==
                 0);
 
-            for (const auto [dx, dz] : neighbours) {
+            for (const auto& [dx, dz] : neighbours) {
                 const auto neighbour =
                     generator.sample_column(x + dx, z + dz);
                 if (!neighbour.wall &&
@@ -612,7 +612,7 @@ TEST_CASE("Poolrooms basins stay coherent and every water edge has a shore") {
                     current_z == first ||
                     current_z == last;
 
-                for (const auto [dx, dz] : neighbours) {
+                for (const auto& [dx, dz] : neighbours) {
                     const auto next_x = current_x + dx;
                     const auto next_z = current_z + dz;
                     if (next_x < first || next_x > last ||
@@ -654,7 +654,7 @@ TEST_CASE("Poolrooms basins stay coherent and every water edge has a shore") {
             }
             CHECK_FALSE(column.wall);
 
-            for (const auto [dx, dz] : neighbours) {
+            for (const auto& [dx, dz] : neighbours) {
                 const auto next_x = x + dx;
                 const auto next_z = z + dz;
                 if (next_x < first || next_x > last ||
@@ -713,6 +713,243 @@ TEST_CASE("Poolrooms basins stay coherent and every water edge has a shore") {
     CHECK(smallest_component >= 32);
     CHECK(shoreline_transitions > 500);
     CHECK(checkerboards == 0);
+}
+
+TEST_CASE("Poolrooms legacy geometry stays unchanged when selected explicitly") {
+    constexpr auto seed = 424242;
+    const BackroomsGenerator implicit_legacy(seed, -2);
+    const BackroomsGenerator explicit_legacy(
+        seed,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::LegacyFlat);
+
+    CHECK(
+        implicit_legacy.pool_geometry_profile() ==
+        BackroomsPoolGeometryProfile::LegacyFlat);
+    CHECK(
+        explicit_legacy.pool_geometry_profile() ==
+        BackroomsPoolGeometryProfile::LegacyFlat);
+
+    auto wet_columns = 0;
+    for (int z = -96; z <= 96; ++z) {
+        for (int x = -96; x <= 96; ++x) {
+            const auto implicit_column =
+                implicit_legacy.sample_column(x, z);
+            const auto explicit_column =
+                explicit_legacy.sample_column(x, z);
+            CHECK(implicit_column == explicit_column);
+
+            if (implicit_column.pool_surface !=
+                BackroomsPoolSurface::Water) {
+                continue;
+            }
+
+            ++wet_columns;
+            CHECK(implicit_column.floor_y == kBackroomsFloorY);
+            CHECK(
+                implicit_column.water_y ==
+                kBackroomsFloorY + 1);
+            CHECK(
+                water_level_from_state(
+                    implicit_column.water_state) ==
+                static_cast<std::uint8_t>(5));
+        }
+    }
+    CHECK(wet_columns > 1500);
+}
+
+TEST_CASE("Poolrooms recessed basins contain water between two floor levels") {
+    constexpr auto seed = 424242;
+    const BackroomsGenerator generator(
+        seed,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::RecessedOneBlock);
+    CHECK(
+        generator.pool_geometry_profile() ==
+        BackroomsPoolGeometryProfile::RecessedOneBlock);
+
+    constexpr std::array<std::pair<int, int>, 4> neighbours {{
+        {1, 0},
+        {-1, 0},
+        {0, 1},
+        {0, -1},
+    }};
+    constexpr auto basin_size = 32;
+    auto wet_columns = 0;
+    auto dry_columns = 0;
+    auto shore_columns = 0;
+    auto shallow_basins = 0;
+    auto overflowing_basins = 0;
+    auto shoreline_transitions = 0;
+
+    for (int basin_z = -4; basin_z <= 4; ++basin_z) {
+        for (int basin_x = -4; basin_x <= 4; ++basin_x) {
+            std::optional<std::uint8_t> basin_water_level;
+
+            for (int local_z = 0; local_z < basin_size; ++local_z) {
+                for (int local_x = 0; local_x < basin_size; ++local_x) {
+                    const auto world_x =
+                        basin_x * basin_size + local_x;
+                    const auto world_z =
+                        basin_z * basin_size + local_z;
+                    const auto column =
+                        generator.sample_column(world_x, world_z);
+
+                    if (column.pool_surface !=
+                        BackroomsPoolSurface::Water) {
+                        CHECK(column.floor_y == kBackroomsFloorY);
+                        CHECK(column.water_state == WaterState {0});
+                        CHECK(column.water_y == kWorldMinY - 1);
+                        dry_columns +=
+                            column.pool_surface ==
+                                    BackroomsPoolSurface::Dry
+                                ? 1
+                                : 0;
+                        shore_columns +=
+                            column.pool_surface ==
+                                    BackroomsPoolSurface::Shore
+                                ? 1
+                                : 0;
+                        continue;
+                    }
+
+                    ++wet_columns;
+                    const auto water_level =
+                        water_level_from_state(
+                            column.water_state);
+                    CHECK(column.floor_y == kBackroomsFloorY - 1);
+                    CHECK(column.water_y == kBackroomsFloorY);
+                    CHECK(column.floor_block ==
+                          to_block_id(BlockType::PoolroomsWetTile));
+                    CHECK(water_state_is_source(column.water_state));
+                    CHECK(water_state_is_infinite(column.water_state));
+                    CHECK((water_level == 5U ||
+                           water_level == kMaxWaterLevel));
+                    CHECK(
+                        generator.sample_block(
+                            world_x,
+                            kBackroomsFloorY - 1,
+                            world_z) ==
+                        to_block_id(BlockType::PoolroomsWetTile));
+                    CHECK(
+                        generator.sample_block(
+                            world_x,
+                            kBackroomsFloorY,
+                            world_z) ==
+                        to_block_id(BlockType::Air));
+                    CHECK(
+                        generator.sample_water_state(
+                            world_x,
+                            kBackroomsFloorY,
+                            world_z) ==
+                        column.water_state);
+                    CHECK(
+                        generator.sample_water_state(
+                            world_x,
+                            kBackroomsFloorY + 1,
+                            world_z) ==
+                        WaterState {0});
+
+                    if (!basin_water_level.has_value()) {
+                        basin_water_level = water_level;
+                    } else {
+                        // Je refuse une pente liquide au milieu d'une même
+                        // cuve, y compris quand une route en découpe le bord.
+                        CHECK(*basin_water_level == water_level);
+                    }
+
+                    for (const auto& [dx, dz] : neighbours) {
+                        const auto neighbour =
+                            generator.sample_column(
+                                world_x + dx,
+                                world_z + dz);
+                        if (neighbour.pool_surface ==
+                            BackroomsPoolSurface::Water) {
+                            continue;
+                        }
+
+                        ++shoreline_transitions;
+                        CHECK(neighbour.floor_y == kBackroomsFloorY);
+                        CHECK(
+                            is_block_opaque(
+                                generator.sample_block(
+                                    world_x + dx,
+                                    kBackroomsFloorY,
+                                    world_z + dz)));
+                    }
+                }
+            }
+
+            if (!basin_water_level.has_value()) {
+                continue;
+            }
+            shallow_basins +=
+                *basin_water_level == 5U ? 1 : 0;
+            overflowing_basins +=
+                *basin_water_level == kMaxWaterLevel ? 1 : 0;
+        }
+    }
+
+    const auto basin_count =
+        shallow_basins + overflowing_basins;
+    // Je garde cette premiere fenetre dense pour valider chaque voxel sans
+    // alourdir inutilement toute la suite. Les routes peuvent supprimer une
+    // cuve entiere, donc je mesure separement la repartition sur une fenetre
+    // beaucoup plus large avec un seul echantillon humide par bassin.
+    REQUIRE(basin_count > 8);
+    CHECK(wet_columns > 1000);
+    CHECK(dry_columns > 1000);
+    CHECK(shore_columns > 500);
+    CHECK(shoreline_transitions > 250);
+    auto distribution_shallow_basins = 0;
+    auto distribution_overflowing_basins = 0;
+    constexpr auto distribution_radius = 16;
+    for (int basin_z = -distribution_radius;
+         basin_z <= distribution_radius;
+         ++basin_z) {
+        for (int basin_x = -distribution_radius;
+             basin_x <= distribution_radius;
+             ++basin_x) {
+            auto sampled_level = std::optional<std::uint8_t> {};
+            for (int local_z = 0;
+                 local_z < basin_size && !sampled_level.has_value();
+                 ++local_z) {
+                for (int local_x = 0;
+                     local_x < basin_size;
+                     ++local_x) {
+                    const auto column = generator.sample_column(
+                        basin_x * basin_size + local_x,
+                        basin_z * basin_size + local_z);
+                    if (column.pool_surface ==
+                        BackroomsPoolSurface::Water) {
+                        sampled_level = water_level_from_state(
+                            column.water_state);
+                        break;
+                    }
+                }
+            }
+            if (!sampled_level.has_value()) {
+                continue;
+            }
+            distribution_shallow_basins +=
+                *sampled_level == 5U ? 1 : 0;
+            distribution_overflowing_basins +=
+                *sampled_level == kMaxWaterLevel ? 1 : 0;
+        }
+    }
+    const auto distribution_basin_count =
+        distribution_shallow_basins +
+        distribution_overflowing_basins;
+    REQUIRE(distribution_basin_count > 100);
+    CHECK(distribution_shallow_basins > 0);
+    CHECK(distribution_overflowing_basins > 0);
+    const auto shallow_ratio =
+        static_cast<double>(distribution_shallow_basins) /
+        static_cast<double>(distribution_basin_count);
+    CHECK(shallow_ratio >= 0.60);
+    CHECK(shallow_ratio <= 0.90);
 }
 
 TEST_CASE("BackRooms connectors pair levels and keep trigger landings free") {
@@ -1143,7 +1380,7 @@ TEST_CASE("BackRooms and Poolrooms ceilings seal one continuous underground mass
                     ++active_fixtures;
                 }
 
-                for (const auto [offset_x, offset_z] :
+                for (const auto& [offset_x, offset_z] :
                      std::array<std::pair<int, int>, 2U> {{{1, 0}, {0, 1}}}) {
                     const auto adjacent =
                         generator.sample_column(

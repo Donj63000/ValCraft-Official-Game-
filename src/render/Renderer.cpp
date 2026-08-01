@@ -644,6 +644,8 @@ legendary_enemy_root_scale(LegendaryEnemyArchetype archetype) noexcept
     return 1.18F;
   case LegendaryEnemyArchetype::ArenaMinion:
     return 0.92F;
+  case LegendaryEnemyArchetype::AstralBoss:
+    return 1.62F;
   }
   return 1.0F;
 }
@@ -662,6 +664,7 @@ valid_legendary_enemy_archetype(LegendaryEnemyArchetype archetype) noexcept
   case LegendaryEnemyArchetype::AstralCreature:
   case LegendaryEnemyArchetype::ForgeGuardian:
   case LegendaryEnemyArchetype::ArenaMinion:
+  case LegendaryEnemyArchetype::AstralBoss:
     return true;
   }
   return false;
@@ -704,6 +707,8 @@ legendary_enemy_primary_tile(LegendaryEnemyArchetype archetype) noexcept
     return CreatureAtlasTile::CrewIron;
   case LegendaryEnemyArchetype::ArenaMinion:
     return CreatureAtlasTile::CrewBurgundyCloth;
+  case LegendaryEnemyArchetype::AstralBoss:
+    return CreatureAtlasTile::TransformGlow;
   }
   return CreatureAtlasTile::ZombieFlesh;
 }
@@ -3563,6 +3568,7 @@ void build_block_break_overlay_mesh_data_into(
                                  break_progress.block, tile, inflate,
                                  15.0F / 16.0F);
     break;
+  case BlockMeshType::Ramp:
   case BlockMeshType::FullCube:
   default:
     append_block_break_cube_mesh(mesh.vertices, mesh.indices,
@@ -5640,7 +5646,8 @@ void Renderer::render_frame(
   std::array<glm::vec4, kMaximumBackroomsFlickerLights>
       backrooms_flicker_uniforms{};
   auto backrooms_flicker_count = std::size_t{0U};
-  const auto backrooms_level = world.backrooms_level();
+  const auto backrooms_level =
+      world.backrooms_level_at_y(eye.y);
   if (backrooms_interior && std::isfinite(eye.x) && std::isfinite(eye.z)) {
     constexpr auto minimum_safe_world_coordinate =
         static_cast<double>(
@@ -5686,6 +5693,21 @@ void Renderer::render_frame(
                 camera_block_x,
                 camera_block_z,
                 backrooms_level);
+        const auto physical_level_offset =
+            world.backrooms_spawn_block(backrooms_level).y -
+            world.backrooms_spawn_block(
+                world.backrooms_level()).y;
+        if (physical_level_offset != 0) {
+          // Je translate les luminaires du générateur local vers leur étage
+          // physique. Le cache conserve ainsi une seule identité logique sans
+          // faire clignoter une source dans la dalle voisine.
+          for (std::size_t index = 0U;
+               index < backrooms_flicker_field_.count;
+               ++index) {
+            backrooms_flicker_field_.anchors[index].position_y +=
+                static_cast<float>(physical_level_offset);
+          }
+        }
         backrooms_flicker_world_seed_ = world.seed();
         backrooms_flicker_level_ = backrooms_level;
         backrooms_flicker_cache_x_ = camera_cache_x;
