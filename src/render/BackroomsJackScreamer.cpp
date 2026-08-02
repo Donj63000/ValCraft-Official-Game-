@@ -194,4 +194,27 @@ auto resolve_backrooms_jack_screamer_path(
     return {};
 }
 
+auto resolve_backrooms_marlow_screamer_path(
+    const std::filesystem::path& working_directory)
+    -> std::filesystem::path {
+    const std::array candidates {
+        working_directory / "assets" / "backrooms" /
+            "marlow_le_noye_screamer.bmp",
+        working_directory / "bin" / "assets" / "backrooms" /
+            "marlow_le_noye_screamer.bmp",
+        working_directory.parent_path() / "assets" / "backrooms" /
+            "marlow_le_noye_screamer.bmp",
+        working_directory.parent_path().parent_path() / "assets" /
+            "backrooms" / "marlow_le_noye_screamer.bmp",
+    };
+    std::error_code error;
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::is_regular_file(candidate, error)) {
+            return candidate;
+        }
+        error.clear();
+    }
+    return {};
+}
+
 } // namespace valcraft

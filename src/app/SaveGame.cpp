@@ -30,11 +30,14 @@ constexpr std::array<char, 4> kLegendaryWeaponStateMagic {{'L', 'W', 'E', 'A'}};
 constexpr std::array<char, 4> kBackroomsFlashlightStateMagic {{'B', 'F', 'L', 'H'}};
 constexpr std::array<char, 4> kBackroomsJackStateMagic {{'B', 'J', 'C', 'K'}};
 constexpr std::array<char, 4> kBackroomsLevelStateMagic {{'B', 'R', 'L', 'V'}};
+constexpr std::array<char, 4> kBackroomsMarlowStateMagic {{'M', 'R', 'L', 'W'}};
 constexpr std::uint8_t kLegendaryWeaponStateFormatVersion = 1U;
 constexpr std::uint8_t kBackroomsFlashlightStateFormatVersion = 1U;
 constexpr std::uint8_t kBackroomsJackStateFormatVersion = 1U;
 constexpr std::uint8_t kBackroomsLevelStateFormatVersion = 1U;
-constexpr std::uint32_t kSaveVersion = 18;
+constexpr std::uint8_t kBackroomsMarlowStateFormatVersion = 1U;
+constexpr std::uint32_t kSaveVersion = 19;
+constexpr std::uint32_t kSaveVersionBackroomsMarlow = 19;
 constexpr std::uint32_t kSaveVersionBackroomsLevel = 18;
 constexpr std::uint32_t kSaveVersionBackroomsJack = 17;
 constexpr std::uint32_t kSaveVersionBackroomsFlashlight = 16;
@@ -69,7 +72,11 @@ constexpr float kMaximumSavedBackroomsJackPhaseSeconds = 86'400.0F;
 constexpr float kMaximumSavedBackroomsJackLostSightSeconds = 86'400.0F;
 constexpr float kMaximumSavedBackroomsJackUnseenDistance = 100'000.0F;
 constexpr float kMaximumSavedBackroomsJackSpawnDelay = 3'600.0F;
+constexpr float kMaximumHistoricalSavedBackroomsJackCooldown = 360.0F;
 constexpr float kMaximumSavedBackroomsJackFootstepDistance = 2.0F;
+constexpr float kMaximumSavedBackroomsMarlowCueSeconds = 60.0F;
+constexpr float kMaximumSavedBackroomsMarlowManifestationSeconds = 60.0F;
+constexpr float kMaximumSavedBackroomsMarlowCooldownSeconds = 24.0F;
 
 static_assert(kChunkSizeX > 0 && kChunkSizeZ > 0);
 static_assert(kShipCrewMemberCount == 6U, "Changer le roster v9 exige une nouvelle version de sauvegarde");
@@ -90,6 +97,9 @@ static_assert(
     sizeof(std::uint8_t));
 static_assert(
     sizeof(std::underlying_type_t<BackroomsJackPhase>) ==
+    sizeof(std::uint8_t));
+static_assert(
+    sizeof(std::underlying_type_t<BackroomsMarlowEncounterMode>) ==
     sizeof(std::uint8_t));
 static_assert(sizeof(int) == sizeof(std::int32_t));
 
@@ -264,7 +274,7 @@ auto is_sane_saved_world_position(const glm::vec3& position) noexcept -> bool {
         !is_finite_in_range(
             state.cooldown_seconds,
             0.0F,
-            kBackroomsJackMaximumCooldownSeconds) ||
+            kBackroomsJackMaximumPersistedCooldownSeconds) ||
         !is_finite_in_range(
             state.footstep_distance,
             0.0F,
@@ -308,6 +318,34 @@ auto is_sane_saved_world_position(const glm::vec3& position) noexcept -> bool {
     return true;
 }
 
+[[nodiscard]] auto is_valid_backrooms_marlow_save_state(
+    const BackroomsMarlowState& state) noexcept -> bool {
+    const auto mode_value =
+        static_cast<std::uint8_t>(state.last_mode);
+    return is_finite_in_range(
+               state.pressure,
+               0.0F,
+               kBackroomsMarlowMaximumPressure) &&
+           is_finite_in_range(
+               state.cue_seconds,
+               0.0F,
+               kMaximumSavedBackroomsMarlowCueSeconds) &&
+           is_finite_in_range(
+               state.manifestation_seconds,
+               0.0F,
+               kMaximumSavedBackroomsMarlowManifestationSeconds) &&
+           is_finite_in_range(
+               state.cooldown_seconds,
+               0.0F,
+               kMaximumSavedBackroomsMarlowCooldownSeconds) &&
+           is_valid_backrooms_logical_level(
+               state.logical_level) &&
+           mode_value <= static_cast<std::uint8_t>(
+                             BackroomsMarlowEncounterMode::WaterAmbush) &&
+           state.random_state != 0U &&
+           state.next_event_sequence != 0U;
+}
+
 void write_generation_profile(BinaryWriter& writer, WorldGenerationProfile profile);
 auto read_generation_profile(BinaryReader& reader, WorldGenerationProfile& profile) -> bool;
 
@@ -328,6 +366,8 @@ void validate_snapshot_for_write(const SaveGameSnapshot& snapshot) {
             snapshot.backrooms_level) ||
         snapshot.backrooms_jack.logical_level !=
             snapshot.backrooms_level ||
+        snapshot.backrooms_marlow.logical_level !=
+            snapshot.backrooms_level ||
         (snapshot.metadata.game_mode != GameMode::Backrooms &&
          snapshot.backrooms_level != 0)) {
         throw std::runtime_error(
@@ -337,6 +377,11 @@ void validate_snapshot_for_write(const SaveGameSnapshot& snapshot) {
             snapshot.backrooms_jack)) {
         throw std::runtime_error(
             "Save snapshot contains an invalid Backrooms Jack state");
+    }
+    if (!is_valid_backrooms_marlow_save_state(
+            snapshot.backrooms_marlow)) {
+        throw std::runtime_error(
+            "Save snapshot contains an invalid Backrooms Marlow state");
     }
     for (const auto& drop : snapshot.item_drops) {
         auto sanitized_drop = drop;
@@ -1637,6 +1682,27 @@ auto read_backrooms_jack_state_extension(
         static_cast<int>(last_chunk_x),
         static_cast<int>(last_chunk_z),
     };
+
+    // Je reconnais les deux compteurs longs du directeur historique avant de
+    // les borner au nouveau rythme. Je garde toutes les autres validations
+    // strictes afin qu'une sauvegarde corrompue ne soit jamais reparée en
+    // silence par le sanitiseur general.
+    if (!is_finite_in_range(
+            raw.spawn_check_seconds,
+            0.0F,
+            kMaximumSavedBackroomsJackSpawnDelay) ||
+        !is_finite_in_range(
+            raw.cooldown_seconds,
+            0.0F,
+            kMaximumHistoricalSavedBackroomsJackCooldown)) {
+        return false;
+    }
+    raw.spawn_check_seconds = std::min(
+        raw.spawn_check_seconds,
+        kBackroomsJackMaximumPersistedSpawnDelaySeconds);
+    raw.cooldown_seconds = std::min(
+        raw.cooldown_seconds,
+        kBackroomsJackMaximumPersistedCooldownSeconds);
     if (!is_valid_backrooms_jack_save_state(raw)) {
         return false;
     }
@@ -1679,6 +1745,70 @@ auto read_backrooms_level_state_extension(
         return false;
     }
     logical_level = raw_level;
+    return true;
+}
+
+void write_backrooms_marlow_state_extension(
+    BinaryWriter& writer,
+    const BackroomsMarlowState& state) {
+    // Je fixe MRLW v1 a 40 octets et je n'y place que le directeur durable.
+    // Le corps, le chemin, les cellules et la noyade en cours restent runtime.
+    const auto persistent =
+        prepare_backrooms_marlow_for_persistence(state);
+    writer.write_bytes(
+        kBackroomsMarlowStateMagic.data(),
+        kBackroomsMarlowStateMagic.size());
+    writer.write_value(
+        kBackroomsMarlowStateFormatVersion);
+    writer.write_value(persistent.pressure);
+    writer.write_value(persistent.cue_seconds);
+    writer.write_value(
+        persistent.manifestation_seconds);
+    writer.write_value(persistent.cooldown_seconds);
+    writer.write_value(persistent.logical_level);
+    write_enum(writer, persistent.last_mode);
+    writer.write_value(persistent.random_state);
+    writer.write_value(
+        persistent.next_event_sequence);
+    write_bool(writer, persistent.has_last_mode);
+    write_bool(writer, persistent.initialized);
+}
+
+auto read_backrooms_marlow_state_extension(
+    BinaryReader& reader,
+    BackroomsMarlowState& state) -> bool {
+    auto magic = std::array<
+        char,
+        kBackroomsMarlowStateMagic.size()> {};
+    auto format_version = std::uint8_t {0U};
+    BackroomsMarlowState raw {};
+    if (!reader.read_bytes(
+            magic.data(),
+            magic.size()) ||
+        magic != kBackroomsMarlowStateMagic ||
+        !reader.read_value(format_version) ||
+        format_version !=
+            kBackroomsMarlowStateFormatVersion ||
+        !reader.read_value(raw.pressure) ||
+        !reader.read_value(raw.cue_seconds) ||
+        !reader.read_value(
+            raw.manifestation_seconds) ||
+        !reader.read_value(raw.cooldown_seconds) ||
+        !reader.read_value(raw.logical_level) ||
+        !read_enum(reader, raw.last_mode) ||
+        !reader.read_value(raw.random_state) ||
+        !reader.read_value(
+            raw.next_event_sequence) ||
+        !read_strict_bool(
+            reader,
+            raw.has_last_mode) ||
+        !read_strict_bool(
+            reader,
+            raw.initialized) ||
+        !is_valid_backrooms_marlow_save_state(raw)) {
+        return false;
+    }
+    state = raw;
     return true;
 }
 
@@ -2306,6 +2436,8 @@ void migrate_backrooms_snapshot_to_v3(
         WorldGenerationVersion::BackroomsV3;
     snapshot.world_save_plan.chunks.clear();
     snapshot.metadata.modified_chunk_count = 0U;
+    snapshot.backrooms_marlow.logical_level =
+        static_cast<std::int32_t>(logical_level);
 }
 
 auto sanitize_player_ability_runtime_save_state(
@@ -3134,6 +3266,23 @@ auto load_save_slot(const std::filesystem::path& root_directory,
         // Les sauvegardes v1-v17 ne connaissaient qu'un étage Backrooms.
         snapshot.backrooms_level = 0;
     }
+    if (version >= kSaveVersionBackroomsMarlow) {
+        if (!read_backrooms_marlow_state_extension(
+                reader,
+                snapshot.backrooms_marlow) ||
+            snapshot.backrooms_marlow.logical_level !=
+                snapshot.backrooms_level) {
+            return std::nullopt;
+        }
+    } else {
+        // Je reprends v1-v18 avec un directeur dormant deterministe. Aucune
+        // manifestation, trajectoire ou noyade historique n'est inventee.
+        snapshot.backrooms_marlow =
+            initialize_backrooms_marlow(
+                static_cast<std::uint32_t>(
+                    snapshot.metadata.seed),
+                snapshot.backrooms_level);
+    }
     snapshot.world_save_plan.backrooms_level =
         snapshot.backrooms_level;
     snapshot.backrooms_jack.logical_level =
@@ -3380,6 +3529,11 @@ static void write_save_slot_impl(const std::filesystem::path& root_directory,
     write_backrooms_level_state_extension(
         writer,
         snapshot.backrooms_level);
+    // Je garde MRLW terminal et append-only : BJCK v1 puis BRLV v1 restent
+    // bit a bit a leurs positions relatives pour toutes les migrations.
+    write_backrooms_marlow_state_extension(
+        writer,
+        snapshot.backrooms_marlow);
 
     output.flush();
     if (!writer.ok() || !output.good()) {

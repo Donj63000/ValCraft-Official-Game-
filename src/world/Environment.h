@@ -10,6 +10,9 @@ namespace valcraft {
 // Je borne le temps meteo externe avant les conversions en indices de cycles.
 // Cette limite couvre plus de trente ans de simulation continue.
 inline constexpr float kMaximumWeatherTimeSeconds = 1.0e9F;
+inline constexpr float kBackroomsOfficeInteriorVisibilityFloor = 0.08F;
+inline constexpr float kPoolroomsInteriorVisibilityFloor = 0.22F;
+inline constexpr float kBackroomsBlackoutVisibilityFloor = 0.0F;
 
 enum class WeatherKind : std::uint8_t {
     Clear = 0,
@@ -63,6 +66,7 @@ struct EnvironmentState {
     float glow_strength = 0.22F;
     float post_sharpen_strength = 0.16F;
     float post_edge_strength = 0.14F;
+    float interior_visibility_floor = 0.0F;
     bool suppress_gameplay_hud = false;
     bool enclosed_interior = false;
     bool poolrooms = false;

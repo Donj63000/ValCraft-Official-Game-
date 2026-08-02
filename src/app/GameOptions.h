@@ -87,7 +87,15 @@ enum class BackroomsJackSmokeMode {
     Stare = 3,
     Chase = 4,
     Jumpscare = 5,
+    // Je distingue les deux mises en scene psychologiques afin de pouvoir
+    // capturer leurs vraies distances sans modifier une partie normale.
+    CorridorStare = 6,
+    RearStare = 7,
 };
+
+inline constexpr auto kBackroomsJackSmokeCorridorDistanceMinimum = 32.0F;
+inline constexpr auto kBackroomsJackSmokeCorridorDistanceDefault = 40.0F;
+inline constexpr auto kBackroomsJackSmokeCorridorDistanceMaximum = 52.0F;
 
 struct GameOptions {
     bool smoke_test = false;
@@ -121,6 +129,11 @@ struct GameOptions {
     bool smoke_backrooms_blackout = false;
     BackroomsJackSmokeMode smoke_backrooms_jack =
         BackroomsJackSmokeMode::None;
+    // Je garde 40 m comme cadrage de reference, mais je peux rejouer les
+    // bornes deterministes du couloir sans modifier le comportement normal.
+    float smoke_backrooms_jack_distance =
+        kBackroomsJackSmokeCorridorDistanceDefault;
+    bool smoke_backrooms_jack_distance_explicitly_set = false;
     // Je peux capturer directement un étage profond sans devoir automatiser
     // plusieurs escaliers dans un smoke visuel.
     int smoke_backrooms_level = 0;

@@ -9,6 +9,9 @@
 namespace valcraft {
 namespace {
 
+// Je valide chaque pack contre le catalogue append-only declare dans le
+// header afin qu'une couche ajoutee ne puisse jamais etre chargee de travers.
+
 constexpr std::uint8_t kPackEncodingUnorm8 = 1U;
 constexpr std::uint8_t kPackFlagCompleteMipChain = 1U;
 constexpr std::uint32_t kPackLayerRecordSize = 8U;

@@ -32,6 +32,7 @@ enum class BackroomsVerticalConnectionStyle : std::uint8_t {
 enum class BackroomsSpatialProfile : std::uint8_t {
     LegacyV2 = 0,
     RecessedPoolroomsV3 = 1,
+    FloodedPoolroomsV4 = 2,
 };
 
 struct BackroomsLevelPlacement {

@@ -27,23 +27,29 @@ enum class WorldGenerationVersion : std::uint32_t {
     BackroomsV1 = 4,
     BackroomsV2 = 5,
     BackroomsV3 = 6,
+    BackroomsV4 = 7,
 };
 
 [[nodiscard]] inline constexpr auto is_backrooms_generation_version(
     WorldGenerationVersion version) noexcept -> bool {
     return version == WorldGenerationVersion::BackroomsV1 ||
            version == WorldGenerationVersion::BackroomsV2 ||
-           version == WorldGenerationVersion::BackroomsV3;
+           version == WorldGenerationVersion::BackroomsV3 ||
+           version == WorldGenerationVersion::BackroomsV4;
 }
 
 [[nodiscard]] inline constexpr auto uses_backrooms_spatial_stack(
     WorldGenerationVersion version) noexcept -> bool {
     return version == WorldGenerationVersion::BackroomsV2 ||
-           version == WorldGenerationVersion::BackroomsV3;
+           version == WorldGenerationVersion::BackroomsV3 ||
+           version == WorldGenerationVersion::BackroomsV4;
 }
 
 [[nodiscard]] inline constexpr auto backrooms_spatial_profile_for_version(
     WorldGenerationVersion version) noexcept -> BackroomsSpatialProfile {
+    if (version == WorldGenerationVersion::BackroomsV4) {
+        return BackroomsSpatialProfile::FloodedPoolroomsV4;
+    }
     return version == WorldGenerationVersion::BackroomsV3
                ? BackroomsSpatialProfile::RecessedPoolroomsV3
                : BackroomsSpatialProfile::LegacyV2;
@@ -59,7 +65,7 @@ enum class WorldGenerationVersion : std::uint32_t {
     case WorldGenerationProfile::OceanAdventure:
         return WorldGenerationVersion::LivingOceanV3;
     case WorldGenerationProfile::Backrooms:
-        return WorldGenerationVersion::BackroomsV3;
+        return WorldGenerationVersion::BackroomsV4;
     case WorldGenerationProfile::Continental:
     default:
         return WorldGenerationVersion::LegacyV1;

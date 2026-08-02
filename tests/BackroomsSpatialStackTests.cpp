@@ -719,6 +719,135 @@ TEST_CASE("la pile V3 reserve la base des Poolrooms aux fonds encaisses") {
     CHECK(bottom_stack.placements().front().floor_y == kWorldMinY + 1);
 }
 
+TEST_CASE("la pile V4 contient les nappes continues et les bassins profonds dans leur tranche") {
+    constexpr auto seed = 63017;
+    constexpr auto anchor = -2;
+    const BackroomsSpatialStack stack(
+        seed,
+        anchor,
+        BackroomsSpatialProfile::FloodedPoolroomsV4);
+    const auto placement = stack.placement_for_level(anchor);
+    REQUIRE(placement.has_value());
+    REQUIRE(placement->theme == BackroomsTheme::Poolrooms);
+    CHECK(placement->floor_y == placement->base_y + 2);
+    CHECK(stack.spawn_block(anchor).y == placement->floor_y + 1);
+
+    const BackroomsGenerator generator(
+        seed,
+        anchor,
+        kBackroomsSpatialConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4);
+    auto shallow = std::optional<HorizontalPoint> {};
+    auto deep = std::optional<HorizontalPoint> {};
+    for (int module_z = -20;
+         module_z <= 20 && !deep.has_value();
+         ++module_z) {
+        for (int module_x = -20;
+             module_x <= 20 && !deep.has_value();
+             ++module_x) {
+            if (!generator.is_flooded_module(module_x, module_z)) {
+                continue;
+            }
+            for (int local_z = 0;
+                 local_z < kBackroomsModuleSize && !deep.has_value();
+                 ++local_z) {
+                for (int local_x = 0;
+                     local_x < kBackroomsModuleSize;
+                     ++local_x) {
+                    const HorizontalPoint point {
+                        module_x * kBackroomsModuleSize + local_x,
+                        module_z * kBackroomsModuleSize + local_z,
+                    };
+                    const auto column =
+                        generator.sample_column(point.x, point.z);
+                    if (column.water_state == WaterState {0}) {
+                        continue;
+                    }
+                    if (column.deep_water) {
+                        deep = point;
+                        break;
+                    }
+                    if (!shallow.has_value()) {
+                        shallow = point;
+                    }
+                }
+            }
+        }
+    }
+    REQUIRE(shallow.has_value());
+    REQUIRE(deep.has_value());
+
+    const auto shallow_column =
+        generator.sample_column(shallow->x, shallow->z);
+    const auto shallow_floor_y =
+        placement->floor_y +
+        (shallow_column.floor_y - kBackroomsFloorY);
+    const auto shallow_water_y =
+        placement->floor_y +
+        (shallow_column.water_top_y - kBackroomsFloorY);
+    CHECK(shallow_floor_y == placement->base_y + 1);
+    CHECK(shallow_water_y == placement->floor_y);
+    CHECK(
+        stack.sample_block(
+            shallow->x,
+            shallow_floor_y,
+            shallow->z) ==
+        to_block_id(BlockType::PoolroomsWetTile));
+    CHECK(
+        stack.sample_water_state(
+            shallow->x,
+            shallow_water_y,
+            shallow->z) ==
+        shallow_column.water_state);
+
+    const auto deep_column =
+        generator.sample_column(deep->x, deep->z);
+    const auto deep_floor_y =
+        placement->floor_y +
+        (deep_column.floor_y - kBackroomsFloorY);
+    const auto deep_bottom_y =
+        placement->floor_y +
+        (deep_column.water_bottom_y - kBackroomsFloorY);
+    const auto deep_top_y =
+        placement->floor_y +
+        (deep_column.water_top_y - kBackroomsFloorY);
+    CHECK(deep_floor_y == placement->base_y);
+    CHECK(deep_bottom_y == placement->base_y + 1);
+    CHECK(deep_top_y == placement->floor_y);
+    CHECK(
+        stack.sample_block(
+            deep->x,
+            deep_floor_y,
+            deep->z) ==
+        to_block_id(BlockType::PoolroomsWetTile));
+    for (int world_y = deep_bottom_y;
+         world_y <= deep_top_y;
+         ++world_y) {
+        CHECK(
+            stack.sample_block(
+                deep->x,
+                world_y,
+                deep->z) ==
+            to_block_id(BlockType::Air));
+        CHECK(
+            stack.sample_water_state(
+                deep->x,
+                world_y,
+                deep->z) ==
+            deep_column.water_state);
+    }
+    CHECK(
+        stack.sample_water_state(
+            deep->x,
+            deep_floor_y,
+            deep->z) == WaterState {0});
+    CHECK(
+        stack.sample_water_state(
+            deep->x,
+            deep_top_y + 1,
+            deep->z) == WaterState {0});
+}
+
 TEST_CASE("le profil LegacyV2 explicite reste identique au constructeur historique") {
     constexpr auto seed = -92741;
     constexpr auto anchor = -3;

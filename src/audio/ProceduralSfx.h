@@ -25,6 +25,12 @@ enum class GameSfxKind : std::uint8_t {
     JackNotice = 15,
     JackChase = 16,
     JackScreamer = 17,
+    MarlowWaterSignal = 18,
+    MarlowSurface = 19,
+    MarlowSubmerge = 20,
+    MarlowGrab = 21,
+    MarlowScreamer = 22,
+    MarlowDistantSplash = 23,
 };
 
 struct ProceduralSfxRequest {

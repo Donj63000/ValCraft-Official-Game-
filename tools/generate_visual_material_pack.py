@@ -37,6 +37,10 @@ DETAIL_PATTERNS: Final = frozenset({
     "moss",
     "snow",
     "ore",
+    "backrooms_wallpaper",
+    "backrooms_carpet",
+    "backrooms_ceiling",
+    "backrooms_concrete",
 })
 
 
@@ -113,6 +117,18 @@ RECIPES: Final = (
     MaterialRecipe(51, "coral_fan", SURFACE_CUTOUT, (116, 46, 91), (222, 112, 145), 190, 0, 0, "coral_fan", 0x36703, 1),
     MaterialRecipe(52, "reef_fish", SURFACE_CUTOUT, (28, 103, 145), (245, 184, 66), 150, 0, 0, "reef_fish", 0x37805, 1),
     MaterialRecipe(53, "marine_shell", SURFACE_PROXY, (148, 109, 77), (232, 208, 158), 154, 0, 0, "marine_shell", 0x38907, 2),
+    # Je place les materiaux Backrooms en fin de catalogue : aucune couche
+    # historique ne change d'indice et les anciennes captures restent lisibles.
+    MaterialRecipe(54, "backrooms_wallpaper_yellow", SURFACE_ARCHITECTURAL, (122, 111, 55), (194, 177, 91), 224, 0, 0, "backrooms_wallpaper", 0x39A0B, 2),
+    MaterialRecipe(55, "backrooms_wallpaper_green", SURFACE_ARCHITECTURAL, (68, 86, 57), (121, 137, 78), 226, 0, 0, "backrooms_wallpaper", 0x3AB01, 2),
+    MaterialRecipe(56, "backrooms_wallpaper_blue", SURFACE_ARCHITECTURAL, (60, 80, 91), (105, 126, 135), 224, 0, 0, "backrooms_wallpaper", 0x3BC03, 2),
+    MaterialRecipe(57, "backrooms_wallpaper_rose", SURFACE_ARCHITECTURAL, (91, 65, 67), (143, 101, 104), 226, 0, 0, "backrooms_wallpaper", 0x3CD05, 2),
+    MaterialRecipe(58, "backrooms_wallpaper_oxide", SURFACE_ARCHITECTURAL, (82, 49, 29), (139, 82, 45), 230, 0, 0, "backrooms_wallpaper", 0x3DE07, 2),
+    MaterialRecipe(59, "backrooms_damp_carpet", SURFACE_ARCHITECTURAL, (73, 63, 35), (31, 29, 19), 196, 0, 0, "backrooms_carpet", 0x3EF0B, 2),
+    MaterialRecipe(60, "backrooms_acoustic_ceiling", SURFACE_ARCHITECTURAL, (157, 158, 139), (207, 202, 176), 232, 0, 0, "backrooms_ceiling", 0x40101, 2),
+    MaterialRecipe(61, "backrooms_painted_concrete", SURFACE_ARCHITECTURAL, (91, 94, 90), (139, 136, 123), 224, 0, 0, "backrooms_concrete", 0x41203, 2),
+    MaterialRecipe(62, "backrooms_fixture_metal", SURFACE_ARCHITECTURAL, (36, 40, 38), (91, 97, 92), 174, 184, 0, "backrooms_fixture_metal", 0x42305, 2),
+    MaterialRecipe(63, "backrooms_fluorescent_diffuser", SURFACE_ARCHITECTURAL, (166, 190, 154), (240, 247, 216), 78, 0, 232, "backrooms_fluorescent_diffuser", 0x43407, 1),
 )
 
 
@@ -495,6 +511,166 @@ def _surface_sample(recipe: MaterialRecipe,
         height = _clamp_byte(105 + noise // 5 + (28 if steel else 0))
         blend = 220 if steel else _clamp_byte(48 + noise // 3)
         metallic = recipe.metallic if steel else 0
+    elif recipe.pattern == "backrooms_wallpaper":
+        panel_width = max(16, size // 4)
+        panel_local = x % panel_width
+        panel_edge = min(panel_local, panel_width - 1 - panel_local)
+        seam = max(0, 2 - panel_edge)
+        vertical_fibre = _triangle_wave(
+            x * 5 + (noise - 128) // 18,
+            max(8, size // 12),
+        )
+        motif_period = max(16, size // 4)
+        motif_a = _triangle_wave(x * 2 + y, motif_period)
+        motif_b = _triangle_wave(x * 2 - y, motif_period)
+        motif = max(0, 4 - min(motif_a, motif_b))
+        stain = _value_noise(
+            x,
+            y,
+            size,
+            max(16, size // 4),
+            recipe.seed ^ 0x5D91,
+        )
+        # Je garde le damas et les fibres sous le seuil du motif graphique :
+        # le mur parait imprime et use, sans redevenir une tuile de jeu video.
+        height = _clamp_byte(
+            126 + (vertical_fibre - 4) // 2 + motif * 2 - seam * 7 +
+            (micro - 128) // 28
+        )
+        blend = _clamp_byte(
+            126 + (noise - 128) // 8 + motif * 3 - seam * 12 -
+            max(0, stain - 184) // 5 + (fine - 128) // 24
+        )
+        roughness += seam * 4 + max(0, stain - 204) // 8
+        occlusion -= seam * 9 + max(0, stain - 210) // 7
+        detail_luma = (micro - 128) // 34 + (meso - 128) // 54
+    elif recipe.pattern == "backrooms_carpet":
+        damp = _value_noise(
+            x,
+            y,
+            size,
+            max(16, size // 4),
+            recipe.seed ^ 0x73C5,
+        )
+        tuft = _cellular_noise(
+            x,
+            y,
+            size,
+            max(3, size // 36),
+            recipe.seed ^ 0x2A79,
+        )
+        fibre = _triangle_wave(x * 7 + y * 3, max(7, size // 14))
+        wet_patch = max(0, damp - 142)
+        height = _clamp_byte(
+            122 + (tuft - 128) // 9 + fibre // 3 +
+            (micro - 128) // 22 - wet_patch // 18
+        )
+        blend = _clamp_byte(
+            72 + (noise - 128) // 10 + wet_patch +
+            (fine - 128) // 18
+        )
+        # Les flaques assombrissent la fibre et abaissent localement sa
+        # rugosite ; le shader peut alors produire un reflet humide reel.
+        roughness -= wet_patch * 3 // 4
+        occlusion -= wet_patch // 9
+        detail_luma = (micro - 128) // 24 + (meso - 128) // 42
+    elif recipe.pattern == "backrooms_ceiling":
+        edge = min(x, y, size - 1 - x, size - 1 - y)
+        joint = max(0, max(3, size // 42) - edge)
+        pores = _cellular_noise(
+            x,
+            y,
+            size,
+            max(3, size // 38),
+            recipe.seed ^ 0x8B13,
+        )
+        pitted = pores > 218
+        height = _clamp_byte(
+            129 + (noise - 128) // 16 - joint * 12 -
+            (13 if pitted else 0) + (micro - 128) // 34
+        )
+        blend = _clamp_byte(
+            148 + (noise - 128) // 11 - joint * 18 -
+            (18 if pitted else 0)
+        )
+        roughness += 8 if pitted else (fine - 128) // 32
+        occlusion -= joint * 14 + (12 if pitted else 0)
+        detail_luma = (micro - 128) // 40 + (meso - 128) // 58
+    elif recipe.pattern == "backrooms_concrete":
+        pores = _cellular_noise(
+            x,
+            y,
+            size,
+            max(4, size // 28),
+            recipe.seed ^ 0xA153,
+        )
+        broad_stain = _value_noise(
+            x,
+            y,
+            size,
+            max(16, size // 5),
+            recipe.seed ^ 0xC71D,
+        )
+        crack_a = _triangle_wave(x * 3 + y * 2 + noise // 13, 97) < 2
+        crack_b = _triangle_wave(x * 2 - y * 3 + noise // 17, 109) < 2
+        cracked = crack_a or crack_b
+        height = _clamp_byte(
+            124 + (pores - 128) // 9 + (micro - 128) // 24 -
+            (16 if cracked else 0)
+        )
+        blend = _clamp_byte(
+            112 + (noise - 128) // 7 + (broad_stain - 128) // 7 -
+            (22 if cracked else 0)
+        )
+        roughness += 10 if cracked else (fine - 128) // 26
+        occlusion -= 18 if cracked else max(0, 94 - pores) // 9
+        detail_luma = (micro - 128) // 25 + (meso - 128) // 43
+    elif recipe.pattern == "backrooms_fixture_metal":
+        pits = _cellular_noise(
+            x,
+            y,
+            size,
+            max(4, size // 26),
+            recipe.seed ^ 0xD42F,
+        )
+        scratch = _triangle_wave(x * 7 + y * 2, 59) < 2
+        corroded = pits > 214
+        height = _clamp_byte(
+            126 + (noise - 128) // 14 - (20 if corroded else 0) +
+            (7 if scratch else 0)
+        )
+        blend = _clamp_byte(
+            92 + (noise - 128) // 5 - (38 if corroded else 0) +
+            (28 if scratch else 0)
+        )
+        roughness += 24 if corroded else (fine - 128) // 18
+        metallic -= 48 if corroded else 0
+        occlusion -= 22 if corroded else 0
+    elif recipe.pattern == "backrooms_fluorescent_diffuser":
+        frame_width = max(5, size // 10)
+        edge = min(x, y, size - 1 - x, size - 1 - y)
+        frame = edge < frame_width
+        louver = _triangle_wave(x * 2 + y, max(10, size // 8)) < 2
+        cloud = _value_noise(
+            x,
+            y,
+            size,
+            max(12, size // 6),
+            recipe.seed ^ 0xE6A1,
+        )
+        height = _clamp_byte(
+            118 if frame else 130 + (cloud - 128) // 18 + (5 if louver else 0)
+        )
+        blend = _clamp_byte(
+            48 + (noise - 128) // 8 if frame else
+            214 + (cloud - 128) // 7 - (20 if louver else 0)
+        )
+        metallic = recipe.metallic if not frame else 172
+        roughness = 182 if frame else _clamp_byte(recipe.roughness + (cloud - 128) // 18)
+        emission = 0 if frame else _clamp_byte(
+            recipe.emission + (cloud - 128) // 12 - (22 if louver else 0)
+        )
+        occlusion = 236 if frame else 255
     elif recipe.pattern in {"ship_dark_wood", "ship_deck", "ship_oiled_wood"}:
         plank_width = max(16, size // 6)
         seam = min(y % plank_width, plank_width - 1 - y % plank_width)

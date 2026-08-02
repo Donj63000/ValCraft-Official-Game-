@@ -25,6 +25,8 @@
 #include "creatures/legendary/LegendaryEnemySystem.h"
 #include "gameplay/BackroomsFlashlight.h"
 #include "gameplay/BackroomsJack.h"
+#include "gameplay/BackroomsMarlow.h"
+#include "gameplay/BackroomsThreatArbiter.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/MusketCombat.h"
 #include "gameplay/PlayerController.h"
@@ -249,6 +251,18 @@ private:
             backrooms_jack_last_result {};
         float backrooms_jack_death_delay_seconds = 0.0F;
         bool backrooms_jack_death_pending = false;
+        BackroomsMarlowState backrooms_marlow {};
+        BackroomsMarlowRuntime backrooms_marlow_runtime {};
+        BackroomsMarlowUpdateResult backrooms_marlow_last_result {};
+        BackroomsThreatArbiterRuntime backrooms_threat_arbiter {};
+        std::uint64_t backrooms_threat_request_sequence = 0U;
+        glm::vec3 backrooms_marlow_previous_player_position {0.0F};
+        float backrooms_marlow_death_delay_seconds = 0.0F;
+        bool backrooms_marlow_death_pending = false;
+        bool backrooms_marlow_previous_in_water = false;
+        bool backrooms_marlow_previous_on_ground = true;
+        bool backrooms_marlow_previous_jump_input = false;
+        bool backrooms_marlow_has_previous_player_position = false;
         bool blade_pose_valid = false;
         bool weapon_was_selected = false;
         bool sea_encounter_started = false;
@@ -533,6 +547,8 @@ private:
         -> bool;
     [[nodiscard]] auto backrooms_jack_jumpscare_active() const noexcept
         -> bool;
+    [[nodiscard]] auto backrooms_marlow_cinematic_active() const noexcept
+        -> bool;
     [[nodiscard]] auto current_environment_state() const -> EnvironmentState;
     void reset_backrooms_jack_runtime() noexcept;
     void update_backrooms_simulation(float dt);
@@ -783,6 +799,18 @@ private:
         backrooms_jack_last_result_ {};
     float backrooms_jack_death_delay_seconds_ = 0.0F;
     bool backrooms_jack_death_pending_ = false;
+    BackroomsMarlowState backrooms_marlow_ {};
+    BackroomsMarlowRuntime backrooms_marlow_runtime_ {};
+    BackroomsMarlowUpdateResult backrooms_marlow_last_result_ {};
+    BackroomsThreatArbiterRuntime backrooms_threat_arbiter_ {};
+    std::uint64_t backrooms_threat_request_sequence_ = 0U;
+    glm::vec3 backrooms_marlow_previous_player_position_ {0.0F};
+    float backrooms_marlow_death_delay_seconds_ = 0.0F;
+    bool backrooms_marlow_death_pending_ = false;
+    bool backrooms_marlow_previous_in_water_ = false;
+    bool backrooms_marlow_previous_on_ground_ = true;
+    bool backrooms_marlow_previous_jump_input_ = false;
+    bool backrooms_marlow_has_previous_player_position_ = false;
     float menu_preview_time_of_day_ = 8.25F;
     float preview_orbit_radians_ = 0.0F;
     bool has_active_session_ = false;

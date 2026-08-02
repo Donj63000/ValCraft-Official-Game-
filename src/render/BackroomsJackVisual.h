@@ -10,8 +10,8 @@
 namespace valcraft {
 
 inline constexpr std::size_t kBackroomsJackVisualPartBudget = 128U;
-inline constexpr float kBackroomsJackVisualStandingHeight = 3.82F;
-inline constexpr float kBackroomsJackVisualMaximumHunchRadians = 0.70F;
+inline constexpr float kBackroomsJackVisualStandingHeight = 4.50F;
+inline constexpr float kBackroomsJackVisualMaximumHunchRadians = 0.82F;
 
 struct BackroomsJackVisualPose {
     glm::vec3 position {0.0F};

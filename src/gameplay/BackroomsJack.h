@@ -10,20 +10,64 @@
 
 namespace valcraft {
 
-inline constexpr int kBackroomsJackNavigationSide = kChunkSizeX * 3;
+class World;
+
+inline constexpr int kBackroomsJackNavigationChunkRadius = 2;
+inline constexpr int kBackroomsJackNavigationChunkSide =
+    kBackroomsJackNavigationChunkRadius * 2 + 1;
+// Je garde l'A* compact mais j'observe un anneau supplémentaire pour placer
+// les apparitions lointaines uniquement dans des chunks réellement publiés.
+inline constexpr int kBackroomsJackReadinessChunkRadius = 3;
+inline constexpr int kBackroomsJackReadinessChunkSide =
+    kBackroomsJackReadinessChunkRadius * 2 + 1;
+inline constexpr int kBackroomsJackNavigationSide =
+    kChunkSizeX * kBackroomsJackNavigationChunkSide;
 inline constexpr std::size_t kBackroomsJackNavigationCellCount =
     static_cast<std::size_t>(
         kBackroomsJackNavigationSide *
         kBackroomsJackNavigationSide);
+inline constexpr std::size_t kBackroomsJackReadinessCellCount =
+    static_cast<std::size_t>(
+        kBackroomsJackReadinessChunkSide *
+        kBackroomsJackReadinessChunkSide);
 inline constexpr std::size_t kBackroomsJackMaximumEvents = 16U;
-inline constexpr float kBackroomsJackMinimumSpawnDistance = 18.0F;
-inline constexpr float kBackroomsJackMaximumSpawnDistance = 42.0F;
-inline constexpr float kBackroomsJackStandingHeight = 3.80F;
-inline constexpr float kBackroomsJackBentHeight = 3.28F;
-inline constexpr float kBackroomsJackStandingClearance = 4.30F;
-inline constexpr float kBackroomsJackMinimumCooldownSeconds = 180.0F;
-inline constexpr float kBackroomsJackMaximumCooldownSeconds = 360.0F;
-inline constexpr float kBackroomsJackPoolroomsSpeedMultiplier = 0.94F;
+inline constexpr float kBackroomsJackMinimumSpawnDistance = 16.0F;
+inline constexpr float kBackroomsJackMaximumSpawnDistance = 52.0F;
+inline constexpr float kBackroomsJackDefaultMaximumVisibleDistance = 64.0F;
+inline constexpr float kBackroomsJackFirstCueMinimumSeconds = 20.0F;
+inline constexpr float kBackroomsJackFirstCueMaximumSeconds = 35.0F;
+inline constexpr float kBackroomsJackFollowingCueMinimumSeconds = 25.0F;
+inline constexpr float kBackroomsJackFollowingCueMaximumSeconds = 45.0F;
+inline constexpr float kBackroomsJackCueDeadlineSeconds = 50.0F;
+inline constexpr float kBackroomsJackInitialSpawnDelayMinimumSeconds = 40.0F;
+inline constexpr float kBackroomsJackInitialSpawnDelayMaximumSeconds = 60.0F;
+inline constexpr float kBackroomsJackFollowingSpawnDelayMinimumSeconds = 45.0F;
+inline constexpr float kBackroomsJackFollowingSpawnDelayMaximumSeconds = 65.0F;
+inline constexpr float kBackroomsJackVisualDeadlineSeconds = 80.0F;
+inline constexpr float kBackroomsJackPostChaseVisualDeadlineSeconds = 120.0F;
+inline constexpr float kBackroomsJackSpawnRetryMinimumSeconds = 1.0F;
+inline constexpr float kBackroomsJackSpawnRetryMaximumSeconds = 1.0F;
+inline constexpr float kBackroomsJackHiddenHuntMinimumSeconds = 25.0F;
+inline constexpr float kBackroomsJackHiddenHuntMaximumSeconds = 40.0F;
+inline constexpr float kBackroomsJackRevealMinimumSeconds = 0.25F;
+inline constexpr float kBackroomsJackRevealMaximumSeconds = 0.40F;
+inline constexpr float kBackroomsJackInterferenceTailMinimumSeconds = 0.80F;
+inline constexpr float kBackroomsJackInterferenceTailMaximumSeconds = 1.80F;
+inline constexpr float kBackroomsJackDistantCueMinimumDistance = 14.0F;
+inline constexpr float kBackroomsJackDistantCueMaximumDistance = 32.0F;
+inline constexpr float kBackroomsJackStandingHeight = 4.52F;
+inline constexpr float kBackroomsJackBentHeight = 3.90F;
+inline constexpr float kBackroomsJackStandingClearance = 5.05F;
+inline constexpr float kBackroomsJackLowCeilingEntryHunchRatio = 0.84F;
+inline constexpr float kBackroomsJackMinimumCooldownSeconds = 70.0F;
+inline constexpr float kBackroomsJackMaximumCooldownSeconds = 90.0F;
+inline constexpr float kBackroomsJackPsychologicalCooldownMinimumSeconds =
+    kBackroomsJackFollowingSpawnDelayMinimumSeconds;
+inline constexpr float kBackroomsJackPsychologicalCooldownMaximumSeconds =
+    kBackroomsJackFollowingSpawnDelayMaximumSeconds;
+inline constexpr float kBackroomsJackMaximumPersistedSpawnDelaySeconds = 60.0F;
+inline constexpr float kBackroomsJackMaximumPersistedCooldownSeconds = 90.0F;
+inline constexpr float kBackroomsJackPoolroomsSpeedMultiplier = 0.98F;
 inline constexpr std::int32_t kBackroomsMinimumLogicalLevel = -1'000'000;
 inline constexpr std::int32_t kBackroomsMaximumLogicalLevel = 1'000'000;
 
@@ -49,6 +93,21 @@ enum class BackroomsJackMotion : std::uint8_t {
     Running = 2,
 };
 
+enum class BackroomsJackEncounterMode : std::uint8_t {
+    HiddenHunt = 0,
+    CorridorStare = 1,
+    RearStare = 2,
+};
+
+struct BackroomsJackEncounterModeOrder {
+    std::array<BackroomsJackEncounterMode, 3> modes {{
+        BackroomsJackEncounterMode::HiddenHunt,
+        BackroomsJackEncounterMode::CorridorStare,
+        BackroomsJackEncounterMode::RearStare,
+    }};
+    std::uint32_t next_random_state = 1U;
+};
+
 enum class BackroomsJackEventKind : std::uint8_t {
     Notice = 0,
     Chase = 1,
@@ -56,6 +115,13 @@ enum class BackroomsJackEventKind : std::uint8_t {
     WoodenLegStep = 3,
     Screamer = 4,
     Vanished = 5,
+    DistantBootStep = 6,
+    DistantWoodenLegStep = 7,
+};
+
+enum class BackroomsJackLightInterferenceMode : std::uint8_t {
+    Flicker = 0,
+    BlackoutPulse = 1,
 };
 
 enum class BackroomsJackSmokePose : std::uint8_t {
@@ -85,8 +151,10 @@ struct BackroomsJackNavigationCell {
 struct BackroomsJackNavigationGrid {
     ChunkCoord center_chunk {};
     std::int32_t logical_level = 0;
-    int origin_world_x = -kChunkSizeX;
-    int origin_world_z = -kChunkSizeZ;
+    int origin_world_x =
+        -kBackroomsJackNavigationChunkRadius * kChunkSizeX;
+    int origin_world_z =
+        -kBackroomsJackNavigationChunkRadius * kChunkSizeZ;
     std::array<
         BackroomsJackNavigationCell,
         kBackroomsJackNavigationCellCount> cells {};
@@ -121,7 +189,9 @@ struct BackroomsJackPlayerContext {
 
 struct BackroomsJackChunkReadiness {
     ChunkCoord center_chunk {};
-    std::array<bool, 9> ready {};
+    std::array<bool, kBackroomsJackReadinessCellCount> ready {};
+    std::array<std::uint64_t, kBackroomsJackReadinessCellCount>
+        mesh_revisions {};
 };
 
 struct BackroomsJackUpdateContext {
@@ -130,6 +200,12 @@ struct BackroomsJackUpdateContext {
     bool allow_spawn = true;
     bool simulation_frozen = false;
     bool player_alive = true;
+    // Je laisse les tests et les outils purs utiliser le generateur seul, mais
+    // la partie reelle peut superposer les connecteurs et overrides du World.
+    const World* spatial_world = nullptr;
+    int spatial_world_y_offset = 0;
+    float maximum_visible_distance =
+        kBackroomsJackDefaultMaximumVisibleDistance;
 };
 
 struct BackroomsJackPerception {
@@ -150,8 +226,11 @@ struct BackroomsJackSpawnSelection {
     };
     float body_yaw_degrees = 0.0F;
     float initial_hunch = 0.0F;
+    BackroomsJackEncounterMode encounter_mode =
+        BackroomsJackEncounterMode::HiddenHunt;
     std::uint32_t next_random_state = 1U;
     bool found = false;
+    bool route_guaranteed = false;
 };
 
 struct BackroomsJackEvent {
@@ -182,6 +261,8 @@ struct BackroomsJackLightInterferenceView {
     float radius = 0.0F;
     float intensity = 0.0F;
     bool active = false;
+    BackroomsJackLightInterferenceMode mode =
+        BackroomsJackLightInterferenceMode::Flicker;
 };
 
 struct BackroomsJackUpdateResult {
@@ -239,15 +320,53 @@ struct BackroomsJackState {
 
 struct BackroomsJackRuntime {
     BackroomsJackNavigationGrid navigation {};
+    BackroomsJackChunkReadiness navigation_readiness {};
     BackroomsJackPath path {};
     BackroomsJackGridPoint path_target {};
     float fixed_step_accumulator = 0.0F;
     float repath_seconds = 0.0F;
     float stuck_seconds = 0.0F;
+    float encounter_limit_seconds = 0.0F;
+    float encounter_reaction_seconds = 0.0F;
     glm::vec3 last_simulated_position {0.0F};
+    BackroomsJackSpawnSelection pending_spawn {};
+    glm::vec3 interference_tail_position {0.0F};
+    BackroomsJackEncounterMode encounter_mode =
+        BackroomsJackEncounterMode::HiddenHunt;
+    BackroomsJackEncounterMode previous_encounter_mode =
+        BackroomsJackEncounterMode::HiddenHunt;
+    float pending_reveal_seconds = 0.0F;
+    float pending_vanish_seconds = 0.0F;
+    float distant_cue_seconds = 0.0F;
+    float visual_deadline_seconds = 0.0F;
+    float hidden_hunt_timeout_seconds = 0.0F;
+    float encounter_deadline_seconds = 0.0F;
+    float interference_tail_seconds = 0.0F;
+    float interference_tail_duration = 0.0F;
+    BackroomsJackLightInterferenceMode interference_tail_mode =
+        BackroomsJackLightInterferenceMode::Flicker;
+    std::uint8_t hidden_hunt_reposition_count = 0U;
     bool navigation_valid = false;
+    bool navigation_readiness_valid = false;
     bool has_path_target = false;
+    bool movement_blocked = false;
+    bool encounter_chases = false;
+    bool encounter_outcome_directed = false;
+    bool encounter_was_seen = false;
+    bool has_last_simulated_position = false;
+    bool has_previous_encounter_mode = false;
+    bool previous_encounter_chased = false;
+    bool pending_reveal = false;
+    bool pending_vanish = false;
+    bool pending_vanish_uses_short_cooldown = false;
+    bool spawn_retry_pending = false;
+    bool director_initialized = false;
+    bool distant_cue_next_wooden = false;
 };
+
+[[nodiscard]] auto prepare_backrooms_jack_for_persistence(
+    const BackroomsJackState& state,
+    const BackroomsJackRuntime& runtime) noexcept -> BackroomsJackState;
 
 struct BackroomsJackSmokePreview {
     BackroomsJackState state {};
@@ -258,6 +377,12 @@ struct BackroomsJackSmokePreview {
 [[nodiscard]] auto initialize_backrooms_jack(
     std::uint32_t seed,
     std::int32_t logical_level = 0) noexcept -> BackroomsJackState;
+
+[[nodiscard]] auto backrooms_jack_encounter_mode_order(
+    std::uint32_t random_state,
+    bool has_previous_mode,
+    BackroomsJackEncounterMode previous_mode,
+    bool force_visible) noexcept -> BackroomsJackEncounterModeOrder;
 
 [[nodiscard]] auto sanitize_backrooms_jack_state(
     const BackroomsJackState& state) noexcept -> BackroomsJackState;

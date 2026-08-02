@@ -84,6 +84,7 @@ enum class BackroomsPoolSurface : std::uint8_t {
 enum class BackroomsPoolGeometryProfile : std::uint8_t {
     LegacyFlat = 0,
     RecessedOneBlock = 1,
+    FloodedDistrictsV4 = 2,
 };
 
 struct BackroomsModuleDescriptor {
@@ -111,7 +112,11 @@ struct BackroomsColumnSample {
     int wall_top_y = kBackroomsFloorY;
     int overhead_bottom_y = kWorldMaxY + 1;
     int overhead_top_y = kWorldMinY - 1;
+    // Je garde water_y comme alias de la surface pour les consommateurs V1-V3,
+    // puis je decris le volume V4 avec un intervalle vertical explicite.
     int water_y = kWorldMinY - 1;
+    int water_bottom_y = kWorldMinY - 1;
+    int water_top_y = kWorldMinY - 1;
     BlockId foundation_block = to_block_id(BlockType::Stone);
     BlockId roof_block = to_block_id(BlockType::Stone);
     BlockId floor_block = to_block_id(BlockType::Dirt);
@@ -126,6 +131,9 @@ struct BackroomsColumnSample {
         BackroomsElevatedFeature::None;
     BackroomsPoolSurface pool_surface =
         BackroomsPoolSurface::Dry;
+    bool flooded_district = false;
+    bool deep_water = false;
+    std::uint8_t water_depth_cells = 0U;
 
     auto operator==(const BackroomsColumnSample&) const -> bool = default;
 };
@@ -158,6 +166,12 @@ public:
         -> BackroomsPoolGeometryProfile;
     [[nodiscard]] auto theme() const noexcept -> BackroomsTheme;
     [[nodiscard]] auto is_poolrooms() const noexcept -> bool;
+    [[nodiscard]] auto is_flooded_module(
+        int module_x,
+        int module_z) const noexcept -> bool;
+    [[nodiscard]] auto is_flooded_at(
+        int world_x,
+        int world_z) const noexcept -> bool;
     [[nodiscard]] auto module_descriptor(int module_x, int module_z) const noexcept
         -> BackroomsModuleDescriptor;
     [[nodiscard]] auto descriptor_at(int world_x, int world_z) const noexcept

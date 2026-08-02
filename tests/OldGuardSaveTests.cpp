@@ -148,6 +148,10 @@ void erase_current_post_item_extensions(
     // pour reconstruire fidèlement une sauvegarde v11 ou v10 historique.
     erase_terminal_extension(
         bytes,
+        {'M', 'R', 'L', 'W'},
+        40U);
+    erase_terminal_extension(
+        bytes,
         {'B', 'R', 'L', 'V'},
         4U + sizeof(std::uint8_t) +
             sizeof(std::int32_t));

@@ -628,6 +628,10 @@ TEST_CASE(
         std::string_view::npos);
   CHECK(
       terrain_shader.find(
+          "uniform float u_interior_visibility_floor;") !=
+      std::string_view::npos);
+  CHECK(
+      terrain_shader.find(
           "uniform float u_backrooms_flashlight_intensity;") !=
       std::string_view::npos);
   CHECK(
@@ -704,6 +708,24 @@ TEST_CASE(
       std::string_view::npos);
   CHECK(
       terrain_shader.find(
+          "return mix(\n"
+          "        safe_visibility_floor,\n"
+          "        1.0,\n"
+          "        combined_visibility);") !=
+      std::string_view::npos);
+  const auto terrain_darkness_composite =
+      terrain_shader.find("float darkness_visibility =");
+  const auto terrain_fog_composite =
+      terrain_shader.find("float weather_fog =", terrain_darkness_composite);
+  REQUIRE(terrain_darkness_composite != std::string_view::npos);
+  REQUIRE(terrain_fog_composite != std::string_view::npos);
+  CHECK(terrain_darkness_composite < terrain_fog_composite);
+  CHECK(
+      terrain_shader.find(
+          "surface_emission * (1.0 - darkness_visibility)") !=
+      std::string_view::npos);
+  CHECK(
+      terrain_shader.find(
           "const float outer_cone_cosine = 0.913545") !=
       std::string_view::npos);
   CHECK(
@@ -732,10 +754,12 @@ TEST_CASE(
           "v_primary_block == 49u || v_primary_block == 51u") ==
       std::string_view::npos);
   CHECK(
-      terrain_shader.find("if (v_primary_block == 50u)") !=
+      terrain_shader.find(
+          "if (backrooms_material_semantics && v_primary_block == 50u)") !=
       std::string_view::npos);
   CHECK(
-      terrain_shader.find("else if (v_primary_block == 52u)") !=
+      terrain_shader.find(
+          "else if (backrooms_material_semantics && v_primary_block == 52u)") !=
       std::string_view::npos);
   const auto emission_override_begin =
       terrain_shader.find("float emission =");
@@ -754,8 +778,7 @@ TEST_CASE(
       terrain_shader.find("vec3 emission_color");
   const auto emission_color_end =
       terrain_shader.find(
-          "color +=\n"
-          "        emission_color",
+          "vec3 surface_emission =",
           emission_color_begin);
   REQUIRE(emission_color_begin != std::string_view::npos);
   REQUIRE(emission_color_end != std::string_view::npos);
@@ -800,6 +823,9 @@ TEST_CASE(
   CHECK(renderer_source.find("uniform int u_enclosed_interior;") !=
         std::string::npos);
   CHECK(renderer_source.find(
+            "uniform float u_interior_visibility_floor;") !=
+        std::string::npos);
+  CHECK(renderer_source.find(
             "backrooms_contiguous_chunk_coverage_distance(") !=
         std::string::npos);
   CHECK(renderer_source.find("backrooms_terminal_fog_range(") !=
@@ -841,22 +867,29 @@ TEST_CASE(
             "glUniform1i(modern_terrain_uniforms_.enclosed_interior") !=
         std::string::npos);
   CHECK(renderer_source.find(
+            "glUniform1f(modern_terrain_uniforms_.interior_visibility_floor") !=
+        std::string::npos);
+  CHECK(renderer_source.find(
             "glUniform1i(uniforms.enclosed_interior") !=
+        std::string::npos);
+  CHECK(renderer_source.find(
+            "glUniform1f(uniforms.interior_visibility_floor") !=
         std::string::npos);
   CHECK(renderer_source.find(
             "\"u_enclosed_interior\"") !=
         std::string::npos);
   CHECK(renderer_source.find(
-            "const std::array<GLint, 44> "
+            "const std::array<GLint, 45> "
             "modern_terrain_uniform_locations") !=
         std::string::npos);
   CHECK(renderer_source.find(
-            "const std::array<GLint, 41> "
+            "const std::array<GLint, 42> "
             "modern_architecture_uniform_locations") !=
         std::string::npos);
   CHECK(renderer_source.find(
             "modern_terrain_uniforms_.block_light_color,\n"
             "      modern_terrain_uniforms_.enclosed_interior,\n"
+            "      modern_terrain_uniforms_.interior_visibility_floor,\n"
             "      modern_terrain_uniforms_.backrooms_flicker_count,\n"
             "      modern_terrain_uniforms_.backrooms_flicker_lights,\n"
             "      modern_terrain_uniforms_.backrooms_flashlight_intensity") !=
@@ -864,6 +897,7 @@ TEST_CASE(
   CHECK(renderer_source.find(
             "modern_architecture_uniforms_.block_light_color,\n"
             "      modern_architecture_uniforms_.enclosed_interior,\n"
+            "      modern_architecture_uniforms_.interior_visibility_floor,\n"
             "      modern_architecture_uniforms_.backrooms_flicker_count,\n"
             "      modern_architecture_uniforms_.backrooms_flicker_lights,\n"
             "      modern_architecture_uniforms_.backrooms_flashlight_intensity") !=
@@ -881,11 +915,14 @@ TEST_CASE(
             "item_drop_uniforms_.backrooms_flashlight_intensity") !=
         std::string::npos);
   CHECK(renderer_source.find(
-            "const std::array<GLint, 6>\n"
+            "const std::array<GLint, 7>\n"
             "      item_drop_backrooms_uniform_locations") !=
         std::string::npos);
   CHECK(renderer_source.find(
             "glUniform1i(item_drop_uniforms_.enclosed_interior") !=
+        std::string::npos);
+  CHECK(renderer_source.find(
+            "glUniform1f(item_drop_uniforms_.interior_visibility_floor") !=
         std::string::npos);
   CHECK(renderer_source.find(
             "glUniform2f(\n"
@@ -899,11 +936,12 @@ TEST_CASE(
             "\"u_backrooms_flashlight_intensity\"") !=
         std::string::npos);
   CHECK(renderer_source.find(
-            "const std::array<GLint, 7> "
+            "const std::array<GLint, 8> "
             "world_interior_lighting_uniform_locations") !=
         std::string::npos);
   CHECK(renderer_source.find(
             "world_uniforms_.enclosed_interior,\n"
+            "      world_uniforms_.interior_visibility_floor,\n"
             "      world_uniforms_.backrooms_flicker_count,\n"
             "      world_uniforms_.backrooms_flicker_lights,\n"
             "      world_uniforms_.backrooms_flashlight_intensity,\n"
@@ -921,6 +959,10 @@ TEST_CASE(
   CHECK(renderer_source.find("vec3 legacy_emission") !=
         std::string::npos);
   CHECK(renderer_source.find("vec3 backrooms_emission") !=
+        std::string::npos);
+  CHECK(renderer_source.find("float interior_readability_energy") !=
+        std::string::npos);
+  CHECK(renderer_source.find("vec3 interior_readability_floor") !=
         std::string::npos);
   CHECK(renderer_source.find("u_backrooms_flicker_count") !=
         std::string::npos);
@@ -992,6 +1034,12 @@ TEST_CASE(
   const auto creature_darkness_source =
       std::string_view(renderer_source).substr(
           creature_darkness_begin);
+  CHECK(
+      legacy_darkness_source.find("safe_visibility_floor") !=
+      std::string_view::npos);
+  CHECK(
+      creature_darkness_source.find("safe_visibility_floor") ==
+      std::string_view::npos);
   for (const auto shader_source :
        {legacy_darkness_source,
         creature_darkness_source}) {
@@ -1028,17 +1076,25 @@ TEST_CASE(
   }
   CHECK(
       legacy_darkness_source.find(
+          "lit_color * darkness_visibility +\n"
+          "        surface_emission * (1.0 - darkness_visibility);") !=
+      std::string_view::npos);
+  CHECK(
+      legacy_darkness_source.find(
           "final_color *=\n"
+          "        backrooms_darkness_visibility") ==
+      std::string_view::npos);
+  CHECK(
+      creature_darkness_source.find(
+          "float darkness_visibility =\n"
           "        backrooms_darkness_visibility(\n"
-          "            block_light,\n"
+          "            instance_block_light,\n"
           "            flashlight_energy);") !=
       std::string_view::npos);
   CHECK(
       creature_darkness_source.find(
-          "final_color *=\n"
-          "        backrooms_darkness_visibility(\n"
-          "            instance_block_light,\n"
-          "            flashlight_energy);") !=
+          "fogged_color * darkness_visibility +\n"
+          "        fogged_glow;") !=
       std::string_view::npos);
   CHECK(renderer_source.find(
             "const float outer_cone_cosine = 0.913545") !=
@@ -1104,6 +1160,76 @@ TEST_CASE(
         std::string::npos);
   CHECK(renderer_source.find("if (!backrooms_interior)") !=
         std::string::npos);
+  CHECK(renderer_source.find(
+            "backrooms_terminal_fog_snapshot_.world_seed == world.seed()") !=
+        std::string::npos);
+  CHECK(renderer_source.find(
+            "backrooms_terminal_fog_snapshot_.logical_level == "
+            "backrooms_level") != std::string::npos);
+  CHECK(renderer_source.find(
+            ".logical_level = backrooms_level") !=
+        std::string::npos);
+  const auto blackout_mode = renderer_source.find(
+      "BackroomsJackLightInterferenceMode::BlackoutPulse");
+  REQUIRE(blackout_mode != std::string::npos);
+  const auto blackout_output = renderer_source.find(
+      "? 0.05F",
+      blackout_mode);
+  REQUIRE(blackout_output != std::string::npos);
+  const auto blackout_tail_mix = renderer_source.find(
+      "1.0F - forced_output",
+      blackout_output);
+  CHECK(blackout_tail_mix != std::string::npos);
+}
+
+TEST_CASE("Backrooms terminal fog snapshot is read only and invalid by default") {
+  static_assert(std::is_same_v<
+                decltype(std::declval<const Renderer &>()
+                             .backrooms_terminal_fog_snapshot()),
+                BackroomsTerminalFogSnapshot>);
+
+  const Renderer renderer{};
+  const auto snapshot = renderer.backrooms_terminal_fog_snapshot();
+  CHECK_FALSE(snapshot.valid);
+  CHECK(snapshot.world_seed == 0);
+  CHECK(snapshot.logical_level == 0);
+  CHECK_FALSE(snapshot.range.enabled());
+  CHECK(snapshot.safe_visible_distance(0, 0) == 0.0F);
+  auto detached_copy = snapshot;
+  detached_copy.valid = true;
+  CHECK(detached_copy.valid);
+  CHECK_FALSE(renderer.backrooms_terminal_fog_snapshot().valid);
+
+  const BackroomsTerminalFogSnapshot committed {
+      .valid = true,
+      .world_seed = 7331,
+      .logical_level = -2,
+      .range = {12.0F, 48.0F},
+  };
+  CHECK(committed.safe_visible_distance(7331, -2) ==
+        doctest::Approx(46.0F));
+  CHECK(committed.safe_visible_distance(7331, -2, 2.0F, 32.0F) ==
+        doctest::Approx(32.0F));
+  CHECK(committed.safe_visible_distance(7332, -2) == 0.0F);
+  CHECK(committed.safe_visible_distance(7331, -1) == 0.0F);
+  CHECK(committed.safe_visible_distance(
+            7331,
+            -2,
+            std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::infinity()) ==
+        doctest::Approx(46.0F));
+}
+
+TEST_CASE("BlackoutPulse masque completement une apparition meme sans rampe") {
+  CHECK(backrooms_blackout_pulse_fallback_intensity(0.0F) ==
+        doctest::Approx(1.0F));
+  CHECK(backrooms_blackout_pulse_fallback_intensity(0.5F) ==
+        doctest::Approx(0.525F));
+  CHECK(backrooms_blackout_pulse_fallback_intensity(1.0F) ==
+        doctest::Approx(0.05F));
+  CHECK(backrooms_blackout_pulse_fallback_intensity(
+            std::numeric_limits<float>::quiet_NaN()) ==
+        doctest::Approx(1.0F));
 }
 
 TEST_CASE(
@@ -1213,7 +1339,7 @@ TEST_CASE(
 TEST_CASE(
     "Poolrooms PBR terrain keeps ceramic joints wetness and cold emission") {
   const auto shader = kModernTerrainFragmentShaderSource;
-  CHECK(shader.find("block_id >= 42u && block_id <= 63u") !=
+  CHECK(shader.find("block_id >= 42u && block_id <= 68u") !=
         std::string_view::npos);
   CHECK(shader.find("vec3 poolrooms_ceramic_color") !=
         std::string_view::npos);
@@ -1231,6 +1357,12 @@ TEST_CASE(
         std::string_view::npos);
   CHECK(shader.find("mix(\n                0.985,\n                1.015,") !=
         std::string_view::npos);
+  CHECK(shader.find("float dry_poolrooms_ceramic") !=
+        std::string_view::npos);
+  CHECK(shader.find("float irregular_grime") !=
+        std::string_view::npos);
+  CHECK(shader.find("mix(0.85, 1.0, irregular_grime)") !=
+        std::string_view::npos);
   CHECK(shader.find(
             "if (block_id >= 53u && block_id <= 55u) return 0.008") !=
         std::string_view::npos);
@@ -1243,9 +1375,98 @@ TEST_CASE(
         std::string_view::npos);
   CHECK(shader.find("if (block_id == 56u) return 0.86") !=
         std::string_view::npos);
-  CHECK(shader.find("else if (v_primary_block == 58u)") !=
+  CHECK(shader.find("else if (backrooms_material_semantics &&\n"
+                    "               v_primary_block == 58u)") !=
         std::string_view::npos);
   CHECK(shader.find("vec3(0.54, 0.98, 1.04)") !=
+        std::string_view::npos);
+}
+
+TEST_CASE(
+    "Backrooms office PBR uses dedicated materials and broad damp carpet patches") {
+  const auto shader = kModernTerrainFragmentShaderSource;
+
+  // Je verrouille les dix couches append-only : un futur remaniement ne doit
+  // jamais remettre du sable, du cuir ou de la neige sous les bureaux.
+  CHECK(shader.find(
+            "if (block_id >= 42u && block_id <= 46u) return float(block_id + 11u)") !=
+        std::string_view::npos);
+  CHECK(shader.find(
+            "if ((block_id >= 42u && block_id <= 49u) ||\n"
+            "        (block_id >= 64u && block_id <= 68u))") !=
+        std::string_view::npos);
+  CHECK(shader.find("if (block_id == 48u) return 58.0") !=
+        std::string_view::npos);
+  CHECK(shader.find("if (block_id == 49u) return 59.0") !=
+        std::string_view::npos);
+  CHECK(shader.find(
+            "block_id == 50u || block_id == 52u || block_id == 58u") !=
+        std::string_view::npos);
+  CHECK(shader.find("return 62.0") != std::string_view::npos);
+  CHECK(shader.find("return 61.0") != std::string_view::npos);
+  CHECK(shader.find("if (block_id == 61u) return 61.0") !=
+        std::string_view::npos);
+  CHECK(shader.find(
+            "if (block_id == 51u || block_id == 59u || block_id == 61u)") !=
+        std::string_view::npos);
+  CHECK(shader.find("if (block_id == 59u) return 0.72") ==
+        std::string_view::npos);
+  CHECK(shader.find("float carpet_damp_field = value_noise_2d") !=
+        std::string_view::npos);
+  CHECK(shader.find("if (carpet_presence > 0.0)") !=
+        std::string_view::npos);
+  CHECK(shader.find("v_world_position.xz * 0.115") !=
+        std::string_view::npos);
+  CHECK(shader.find("max(poolrooms_wetness, carpet_wetness)") !=
+        std::string_view::npos);
+  CHECK(shader.find("emission_color = vec3(1.12, 0.94, 0.60)") !=
+        std::string_view::npos);
+}
+
+TEST_CASE(
+    "Backrooms PBR semantics never alter direct marine materials") {
+  const auto shader = kModernTerrainFragmentShaderSource;
+  const auto shadow_shader = kModernTerrainShadowFragmentShaderSource;
+
+  // Je verrouille la separation entre BlockId et VisualMaterialId : les
+  // couches marines 47 a 53 ne doivent jamais devenir du beton, de la
+  // moquette humide, un tube emissif ou du carrelage Poolrooms.
+  CHECK(shader.find(
+            "bool backrooms_material_semantics = !direct_material;") !=
+        std::string_view::npos);
+  CHECK(shader.find("if (backrooms_material_semantics) {\n"
+                    "        primary_albedo.rgb = tint_backrooms_material") !=
+        std::string_view::npos);
+  CHECK(shader.find("float poolrooms_wetness =\n"
+                    "        backrooms_material_semantics") !=
+        std::string_view::npos);
+  CHECK(shader.find("float carpet_presence =\n"
+                    "        backrooms_material_semantics") !=
+        std::string_view::npos);
+  CHECK(shader.find("float roughness =\n"
+                    "        backrooms_material_semantics") !=
+        std::string_view::npos);
+  CHECK(shader.find("float metallic =\n"
+                    "        backrooms_material_semantics") !=
+        std::string_view::npos);
+  CHECK(shader.find("if (backrooms_material_semantics &&\n"
+                    "        (v_primary_block == 50u ||") !=
+        std::string_view::npos);
+  CHECK(shader.find(
+            "if (backrooms_material_semantics && v_primary_block == 50u)") !=
+        std::string_view::npos);
+  CHECK(shader.find(
+            "block_id == 58u || block_id == 59u || block_id == 61u) {\n"
+            "        // Je conserve la separation physique") !=
+        std::string_view::npos);
+  CHECK(shader.find(
+            "block_id == 58u || block_id == 59u || block_id == 61u) {\n"
+            "        // Je laisse le masque ORM") !=
+        std::string_view::npos);
+  CHECK(shadow_shader.find("if ((v_surface_flags & 32u) != 0u) {") !=
+        std::string_view::npos);
+  CHECK(shadow_shader.find(
+            "return float(clamp(block_id, 1u, 63u) - 1u);") !=
         std::string_view::npos);
 }
 
@@ -1335,9 +1556,21 @@ TEST_CASE(
   CHECK(fragment_shader.find("float backrooms_darkness_visibility") !=
         std::string_view::npos);
   CHECK(fragment_shader.find(
+            "uniform float u_interior_visibility_floor;") !=
+        std::string_view::npos);
+  CHECK(fragment_shader.find(
             "color *=\n"
             "        backrooms_darkness_visibility(") !=
         std::string_view::npos);
+  const auto water_darkness_call = fragment_shader.rfind(
+      "color *=\n"
+      "        backrooms_darkness_visibility(");
+  const auto water_fog = fragment_shader.find(
+      "float weather_fog =",
+      water_darkness_call);
+  REQUIRE(water_darkness_call != std::string_view::npos);
+  REQUIRE(water_fog != std::string_view::npos);
+  CHECK(water_darkness_call < water_fog);
 }
 
 TEST_CASE(
@@ -1370,6 +1603,9 @@ TEST_CASE(
         std::string::npos);
   CHECK(source.find(
             "modern_water_uniforms_.backrooms_flashlight_intensity") !=
+        std::string::npos);
+  CHECK(source.find(
+            "modern_water_uniforms_.interior_visibility_floor") !=
         std::string::npos);
   CHECK(source.find(
             "modern_water_uniforms_.interior_fog_range") !=

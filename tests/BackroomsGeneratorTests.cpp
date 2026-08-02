@@ -547,6 +547,110 @@ TEST_CASE("Poolrooms mix safe shallow basins dry paths and voxel volumes") {
     CHECK(found_readable_shore);
 }
 
+TEST_CASE(
+    "Poolrooms reserve exposed dark tiles for true blackout modules") {
+    const BackroomsGenerator generator(424242, -2);
+    const auto dark_tile =
+        to_block_id(BlockType::PoolroomsDarkTile);
+
+    std::vector<std::pair<int, int>> readable_modules;
+    std::optional<std::pair<int, int>> blackout_module;
+    for (int module_z = -8; module_z <= 8; ++module_z) {
+        for (int module_x = -8; module_x <= 8; ++module_x) {
+            const auto descriptor =
+                generator.module_descriptor(module_x, module_z);
+            if (descriptor.tension == BackroomsTension::Blackout) {
+                if (!blackout_module.has_value()) {
+                    blackout_module = {module_x, module_z};
+                }
+            } else if (readable_modules.size() < 3U) {
+                readable_modules.emplace_back(module_x, module_z);
+            }
+        }
+    }
+
+    REQUIRE(readable_modules.size() == 3U);
+    REQUIRE(blackout_module.has_value());
+
+    std::size_t scanned_foundations = 0;
+    std::size_t dark_foundations = 0;
+    std::size_t dry_floors_outside_blackout = 0;
+    std::size_t exposed_walls_outside_blackout = 0;
+    std::size_t exposed_dark_floors_outside_blackout = 0;
+    std::size_t exposed_dark_walls_outside_blackout = 0;
+    std::size_t exposed_dark_walls_in_blackout = 0;
+
+    const auto inspect_module =
+        [&](int module_x, int module_z, bool blackout) {
+            for (int local_z = 0;
+                 local_z < kBackroomsModuleSize;
+                 ++local_z) {
+                for (int local_x = 0;
+                     local_x < kBackroomsModuleSize;
+                     ++local_x) {
+                    const auto world_x =
+                        module_x * kBackroomsModuleSize + local_x;
+                    const auto world_z =
+                        module_z * kBackroomsModuleSize + local_z;
+                    const auto column =
+                        generator.sample_column(world_x, world_z);
+
+                    ++scanned_foundations;
+                    dark_foundations +=
+                        generator.sample_block(
+                            world_x,
+                            column.floor_y - 1,
+                            world_z) == dark_tile
+                            ? 1U
+                            : 0U;
+
+                    if (!blackout) {
+                        dry_floors_outside_blackout +=
+                            column.pool_surface ==
+                                    BackroomsPoolSurface::Dry
+                                ? 1U
+                                : 0U;
+                        exposed_walls_outside_blackout +=
+                            column.wall ? 1U : 0U;
+                        exposed_dark_floors_outside_blackout +=
+                            column.floor_block == dark_tile
+                                ? 1U
+                                : 0U;
+                        exposed_dark_walls_outside_blackout +=
+                            column.wall &&
+                                    column.wall_block == dark_tile
+                                ? 1U
+                                : 0U;
+                        continue;
+                    }
+
+                    exposed_dark_walls_in_blackout +=
+                        column.wall &&
+                                column.wall_block == dark_tile
+                            ? 1U
+                            : 0U;
+                }
+            }
+        };
+
+    // Je parcours plusieurs modules lisibles pour interdire tout ancien pavé
+    // sombre de 8 x 8, puis un vrai Blackout pour préserver son identité.
+    for (const auto& [module_x, module_z] : readable_modules) {
+        inspect_module(module_x, module_z, false);
+    }
+    inspect_module(
+        blackout_module->first,
+        blackout_module->second,
+        true);
+
+    CHECK(dark_foundations == scanned_foundations);
+    CHECK(dry_floors_outside_blackout > 0U);
+    CHECK(exposed_walls_outside_blackout > 0U);
+    CHECK(exposed_dark_floors_outside_blackout == 0U);
+    CHECK(exposed_dark_walls_outside_blackout == 0U);
+    CHECK(exposed_dark_walls_in_blackout > 0U);
+}
+
 TEST_CASE("Poolrooms basins stay coherent and every water edge has a shore") {
     constexpr auto first = -128;
     constexpr auto last = 127;
@@ -950,6 +1054,298 @@ TEST_CASE("Poolrooms recessed basins contain water between two floor levels") {
         static_cast<double>(distribution_basin_count);
     CHECK(shallow_ratio >= 0.60);
     CHECK(shallow_ratio <= 0.90);
+}
+
+TEST_CASE("Poolrooms V4 flooded districts are deterministic connected and cover one fifth of modules") {
+    constexpr auto seed = 424242;
+    const BackroomsGenerator first(
+        seed,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4);
+    const BackroomsGenerator second(
+        seed,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4);
+
+    auto flooded_modules = 0;
+    auto eligible_modules = 0;
+    auto four_module_districts = 0;
+    auto triomino_districts = 0;
+    for (int district_z = -12; district_z <= 12; ++district_z) {
+        for (int district_x = -12; district_x <= 12; ++district_x) {
+            auto district_flooded = 0;
+            for (int local_module_z = 0;
+                 local_module_z < 4;
+                 ++local_module_z) {
+                for (int local_module_x = 0;
+                     local_module_x < 4;
+                     ++local_module_x) {
+                    const auto module_x =
+                        district_x * 4 + local_module_x;
+                    const auto module_z =
+                        district_z * 4 + local_module_z;
+                    const auto flooded =
+                        first.is_flooded_module(module_x, module_z);
+                    CHECK(
+                        flooded ==
+                        second.is_flooded_module(module_x, module_z));
+                    if (district_x == 0 && district_z == 0) {
+                        CHECK_FALSE(flooded);
+                        continue;
+                    }
+
+                    ++eligible_modules;
+                    flooded_modules += flooded ? 1 : 0;
+                    district_flooded += flooded ? 1 : 0;
+                    if (local_module_x == 0 || local_module_x == 3 ||
+                        local_module_z == 0 || local_module_z == 3) {
+                        // Je garde une couronne sèche complète entre deux
+                        // macro-districts pour interdire leur fusion fortuite.
+                        CHECK_FALSE(flooded);
+                    }
+                }
+            }
+
+            if (district_x == 0 && district_z == 0) {
+                CHECK(district_flooded == 0);
+                continue;
+            }
+            CHECK((district_flooded == 3 || district_flooded == 4));
+            triomino_districts += district_flooded == 3 ? 1 : 0;
+            four_module_districts += district_flooded == 4 ? 1 : 0;
+        }
+    }
+
+    REQUIRE(eligible_modules > 0);
+    const auto flooded_ratio =
+        static_cast<double>(flooded_modules) /
+        static_cast<double>(eligible_modules);
+    CHECK(flooded_ratio >= 0.19);
+    CHECK(flooded_ratio <= 0.21);
+    CHECK(triomino_districts > four_module_districts * 2);
+    CHECK(four_module_districts > 0);
+}
+
+TEST_CASE("Poolrooms V4 keeps every hub and portal connected through shallow water") {
+    const BackroomsGenerator generator(
+        -9081,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4);
+
+    auto flooded_modules = 0;
+    for (int module_z = -5; module_z <= 5; ++module_z) {
+        for (int module_x = -5; module_x <= 5; ++module_x) {
+            const auto descriptor =
+                generator.module_descriptor(module_x, module_z);
+            const auto visited =
+                reachable_cells(
+                    generator,
+                    module_x,
+                    module_z,
+                    descriptor.hub_x,
+                    descriptor.hub_z);
+            CHECK(
+                visited[local_index(
+                    descriptor.hub_x,
+                    descriptor.hub_z)]);
+            check_portal_reachable(
+                visited,
+                descriptor.north_portal_x,
+                0);
+            check_portal_reachable(
+                visited,
+                descriptor.south_portal_x,
+                kBackroomsModuleSize - 1);
+            check_portal_reachable(
+                visited,
+                0,
+                descriptor.west_portal_z);
+            check_portal_reachable(
+                visited,
+                kBackroomsModuleSize - 1,
+                descriptor.east_portal_z);
+            flooded_modules +=
+                generator.is_flooded_module(module_x, module_z)
+                    ? 1
+                    : 0;
+        }
+    }
+    CHECK(flooded_modules > 12);
+}
+
+TEST_CASE("Poolrooms V4 flood open rooms continuously and reserve optional deep basins") {
+    constexpr auto seed = 63017;
+    const BackroomsGenerator generator(
+        seed,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4);
+
+    auto flooded_open_cells = 0;
+    auto flooded_route_cells = 0;
+    auto deep_cells = 0;
+    auto deep_modules = 0;
+    auto inspected_modules = 0;
+    auto continuous_seams = 0;
+    for (int module_z = -16; module_z <= 16; ++module_z) {
+        for (int module_x = -16; module_x <= 16; ++module_x) {
+            if (!generator.is_flooded_module(module_x, module_z)) {
+                continue;
+            }
+
+            ++inspected_modules;
+            auto module_has_deep_water = false;
+            for (int local_z = 0;
+                 local_z < kBackroomsModuleSize;
+                 ++local_z) {
+                for (int local_x = 0;
+                     local_x < kBackroomsModuleSize;
+                     ++local_x) {
+                    const auto world_x =
+                        module_x * kBackroomsModuleSize + local_x;
+                    const auto world_z =
+                        module_z * kBackroomsModuleSize + local_z;
+                    const auto column =
+                        generator.sample_column(world_x, world_z);
+                    CHECK(column.flooded_district);
+                    CHECK(column.water_y == column.water_top_y);
+
+                    if (generator.connector_near(
+                            world_x,
+                            kBackroomsFloorY + 1,
+                            world_z,
+                            4)
+                            .has_value()) {
+                        CHECK(column.water_state == WaterState {0});
+                    }
+                    if (column.water_state == WaterState {0}) {
+                        CHECK(column.water_depth_cells == 0U);
+                        CHECK_FALSE(column.deep_water);
+                        continue;
+                    }
+
+                    ++flooded_open_cells;
+                    flooded_route_cells +=
+                        column.guaranteed_route ? 1 : 0;
+                    CHECK_FALSE(column.wall);
+                    CHECK(column.pool_surface ==
+                          BackroomsPoolSurface::Water);
+                    CHECK(water_state_is_source(column.water_state));
+                    CHECK(water_state_is_infinite(column.water_state));
+                    CHECK(
+                        water_level_from_state(column.water_state) ==
+                        kMaxWaterLevel);
+                    CHECK(column.water_top_y == kBackroomsFloorY);
+                    CHECK(
+                        generator.sample_water_state(
+                            world_x,
+                            column.water_bottom_y,
+                            world_z) == column.water_state);
+                    CHECK(
+                        generator.sample_water_state(
+                            world_x,
+                            column.water_top_y,
+                            world_z) == column.water_state);
+
+                    if (!column.deep_water) {
+                        CHECK(column.floor_y == kBackroomsFloorY - 1);
+                        CHECK(column.water_bottom_y == kBackroomsFloorY);
+                        CHECK(column.water_depth_cells == 1U);
+                        continue;
+                    }
+
+                    module_has_deep_water = true;
+                    ++deep_cells;
+                    CHECK_FALSE(column.guaranteed_route);
+                    CHECK(column.floor_y == kBackroomsFloorY - 2);
+                    CHECK(column.water_bottom_y == kBackroomsFloorY - 1);
+                    CHECK(column.water_depth_cells == 2U);
+                    CHECK(
+                        generator.sample_water_state(
+                            world_x,
+                            kBackroomsFloorY - 2,
+                            world_z) == WaterState {0});
+                }
+            }
+            deep_modules += module_has_deep_water ? 1 : 0;
+
+            if (!generator.is_flooded_module(module_x + 1, module_z)) {
+                continue;
+            }
+            const auto descriptor =
+                generator.module_descriptor(module_x, module_z);
+            for (int offset = -kBackroomsPortalHalfWidth;
+                 offset <= kBackroomsPortalHalfWidth;
+                 ++offset) {
+                const auto seam_z =
+                    module_z * kBackroomsModuleSize +
+                    descriptor.east_portal_z + offset;
+                const auto west_x =
+                    module_x * kBackroomsModuleSize +
+                    kBackroomsModuleSize - 1;
+                const auto east_x = west_x + 1;
+                if (generator.connector_near(
+                        west_x,
+                        kBackroomsFloorY + 1,
+                        seam_z,
+                        4)
+                        .has_value() ||
+                    generator.connector_near(
+                        east_x,
+                        kBackroomsFloorY + 1,
+                        seam_z,
+                        4)
+                        .has_value()) {
+                    continue;
+                }
+                const auto west =
+                    generator.sample_column(west_x, seam_z);
+                const auto east =
+                    generator.sample_column(east_x, seam_z);
+                CHECK(west.water_state != WaterState {0});
+                CHECK(east.water_state != WaterState {0});
+                CHECK(west.water_top_y == east.water_top_y);
+                ++continuous_seams;
+            }
+        }
+    }
+
+    CHECK(inspected_modules > 150);
+    CHECK(flooded_open_cells > 400'000);
+    CHECK(flooded_route_cells > 15'000);
+    CHECK(deep_modules > 8);
+    CHECK(deep_cells > 500);
+    CHECK(continuous_seams > 40);
+}
+
+TEST_CASE("Poolrooms V3 water interval alias preserves the historical one-cell geometry") {
+    const BackroomsGenerator generator(
+        424242,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::RecessedOneBlock);
+
+    auto wet_cells = 0;
+    for (int world_z = -96; world_z <= 96; ++world_z) {
+        for (int world_x = -96; world_x <= 96; ++world_x) {
+            const auto column =
+                generator.sample_column(world_x, world_z);
+            CHECK_FALSE(column.flooded_district);
+            CHECK_FALSE(column.deep_water);
+            if (column.water_state == WaterState {0}) {
+                CHECK(column.water_depth_cells == 0U);
+                continue;
+            }
+            ++wet_cells;
+            CHECK(column.water_y == column.water_bottom_y);
+            CHECK(column.water_y == column.water_top_y);
+            CHECK(column.water_depth_cells == 1U);
+        }
+    }
+    CHECK(wet_cells > 1'000);
 }
 
 TEST_CASE("BackRooms connectors pair levels and keep trigger landings free") {

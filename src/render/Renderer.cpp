@@ -6,6 +6,7 @@
 #include "gameplay/progression/AbilitySystem.h"
 #include "render/BackroomsJackScreamer.h"
 #include "render/BackroomsJackVisual.h"
+#include "render/BackroomsMarlowVisual.h"
 #include "render/BackroomsVisibility.h"
 #include "render/HotbarLayout.h"
 #include "render/ItemDropGeometry.h"
@@ -4182,6 +4183,64 @@ void append_backrooms_flashlight_hud_geometry(
 
 } // namespace
 
+auto make_backrooms_interference_fixture_cache_key(
+    int world_seed, int logical_level,
+    const BackroomsJackLightInterferenceView &interference) noexcept
+    -> std::optional<BackroomsInterferenceFixtureCacheKey> {
+  const auto supported_mode =
+      interference.mode == BackroomsJackLightInterferenceMode::Flicker ||
+      interference.mode ==
+          BackroomsJackLightInterferenceMode::BlackoutPulse;
+  if (!interference.active || !supported_mode ||
+      !std::isfinite(interference.position.x) ||
+      !std::isfinite(interference.position.z) ||
+      !std::isfinite(interference.radius) ||
+      !std::isfinite(interference.intensity)) {
+    return std::nullopt;
+  }
+
+  const auto cell_size =
+      static_cast<double>(kBackroomsFlickerCacheCellSize);
+  const auto anchor_cell_x =
+      std::floor(static_cast<double>(interference.position.x) / cell_size);
+  const auto anchor_cell_z =
+      std::floor(static_cast<double>(interference.position.z) / cell_size);
+  constexpr auto minimum_cell =
+      static_cast<double>(std::numeric_limits<int>::min());
+  constexpr auto maximum_cell =
+      static_cast<double>(std::numeric_limits<int>::max());
+  if (anchor_cell_x < minimum_cell || anchor_cell_x > maximum_cell ||
+      anchor_cell_z < minimum_cell || anchor_cell_z > maximum_cell) {
+    return std::nullopt;
+  }
+
+  const auto search_radius =
+      static_cast<int>(std::ceil(std::clamp(
+          interference.radius, 1.0F,
+          static_cast<float>(kMaximumBackroomsFixtureSearchRadius))));
+  return BackroomsInterferenceFixtureCacheKey{
+      .world_seed = world_seed,
+      .logical_level = logical_level,
+      .anchor_cell_x = static_cast<int>(anchor_cell_x),
+      .anchor_cell_z = static_cast<int>(anchor_cell_z),
+      .search_radius = search_radius,
+      .mode = interference.mode,
+  };
+}
+
+auto backrooms_blackout_pulse_fallback_intensity(
+    float interference_strength) noexcept -> float {
+  const auto safe_strength =
+      std::isfinite(interference_strength)
+          ? std::clamp(interference_strength, 0.0F, 1.0F)
+          : 0.0F;
+  return std::clamp(
+      1.0F -
+          safe_strength *
+              (1.0F - kBackroomsBlackoutPulseFallbackOutput),
+      kBackroomsBlackoutPulseFallbackOutput, 1.0F);
+}
+
 auto build_renderer_issou_hud_geometry(
     const RendererIssouHudSnapshot &snapshot, int viewport_width,
     int viewport_height) -> std::vector<HudVertex> {
@@ -4733,6 +4792,92 @@ void Renderer::set_backrooms_jack(
       });
 }
 
+void Renderer::set_backrooms_marlow(
+    const BackroomsMarlowUpdateResult &result,
+    float animation_time_seconds,
+    float sky_light,
+    float block_light) {
+  backrooms_marlow_result_ = result;
+  backrooms_marlow_parts_.clear();
+  const auto safe_sky = std::clamp(
+      std::isfinite(sky_light) ? sky_light : 0.0F, 0.0F, 1.0F);
+  const auto safe_block = std::clamp(
+      std::isfinite(block_light) ? block_light : 0.0F, 0.0F, 1.0F);
+  const auto safe_time = std::isfinite(animation_time_seconds)
+                             ? animation_time_seconds
+                             : 0.0F;
+
+  if (result.render.visible &&
+      std::isfinite(result.render.position.x) &&
+      std::isfinite(result.render.position.y) &&
+      std::isfinite(result.render.position.z)) {
+    const auto phase = result.render.phase;
+    auto body_parts = build_backrooms_marlow_visual_parts({
+        .position = result.render.position,
+        .yaw_radians = backrooms_marlow_visual_body_yaw_radians(
+            result.render.body_yaw_degrees),
+        .animation_time = safe_time,
+        .motion_amount =
+            phase == BackroomsMarlowPhase::Emerging ||
+                    phase == BackroomsMarlowPhase::Blocking ||
+                    phase == BackroomsMarlowPhase::Dragging
+                ? 1.0F
+                : 0.18F,
+        .submersion_ratio =
+            backrooms_marlow_visual_submersion_ratio(
+                result.render.immersion_ratio,
+                result.render.reveal_amount),
+        .peek_amount =
+            phase == BackroomsMarlowPhase::CornerPeek
+                ? std::clamp(result.render.peek_side, -1.0F, 1.0F) * 0.92F
+                : 0.0F,
+        .head_scan_radians =
+            std::sin(safe_time * 0.47F) * 0.10F,
+        .reach_amount =
+            phase == BackroomsMarlowPhase::Dragging ||
+                    phase == BackroomsMarlowPhase::Drowning ||
+                    phase == BackroomsMarlowPhase::Screamer
+                ? 1.0F
+                : 0.0F,
+        .jumpscare = phase == BackroomsMarlowPhase::Screamer,
+        .sky_light = safe_sky,
+        .block_light = safe_block,
+    });
+    backrooms_marlow_visual_anchor_ = result.render.position;
+    backrooms_marlow_parts_.insert(
+        backrooms_marlow_parts_.end(),
+        body_parts.begin(),
+        body_parts.end());
+  }
+  if (result.buoy.visible &&
+      std::isfinite(result.buoy.position.x) &&
+      std::isfinite(result.buoy.position.y) &&
+      std::isfinite(result.buoy.position.z)) {
+    auto buoy_parts = build_backrooms_marlow_buoy_visual_parts({
+        .water_surface_position = result.buoy.position,
+        .yaw_radians = safe_time * 0.19F,
+        .animation_time = safe_time,
+        .disturbance = result.buoy.warning_amount,
+        .sky_light = safe_sky,
+        .block_light = safe_block,
+    });
+    if (!result.render.visible) {
+      backrooms_marlow_visual_anchor_ = result.buoy.position;
+    }
+    backrooms_marlow_parts_.insert(
+        backrooms_marlow_parts_.end(),
+        buoy_parts.begin(),
+        buoy_parts.end());
+  }
+}
+
+auto Renderer::backrooms_terminal_fog_snapshot() const noexcept
+    -> BackroomsTerminalFogSnapshot {
+  // Je retourne une copie : le gameplay peut lire la derniere frontiere GPU
+  // engagee, mais il ne peut jamais modifier l'etat de securite du renderer.
+  return backrooms_terminal_fog_snapshot_;
+}
+
 auto Renderer::legendary_presentation_stats() const noexcept
     -> const RendererLegendaryPresentationStats & {
   return legendary_presentation_stats_;
@@ -4899,6 +5044,12 @@ auto Renderer::initialize(const RendererOptions &options) -> bool {
               ? "Unable to load Jack the pirate screamer texture"
               : last_initialization_error_);
     }
+    if (!create_backrooms_marlow_screamer_texture()) {
+      throw std::runtime_error(
+          last_initialization_error_.empty()
+              ? "Unable to load Marlow the drowned screamer texture"
+              : last_initialization_error_);
+    }
     if (options_.visual_pipeline == VisualPipeline::ModernStylized) {
       if (!create_modern_material_textures()) {
         throw std::runtime_error(
@@ -4961,6 +5112,7 @@ void Renderer::shutdown() {
     destroy_model_icon_texture();
     destroy_msdf_font_texture();
     destroy_backrooms_jack_screamer_texture();
+    destroy_backrooms_marlow_screamer_texture();
 
     if (screen_quad_vao_ != 0) {
       glDeleteVertexArrays(1, &screen_quad_vao_);
@@ -5124,6 +5276,7 @@ void Renderer::shutdown() {
   creature_parts_scratch_.clear();
   creature_part_contexts_scratch_.clear();
   backrooms_jack_parts_.clear();
+  backrooms_marlow_parts_.clear();
   clear_legendary_presentation();
   legendary_presentation_stats_ = {};
   for (auto &batch : visual_entity_batches_) {
@@ -5138,6 +5291,7 @@ void Renderer::shutdown() {
   msdf_font_texture_ = 0;
   model_icon_texture_ = 0;
   backrooms_jack_screamer_texture_ = 0;
+  backrooms_marlow_screamer_texture_ = 0;
   modern_material_albedo_texture_ = 0;
   modern_material_normal_height_texture_ = 0;
   modern_material_orm_emission_texture_ = 0;
@@ -5239,11 +5393,13 @@ void Renderer::shutdown() {
   terrain_upload_scratch_ = {};
   architecture_upload_scratch_ = {};
   architecture_indices_scratch_.clear();
+  architecture_index_coverage_scratch_.clear();
   block_break_overlay_scratch_ = {};
   loading_vertices_scratch_.clear();
   gameplay_announcement_vertices_scratch_.clear();
   backrooms_flashlight_hud_vertices_scratch_.clear();
   backrooms_jack_screamer_vertices_scratch_.clear();
+  backrooms_marlow_screamer_vertices_scratch_.clear();
   command_console_vertices_scratch_.clear();
   last_gpu_timings_ = {};
   gpu_frame_index_ = 0;
@@ -5260,12 +5416,17 @@ void Renderer::shutdown() {
   msdf_font_mips_ = 0U;
   backrooms_jack_screamer_width_ = 0U;
   backrooms_jack_screamer_height_ = 0U;
+  backrooms_marlow_screamer_width_ = 0U;
+  backrooms_marlow_screamer_height_ = 0U;
   frame_draw_calls_ = 0U;
   frame_triangles_ = 0U;
   frame_uploaded_bytes_ = 0U;
   world_resource_reset_progress_.finish();
   backrooms_jack_render_view_ = {};
   backrooms_jack_light_interference_ = {};
+  backrooms_marlow_result_ = {};
+  backrooms_marlow_visual_anchor_ = {};
+  backrooms_jack_interference_fixture_cache_.reset();
   ship_mesh_cache_.reset();
   active_ship_lod_ = StylizedShipLod::Near;
   active_gpu_query_frame_ = -1;
@@ -5503,11 +5664,26 @@ void Renderer::render_frame(
   // Je calcule une seule fois l'etat reel de la camera. Le ciel, le terrain
   // et le post-traitement suivent ainsi la meme vague et les memes volumes
   // etanches du navire.
-  const auto maritime_submersion = resolve_maritime_submersion_state(
+  auto maritime_submersion = resolve_maritime_submersion_state(
       options_.visual_pipeline == VisualPipeline::ModernStylized,
       world.generation_profile() == WorldGenerationProfile::OceanAdventure,
       player.state().head_underwater && !camera_excluded_from_ocean, eye.y,
       sampled_ocean_surface);
+  const auto marlow_drowning_amount = std::clamp(
+      std::isfinite(backrooms_marlow_result_.capture.drowning_amount)
+          ? backrooms_marlow_result_.capture.drowning_amount
+          : 0.0F,
+      0.0F,
+      1.0F);
+  if (marlow_drowning_amount > 0.0F) {
+    // Je reutilise l'absorption aquatique deja coherente avec les pipelines
+    // moderne et legacy, puis je la pousse progressivement pendant la noyade.
+    maritime_submersion.active = true;
+    maritime_submersion.depth =
+        0.25F + marlow_drowning_amount * 4.0F;
+    maritime_submersion.blend =
+        0.38F + marlow_drowning_amount * 0.62F;
+  }
   auto camera_forward = player.look_direction();
   if (glm::dot(camera_forward, camera_forward) > 1.0e-6F) {
     camera_forward = glm::normalize(camera_forward);
@@ -5528,6 +5704,8 @@ void Renderer::render_frame(
   const auto poolrooms_interior =
       backrooms_interior &&
       environment.poolrooms;
+  const auto backrooms_level =
+      world.backrooms_level_at_y(player.position().y);
   const auto resident_stream_radius = std::max(world.stream_radius(), 0);
   const auto visible_stream_radius =
       backrooms_interior
@@ -5620,10 +5798,11 @@ void Renderer::render_frame(
   auto backrooms_fog_range = backrooms_fog_target;
   if (backrooms_interior) {
     const auto fog_update_time = clock::now();
-    const auto continues_same_world =
-        backrooms_terminal_fog_state_valid_ &&
-        backrooms_terminal_fog_world_seed_ == world.seed();
-    if (continues_same_world) {
+    const auto continues_same_world_and_level =
+        backrooms_terminal_fog_snapshot_.valid &&
+        backrooms_terminal_fog_snapshot_.world_seed == world.seed() &&
+        backrooms_terminal_fog_snapshot_.logical_level == backrooms_level;
+    if (continues_same_world_and_level) {
       const auto fog_delta_seconds =
           std::chrono::duration<float>(
               fog_update_time -
@@ -5631,23 +5810,23 @@ void Renderer::render_frame(
               .count();
       backrooms_fog_range =
           backrooms_advance_terminal_fog_range(
-              backrooms_terminal_fog_range_,
+              backrooms_terminal_fog_snapshot_.range,
               backrooms_fog_target,
               fog_delta_seconds);
     }
-    backrooms_terminal_fog_range_ = backrooms_fog_range;
+    backrooms_terminal_fog_snapshot_ = {
+        .valid = true,
+        .world_seed = world.seed(),
+        .logical_level = backrooms_level,
+        .range = backrooms_fog_range,
+    };
     backrooms_terminal_fog_update_time_ = fog_update_time;
-    backrooms_terminal_fog_world_seed_ = world.seed();
-    backrooms_terminal_fog_state_valid_ = true;
   } else {
-    backrooms_terminal_fog_range_ = {};
-    backrooms_terminal_fog_state_valid_ = false;
+    backrooms_terminal_fog_snapshot_ = {};
   }
   std::array<glm::vec4, kMaximumBackroomsFlickerLights>
       backrooms_flicker_uniforms{};
   auto backrooms_flicker_count = std::size_t{0U};
-  const auto backrooms_level =
-      world.backrooms_level_at_y(eye.y);
   if (backrooms_interior && std::isfinite(eye.x) && std::isfinite(eye.z)) {
     constexpr auto minimum_safe_world_coordinate =
         static_cast<double>(
@@ -5743,124 +5922,155 @@ void Renderer::render_frame(
     backrooms_flicker_field_ = {};
     backrooms_flicker_cache_valid_ = false;
   }
-  if (backrooms_interior &&
-      backrooms_jack_light_interference_.active &&
-      std::isfinite(
-          backrooms_jack_light_interference_.position.x) &&
-      std::isfinite(
-          backrooms_jack_light_interference_.position.z) &&
-      std::isfinite(
-          backrooms_jack_light_interference_.radius) &&
-      std::isfinite(
-          backrooms_jack_light_interference_.intensity)) {
-    const auto search_radius =
-        static_cast<int>(
-            std::ceil(
-                std::clamp(
-                    backrooms_jack_light_interference_.radius,
-                    1.0F,
-                    static_cast<float>(
-                        kMaximumBackroomsFixtureSearchRadius))));
-    const auto forced_fixture =
-        find_nearest_backrooms_light_fixture(
-            world.seed(),
-            static_cast<double>(
-                backrooms_jack_light_interference_.position.x),
-            static_cast<double>(
-                backrooms_jack_light_interference_.position.z),
-            search_radius,
-            backrooms_level);
+  auto effective_backrooms_interference =
+      backrooms_jack_light_interference_;
+  const auto &marlow_interference =
+      backrooms_marlow_result_.interference;
+  if (std::isfinite(marlow_interference.intensity) &&
+      marlow_interference.intensity >
+          effective_backrooms_interference.intensity) {
+    // Je partage le meme budget de rampe entre les deux monstres. L'arbitre
+    // evite les manifestations simultanees et je conserve ici la perturbation
+    // la plus forte pendant les courtes trainees de disparition.
+    effective_backrooms_interference.position =
+        marlow_interference.position;
+    effective_backrooms_interference.radius =
+        marlow_interference.radius;
+    effective_backrooms_interference.intensity =
+        marlow_interference.intensity;
+    effective_backrooms_interference.active =
+        marlow_interference.intensity > 0.0F;
+    effective_backrooms_interference.mode =
+        marlow_interference.blackout_pulse
+            ? BackroomsJackLightInterferenceMode::BlackoutPulse
+            : BackroomsJackLightInterferenceMode::Flicker;
+  }
+  const auto interference_cache_key =
+      backrooms_interior
+          ? make_backrooms_interference_fixture_cache_key(
+                world.seed(), backrooms_level,
+                effective_backrooms_interference)
+          : std::nullopt;
+  std::optional<glm::vec4> forced_interference_uniform{};
+  if (interference_cache_key.has_value()) {
+    if (!backrooms_jack_interference_fixture_cache_.matches(
+            *interference_cache_key)) {
+      // Je sonde depuis le centre canonique de la cellule : le resultat reste
+      // deterministe pendant tout son parcours et le cout n'est paye qu'a la
+      // frontiere suivante.
+      auto fixture = find_nearest_backrooms_light_fixture(
+          interference_cache_key->world_seed,
+          interference_cache_key->query_position_x(),
+          interference_cache_key->query_position_z(),
+          interference_cache_key->search_radius,
+          interference_cache_key->logical_level);
+      if (fixture.has_value()) {
+        const auto physical_level_offset =
+            world.backrooms_spawn_block(
+                     interference_cache_key->logical_level)
+                .y -
+            world.backrooms_spawn_block(world.backrooms_level()).y;
+        fixture->position_y +=
+            static_cast<float>(physical_level_offset);
+      }
+      backrooms_jack_interference_fixture_cache_.key =
+          *interference_cache_key;
+      backrooms_jack_interference_fixture_cache_.fixture =
+          std::move(fixture);
+      backrooms_jack_interference_fixture_cache_.valid = true;
+    }
+
+    const auto strength = std::clamp(
+        effective_backrooms_interference.intensity, 0.0F, 1.0F);
+    const auto &forced_fixture =
+        backrooms_jack_interference_fixture_cache_.fixture;
     if (forced_fixture.has_value()) {
-      const auto strength =
-          std::clamp(
-              backrooms_jack_light_interference_.intensity,
-              0.0F,
-              1.0F);
       const auto phase =
           environment.weather_time_seconds * 47.0F +
           forced_fixture->position_x * 0.73F +
           forced_fixture->position_z * 1.17F;
-      const auto ballast_a =
-          0.5F + 0.5F * std::sin(phase);
+      const auto ballast_a = 0.5F + 0.5F * std::sin(phase);
       const auto ballast_b =
-          0.5F +
-          0.5F *
-              std::sin(
-                  phase * 1.91F +
-                  2.4F);
+          0.5F + 0.5F * std::sin(phase * 1.91F + 2.4F);
       const auto forced_output =
-          ballast_a > 0.42F && ballast_b > 0.30F
-              ? 0.04F
-              : 0.42F + ballast_b * 0.42F;
-      const auto forced_intensity =
-          std::clamp(
-              1.0F -
-                  strength *
-                      (1.0F - forced_output),
-              0.05F,
-              1.0F);
-      const glm::vec4 forced_uniform {
+          effective_backrooms_interference.mode ==
+                  BackroomsJackLightInterferenceMode::BlackoutPulse
+              ? 0.05F
+              : ballast_a > 0.42F && ballast_b > 0.30F
+                    ? 0.04F
+                    : 0.42F + ballast_b * 0.42F;
+      // Je melange la panne avec l'intensite courante : le pic Blackout atteint
+      // exactement 0,05, puis la rampe recupere selon la trainee de Jack.
+      const auto forced_intensity = std::clamp(
+          1.0F - strength * (1.0F - forced_output), 0.05F, 1.0F);
+      forced_interference_uniform = glm::vec4{
           forced_fixture->position_x,
           forced_fixture->position_y,
           forced_fixture->position_z,
           forced_intensity,
       };
+    } else if (effective_backrooms_interference.mode ==
+               BackroomsJackLightInterferenceMode::BlackoutPulse) {
+      // Je masque aussi l'apparition sans rampe reelle : le plancher interieur
+      // conserve les volumes, tandis que ce repli ne simule aucun son ni
+      // evenement Notice/Chase depuis le renderer.
+      const auto fallback_y =
+          std::isfinite(effective_backrooms_interference.position.y)
+              ? effective_backrooms_interference.position.y
+              : 0.0F;
+      forced_interference_uniform = glm::vec4{
+          effective_backrooms_interference.position.x,
+          fallback_y,
+          effective_backrooms_interference.position.z,
+          backrooms_blackout_pulse_fallback_intensity(strength),
+      };
+    }
+  } else {
+    // Je jette aussi les echecs memorises en quittant l'etage ou a la fin du
+    // pulse afin qu'aucun monde precedent ne puisse reutiliser son ancre.
+    backrooms_jack_interference_fixture_cache_.reset();
+  }
 
-      auto duplicate_index =
-          kMaximumBackroomsFlickerLights;
-      for (std::size_t index = 0U;
-           index < backrooms_flicker_count;
-           ++index) {
+  if (forced_interference_uniform.has_value()) {
+    const auto &forced_uniform = *forced_interference_uniform;
+    const auto forced_intensity = forced_uniform.w;
+    auto duplicate_index = kMaximumBackroomsFlickerLights;
+    for (std::size_t index = 0U; index < backrooms_flicker_count; ++index) {
+      const auto delta_x =
+          backrooms_flicker_uniforms[index].x - forced_uniform.x;
+      const auto delta_z =
+          backrooms_flicker_uniforms[index].z - forced_uniform.z;
+      if (delta_x * delta_x + delta_z * delta_z < 0.25F) {
+        duplicate_index = index;
+        break;
+      }
+    }
+    if (duplicate_index < kMaximumBackroomsFlickerLights) {
+      backrooms_flicker_uniforms[duplicate_index].w = std::min(
+          backrooms_flicker_uniforms[duplicate_index].w, forced_intensity);
+    } else if (backrooms_flicker_count <
+               kMaximumBackroomsFlickerLights) {
+      backrooms_flicker_uniforms[backrooms_flicker_count++] = forced_uniform;
+    } else {
+      // Je garantis la panne la plus proche de Jack, meme si les six
+      // emplacements rares autour de la camera sont deja occupes.
+      auto replacement = std::size_t{0U};
+      auto farthest_distance_squared = -1.0F;
+      for (std::size_t index = 0U; index < backrooms_flicker_count; ++index) {
         const auto delta_x =
             backrooms_flicker_uniforms[index].x -
-            forced_uniform.x;
+            effective_backrooms_interference.position.x;
         const auto delta_z =
             backrooms_flicker_uniforms[index].z -
-            forced_uniform.z;
-        if (delta_x * delta_x + delta_z * delta_z <
-            0.25F) {
-          duplicate_index = index;
-          break;
+            effective_backrooms_interference.position.z;
+        const auto distance_squared =
+            delta_x * delta_x + delta_z * delta_z;
+        if (distance_squared > farthest_distance_squared) {
+          farthest_distance_squared = distance_squared;
+          replacement = index;
         }
       }
-      if (duplicate_index <
-          kMaximumBackroomsFlickerLights) {
-        backrooms_flicker_uniforms[duplicate_index].w =
-            std::min(
-                backrooms_flicker_uniforms[duplicate_index].w,
-                forced_intensity);
-      } else if (backrooms_flicker_count <
-                 kMaximumBackroomsFlickerLights) {
-        backrooms_flicker_uniforms[
-            backrooms_flicker_count++] =
-            forced_uniform;
-      } else {
-        // Je garantis la panne de la rampe la plus proche de Jack, meme si
-        // les six emplacements rares autour de la camera sont deja occupes.
-        auto replacement = std::size_t{0U};
-        auto farthest_distance_squared = -1.0F;
-        for (std::size_t index = 0U;
-             index < backrooms_flicker_count;
-             ++index) {
-          const auto delta_x =
-              backrooms_flicker_uniforms[index].x -
-              backrooms_jack_light_interference_.position.x;
-          const auto delta_z =
-              backrooms_flicker_uniforms[index].z -
-              backrooms_jack_light_interference_.position.z;
-          const auto distance_squared =
-              delta_x * delta_x +
-              delta_z * delta_z;
-          if (distance_squared >
-              farthest_distance_squared) {
-            farthest_distance_squared =
-                distance_squared;
-            replacement = index;
-          }
-        }
-        backrooms_flicker_uniforms[replacement] =
-            forced_uniform;
-      }
+      backrooms_flicker_uniforms[replacement] = forced_uniform;
     }
   }
   if (maritime_horizon_enabled) {
@@ -6424,6 +6634,8 @@ void Renderer::render_frame(
                glm::value_ptr(environment.block_light_color));
   glUniform1i(world_uniforms_.enclosed_interior,
               environment.enclosed_interior ? 1 : 0);
+  glUniform1f(world_uniforms_.interior_visibility_floor,
+              environment.interior_visibility_floor);
   glUniform1i(
       world_uniforms_.backrooms_flicker_count,
       static_cast<GLint>(backrooms_flicker_count));
@@ -6528,6 +6740,8 @@ void Renderer::render_frame(
                      glm::value_ptr(environment.block_light_color));
         glUniform1i(uniforms.enclosed_interior,
                     environment.enclosed_interior ? 1 : 0);
+        glUniform1f(uniforms.interior_visibility_floor,
+                    environment.interior_visibility_floor);
         glUniform1i(
             uniforms.backrooms_flicker_count,
             static_cast<GLint>(
@@ -6623,6 +6837,8 @@ void Renderer::render_frame(
                  glm::value_ptr(environment.block_light_color));
     glUniform1i(modern_terrain_uniforms_.enclosed_interior,
                 environment.enclosed_interior ? 1 : 0);
+    glUniform1f(modern_terrain_uniforms_.interior_visibility_floor,
+                environment.interior_visibility_floor);
     glUniform1i(
         modern_terrain_uniforms_.backrooms_flicker_count,
         static_cast<GLint>(
@@ -7092,6 +7308,8 @@ void Renderer::render_frame(
                   static_cast<float>(kSeaLevel + 1));
       glUniform1i(modern_water_uniforms_.enclosed_interior,
                   environment.enclosed_interior ? 1 : 0);
+      glUniform1f(modern_water_uniforms_.interior_visibility_floor,
+                  environment.interior_visibility_floor);
       glUniform1i(modern_water_uniforms_.poolrooms_interior,
                   poolrooms_interior ? 1 : 0);
       glUniform1i(
@@ -7226,7 +7444,8 @@ void Renderer::render_frame(
   if (menu_preview_visible) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     run_menu_background_pass(render_width, render_height, environment.exposure);
-  } else if (optional_post_process_enabled || modern_output_resolve_required) {
+  } else if (optional_post_process_enabled || modern_output_resolve_required ||
+             marlow_drowning_amount > 0.0F) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     run_post_process(environment, camera_weather_exposure, maritime_submersion,
                      render_width, render_height, projection_far_distance,
@@ -7252,6 +7471,12 @@ void Renderer::render_frame(
     // etre adouci par un menu, une batterie ou une boite de dialogue.
     draw_backrooms_jack_screamer(
         backrooms_jack_render_view_,
+        environment.weather_time_seconds,
+        width,
+        height);
+  } else if (backrooms_marlow_result_.render.phase ==
+             BackroomsMarlowPhase::Screamer) {
+    draw_backrooms_marlow_screamer(
         environment.weather_time_seconds,
         width,
         height);
@@ -7294,7 +7519,9 @@ void Renderer::render_frame(
     draw_issou_legendary_hud(width, height);
   }
   if (confirm_dialog.visible &&
-      !backrooms_jack_render_view_.jumpscare) {
+      !backrooms_jack_render_view_.jumpscare &&
+      backrooms_marlow_result_.render.phase !=
+          BackroomsMarlowPhase::Screamer) {
     draw_confirm_dialog(confirm_dialog, width, height);
   }
   if (!backrooms_jack_render_view_.jumpscare) {
@@ -8069,6 +8296,12 @@ auto Renderer::estimate_gpu_texture_bytes() const noexcept -> std::uint64_t {
         static_cast<int>(backrooms_jack_screamer_height_),
         4U);
   }
+  if (backrooms_marlow_screamer_texture_ != 0) {
+    total += image_bytes(
+        static_cast<int>(backrooms_marlow_screamer_width_),
+        static_cast<int>(backrooms_marlow_screamer_height_),
+        4U);
+  }
   if (modern_material_albedo_texture_ != 0 ||
       modern_material_normal_height_texture_ != 0 ||
       modern_material_orm_emission_texture_ != 0) {
@@ -8150,10 +8383,10 @@ void Renderer::begin_world_resource_reset() {
     return;
   }
 
-  backrooms_terminal_fog_range_ = {};
-  backrooms_terminal_fog_state_valid_ = false;
+  backrooms_terminal_fog_snapshot_ = {};
   backrooms_flicker_field_ = {};
   backrooms_flicker_cache_valid_ = false;
+  backrooms_jack_interference_fixture_cache_.reset();
 
   // Je rends immediatement l'ancien monde invisible, puis je libere ses objets
   // GPU par tranches.
@@ -8690,53 +8923,8 @@ void Renderer::upload_architectural_mesh_data(GpuMesh &gpu_mesh,
   }
 
   auto &ordered_indices = architecture_indices_scratch_;
-  ordered_indices.clear();
-  ordered_indices.reserve(mesh.indices.size());
-  auto covered_index_count = std::size_t{0U};
-  for (const auto &quad : mesh.quads) {
-    const auto first = static_cast<std::size_t>(quad.first_index);
-    constexpr std::size_t kQuadIndexCount = 6U;
-    if (first > mesh.indices.size() ||
-        mesh.indices.size() - first < kQuadIndexCount) {
-      continue;
-    }
-    covered_index_count =
-        std::max(covered_index_count, first + kQuadIndexCount);
-    if ((quad.surface_flags & ArchitecturalTransparent) != 0U) {
-      continue;
-    }
-    ordered_indices.insert(
-        ordered_indices.end(),
-        mesh.indices.begin() + static_cast<std::ptrdiff_t>(first),
-        mesh.indices.begin() +
-            static_cast<std::ptrdiff_t>(first + kQuadIndexCount));
-  }
-
-  // Les primitives de fixtures sont ajoutees apres les quads greedy et sont
-  // toujours opaques/cutout. Je les conserve dans la premiere plage.
-  ordered_indices.insert(ordered_indices.end(),
-                         mesh.indices.begin() +
-                             static_cast<std::ptrdiff_t>(std::min(
-                                 covered_index_count, mesh.indices.size())),
-                         mesh.indices.end());
-  const auto opaque_index_count = ordered_indices.size();
-
-  for (const auto &quad : mesh.quads) {
-    if ((quad.surface_flags & ArchitecturalTransparent) == 0U) {
-      continue;
-    }
-    const auto first = static_cast<std::size_t>(quad.first_index);
-    constexpr std::size_t kQuadIndexCount = 6U;
-    if (first > mesh.indices.size() ||
-        mesh.indices.size() - first < kQuadIndexCount) {
-      continue;
-    }
-    ordered_indices.insert(
-        ordered_indices.end(),
-        mesh.indices.begin() + static_cast<std::ptrdiff_t>(first),
-        mesh.indices.begin() +
-            static_cast<std::ptrdiff_t>(first + kQuadIndexCount));
-  }
+  const auto opaque_index_count = order_architectural_indices_for_render(
+      mesh, ordered_indices, architecture_index_coverage_scratch_);
 
   const auto vertex_bytes =
       static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(HardSurfaceVertex));
@@ -9651,6 +9839,7 @@ uniform vec3 u_sun_color;
 uniform vec3 u_ambient_color;
 uniform vec3 u_block_light_color;
 uniform int u_enclosed_interior;
+uniform float u_interior_visibility_floor;
 uniform int u_backrooms_flicker_count;
 uniform vec4 u_backrooms_flicker_lights[6];
 uniform float u_backrooms_flashlight_intensity;
@@ -9788,12 +9977,24 @@ float backrooms_darkness_visibility(
             0.000,
             0.180,
             safe_flashlight_energy);
-    return clamp(
+    float combined_visibility = clamp(
         1.0 -
             (1.0 - fixture_visibility) *
             (1.0 - flashlight_visibility),
         0.0,
         1.0);
+    float safe_visibility_floor =
+        (isnan(u_interior_visibility_floor) ||
+         isinf(u_interior_visibility_floor))
+            ? 0.0
+            : clamp(
+                  u_interior_visibility_floor,
+                  0.0,
+                  1.0);
+    return mix(
+        safe_visibility_floor,
+        1.0,
+        combined_visibility);
 }
 
 float shadow_visibility_at(
@@ -10422,6 +10623,22 @@ void main() {
                               (0.35 + 0.65 * smoothstep(-0.20, 1.0, normal.y));
     lit_color += albedo * vec3(0.62, 0.72, 1.00) * lightning_surface * (0.24 + 0.22 * clamp(u_storm_intensity, 0.0, 1.0));
 
+    // Je fournis au pipeline Legacy le meme rebond de lecture que le pipeline
+    // moderne. Le plancher de visibilite peut alors assombrir une matiere
+    // encore detaillee au lieu de multiplier une couleur deja presque nulle.
+    float interior_readability_energy =
+        (0.15 + 0.08 * softened_block_light) *
+        enclosed_interior;
+    vec3 interior_readability_floor =
+        albedo *
+        material_tint *
+        interior_readability_energy *
+        mix(0.78, 1.0, clamp(v_ao, 0.0, 1.0)) *
+        (1.0 - water_mask);
+    lit_color = max(
+        lit_color,
+        interior_readability_floor);
+
     // Je garde les torches et lanternes historiques intactes hors Backrooms.
     // Dans l'intérieur, seule la partie réellement claire du texel émet :
     // le cadre sombre d'une rampe ne devient donc jamais une seconde ampoule.
@@ -10436,14 +10653,24 @@ void main() {
         albedo * emissive_mask * source_mask *
         (0.36 + 0.82 * softened_block_light) *
         backrooms_source_scale;
-    lit_color += mix(
+    vec3 surface_emission = mix(
         legacy_emission,
         backrooms_emission,
         enclosed_interior);
+    lit_color += surface_emission;
     float super_vision = clamp(u_super_vision_strength, 0.0, 1.0) * (1.0 - daylight);
     vec3 super_floor = albedo * vec3(0.58, 0.70, 0.78);
     lit_color = mix(lit_color, max(lit_color, super_floor), super_vision * 0.72);
     lit_color += vec3(0.05, 0.13, 0.16) * super_vision * (0.50 + 0.50 * sky_light);
+    float darkness_visibility =
+        backrooms_darkness_visibility(
+            block_light,
+            flashlight_energy);
+    // Je masque la matiere avant le brouillard et je restitue uniquement la
+    // part emissive deja presente dans lit_color.
+    lit_color =
+        lit_color * darkness_visibility +
+        surface_emission * (1.0 - darkness_visibility);
 
     vec3 view_ray = normalize(v_world_position - u_camera_position);
     float fog_distance =
@@ -10599,10 +10826,6 @@ void main() {
                 maritime_ocean,
                 maritime_blend);
     }
-    final_color *=
-        backrooms_darkness_visibility(
-            block_light,
-            flashlight_energy);
     frag_color = vec4(final_color, output_alpha);
 }
 )";
@@ -11187,13 +11410,15 @@ void main() {
                  sun_scatter * horizon * u_atmospheric_scatter_strength * (0.16 + 0.78 * sky_mix);
     vec3 fogged_color = mix(lit_color, fog_color, fog);
     vec3 fogged_glow = (nightmare_glow + super_vision_glow) * (1.0 - fog * 0.72);
-    vec3 final_color =
-        fogged_color +
-        fogged_glow;
-    final_color *=
+    float darkness_visibility =
         backrooms_darkness_visibility(
             instance_block_light,
             flashlight_energy);
+    // Je masque la matiere dans le noir, mais je conserve l'emission apres le
+    // brouillard : les yeux de Jack restent un indice lointain, pas une lampe.
+    vec3 final_color =
+        fogged_color * darkness_visibility +
+        fogged_glow;
     frag_color = vec4(final_color, 1.0);
 }
 )";
@@ -13565,6 +13790,10 @@ void main() {
       glGetUniformLocation(modern_terrain_program_, "u_block_light_color");
   modern_terrain_uniforms_.enclosed_interior =
       glGetUniformLocation(modern_terrain_program_, "u_enclosed_interior");
+  modern_terrain_uniforms_.interior_visibility_floor =
+      glGetUniformLocation(
+          modern_terrain_program_,
+          "u_interior_visibility_floor");
   modern_terrain_uniforms_.backrooms_flicker_count =
       glGetUniformLocation(
           modern_terrain_program_,
@@ -13655,6 +13884,10 @@ void main() {
             glGetUniformLocation(program, "u_block_light_color");
         uniforms.enclosed_interior =
             glGetUniformLocation(program, "u_enclosed_interior");
+        uniforms.interior_visibility_floor =
+            glGetUniformLocation(
+                program,
+                "u_interior_visibility_floor");
         uniforms.backrooms_flicker_count =
             glGetUniformLocation(
                 program,
@@ -13811,7 +14044,7 @@ void main() {
   modern_ship_shadow_uniforms_.wind_strength =
       glGetUniformLocation(modern_ship_shadow_program_, "u_wind_strength");
 
-  const std::array<GLint, 44> modern_terrain_uniform_locations{{
+  const std::array<GLint, 45> modern_terrain_uniform_locations{{
       modern_terrain_uniforms_.model,
       modern_terrain_uniforms_.view_projection,
       modern_terrain_uniforms_.light_view_projection,
@@ -13823,6 +14056,7 @@ void main() {
       modern_terrain_uniforms_.ambient_color,
       modern_terrain_uniforms_.block_light_color,
       modern_terrain_uniforms_.enclosed_interior,
+      modern_terrain_uniforms_.interior_visibility_floor,
       modern_terrain_uniforms_.backrooms_flicker_count,
       modern_terrain_uniforms_.backrooms_flicker_lights,
       modern_terrain_uniforms_.backrooms_flashlight_intensity,
@@ -13864,7 +14098,7 @@ void main() {
         "Modern terrain shader is missing one or more required uniforms");
   }
 
-  const std::array<GLint, 41> modern_architecture_uniform_locations{{
+  const std::array<GLint, 42> modern_architecture_uniform_locations{{
       modern_architecture_uniforms_.model,
       modern_architecture_uniforms_.view_projection,
       modern_architecture_uniforms_.light_view_projection,
@@ -13876,6 +14110,7 @@ void main() {
       modern_architecture_uniforms_.ambient_color,
       modern_architecture_uniforms_.block_light_color,
       modern_architecture_uniforms_.enclosed_interior,
+      modern_architecture_uniforms_.interior_visibility_floor,
       modern_architecture_uniforms_.backrooms_flicker_count,
       modern_architecture_uniforms_.backrooms_flicker_lights,
       modern_architecture_uniforms_.backrooms_flashlight_intensity,
@@ -13989,6 +14224,10 @@ void main() {
       glGetUniformLocation(world_program_, "u_block_light_color");
   world_uniforms_.enclosed_interior =
       glGetUniformLocation(world_program_, "u_enclosed_interior");
+  world_uniforms_.interior_visibility_floor =
+      glGetUniformLocation(
+          world_program_,
+          "u_interior_visibility_floor");
   world_uniforms_.backrooms_flicker_count =
       glGetUniformLocation(world_program_, "u_backrooms_flicker_count");
   world_uniforms_.backrooms_flicker_lights =
@@ -14068,10 +14307,11 @@ void main() {
   world_uniforms_.maritime_sea_level =
       glGetUniformLocation(world_program_, "u_maritime_sea_level");
 
-  const std::array<GLint, 7> world_interior_lighting_uniform_locations{{
+  const std::array<GLint, 8> world_interior_lighting_uniform_locations{{
       world_uniforms_.ambient_color,
       world_uniforms_.block_light_color,
       world_uniforms_.enclosed_interior,
+      world_uniforms_.interior_visibility_floor,
       world_uniforms_.backrooms_flicker_count,
       world_uniforms_.backrooms_flicker_lights,
       world_uniforms_.backrooms_flashlight_intensity,
@@ -14309,6 +14549,9 @@ void main() {
                        "u_maritime_sea_level");
   modern_water_uniform(modern_water_uniforms_.enclosed_interior,
                        "u_enclosed_interior");
+  modern_water_uniform(
+      modern_water_uniforms_.interior_visibility_floor,
+      "u_interior_visibility_floor");
   modern_water_uniform(modern_water_uniforms_.poolrooms_interior,
                        "u_poolrooms_interior");
   modern_water_uniform(modern_water_uniforms_.backrooms_flicker_count,
@@ -14389,6 +14632,7 @@ void main() {
       modern_water_uniforms_.maritime_far_fog_range,
       modern_water_uniforms_.maritime_sea_level,
       modern_water_uniforms_.enclosed_interior,
+      modern_water_uniforms_.interior_visibility_floor,
       modern_water_uniforms_.poolrooms_interior,
       modern_water_uniforms_.backrooms_flicker_count,
       modern_water_uniforms_.backrooms_flicker_lights,
@@ -14431,6 +14675,10 @@ void main() {
       glGetUniformLocation(item_drop_program_, "u_block_light_color");
   item_drop_uniforms_.enclosed_interior =
       glGetUniformLocation(item_drop_program_, "u_enclosed_interior");
+  item_drop_uniforms_.interior_visibility_floor =
+      glGetUniformLocation(
+          item_drop_program_,
+          "u_interior_visibility_floor");
   item_drop_uniforms_.backrooms_flicker_count =
       glGetUniformLocation(item_drop_program_, "u_backrooms_flicker_count");
   item_drop_uniforms_.backrooms_flicker_lights =
@@ -14493,10 +14741,11 @@ void main() {
       glGetUniformLocation(item_drop_program_, "u_inverse_view_projection");
   item_drop_uniforms_.shadows_enabled =
       glGetUniformLocation(item_drop_program_, "u_shadows_enabled");
-  const std::array<GLint, 6>
+  const std::array<GLint, 7>
       item_drop_backrooms_uniform_locations {{
           item_drop_uniforms_.block_light_color,
           item_drop_uniforms_.enclosed_interior,
+          item_drop_uniforms_.interior_visibility_floor,
           item_drop_uniforms_.backrooms_flicker_count,
           item_drop_uniforms_.backrooms_flicker_lights,
           item_drop_uniforms_.backrooms_flashlight_intensity,
@@ -15247,6 +15496,71 @@ void Renderer::destroy_backrooms_jack_screamer_texture() {
   backrooms_jack_screamer_texture_ = 0;
   backrooms_jack_screamer_width_ = 0U;
   backrooms_jack_screamer_height_ = 0U;
+}
+
+auto Renderer::create_backrooms_marlow_screamer_texture() -> bool {
+  if (backrooms_marlow_screamer_texture_ != 0) {
+    return true;
+  }
+
+  std::error_code path_error;
+  const auto working_directory =
+      std::filesystem::current_path(path_error);
+  if (path_error) {
+    last_initialization_error_ =
+        "Unable to resolve the working directory for Marlow's screamer";
+    return false;
+  }
+  const auto path =
+      resolve_backrooms_marlow_screamer_path(working_directory);
+  if (path.empty()) {
+    last_initialization_error_ =
+        "Missing assets/backrooms/marlow_le_noye_screamer.bmp";
+    return false;
+  }
+  const auto image = load_backrooms_jack_screamer_bmp(path);
+  if (!image.valid()) {
+    last_initialization_error_ = image.error.empty()
+                                     ? "Invalid Marlow screamer bitmap"
+                                     : image.error;
+    return false;
+  }
+
+  GLint maximum_texture_size = 0;
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
+  if (image.width > maximum_texture_size ||
+      image.height > maximum_texture_size) {
+    last_initialization_error_ =
+        "Marlow screamer exceeds the GPU texture limit";
+    return false;
+  }
+
+  glGenTextures(1, &backrooms_marlow_screamer_texture_);
+  glBindTexture(GL_TEXTURE_2D, backrooms_marlow_screamer_texture_);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(
+      GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8,
+      image.width, image.height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+      image.rgba.data());
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  backrooms_marlow_screamer_width_ =
+      static_cast<std::uint16_t>(image.width);
+  backrooms_marlow_screamer_height_ =
+      static_cast<std::uint16_t>(image.height);
+  return true;
+}
+
+void Renderer::destroy_backrooms_marlow_screamer_texture() {
+  if (backrooms_marlow_screamer_texture_ != 0) {
+    glDeleteTextures(1, &backrooms_marlow_screamer_texture_);
+  }
+  backrooms_marlow_screamer_texture_ = 0;
+  backrooms_marlow_screamer_width_ = 0U;
+  backrooms_marlow_screamer_height_ = 0U;
 }
 
 auto Renderer::hud_item_texture_mode(BlockId block_id) const noexcept -> float {
@@ -17310,6 +17624,8 @@ void Renderer::draw_item_drops(
                glm::value_ptr(environment.block_light_color));
   glUniform1i(item_drop_uniforms_.enclosed_interior,
               environment.enclosed_interior ? 1 : 0);
+  glUniform1f(item_drop_uniforms_.interior_visibility_floor,
+              environment.interior_visibility_floor);
   const auto flicker_count =
       std::min(
           backrooms_flicker_lights.size(),
@@ -17505,9 +17821,18 @@ auto Renderer::collect_visible_creature_parts(
       jack_distance_squared <=
           creature_draw_distance_sq;
 
+  const auto marlow_offset =
+      backrooms_marlow_visual_anchor_ - focus;
+  const auto marlow_distance_squared =
+      glm::dot(marlow_offset, marlow_offset);
+  const auto marlow_visible =
+      !backrooms_marlow_parts_.empty() &&
+      std::isfinite(marlow_distance_squared) &&
+      marlow_distance_squared <= creature_draw_distance_sq;
+
   if (visible_creatures.empty() && visible_crew.empty() &&
       visible_old_guard.empty() && legendary_world_parts_.empty() &&
-      !jack_visible) {
+      !jack_visible && !marlow_visible) {
     return {};
   }
 
@@ -17516,7 +17841,8 @@ auto Renderer::collect_visible_creature_parts(
       visible_crew.size() * kCrewVisualPartBudget +
       visible_old_guard.size() * kOldGuardVisualPartBudget +
       legendary_world_parts_.size() +
-      (jack_visible ? backrooms_jack_parts_.size() : 0U);
+      (jack_visible ? backrooms_jack_parts_.size() : 0U) +
+      (marlow_visible ? backrooms_marlow_parts_.size() : 0U);
   if (parts.capacity() < required_part_capacity) {
     parts.reserve(required_part_capacity);
   }
@@ -17555,6 +17881,16 @@ auto Renderer::collect_visible_creature_parts(
     part_contexts.insert(
         part_contexts.end(),
         backrooms_jack_parts_.size(),
+        VisualEntityContext::Creature);
+  }
+  if (marlow_visible) {
+    parts.insert(
+        parts.end(),
+        backrooms_marlow_parts_.begin(),
+        backrooms_marlow_parts_.end());
+    part_contexts.insert(
+        part_contexts.end(),
+        backrooms_marlow_parts_.size(),
         VisualEntityContext::Creature);
   }
   const auto legendary_draw_distance_squared =
@@ -17675,7 +18011,8 @@ void Renderer::draw_creature_shadows(
     const glm::mat4 &light_view_projection, const glm::vec3 &shadow_focus) {
   if ((creatures.empty() && crew.empty() && old_guard.empty() &&
        legendary_world_parts_.empty() &&
-       backrooms_jack_parts_.empty()) ||
+       backrooms_jack_parts_.empty() &&
+       backrooms_marlow_parts_.empty()) ||
       creature_shadow_program_ == 0 || creature_vao_ == 0 ||
       creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
     return;
@@ -17737,7 +18074,8 @@ void Renderer::draw_creatures(
     float super_vision_strength) {
   if ((creatures.empty() && crew.empty() && old_guard.empty() &&
        legendary_world_parts_.empty() &&
-       backrooms_jack_parts_.empty()) ||
+       backrooms_jack_parts_.empty() &&
+       backrooms_marlow_parts_.empty()) ||
       creature_program_ == 0 || creature_vao_ == 0 ||
       creature_instance_vbo_ == 0 || creature_ebo_ == 0) {
     return;
@@ -17849,11 +18187,11 @@ void Renderer::draw_creatures(
   }
   const auto creature_terminal_fog_range =
       environment.enclosed_interior &&
-              backrooms_terminal_fog_state_valid_ &&
-              backrooms_terminal_fog_range_.enabled()
+              backrooms_terminal_fog_snapshot_.valid &&
+              backrooms_terminal_fog_snapshot_.range.enabled()
           ? glm::vec2{
-                backrooms_terminal_fog_range_.start_distance,
-                backrooms_terminal_fog_range_.end_distance,
+                backrooms_terminal_fog_snapshot_.range.start_distance,
+                backrooms_terminal_fog_snapshot_.range.end_distance,
             }
           : glm::vec2{-1.0F, -1.0F};
   glUniform2fv(
@@ -18586,6 +18924,105 @@ void Renderer::draw_backrooms_jack_screamer(
       static_cast<GLsizei>(vertices.size()));
   record_triangle_draw(
       static_cast<GLsizei>(vertices.size()));
+  glDisable(GL_BLEND);
+  glEnable(GL_CULL_FACE);
+  glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::draw_backrooms_marlow_screamer(
+    float absolute_time_seconds,
+    int width,
+    int height) {
+  if (width <= 0 || height <= 0 ||
+      hud_program_ == 0 || hud_vao_ == 0 || hud_vbo_ == 0 ||
+      backrooms_marlow_screamer_texture_ == 0 ||
+      backrooms_marlow_screamer_width_ == 0U ||
+      backrooms_marlow_screamer_height_ == 0U) {
+    return;
+  }
+
+  const auto viewport_width = static_cast<float>(width);
+  const auto viewport_height = static_cast<float>(height);
+  const auto safe_time = std::isfinite(absolute_time_seconds)
+                             ? absolute_time_seconds
+                             : 0.0F;
+  const auto image_aspect =
+      static_cast<float>(backrooms_marlow_screamer_width_) /
+      static_cast<float>(backrooms_marlow_screamer_height_);
+  const auto viewport_aspect = viewport_width / viewport_height;
+  auto u_min = 0.0F;
+  auto u_max = 1.0F;
+  auto v_min = 0.0F;
+  auto v_max = 1.0F;
+  if (viewport_aspect > image_aspect) {
+    const auto visible_v = glm::clamp(
+        image_aspect / viewport_aspect, 0.01F, 1.0F);
+    v_min = (1.0F - visible_v) * 0.5F;
+    v_max = 1.0F - v_min;
+  } else {
+    const auto visible_u = glm::clamp(
+        viewport_aspect / image_aspect, 0.01F, 1.0F);
+    u_min = (1.0F - visible_u) * 0.5F;
+    u_max = 1.0F - u_min;
+  }
+
+  const auto pulse = 0.5F + 0.5F * std::sin(safe_time * 37.0F);
+  const auto expansion = 1.07F + pulse * 0.035F;
+  const auto draw_width = viewport_width * expansion;
+  const auto draw_height = viewport_height * expansion;
+  const auto draw_x = (viewport_width - draw_width) * 0.5F +
+      std::sin(safe_time * 73.0F) * viewport_width * 0.009F;
+  const auto draw_y = (viewport_height - draw_height) * 0.5F +
+      std::sin(safe_time * 59.0F + 1.2F) * viewport_height * 0.012F;
+
+  auto &vertices = backrooms_marlow_screamer_vertices_scratch_;
+  vertices.clear();
+  vertices.reserve(72U);
+  append_hud_rect_top_left(
+      vertices, viewport_width, viewport_height,
+      0.0F, 0.0F, viewport_width, viewport_height,
+      {0.0F, 0.015F, 0.025F, 1.0F});
+  append_hud_quad_top_left(
+      vertices, viewport_width, viewport_height,
+      draw_x, draw_y, draw_width, draw_height,
+      {0.84F + pulse * 0.12F, 0.96F, 1.0F, 1.0F},
+      {u_min, v_max, u_max, v_min}, 64.0F);
+
+  // Je superpose trois lames d'eau irregulieres. Elles cassent brievement le
+  // visage sans masquer ses grands yeux blancs ni introduire un nouveau shader.
+  for (auto band = 0; band < 3; ++band) {
+    const auto band_f = static_cast<float>(band);
+    const auto band_height = viewport_height * (0.035F + band_f * 0.007F);
+    const auto band_y = viewport_height * (0.24F + band_f * 0.22F) +
+        std::sin(safe_time * (43.0F + band_f * 7.0F) + band_f) *
+            viewport_height * 0.018F;
+    append_hud_rect_top_left(
+        vertices, viewport_width, viewport_height,
+        0.0F, band_y, viewport_width, band_height,
+        {0.02F, 0.22F, 0.30F, 0.13F + pulse * 0.08F});
+  }
+  append_hud_rect_top_left(
+      vertices, viewport_width, viewport_height,
+      0.0F, 0.0F, viewport_width, viewport_height,
+      {0.0F, 0.08F, 0.12F, 0.08F + pulse * 0.08F});
+
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_CULL_FACE);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glUseProgram(hud_program_);
+  bind_hud_textures();
+  // Le shader HUD possede deja le sampler du screamer sur l'unite 3. Je ne
+  // change que la texture liee pour garder le contrat GPU historique intact.
+  glActiveTexture(GL_TEXTURE3);
+  glBindTexture(GL_TEXTURE_2D, backrooms_marlow_screamer_texture_);
+  glActiveTexture(GL_TEXTURE0);
+  upload_hud_vertices(vertices);
+  glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertices.size()));
+  record_triangle_draw(static_cast<GLsizei>(vertices.size()));
+  glActiveTexture(GL_TEXTURE3);
+  glBindTexture(GL_TEXTURE_2D, backrooms_jack_screamer_texture_);
+  glActiveTexture(GL_TEXTURE0);
   glDisable(GL_BLEND);
   glEnable(GL_CULL_FACE);
   glEnable(GL_DEPTH_TEST);

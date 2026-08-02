@@ -66,6 +66,7 @@ struct BackroomsTerminalFogRange {
 [[nodiscard]] auto backrooms_darkness_visibility(
     float block_light,
     float flashlight_energy,
-    bool enclosed_interior) noexcept -> float;
+    bool enclosed_interior,
+    float visibility_floor = 0.0F) noexcept -> float;
 
 } // namespace valcraft

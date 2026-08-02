@@ -52,6 +52,8 @@ auto GameMusic::initialize() -> bool {
     backrooms_ambience_.reset();
     sfx_mixer_.set_sample_rate(obtained_spec_.freq);
     sfx_mixer_.reset();
+    drowning_filter_state_.fill(0.0F);
+    drowning_filter_intensity_ = 0.0F;
     SDL_PauseAudioDevice(device_id_, 0);
     return true;
 }
@@ -65,6 +67,8 @@ void GameMusic::shutdown() noexcept {
 
     backrooms_ambience_.reset();
     sfx_mixer_.reset();
+    drowning_filter_state_.fill(0.0F);
+    drowning_filter_intensity_ = 0.0F;
 
     if (owns_audio_subsystem_ && SDL_WasInit(SDL_INIT_AUDIO) != 0U) {
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -148,6 +152,20 @@ void GameMusic::play_sfx(GameSfxKind kind,
     SDL_UnlockAudioDevice(device_id_);
 }
 
+void GameMusic::set_backrooms_drowning_filter(float intensity) noexcept {
+    const auto sanitized =
+        std::isfinite(intensity)
+            ? std::clamp(intensity, 0.0F, 1.0F)
+            : 0.0F;
+    if (device_id_ == 0) {
+        drowning_filter_intensity_ = sanitized;
+        return;
+    }
+    SDL_LockAudioDevice(device_id_);
+    drowning_filter_intensity_ = sanitized;
+    SDL_UnlockAudioDevice(device_id_);
+}
+
 auto GameMusic::available() const noexcept -> bool {
     return device_id_ != 0;
 }
@@ -188,6 +206,39 @@ void GameMusic::render_callback_stream(Uint8* stream, int len) noexcept {
     sfx_mixer_.mix_interleaved(
         std::span<float> {output, sample_count},
         channel_count);
+
+    // Je place le filtre apres tous les bus : pendant la saisie de Marlow,
+    // musique, ambiance et effets semblent traverser la meme masse d'eau.
+    const auto drowning =
+        std::clamp(drowning_filter_intensity_, 0.0F, 1.0F);
+    const auto tracked_channels =
+        std::min(channel_count, drowning_filter_state_.size());
+    const auto cutoff_hz =
+        18'000.0F +
+        (720.0F - 18'000.0F) * drowning;
+    constexpr auto kTwoPi = 6.28318530717958647692F;
+    const auto alpha =
+        1.0F -
+        std::exp(
+            -kTwoPi * cutoff_hz /
+            static_cast<float>(
+                std::max(obtained_spec_.freq, 1)));
+    const auto wet_gain = 1.0F - drowning * 0.24F;
+    for (std::size_t sample_index = 0U;
+         sample_index < sample_count;
+         ++sample_index) {
+        const auto channel = sample_index % channel_count;
+        if (channel >= tracked_channels) {
+            output_samples[sample_index] *= wet_gain;
+            continue;
+        }
+        const auto dry = output_samples[sample_index];
+        auto& filtered = drowning_filter_state_[channel];
+        filtered += (dry - filtered) * alpha;
+        output_samples[sample_index] =
+            (dry + (filtered - dry) * drowning) *
+            wet_gain;
+    }
 }
 
 } // namespace valcraft

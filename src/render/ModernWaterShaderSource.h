@@ -188,6 +188,7 @@ uniform vec2 u_maritime_water_blend_range;
 uniform vec2 u_maritime_far_fog_range;
 uniform float u_maritime_sea_level;
 uniform int u_enclosed_interior;
+uniform float u_interior_visibility_floor;
 uniform int u_poolrooms_interior;
 uniform int u_backrooms_flicker_count;
 uniform vec4 u_backrooms_flicker_lights[6];
@@ -363,12 +364,24 @@ float backrooms_darkness_visibility(
         smoothstep(0.000, 0.620, safe_local_light);
     float flashlight_visibility =
         smoothstep(0.000, 0.180, safe_flashlight_energy);
-    return clamp(
+    float combined_visibility = clamp(
         1.0 -
             (1.0 - fixture_visibility) *
             (1.0 - flashlight_visibility),
         0.0,
         1.0);
+    float safe_visibility_floor =
+        (isnan(u_interior_visibility_floor) ||
+         isinf(u_interior_visibility_floor))
+            ? 0.0
+            : clamp(
+                  u_interior_visibility_floor,
+                  0.0,
+                  1.0);
+    return mix(
+        safe_visibility_floor,
+        1.0,
+        combined_visibility);
 }
 
 vec3 reconstruct_world_position(
@@ -1228,6 +1241,13 @@ void main() {
             3.0) *
         0.025;
 
+    // Je n'assombris que la surface : la brume conserve ainsi la profondeur
+    // de la salle et ne peut plus devenir un aplat noir au-dessus de l'eau.
+    color *=
+        backrooms_darkness_visibility(
+            local_light,
+            flashlight_energy);
+
     float weather_fog =
         1.0 +
         clamp(
@@ -1355,10 +1375,6 @@ void main() {
                 far_blend);
     }
 
-    color *=
-        backrooms_darkness_visibility(
-            local_light,
-            flashlight_energy);
     frag_color =
         vec4(
             max(color, vec3(0.0)),

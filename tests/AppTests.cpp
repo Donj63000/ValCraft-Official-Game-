@@ -198,9 +198,31 @@ constexpr auto kSerializedBackroomsFlashlightExtensionByteCount =
 constexpr auto kSerializedBackroomsJackExtensionByteCount = 146U;
 constexpr auto kSerializedBackroomsLevelExtensionByteCount =
     4U + sizeof(std::uint8_t) + sizeof(std::int32_t);
+constexpr auto kSerializedBackroomsMarlowExtensionByteCount = 40U;
+
+void remove_current_backrooms_marlow_extension(
+    std::vector<char>& bytes) {
+    constexpr auto magic =
+        std::array<char, 4> {'M', 'R', 'L', 'W'};
+    REQUIRE(
+        bytes.size() >=
+        kSerializedBackroomsMarlowExtensionByteCount);
+    const auto extension_begin =
+        bytes.end() -
+        static_cast<std::ptrdiff_t>(
+            kSerializedBackroomsMarlowExtensionByteCount);
+    REQUIRE(
+        std::equal(
+            magic.begin(),
+            magic.end(),
+            extension_begin));
+    bytes.erase(extension_begin, bytes.end());
+}
 
 void remove_current_backrooms_jack_extension(
     std::vector<char>& bytes) {
+    // Je retire d'abord MRLW pour retrouver la terminaison BRLV historique.
+    remove_current_backrooms_marlow_extension(bytes);
     constexpr auto level_magic =
         std::array<char, 4> {
             'B',
@@ -3738,7 +3760,7 @@ TEST_CASE("inventory number key swap can move a hovered stack into an empty hotb
     CHECK_FALSE(inventory_slot_has_item(inventory.storage_slots[13]));
 }
 
-TEST_CASE("save version 18 preserves loaded and empty muskets in every item container") {
+TEST_CASE("save version 19 preserves loaded and empty muskets in every item container") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -3808,7 +3830,7 @@ TEST_CASE("save version 18 preserves loaded and empty muskets in every item cont
             reinterpret_cast<char*>(&version),
             sizeof(version));
         REQUIRE(input.good());
-        CHECK(version == 18U);
+        CHECK(version == 19U);
     }
 
     const auto loaded =
@@ -3860,7 +3882,8 @@ TEST_CASE("save version 18 preserves loaded and empty muskets in every item cont
             kSerializedLegendaryWeaponExtensionByteCount +
             kSerializedBackroomsFlashlightExtensionByteCount +
             kSerializedBackroomsJackExtensionByteCount +
-            kSerializedBackroomsLevelExtensionByteCount);
+            kSerializedBackroomsLevelExtensionByteCount +
+            kSerializedBackroomsMarlowExtensionByteCount);
 
     const auto version_11_path =
         save_slot_file_path(
@@ -3897,6 +3920,7 @@ TEST_CASE("save version 18 preserves loaded and empty muskets in every item cont
         const auto hotbar_state_offset =
             static_cast<std::streamoff>(
                 byte_count -
+                kSerializedBackroomsMarlowExtensionByteCount -
                 kSerializedBackroomsLevelExtensionByteCount -
                 kSerializedBackroomsJackExtensionByteCount -
                 kSerializedBackroomsFlashlightExtensionByteCount -
@@ -3938,7 +3962,7 @@ TEST_CASE("save version 18 preserves loaded and empty muskets in every item cont
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 18 round trips the permanent legendary weapon state and rejects a damaged extension") {
+TEST_CASE("save version 19 round trips the permanent legendary weapon state and rejects a damaged extension") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -4006,10 +4030,12 @@ TEST_CASE("save version 18 round trips the permanent legendary weapon state and 
         kSerializedLegendaryWeaponExtensionByteCount +
             kSerializedBackroomsFlashlightExtensionByteCount +
             kSerializedBackroomsJackExtensionByteCount +
-            kSerializedBackroomsLevelExtensionByteCount);
+            kSerializedBackroomsLevelExtensionByteCount +
+            kSerializedBackroomsMarlowExtensionByteCount);
     const auto extension_offset =
         static_cast<std::streamoff>(
             source_size -
+            kSerializedBackroomsMarlowExtensionByteCount -
             kSerializedBackroomsLevelExtensionByteCount -
             kSerializedBackroomsJackExtensionByteCount -
             kSerializedBackroomsFlashlightExtensionByteCount -
@@ -4134,7 +4160,7 @@ TEST_CASE("save version 18 round trips the permanent legendary weapon state and 
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 18 preserves the Backrooms flashlight battery and rejects a damaged extension") {
+TEST_CASE("save version 19 preserves the Backrooms flashlight battery and rejects a damaged extension") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -4182,7 +4208,8 @@ TEST_CASE("save version 18 preserves the Backrooms flashlight battery and reject
         source_size >=
         kSerializedBackroomsFlashlightExtensionByteCount +
             kSerializedBackroomsJackExtensionByteCount +
-            kSerializedBackroomsLevelExtensionByteCount);
+            kSerializedBackroomsLevelExtensionByteCount +
+            kSerializedBackroomsMarlowExtensionByteCount);
 
     const auto legacy_path =
         save_slot_file_path(
@@ -4219,6 +4246,7 @@ TEST_CASE("save version 18 preserves the Backrooms flashlight battery and reject
         output.seekp(
             static_cast<std::streamoff>(
                 source_size -
+                kSerializedBackroomsMarlowExtensionByteCount -
                 kSerializedBackroomsLevelExtensionByteCount -
                 kSerializedBackroomsJackExtensionByteCount -
                 kSerializedBackroomsFlashlightExtensionByteCount));
@@ -4253,6 +4281,7 @@ TEST_CASE("save version 18 preserves the Backrooms flashlight battery and reject
         output.seekp(
             static_cast<std::streamoff>(
                 source_size -
+                kSerializedBackroomsMarlowExtensionByteCount -
                 kSerializedBackroomsLevelExtensionByteCount -
                 kSerializedBackroomsJackExtensionByteCount -
                 1U));
@@ -4273,7 +4302,7 @@ TEST_CASE("save version 18 preserves the Backrooms flashlight battery and reject
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 18 restaure le niveau Poolrooms et refuse un plan d'un autre etage") {
+TEST_CASE("save version 19 restaure le niveau Poolrooms et refuse un plan d'un autre etage") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -4292,6 +4321,7 @@ TEST_CASE("save version 18 restaure le niveau Poolrooms et refuse un plan d'un a
         GameMode::Backrooms;
     snapshot.backrooms_level = -23;
     snapshot.backrooms_jack.logical_level = -23;
+    snapshot.backrooms_marlow.logical_level = -23;
 
     WorldSavePlan plan {};
     plan.seed = snapshot.metadata.seed;
@@ -4349,6 +4379,7 @@ TEST_CASE("les sauvegardes Backrooms V3 font un round trip et rejettent une vers
     snapshot.spawn_position = {4.5F, 42.001F, -6.5F};
     snapshot.player_state.position = {11.5F, 42.001F, 3.5F};
     snapshot.backrooms_jack.logical_level = -23;
+    snapshot.backrooms_marlow.logical_level = -23;
     snapshot.backrooms_jack.position = {-8.5F, 42.001F, 7.5F};
 
     WorldSavePlan plan {};
@@ -4405,7 +4436,7 @@ TEST_CASE("les sauvegardes Backrooms V3 font un round trip et rejettent une vers
         plan);
     overwrite_save_generation_version(
         save_slot_file_path(save_root, 1U),
-        static_cast<WorldGenerationVersion>(7U));
+        static_cast<WorldGenerationVersion>(8U));
     CHECK_FALSE(
         load_save_slot(save_root, 1U)
             .has_value());
@@ -6437,7 +6468,7 @@ TEST_CASE("save game deletion removes slot metadata and payloads") {
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 18 round trips maritime milestones and active ability runtimes exactly") {
+TEST_CASE("save version 19 round trips maritime milestones and active ability runtimes exactly") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -6578,7 +6609,7 @@ TEST_CASE("save version 18 round trips maritime milestones and active ability ru
                 &version),
             sizeof(version));
         REQUIRE(input.good());
-        CHECK(version == 18U);
+        CHECK(version == 19U);
     }
 
     const auto loaded =
@@ -6603,7 +6634,7 @@ TEST_CASE("save version 18 round trips maritime milestones and active ability ru
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio in version 18") {
+TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio in version 19") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(
@@ -6698,7 +6729,7 @@ TEST_CASE("save version 13 preserves the level and migrates the exact bar ratio 
     std::filesystem::remove_all(save_root);
 }
 
-TEST_CASE("save version 18 rejects invalid positional build array counts") {
+TEST_CASE("save version 19 rejects invalid positional build array counts") {
     const auto unique_suffix =
         std::to_string(
             static_cast<unsigned long long>(

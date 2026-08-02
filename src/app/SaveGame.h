@@ -6,6 +6,7 @@
 #include "creatures/CreatureTypes.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/BackroomsJack.h"
+#include "gameplay/BackroomsMarlow.h"
 #include "gameplay/BackroomsFlashlight.h"
 #include "gameplay/PlayerController.h"
 #include "gameplay/PlayerProgression.h"
@@ -117,6 +118,11 @@ struct SaveGameSnapshot {
     // Je place le niveau à la toute fin pour conserver tous les initialisateurs
     // positionnels historiques du snapshot et l'écris dans l'extension BRLV.
     std::int32_t backrooms_level = 0;
+    // Je garde Marlow strictement en dernier : son runtime, son chemin et sa
+    // cinematique sont reconstruits, seul son directeur durable entre dans MRLW.
+    BackroomsMarlowState backrooms_marlow {
+        initialize_backrooms_marlow(0U, 0),
+    };
 };
 
 // Je garde cette migration pure et testable avant l'installation du monde :

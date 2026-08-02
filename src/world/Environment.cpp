@@ -527,6 +527,7 @@ auto make_backrooms_environment_state(
         float exposure = 0.0F;
         float fog_density = 0.0F;
         float vignette = 0.0F;
+        float visibility_floor = 0.0F;
     };
 
     const auto module_lighting =
@@ -539,6 +540,10 @@ auto make_backrooms_environment_state(
                 .exposure = 0.94F * electrical_drift,
                 .fog_density = 0.0065F,
                 .vignette = 0.12F,
+                .visibility_floor =
+                    poolrooms
+                        ? kPoolroomsInteriorVisibilityFloor
+                        : kBackroomsOfficeInteriorVisibilityFloor,
             };
 
             // Je représente ici le rebond diffus des rampes sur la moquette et
@@ -601,6 +606,9 @@ auto make_backrooms_environment_state(
                 lighting.exposure *= 0.75F;
                 lighting.fog_density = 0.0120F;
                 lighting.vignette = 0.23F;
+                // Je réserve le noir absolu aux véritables modules Blackout.
+                lighting.visibility_floor =
+                    kBackroomsBlackoutVisibilityFloor;
                 break;
             }
             lighting.exposure =
@@ -707,6 +715,8 @@ auto make_backrooms_environment_state(
                 lighting.fog_density * weight;
             blended_lighting.vignette +=
                 lighting.vignette * weight;
+            blended_lighting.visibility_floor +=
+                lighting.visibility_floor * weight;
         }
     }
 
@@ -719,6 +729,11 @@ auto make_backrooms_environment_state(
     const auto exposure = blended_lighting.exposure;
     const auto fog_density = blended_lighting.fog_density;
     const auto vignette = blended_lighting.vignette;
+    const auto visibility_floor =
+        std::clamp(
+            blended_lighting.visibility_floor,
+            0.0F,
+            1.0F);
 
     EnvironmentState state {};
     state.time_of_day = 0.0F;
@@ -763,6 +778,7 @@ auto make_backrooms_environment_state(
     state.glow_strength = 0.13F;
     state.post_sharpen_strength = 0.07F;
     state.post_edge_strength = 0.04F;
+    state.interior_visibility_floor = visibility_floor;
     state.suppress_gameplay_hud = true;
     state.enclosed_interior = true;
     state.poolrooms = poolrooms;

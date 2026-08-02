@@ -350,7 +350,7 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
     CHECK(resolve_world_generation_version(WorldGenerationProfile::OceanAdventure) ==
           WorldGenerationVersion::LivingOceanV3);
     CHECK(resolve_world_generation_version(WorldGenerationProfile::Backrooms) ==
-          WorldGenerationVersion::BackroomsV3);
+          WorldGenerationVersion::BackroomsV4);
 
     constexpr auto seed = 424242;
     WorldGenerator latest(
@@ -396,9 +396,9 @@ TEST_CASE("world generation versions resolve explicitly and keep legacy ocean te
           WorldGenerationVersion::LivingOceanV3);
 
     World backrooms_world(seed, 0, WorldGenerationProfile::Backrooms);
-    CHECK(backrooms_world.generation_version() == WorldGenerationVersion::BackroomsV3);
+    CHECK(backrooms_world.generation_version() == WorldGenerationVersion::BackroomsV4);
     CHECK(backrooms_world.capture_save_plan().generation_version ==
-          WorldGenerationVersion::BackroomsV3);
+          WorldGenerationVersion::BackroomsV4);
     CHECK_THROWS_AS(
         WorldGenerator(
             seed,
@@ -435,12 +435,16 @@ TEST_CASE("Backrooms V3 helpers preserve legacy routing and migrate only Poolroo
         WorldGenerationVersion::BackroomsV2));
     CHECK(is_backrooms_generation_version(
         WorldGenerationVersion::BackroomsV3));
+    CHECK(is_backrooms_generation_version(
+        WorldGenerationVersion::BackroomsV4));
     CHECK_FALSE(uses_backrooms_spatial_stack(
         WorldGenerationVersion::BackroomsV1));
     CHECK(uses_backrooms_spatial_stack(
         WorldGenerationVersion::BackroomsV2));
     CHECK(uses_backrooms_spatial_stack(
         WorldGenerationVersion::BackroomsV3));
+    CHECK(uses_backrooms_spatial_stack(
+        WorldGenerationVersion::BackroomsV4));
     CHECK(
         backrooms_spatial_profile_for_version(
             WorldGenerationVersion::BackroomsV2) ==
@@ -449,6 +453,10 @@ TEST_CASE("Backrooms V3 helpers preserve legacy routing and migrate only Poolroo
         backrooms_spatial_profile_for_version(
             WorldGenerationVersion::BackroomsV3) ==
         BackroomsSpatialProfile::RecessedPoolroomsV3);
+    CHECK(
+        backrooms_spatial_profile_for_version(
+            WorldGenerationVersion::BackroomsV4) ==
+        BackroomsSpatialProfile::FloodedPoolroomsV4);
 
     // Je retrouve le niveau -2 depuis sa hauteur V2, puis j'applique le seul
     // voxel ajouté par la cuve V3. Le bureau voisin ne doit jamais bouger.
@@ -496,6 +504,12 @@ TEST_CASE("Backrooms V3 helpers preserve legacy routing and migrate only Poolroo
             seed,
             anchor_level,
             WorldGenerationVersion::BackroomsV3,
+            2.001F) == 0);
+    CHECK(
+        backrooms_v3_position_delta_y(
+            seed,
+            anchor_level,
+            WorldGenerationVersion::BackroomsV4,
             2.001F) == 0);
 }
 

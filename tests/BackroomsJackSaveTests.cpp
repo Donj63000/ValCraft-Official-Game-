@@ -22,10 +22,13 @@ constexpr std::size_t kFlashlightExtensionSize = 10U;
 constexpr std::size_t kJackExtensionSize = 146U;
 constexpr std::size_t kBackroomsLevelExtensionSize =
     4U + sizeof(std::uint8_t) + sizeof(std::int32_t);
+constexpr std::size_t kMarlowExtensionSize = 40U;
 constexpr std::size_t kJackFormatVersionOffset = 4U;
 constexpr std::size_t kJackPhaseOffset = 5U;
 constexpr std::size_t kJackPositionOffset = 6U;
 constexpr std::size_t kJackHunchOffset = 50U;
+constexpr std::size_t kJackSpawnDelayOffset = 74U;
+constexpr std::size_t kJackCooldownOffset = 78U;
 constexpr std::size_t kJackEvadedCountOffset = 118U;
 constexpr std::size_t kJackRandomStateOffset = 127U;
 constexpr std::size_t kJackActiveOffset = 139U;
@@ -224,7 +227,7 @@ void overwrite_value(
 
 } // namespace
 
-TEST_CASE("le format v18 sauvegarde BJCK v1 et le niveau BRLV sans les melanger") {
+TEST_CASE("le format v19 conserve BJCK v1 et BRLV avant MRLW") {
     TemporarySaveDirectory directory {
         "valcraft-jack-save-roundtrip"};
     SaveGameSnapshot snapshot {};
@@ -238,6 +241,7 @@ TEST_CASE("le format v18 sauvegarde BJCK v1 et le niveau BRLV sans les melanger"
         make_persistent_jack_state();
     snapshot.backrooms_level = -2;
     snapshot.backrooms_jack.logical_level = -2;
+    snapshot.backrooms_marlow.logical_level = -2;
 
     write_save_slot(
         directory.path(),
@@ -256,10 +260,11 @@ TEST_CASE("le format v18 sauvegarde BJCK v1 et le niveau BRLV sans les melanger"
         &save_version,
         bytes.data() + kSaveVersionOffset,
         sizeof(save_version));
-    CHECK(save_version == 18U);
+    CHECK(save_version == 19U);
 
     const auto jack_offset =
         bytes.size() -
+        kMarlowExtensionSize -
         kBackroomsLevelExtensionSize -
         kJackExtensionSize;
     REQUIRE(jack_offset >= kFlashlightExtensionSize);
@@ -286,6 +291,7 @@ TEST_CASE("le format v18 sauvegarde BJCK v1 et le niveau BRLV sans les melanger"
                 kJackFormatVersionOffset] == 1U);
     const auto level_offset =
         bytes.size() -
+        kMarlowExtensionSize -
         kBackroomsLevelExtensionSize;
     CHECK(bytes[level_offset + 0U] ==
           static_cast<std::uint8_t>('B'));
@@ -313,6 +319,62 @@ TEST_CASE("le format v18 sauvegarde BJCK v1 et le niveau BRLV sans les melanger"
     CHECK(loaded->backrooms_flashlight.enabled);
 }
 
+TEST_CASE("une sauvegarde Backrooms historique normalise niveau et delais de Jack") {
+    TemporarySaveDirectory directory {
+        "valcraft-jack-save-historical-pressure"};
+    SaveGameSnapshot snapshot {};
+    snapshot.metadata.seed = 0x504C414E;
+    snapshot.metadata.game_mode = GameMode::Backrooms;
+    snapshot.backrooms_level = -37;
+    snapshot.backrooms_jack = initialize_backrooms_jack(
+        static_cast<std::uint32_t>(snapshot.metadata.seed),
+        snapshot.backrooms_level);
+    snapshot.backrooms_marlow = initialize_backrooms_marlow(
+        static_cast<std::uint32_t>(snapshot.metadata.seed),
+        snapshot.backrooms_level);
+    snapshot.backrooms_jack.spawn_check_seconds =
+        kBackroomsJackMaximumPersistedSpawnDelaySeconds;
+    snapshot.backrooms_jack.cooldown_seconds =
+        kBackroomsJackMaximumPersistedCooldownSeconds;
+
+    write_save_slot(directory.path(), 0U, snapshot);
+    const auto path = save_slot_file_path(directory.path(), 0U);
+    auto bytes = read_file(path);
+    REQUIRE(bytes.size() >=
+            kMarlowExtensionSize +
+                kBackroomsLevelExtensionSize +
+                kJackExtensionSize);
+    const auto jack_offset =
+        bytes.size() -
+        kMarlowExtensionSize -
+        kBackroomsLevelExtensionSize -
+        kJackExtensionSize;
+
+    // Je reproduis les compteurs longs acceptes par l'ancien directeur. Le
+    // chargeur doit les lire puis les borner, sans perdre le niveau BRLV.
+    constexpr auto historical_spawn_delay = 180.0F;
+    constexpr auto historical_cooldown = 360.0F;
+    overwrite_value(
+        bytes,
+        jack_offset + kJackSpawnDelayOffset,
+        historical_spawn_delay);
+    overwrite_value(
+        bytes,
+        jack_offset + kJackCooldownOffset,
+        historical_cooldown);
+    write_file(path, bytes);
+
+    const auto loaded = load_save_slot(directory.path(), 0U);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->backrooms_level == -37);
+    CHECK(loaded->world_save_plan.backrooms_level == -37);
+    CHECK(loaded->backrooms_jack.logical_level == -37);
+    CHECK(loaded->backrooms_jack.spawn_check_seconds ==
+          doctest::Approx(kBackroomsJackMaximumPersistedSpawnDelaySeconds));
+    CHECK(loaded->backrooms_jack.cooldown_seconds ==
+          doctest::Approx(kBackroomsJackMaximumPersistedCooldownSeconds));
+}
+
 TEST_CASE("la migration v16 conserve BFLH et initialise un Jack dormant sain") {
     TemporarySaveDirectory directory {
         "valcraft-jack-save-v16"};
@@ -335,10 +397,12 @@ TEST_CASE("la migration v16 conserve BFLH et initialise un Jack dormant sain") {
     auto bytes = read_file(path);
     REQUIRE(
         bytes.size() >
+        kMarlowExtensionSize +
         kBackroomsLevelExtensionSize +
             kJackExtensionSize);
     bytes.resize(
         bytes.size() -
+        kMarlowExtensionSize -
         kBackroomsLevelExtensionSize -
         kJackExtensionSize);
     const auto legacy_version = std::uint32_t {16U};
@@ -379,6 +443,7 @@ TEST_CASE("la migration v17 conserve BJCK et initialise le niveau historique a z
     snapshot.backrooms_jack =
         make_persistent_jack_state();
     snapshot.backrooms_jack.logical_level = -17;
+    snapshot.backrooms_marlow.logical_level = -17;
     write_save_slot(
         directory.path(),
         0U,
@@ -389,9 +454,11 @@ TEST_CASE("la migration v17 conserve BJCK et initialise le niveau historique a z
     auto bytes = read_file(path);
     REQUIRE(
         bytes.size() >
+        kMarlowExtensionSize +
         kBackroomsLevelExtensionSize);
     bytes.resize(
         bytes.size() -
+        kMarlowExtensionSize -
         kBackroomsLevelExtensionSize);
     overwrite_value(
         bytes,
@@ -428,9 +495,13 @@ TEST_CASE("BJCK rejette enums floats compteurs RNG et booleens corrompus") {
     const auto source_path =
         save_slot_file_path(directory.path(), 0U);
     const auto valid_bytes = read_file(source_path);
-    REQUIRE(valid_bytes.size() >= kJackExtensionSize);
+    REQUIRE(valid_bytes.size() >=
+            kMarlowExtensionSize +
+                kBackroomsLevelExtensionSize +
+                kJackExtensionSize);
     const auto jack_offset =
         valid_bytes.size() -
+        kMarlowExtensionSize -
         kBackroomsLevelExtensionSize -
         kJackExtensionSize;
 
@@ -545,9 +616,11 @@ TEST_CASE("BRLV rejette un niveau hors limites et les profils non Backrooms") {
     auto bytes = read_file(path);
     REQUIRE(
         bytes.size() >=
-        kBackroomsLevelExtensionSize);
+        kMarlowExtensionSize +
+            kBackroomsLevelExtensionSize);
     const auto level_offset =
         bytes.size() -
+        kMarlowExtensionSize -
         kBackroomsLevelExtensionSize;
     overwrite_value(
         bytes,
@@ -564,6 +637,8 @@ TEST_CASE("BRLV rejette un niveau hors limites et les profils non Backrooms") {
         GameMode::ClassicAdventure;
     invalid_profile.backrooms_level = -2;
     invalid_profile.backrooms_jack.logical_level =
+        -2;
+    invalid_profile.backrooms_marlow.logical_level =
         -2;
     CHECK_THROWS_AS(
         write_save_slot(

@@ -19,6 +19,12 @@ constexpr int kPoolroomsMinimumCeilingHeight = 8;
 constexpr std::uint8_t kPoolroomsShallowWaterLevel = 5U;
 constexpr int kPoolroomsBasinCellSize = 32;
 constexpr int kPoolroomsRouteShoreWidth = 4;
+constexpr int kFloodedDistrictModules = 4;
+constexpr int kFloodedDistrictCoreFirstModule = 1;
+constexpr int kFloodedDistrictCoreLastModule = 2;
+constexpr int kFloodedTransitionWidth = 2;
+constexpr int kFloodedDeepPoolRouteMargin = 2;
+constexpr int kFloodedDeepPoolConnectorMargin = 8;
 
 [[nodiscard]] constexpr auto mix64(std::uint64_t value) noexcept -> std::uint64_t {
     value += 0x9E3779B97F4A7C15ULL;
@@ -53,6 +59,53 @@ constexpr int kPoolroomsRouteShoreWidth = 4;
 [[nodiscard]] constexpr auto positive_modulo(int value, int divisor) noexcept -> int {
     const auto remainder = value % divisor;
     return remainder < 0 ? remainder + divisor : remainder;
+}
+
+[[nodiscard]] auto flooded_module_for_layout(
+    int layout_seed,
+    int module_x,
+    int module_z) noexcept -> bool {
+
+    const auto district_x =
+        floor_division(module_x, kFloodedDistrictModules);
+    const auto district_z =
+        floor_division(module_z, kFloodedDistrictModules);
+
+    // Je protege tout le macro-district d'apparition : le joueur dispose ainsi
+    // toujours d'une vraie zone de lecture avant sa premiere nappe inondee.
+    if (district_x == 0 && district_z == 0) {
+        return false;
+    }
+
+    const auto local_module_x =
+        positive_modulo(module_x, kFloodedDistrictModules);
+    const auto local_module_z =
+        positive_modulo(module_z, kFloodedDistrictModules);
+    if (local_module_x < kFloodedDistrictCoreFirstModule ||
+        local_module_x > kFloodedDistrictCoreLastModule ||
+        local_module_z < kFloodedDistrictCoreFirstModule ||
+        local_module_z > kFloodedDistrictCoreLastModule) {
+        return false;
+    }
+
+    const auto district_hash =
+        hash_position(
+            layout_seed,
+            district_x,
+            district_z,
+            0xA4F3D91B6C287E05ULL);
+    if (district_hash % 100U < 20U) {
+        return true;
+    }
+
+    // Je retire un seul coin du carre central dans quatre districts sur cinq.
+    // Les trois modules restants forment donc toujours un triomino connecte.
+    const auto local_index =
+        (local_module_z - kFloodedDistrictCoreFirstModule) * 2 +
+        (local_module_x - kFloodedDistrictCoreFirstModule);
+    const auto omitted_index =
+        static_cast<int>((district_hash >> 8U) % 4U);
+    return local_index != omitted_index;
 }
 
 [[nodiscard]] constexpr auto poolrooms_basin_chance(
@@ -483,6 +536,28 @@ auto BackroomsGenerator::theme() const noexcept -> BackroomsTheme {
 
 auto BackroomsGenerator::is_poolrooms() const noexcept -> bool {
     return logical_level_ <= -2;
+}
+
+auto BackroomsGenerator::is_flooded_module(
+    int module_x,
+    int module_z) const noexcept -> bool {
+
+    return is_poolrooms() &&
+           pool_geometry_profile_ ==
+               BackroomsPoolGeometryProfile::FloodedDistrictsV4 &&
+           flooded_module_for_layout(
+               layout_seed_,
+               module_x,
+               module_z);
+}
+
+auto BackroomsGenerator::is_flooded_at(
+    int world_x,
+    int world_z) const noexcept -> bool {
+
+    return is_flooded_module(
+        module_coordinate(world_x),
+        module_coordinate(world_z));
 }
 
 auto BackroomsGenerator::module_coordinate(int world_coordinate) noexcept -> int {
@@ -1368,12 +1443,18 @@ auto BackroomsGenerator::sample_poolrooms_column(
         wall_top_y = ceiling_y;
     }
 
+    const auto flooded_module =
+        is_flooded_module(
+            descriptor.module_x,
+            descriptor.module_z);
     auto pool_surface =
-        poolrooms_basin_surface(
-            layout_seed_,
-            descriptor.archetype,
-            world_x,
-            world_z);
+        flooded_module
+            ? BackroomsPoolSurface::Water
+            : poolrooms_basin_surface(
+                  layout_seed_,
+                  descriptor.archetype,
+                  world_x,
+                  world_z);
     const auto basin_local_origin_x =
         local_x -
         positive_modulo(
@@ -1391,7 +1472,8 @@ auto BackroomsGenerator::sample_poolrooms_column(
             basin_local_origin_z + 6,
             basin_local_origin_x + 25,
             basin_local_origin_z + 25);
-    if (pool_surface != BackroomsPoolSurface::Dry &&
+    if (!flooded_module &&
+        pool_surface != BackroomsPoolSurface::Dry &&
         route_crosses_basin) {
         // Je supprime le bassin entier si une circulation structurelle devait
         // le trancher. Je préfère une vraie salle sèche à deux petites flaques
@@ -1402,9 +1484,44 @@ auto BackroomsGenerator::sample_poolrooms_column(
     // Je donne à chaque bassin un vrai volume de salle. Je retire donc les
     // cloisons procédurales de son noyau et de sa margelle, sans toucher aux
     // murs de modules puisque les formes restent largement en retrait.
-    if (pool_surface != BackroomsPoolSurface::Dry) {
+    if (!flooded_module &&
+        pool_surface != BackroomsPoolSurface::Dry) {
         wall = false;
         wall_top_y = kBackroomsFloorY;
+    }
+
+    if (flooded_module) {
+        // Je conserve les vrais murs et piliers du module. Seules les cellules
+        // ouvertes recoivent l'eau continue, ce qui evite de transformer le
+        // district en simple salle vide tout en supprimant les petits decors.
+        if (wall) {
+            pool_surface = BackroomsPoolSurface::Dry;
+        } else {
+            const auto transition_to_dry_module =
+                (local_x < kFloodedTransitionWidth &&
+                 !is_flooded_module(
+                     descriptor.module_x - 1,
+                     descriptor.module_z)) ||
+                (local_x >=
+                         kBackroomsModuleSize -
+                             kFloodedTransitionWidth &&
+                 !is_flooded_module(
+                     descriptor.module_x + 1,
+                     descriptor.module_z)) ||
+                (local_z < kFloodedTransitionWidth &&
+                 !is_flooded_module(
+                     descriptor.module_x,
+                     descriptor.module_z - 1)) ||
+                (local_z >=
+                         kBackroomsModuleSize -
+                             kFloodedTransitionWidth &&
+                 !is_flooded_module(
+                     descriptor.module_x,
+                     descriptor.module_z + 1));
+            if (transition_to_dry_module) {
+                pool_surface = BackroomsPoolSurface::Shore;
+            }
+        }
     }
 
     const auto route_near_water =
@@ -1414,7 +1531,8 @@ auto BackroomsGenerator::sample_poolrooms_column(
             local_z - kPoolroomsRouteShoreWidth,
             local_x + kPoolroomsRouteShoreWidth,
             local_z + kPoolroomsRouteShoreWidth);
-    if (pool_surface == BackroomsPoolSurface::Water &&
+    if (!flooded_module &&
+        pool_surface == BackroomsPoolSurface::Water &&
         route_near_water) {
         // Je transforme la traversée obligatoire en passerelle carrelée, avec
         // une cellule de rive sèche de chaque côté au lieu de couper l'eau net.
@@ -1430,8 +1548,7 @@ auto BackroomsGenerator::sample_poolrooms_column(
             world_z,
             0x81C25F39ULL) %
         100U;
-    if (descriptor.tension == BackroomsTension::Blackout ||
-        wall_variation < 9U) {
+    if (descriptor.tension == BackroomsTension::Blackout) {
         wall_block =
             to_block_id(BlockType::PoolroomsDarkTile);
     } else if (wall_variation >= 94U) {
@@ -1780,19 +1897,73 @@ auto BackroomsGenerator::sample_poolrooms_column(
             BackroomsElevatedFeature::Arch;
     }
 
+    auto deep_water = false;
+    if (flooded_module &&
+        pool_surface == BackroomsPoolSurface::Water) {
+        const auto deep_hash =
+            hash_position(
+                layout_seed_,
+                descriptor.module_x,
+                descriptor.module_z,
+                0xD72A40F19B65CE83ULL);
+        const auto deep_module = deep_hash % 100U < 15U;
+        const auto orientation =
+            static_cast<int>((deep_hash >> 8U) % 4U);
+        const auto along =
+            orientation == 0 || orientation == 2
+                ? local_x
+                : local_z;
+        const auto depth =
+            orientation == 0
+                ? local_z
+                : orientation == 1
+                      ? kBackroomsModuleSize - 1 - local_x
+                      : orientation == 2
+                            ? kBackroomsModuleSize - 1 - local_z
+                            : local_x;
+        const auto inside_lateral_pool =
+            along >= 12 && along <= 51 &&
+            depth >= 8 && depth <= 12;
+        const auto route_clear =
+            !is_guaranteed_route_in_rectangle(
+                descriptor,
+                local_x - kFloodedDeepPoolRouteMargin,
+                local_z - kFloodedDeepPoolRouteMargin,
+                local_x + kFloodedDeepPoolRouteMargin,
+                local_z + kFloodedDeepPoolRouteMargin);
+        const auto connector_clear =
+            !connector_near(
+                 world_x,
+                 kBackroomsFloorY + 1,
+                 world_z,
+                 kFloodedDeepPoolConnectorMargin)
+                 .has_value();
+        deep_water =
+            deep_module &&
+            inside_lateral_pool &&
+            route_clear &&
+            connector_clear;
+    }
+
     // Je fixe la géométrie seulement après avoir réservé les routes, les
     // connecteurs et les supports. Une cellule asséchée ne peut ainsi laisser
     // ni cuvette vide ni état d'eau résiduel.
     const auto wet =
         pool_surface == BackroomsPoolSurface::Water;
     const auto recessed =
-        pool_geometry_profile_ ==
-        BackroomsPoolGeometryProfile::RecessedOneBlock;
+        pool_geometry_profile_ !=
+        BackroomsPoolGeometryProfile::LegacyFlat;
     const auto floor_y =
         wet && recessed
-            ? kBackroomsFloorY - 1
+            ? kBackroomsFloorY - (deep_water ? 2 : 1)
             : kBackroomsFloorY;
-    const auto water_y =
+    const auto water_bottom_y =
+        wet
+            ? recessed
+                  ? floor_y + 1
+                  : kBackroomsFloorY + 1
+            : kWorldMinY - 1;
+    const auto water_top_y =
         wet
             ? recessed
                   ? kBackroomsFloorY
@@ -1805,17 +1976,6 @@ auto BackroomsGenerator::sample_poolrooms_column(
             : pool_surface == BackroomsPoolSurface::Shore
                   ? to_block_id(BlockType::PoolroomsMetal)
                   : to_block_id(BlockType::PoolroomsTile);
-    if (pool_surface == BackroomsPoolSurface::Dry &&
-        hash_position(
-            layout_seed_,
-            floor_division(world_x, 8),
-            floor_division(world_z, 8),
-            0x4A62C1D7ULL) %
-                17U ==
-            0U) {
-        floor_block =
-            to_block_id(BlockType::PoolroomsDarkTile);
-    }
     if (connector.has_value()) {
         // Je conserve l'identité visuelle du palier, même lorsque celui-ci a
         // remplacé une cellule qui appartenait initialement à un bassin.
@@ -1826,12 +1986,14 @@ auto BackroomsGenerator::sample_poolrooms_column(
     }
 
     const auto water_level =
-        wet && recessed
-            ? poolrooms_basin_water_level(
-                  layout_seed_,
-                  world_x,
-                  world_z)
-            : kPoolroomsShallowWaterLevel;
+        wet && flooded_module
+            ? kMaxWaterLevel
+            : wet && recessed
+                  ? poolrooms_basin_water_level(
+                        layout_seed_,
+                        world_x,
+                        world_z)
+                  : kPoolroomsShallowWaterLevel;
 
     return {
         .floor_y = floor_y,
@@ -1839,7 +2001,9 @@ auto BackroomsGenerator::sample_poolrooms_column(
         .wall_top_y = wall_top_y,
         .overhead_bottom_y = overhead_bottom_y,
         .overhead_top_y = overhead_top_y,
-        .water_y = water_y,
+        .water_y = water_top_y,
+        .water_bottom_y = water_bottom_y,
+        .water_top_y = water_top_y,
         .foundation_block =
             to_block_id(BlockType::PoolroomsDarkTile),
         .roof_block =
@@ -1860,6 +2024,13 @@ auto BackroomsGenerator::sample_poolrooms_column(
         .light_state = light_state,
         .elevated_feature = elevated_feature,
         .pool_surface = pool_surface,
+        .flooded_district = flooded_module,
+        .deep_water = deep_water,
+        .water_depth_cells =
+            wet
+                ? static_cast<std::uint8_t>(
+                      water_top_y - water_bottom_y + 1)
+                : static_cast<std::uint8_t>(0U),
     };
 }
 
@@ -2101,7 +2272,9 @@ auto BackroomsGenerator::sample_water_state(
         return 0;
     }
     const auto column = sample_column(world_x, world_z);
-    return y == column.water_y
+    return column.water_state != WaterState {0} &&
+                   y >= column.water_bottom_y &&
+                   y <= column.water_top_y
                ? column.water_state
                : WaterState {0};
 }

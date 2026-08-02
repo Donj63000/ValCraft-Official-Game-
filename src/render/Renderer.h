@@ -18,6 +18,7 @@
 #include "creatures/legendary/LegendaryEnemySystem.h"
 #include "gameplay/BackroomsFlashlight.h"
 #include "gameplay/BackroomsJack.h"
+#include "gameplay/BackroomsMarlow.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/OldGuard.h"
 #include "gameplay/PlayerController.h"
@@ -48,6 +49,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -74,6 +76,87 @@ namespace valcraft {
 struct ShipRenderState;
 struct ShipVoxel;
 struct OceanState;
+
+struct BackroomsTerminalFogSnapshot {
+  bool valid = false;
+  int world_seed = 0;
+  int logical_level = 0;
+  BackroomsTerminalFogRange range{};
+
+  [[nodiscard]] auto safe_visible_distance(
+      int expected_world_seed, int expected_logical_level,
+      float safety_margin = 2.0F, float distance_cap = 64.0F) const noexcept
+      -> float {
+    if (!valid || world_seed != expected_world_seed ||
+        logical_level != expected_logical_level || !range.enabled() ||
+        !std::isfinite(range.end_distance)) {
+      return 0.0F;
+    }
+    const auto safe_margin =
+        std::isfinite(safety_margin) ? std::max(safety_margin, 0.0F) : 2.0F;
+    const auto safe_cap =
+        std::isfinite(distance_cap) ? std::max(distance_cap, 0.0F) : 64.0F;
+    return std::clamp(range.end_distance - safe_margin, 0.0F, safe_cap);
+  }
+
+  auto operator==(const BackroomsTerminalFogSnapshot &) const -> bool = default;
+};
+
+inline constexpr float kBackroomsBlackoutPulseFallbackOutput = 0.05F;
+
+struct BackroomsInterferenceFixtureCacheKey {
+  int world_seed = 0;
+  int logical_level = 0;
+  int anchor_cell_x = 0;
+  int anchor_cell_z = 0;
+  int search_radius = 1;
+  BackroomsJackLightInterferenceMode mode =
+      BackroomsJackLightInterferenceMode::Flicker;
+
+  [[nodiscard]] auto query_position_x() const noexcept -> double {
+    return (static_cast<double>(anchor_cell_x) + 0.5) *
+           static_cast<double>(kBackroomsFlickerCacheCellSize);
+  }
+
+  [[nodiscard]] auto query_position_z() const noexcept -> double {
+    return (static_cast<double>(anchor_cell_z) + 0.5) *
+           static_cast<double>(kBackroomsFlickerCacheCellSize);
+  }
+
+  auto operator==(const BackroomsInterferenceFixtureCacheKey &) const
+      -> bool = default;
+};
+
+struct BackroomsInterferenceFixtureCache {
+  BackroomsInterferenceFixtureCacheKey key{};
+  std::optional<BackroomsFlickerAnchor> fixture{};
+  bool valid = false;
+
+  [[nodiscard]] auto
+  matches(const BackroomsInterferenceFixtureCacheKey &candidate) const noexcept
+      -> bool {
+    return valid && key == candidate;
+  }
+
+  void reset() noexcept {
+    key = {};
+    fixture.reset();
+    valid = false;
+  }
+};
+
+// Je quantifie l'ancre de Jack sur la meme maille de huit metres que les
+// luminaires. Une position stable ne relance donc jamais le sondage du
+// generateur a chaque image.
+[[nodiscard]] auto make_backrooms_interference_fixture_cache_key(
+    int world_seed, int logical_level,
+    const BackroomsJackLightInterferenceView &interference) noexcept
+    -> std::optional<BackroomsInterferenceFixtureCacheKey>;
+
+// Je reproduis la meme extinction locale lorsqu'aucune rampe perturbable
+// n'existe. Le plancher de visibilite interieur garde la matiere lisible.
+[[nodiscard]] auto backrooms_blackout_pulse_fallback_intensity(
+    float interference_strength) noexcept -> float;
 
 class RendererResourceResetProgress {
 public:
@@ -517,6 +600,13 @@ public:
   void set_backrooms_jack(
       const BackroomsJackRenderView &render,
       const BackroomsJackLightInterferenceView &light_interference);
+  void set_backrooms_marlow(
+      const BackroomsMarlowUpdateResult &result,
+      float animation_time_seconds,
+      float sky_light,
+      float block_light);
+  [[nodiscard]] auto backrooms_terminal_fog_snapshot() const noexcept
+      -> BackroomsTerminalFogSnapshot;
   [[nodiscard]] auto legendary_presentation_stats() const noexcept
       -> const RendererLegendaryPresentationStats &;
   [[nodiscard]] auto issou_hud_snapshot() const noexcept
@@ -670,6 +760,7 @@ private:
     GLint ambient_color = -1;
     GLint block_light_color = -1;
     GLint enclosed_interior = -1;
+    GLint interior_visibility_floor = -1;
     GLint backrooms_flicker_count = -1;
     GLint backrooms_flicker_lights = -1;
     GLint backrooms_flashlight_intensity = -1;
@@ -772,6 +863,7 @@ private:
     GLint ambient_color = -1;
     GLint block_light_color = -1;
     GLint enclosed_interior = -1;
+    GLint interior_visibility_floor = -1;
     GLint backrooms_flicker_count = -1;
     GLint backrooms_flicker_lights = -1;
     GLint backrooms_flashlight_intensity = -1;
@@ -872,6 +964,7 @@ private:
     GLint maritime_far_fog_range = -1;
     GLint maritime_sea_level = -1;
     GLint enclosed_interior = -1;
+    GLint interior_visibility_floor = -1;
     GLint poolrooms_interior = -1;
     GLint backrooms_flicker_count = -1;
     GLint backrooms_flicker_lights = -1;
@@ -1256,6 +1349,8 @@ private:
   void destroy_model_icon_texture();
   auto create_backrooms_jack_screamer_texture() -> bool;
   void destroy_backrooms_jack_screamer_texture();
+  auto create_backrooms_marlow_screamer_texture() -> bool;
+  void destroy_backrooms_marlow_screamer_texture();
   void bind_hud_textures();
   [[nodiscard]] auto hud_item_texture_mode(BlockId block_id) const noexcept
       -> float;
@@ -1397,6 +1492,10 @@ private:
       float absolute_time_seconds,
       int width,
       int height);
+  void draw_backrooms_marlow_screamer(
+      float absolute_time_seconds,
+      int width,
+      int height);
   void
   draw_gameplay_announcement(const GameplayHudAnnouncementView &announcement,
                              int width, int height);
@@ -1463,6 +1562,7 @@ private:
   GLuint msdf_font_texture_ = 0;
   GLuint model_icon_texture_ = 0;
   GLuint backrooms_jack_screamer_texture_ = 0;
+  GLuint backrooms_marlow_screamer_texture_ = 0;
   GLuint modern_material_albedo_texture_ = 0;
   GLuint modern_material_normal_height_texture_ = 0;
   GLuint modern_material_orm_emission_texture_ = 0;
@@ -1596,6 +1696,7 @@ private:
   std::vector<OldGuardEffectGpuInstance> old_guard_effect_instances_scratch_{};
   std::vector<CreaturePartInstance> creature_parts_scratch_{};
   std::vector<CreaturePartInstance> backrooms_jack_parts_{};
+  std::vector<CreaturePartInstance> backrooms_marlow_parts_{};
   // Je conserve le contexte en parallèle des pièces : les animaux et les
   // humains peuvent partager le même buffer sans partager leur anatomie.
   std::vector<VisualEntityContext> creature_part_contexts_scratch_{};
@@ -1617,11 +1718,13 @@ private:
   OrganicTerrainMesh terrain_upload_scratch_{};
   ArchitecturalMesh architecture_upload_scratch_{};
   std::vector<std::uint32_t> architecture_indices_scratch_{};
+  std::vector<std::uint8_t> architecture_index_coverage_scratch_{};
   ChunkMeshData block_break_overlay_scratch_{};
   std::vector<HudVertex> loading_vertices_scratch_{};
   std::vector<HudVertex> gameplay_announcement_vertices_scratch_{};
   std::vector<HudVertex> backrooms_flashlight_hud_vertices_scratch_{};
   std::vector<HudVertex> backrooms_jack_screamer_vertices_scratch_{};
+  std::vector<HudVertex> backrooms_marlow_screamer_vertices_scratch_{};
   std::vector<HudVertex> issou_hud_vertices_scratch_{};
   std::vector<HudVertex> command_console_vertices_scratch_{};
   HudGeometryCache<HotbarHudCacheKey> hotbar_cache_{};
@@ -1666,6 +1769,8 @@ private:
   std::uint16_t model_icon_mips_ = 0;
   std::uint16_t backrooms_jack_screamer_width_ = 0;
   std::uint16_t backrooms_jack_screamer_height_ = 0;
+  std::uint16_t backrooms_marlow_screamer_width_ = 0;
+  std::uint16_t backrooms_marlow_screamer_height_ = 0;
   std::array<std::uint16_t, 256> model_icon_layer_by_block_{};
   std::string last_initialization_error_{};
   std::size_t frame_draw_calls_ = 0;
@@ -1674,12 +1779,15 @@ private:
   RendererResourceResetProgress world_resource_reset_progress_{};
   // Je conserve la frontiere deja revelee pour qu'un nouvel anneau GPU ne
   // fasse jamais apparaitre seize metres de salles sur une seule image.
-  BackroomsTerminalFogRange backrooms_terminal_fog_range_{};
+  BackroomsTerminalFogSnapshot backrooms_terminal_fog_snapshot_{};
   std::chrono::steady_clock::time_point backrooms_terminal_fog_update_time_{};
   BackroomsFlickerField backrooms_flicker_field_{};
   BackroomsJackRenderView backrooms_jack_render_view_{};
   BackroomsJackLightInterferenceView backrooms_jack_light_interference_{};
-  int backrooms_terminal_fog_world_seed_ = 0;
+  BackroomsMarlowUpdateResult backrooms_marlow_result_{};
+  glm::vec3 backrooms_marlow_visual_anchor_ {0.0F};
+  BackroomsInterferenceFixtureCache
+      backrooms_jack_interference_fixture_cache_{};
   int backrooms_flicker_world_seed_ = 0;
   int backrooms_flicker_level_ = 0;
   int backrooms_flicker_cache_x_ = 0;
@@ -1689,7 +1797,6 @@ private:
   int active_gpu_query_frame_ = -1;
   int active_gpu_pass_ = -1;
   bool adaptive_gpu_sample_consumed_ = false;
-  bool backrooms_terminal_fog_state_valid_ = false;
   bool backrooms_flicker_cache_valid_ = false;
   bool pending_cpu_frame_time_valid_ = false;
   bool gpu_timers_supported_ = false;

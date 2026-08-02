@@ -148,7 +148,22 @@ struct ArchitecturalMesherSettings {
     bool mark_silhouette_bevels = true;
 };
 
+[[nodiscard]] constexpr auto is_backrooms_architectural_block(
+    BlockId block_id) noexcept -> bool {
+    // Je garde la simulation sur sa grille historique, mais je route toutes
+    // les enveloppes solides des Backrooms vers les grandes nappes PBR. Les
+    // colonnes de marche sont fusionnees comme du beton continu; les meubles,
+    // plantes, bouees et rampes gardent leurs silhouettes specialisees.
+    return
+        (block_id >= to_block_id(BlockType::BackroomsWallYellow) &&
+         block_id <= to_block_id(BlockType::PoolroomsFailedLight)) ||
+        block_id == to_block_id(BlockType::BackroomsConnectorStep);
+}
+
 [[nodiscard]] constexpr auto is_architectural_solid_block(BlockId block_id) noexcept -> bool {
+    if (is_backrooms_architectural_block(block_id)) {
+        return true;
+    }
     switch (static_cast<BlockType>(block_id)) {
     case BlockType::Wood:
     case BlockType::Cobblestone:
@@ -220,5 +235,13 @@ private:
 // padding des structures ou de l'implementation de std::vector.
 [[nodiscard]] auto architectural_mesh_deterministic_hash(
     const ArchitecturalMesh& mesh) noexcept -> std::uint64_t;
+
+// Je reconstruis l'EBO par nature de primitive au lieu de supposer que les
+// triangles libres viennent apres tous les quads. Cette hypothese devient
+// fausse des que plusieurs tranches ou sections sont concatenees.
+[[nodiscard]] auto order_architectural_indices_for_render(
+    const ArchitecturalMesh& mesh,
+    std::vector<std::uint32_t>& ordered_indices,
+    std::vector<std::uint8_t>& quad_index_coverage) -> std::size_t;
 
 } // namespace valcraft

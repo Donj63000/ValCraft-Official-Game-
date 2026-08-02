@@ -7,6 +7,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -89,6 +90,7 @@ public:
                   float pan = 0.0F,
                   float attenuation = 1.0F,
                   std::uint32_t deterministic_seed = 0U) noexcept;
+    void set_backrooms_drowning_filter(float intensity) noexcept;
 
     [[nodiscard]] auto available() const noexcept -> bool;
 
@@ -102,6 +104,8 @@ private:
     ProceduralMusicComposer composer_ {};
     BackroomsAmbience backrooms_ambience_ {};
     ProceduralSfxMixer sfx_mixer_ {};
+    std::array<float, 8U> drowning_filter_state_ {};
+    float drowning_filter_intensity_ = 0.0F;
 };
 
 } // namespace valcraft

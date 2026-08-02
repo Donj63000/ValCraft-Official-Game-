@@ -20,7 +20,7 @@
 namespace valcraft {
 namespace {
 
-constexpr std::uint64_t kExpectedMaterialPackChecksum = 0xDF9527D7F9BAEEC0ULL;
+constexpr std::uint64_t kExpectedMaterialPackChecksum = 0x8D841BFD53A89EC7ULL;
 
 struct MaterialColorStatistics {
     std::array<double, 3> average {};
@@ -276,7 +276,7 @@ TEST_CASE("les définitions des matériaux gardent des couches et des noms uniqu
 
 TEST_CASE("les matériaux du navire prolongent le catalogue sans renuméroter l'existant") {
     CHECK(static_cast<std::uint16_t>(VisualMaterialId::ToolWoodSteel) == 31U);
-    CHECK(static_cast<std::uint16_t>(VisualMaterialId::Count) == 54U);
+    CHECK(static_cast<std::uint16_t>(VisualMaterialId::Count) == 64U);
 
     struct ExpectedShipMaterial {
         VisualMaterialId id = VisualMaterialId::None;
@@ -391,6 +391,205 @@ TEST_CASE("les materiaux marins restent append-only et visuels") {
             definition.alpha_tested ==
             material.alpha_tested);
     }
+}
+
+TEST_CASE("les materiaux Backrooms prolongent le catalogue sans renumeroter l'existant") {
+    struct ExpectedBackroomsMaterial {
+        VisualMaterialId id = VisualMaterialId::None;
+        std::uint16_t numeric_id = 0U;
+        std::string_view name {};
+        bool emissive = false;
+    };
+    constexpr std::array expected_materials {
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsWallpaperYellow, 54U, "backrooms_wallpaper_yellow", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsWallpaperGreen, 55U, "backrooms_wallpaper_green", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsWallpaperBlue, 56U, "backrooms_wallpaper_blue", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsWallpaperRose, 57U, "backrooms_wallpaper_rose", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsWallpaperOxide, 58U, "backrooms_wallpaper_oxide", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsDampCarpet, 59U, "backrooms_damp_carpet", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsAcousticCeiling, 60U, "backrooms_acoustic_ceiling", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsPaintedConcrete, 61U, "backrooms_painted_concrete", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsFixtureMetal, 62U, "backrooms_fixture_metal", false},
+        ExpectedBackroomsMaterial {VisualMaterialId::BackroomsFluorescentDiffuser, 63U, "backrooms_fluorescent_diffuser", true},
+    };
+
+    CHECK(static_cast<std::uint16_t>(VisualMaterialId::MarineShell) == 53U);
+    CHECK(static_cast<std::uint16_t>(VisualMaterialId::Count) == 64U);
+    for (const auto& material : expected_materials) {
+        CAPTURE(material.numeric_id);
+        CAPTURE(material.name);
+        CHECK(static_cast<std::uint16_t>(material.id) == material.numeric_id);
+        CHECK(direct_visual_material_token(material.id) == material.numeric_id);
+        const auto& definition = visual_material_definition(material.id);
+        CHECK(definition.id == material.id);
+        CHECK(definition.name == material.name);
+        CHECK(definition.pack_layer == material.numeric_id - 1U);
+        CHECK(definition.surface_class == VisualSurfaceClass::Architectural);
+        CHECK(definition.emissive == material.emissive);
+        CHECK_FALSE(definition.alpha_tested);
+        CHECK_FALSE(definition.two_sided);
+    }
+
+    struct ExpectedBlockMaterial {
+        BlockType block = BlockType::Air;
+        VisualMaterialId material = VisualMaterialId::None;
+    };
+    constexpr std::array expected_blocks {
+        ExpectedBlockMaterial {BlockType::BackroomsWallYellow, VisualMaterialId::BackroomsWallpaperYellow},
+        ExpectedBlockMaterial {BlockType::BackroomsWallGreen, VisualMaterialId::BackroomsWallpaperGreen},
+        ExpectedBlockMaterial {BlockType::BackroomsWallBlue, VisualMaterialId::BackroomsWallpaperBlue},
+        ExpectedBlockMaterial {BlockType::BackroomsWallRose, VisualMaterialId::BackroomsWallpaperRose},
+        ExpectedBlockMaterial {BlockType::BackroomsWallOxide, VisualMaterialId::BackroomsWallpaperOxide},
+        ExpectedBlockMaterial {BlockType::BackroomsConcrete, VisualMaterialId::BackroomsPaintedConcrete},
+        ExpectedBlockMaterial {BlockType::BackroomsCarpet, VisualMaterialId::BackroomsDampCarpet},
+        ExpectedBlockMaterial {BlockType::BackroomsCeilingTile, VisualMaterialId::BackroomsAcousticCeiling},
+        ExpectedBlockMaterial {BlockType::BackroomsFluorescentLight, VisualMaterialId::BackroomsFluorescentDiffuser},
+        ExpectedBlockMaterial {BlockType::BackroomsFailedLight, VisualMaterialId::BackroomsFixtureMetal},
+        ExpectedBlockMaterial {BlockType::BackroomsEmergencyLight, VisualMaterialId::BackroomsFluorescentDiffuser},
+        ExpectedBlockMaterial {BlockType::PoolroomsTile, VisualMaterialId::ShipCeramic},
+        ExpectedBlockMaterial {BlockType::PoolroomsWetTile, VisualMaterialId::ShipCeramic},
+        ExpectedBlockMaterial {BlockType::PoolroomsDarkTile, VisualMaterialId::ShipCeramic},
+        ExpectedBlockMaterial {BlockType::PoolroomsMetal, VisualMaterialId::ShipIron},
+        ExpectedBlockMaterial {BlockType::PoolroomsPlastic, VisualMaterialId::ShipCeramic},
+        ExpectedBlockMaterial {BlockType::PoolroomsLight, VisualMaterialId::BackroomsFluorescentDiffuser},
+        ExpectedBlockMaterial {BlockType::PoolroomsFailedLight, VisualMaterialId::BackroomsFixtureMetal},
+        ExpectedBlockMaterial {BlockType::BackroomsDesk, VisualMaterialId::ShipDeckOak},
+        ExpectedBlockMaterial {BlockType::BackroomsChair, VisualMaterialId::BackroomsFixtureMetal},
+        ExpectedBlockMaterial {BlockType::BackroomsPlant, VisualMaterialId::Broadleaf},
+        ExpectedBlockMaterial {BlockType::PoolroomsFloat, VisualMaterialId::ShipCeramic},
+        ExpectedBlockMaterial {BlockType::BackroomsConnectorStep, VisualMaterialId::BackroomsPaintedConcrete},
+        ExpectedBlockMaterial {BlockType::BackroomsRampPositiveX, VisualMaterialId::BackroomsPaintedConcrete},
+        ExpectedBlockMaterial {BlockType::BackroomsRampNegativeX, VisualMaterialId::BackroomsPaintedConcrete},
+        ExpectedBlockMaterial {BlockType::BackroomsRampPositiveZ, VisualMaterialId::BackroomsPaintedConcrete},
+        ExpectedBlockMaterial {BlockType::BackroomsRampNegativeZ, VisualMaterialId::BackroomsPaintedConcrete},
+    };
+    for (const auto& mapping : expected_blocks) {
+        const auto block_id = to_block_id(mapping.block);
+        CAPTURE(static_cast<unsigned int>(block_id));
+        CHECK(visual_material_for_block(block_id) == mapping.material);
+        CHECK(visual_surface_for_block(block_id) ==
+              visual_material_definition(mapping.material).surface_class);
+    }
+}
+
+TEST_CASE("les couches Backrooms fournissent des cartes PBR distinctes et coherentes") {
+    const auto loaded = load_visual_material_pack(find_material_pack());
+    REQUIRE_MESSAGE(loaded, loaded.message);
+    REQUIRE(loaded.pack.has_value());
+
+    std::set<std::uint64_t> albedo_checksums;
+    std::set<std::uint64_t> normal_checksums;
+    std::set<std::uint64_t> orm_checksums;
+    for (std::uint16_t numeric_id = 54U; numeric_id <= 63U; ++numeric_id) {
+        const auto material_id = static_cast<VisualMaterialId>(numeric_id);
+        const auto& definition = visual_material_definition(material_id);
+        REQUIRE(definition.pack_layer < loaded.pack->layers.size());
+        const auto& layer = loaded.pack->layers[definition.pack_layer];
+        CAPTURE(numeric_id);
+        CAPTURE(definition.name);
+        CHECK(layer.material_id == material_id);
+        CHECK(layer.surface_class == VisualSurfaceClass::Architectural);
+        CHECK(layer.name_hash == visual_material_name_hash(definition.name));
+
+        const auto albedo = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::Albedo,
+            0U);
+        const auto normal_height = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::NormalHeight,
+            0U);
+        const auto orm_emission = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::OrmEmission,
+            0U);
+        REQUIRE(albedo.size() == 128U * 128U * 4U);
+        REQUIRE(normal_height.size() == albedo.size());
+        REQUIRE(orm_emission.size() == albedo.size());
+        CHECK(albedo_checksums.insert(byte_checksum(albedo)).second);
+        CHECK(normal_checksums.insert(byte_checksum(normal_height)).second);
+        CHECK(orm_checksums.insert(byte_checksum(orm_emission)).second);
+
+        const auto normal_z = material_channel_statistics(normal_height, 2U);
+        const auto height = material_channel_statistics(normal_height, 3U);
+        const auto occlusion = material_channel_statistics(orm_emission, 0U);
+        CHECK(normal_z.minimum >= 128U);
+        CHECK(height.maximum > height.minimum);
+        CHECK(occlusion.minimum >= 128U);
+
+        const auto emission = material_channel_statistics(orm_emission, 3U);
+        if (material_id == VisualMaterialId::BackroomsFluorescentDiffuser) {
+            CHECK(emission.average >= 100.0);
+            CHECK(emission.maximum >= 220U);
+        } else {
+            CHECK(emission.maximum == 0U);
+        }
+    }
+
+    // Je garde les revetements dielectriques et mats, tout en exigeant une
+    // vraie reponse metallique pour le chassis du luminaire.
+    for (const auto material_id : {
+             VisualMaterialId::BackroomsWallpaperYellow,
+             VisualMaterialId::BackroomsWallpaperGreen,
+             VisualMaterialId::BackroomsWallpaperBlue,
+             VisualMaterialId::BackroomsWallpaperRose,
+             VisualMaterialId::BackroomsWallpaperOxide,
+             VisualMaterialId::BackroomsDampCarpet,
+             VisualMaterialId::BackroomsAcousticCeiling,
+             VisualMaterialId::BackroomsPaintedConcrete,
+         }) {
+        const auto orm = loaded.pack->texels_for(
+            material_id,
+            VisualMaterialTexture::OrmEmission,
+            0U);
+        CHECK(material_channel_statistics(orm, 2U).maximum == 0U);
+    }
+
+    const auto wallpaper_roughness = material_channel_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::BackroomsWallpaperYellow,
+            VisualMaterialTexture::OrmEmission,
+            0U),
+        1U);
+    const auto carpet_roughness = material_channel_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::BackroomsDampCarpet,
+            VisualMaterialTexture::OrmEmission,
+            0U),
+        1U);
+    const auto ceiling_roughness = material_channel_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::BackroomsAcousticCeiling,
+            VisualMaterialTexture::OrmEmission,
+            0U),
+        1U);
+    const auto concrete_roughness = material_channel_statistics(
+        loaded.pack->texels_for(
+            VisualMaterialId::BackroomsPaintedConcrete,
+            VisualMaterialTexture::OrmEmission,
+            0U),
+        1U);
+    CHECK(wallpaper_roughness.average >= 210.0);
+    CHECK(carpet_roughness.average >= 140.0);
+    CHECK(carpet_roughness.minimum < carpet_roughness.maximum);
+    CHECK(ceiling_roughness.average >= 220.0);
+    CHECK(concrete_roughness.average >= 205.0);
+
+    const auto fixture_orm = loaded.pack->texels_for(
+        VisualMaterialId::BackroomsFixtureMetal,
+        VisualMaterialTexture::OrmEmission,
+        0U);
+    const auto fixture_metallic = material_channel_statistics(fixture_orm, 2U);
+    CHECK(fixture_metallic.average >= 130.0);
+    CHECK(fixture_metallic.maximum >= 180U);
+
+    const auto diffuser_orm = loaded.pack->texels_for(
+        VisualMaterialId::BackroomsFluorescentDiffuser,
+        VisualMaterialTexture::OrmEmission,
+        0U);
+    const auto diffuser_metallic = material_channel_statistics(diffuser_orm, 2U);
+    CHECK(diffuser_metallic.average > 20.0);
+    CHECK(diffuser_metallic.maximum >= 160U);
 }
 
 TEST_CASE("le pack procédural versionné se charge avec tous ses mipmaps") {

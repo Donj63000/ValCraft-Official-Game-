@@ -1,6 +1,7 @@
 #include "world/ChunkMesher.h"
 
 #include "render/ArchitecturalMesher.h"
+#include "render/BackroomsPropMesh.h"
 #include "world/BlockVisuals.h"
 #include "world/OceanAdventureLayout.h"
 #include "world/OrganicTerrainMesher.h"
@@ -1441,7 +1442,8 @@ auto ChunkMesher::build_mesh_range(const World& world,
                     (is_organic_terrain_block(block_id) ||
                      is_modern_procedural_decoration(block_id) ||
                      is_architectural_solid_block(block_id) ||
-                     is_architectural_fixture_block(block_id))) {
+                     is_architectural_fixture_block(block_id) ||
+                     is_modern_backrooms_hard_surface_prop(block_id))) {
                     // Je remplace la peau naturelle et les décorations par
                     // leurs maillages modernes; les cellules restent dans le
                     // voisinage d'occlusion et dans toute la logique.

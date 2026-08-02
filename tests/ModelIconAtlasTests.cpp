@@ -24,7 +24,7 @@ namespace valcraft {
 namespace {
 
 constexpr std::uint64_t kExpectedMaterialChecksum =
-    0xDF9527D7F9BAEEC0ULL;
+    0x8D841BFD53A89EC7ULL;
 constexpr std::uint64_t kExpectedIconContentChecksum =
     0x74D3CC0F846DA790ULL;
 

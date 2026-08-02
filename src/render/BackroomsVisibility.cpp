@@ -286,7 +286,8 @@ auto backrooms_advance_terminal_fog_range(
 auto backrooms_darkness_visibility(
     float block_light,
     float flashlight_energy,
-    bool enclosed_interior) noexcept -> float {
+    bool enclosed_interior,
+    float visibility_floor) noexcept -> float {
     if (!enclosed_interior) {
         // Je préserve strictement les mondes ouverts et les autres pipelines :
         // cette fonction ne doit jamais y modifier leur éclairage historique.
@@ -303,15 +304,23 @@ auto backrooms_darkness_visibility(
             sanitized_light(flashlight_energy),
             kBackroomsDarknessFlashlightBlackThreshold,
             kBackroomsDarknessFlashlightFullVisibilityThreshold);
+    const auto safe_visibility_floor =
+        sanitized_light(visibility_floor);
 
     // Je réunis les deux sources sans dépasser l'unité. Chacune peut révéler
     // seule la scène et deux sources partielles restent monotones.
-    return std::clamp(
+    const auto source_visibility = std::clamp(
         1.0F -
             (1.0F - local_visibility) *
                 (1.0F - flashlight_visibility),
         0.0F,
         1.0F);
+    // Je conserve un rebond minimal dans les intérieurs ordinaires, puis je
+    // laisse les vraies sources restaurer progressivement toute la visibilité.
+    return
+        safe_visibility_floor +
+        (1.0F - safe_visibility_floor) *
+            source_visibility;
 }
 
 } // namespace valcraft

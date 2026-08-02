@@ -1,6 +1,7 @@
 #include "world/World.h"
 
 #include "render/ArchitecturalFixtureMesh.h"
+#include "render/BackroomsPropMesh.h"
 #include "render/VisualVegetation.h"
 #include "render/VisualVegetationMesh.h"
 
@@ -334,7 +335,8 @@ auto section_max_y(std::size_t section_index) noexcept -> int {
             for (int x = 0; x < kChunkSizeX; ++x) {
                 const auto block = chunk.get_local(x, y, z);
                 if (is_architectural_solid_block(block) ||
-                    is_architectural_fixture_block(block)) {
+                    is_architectural_fixture_block(block) ||
+                    is_modern_backrooms_hard_surface_prop(block)) {
                     return true;
                 }
             }
@@ -4093,23 +4095,25 @@ auto World::rebuild_chunk_mesh(ChunkRecord& record) -> bool {
                     section.max,
                     1,
                 };
+                const ArchitecturalSampler architectural_sampler =
+                    [this, &vegetation](int x, int y, int z) {
+                    auto block = peek_block_or_generated(x, y, z);
+                    if (vegetation.has_value() &&
+                        coordinate_is_tree_wood(
+                            *vegetation,
+                            {x, y, z},
+                            block)) {
+                        block = to_block_id(BlockType::Air);
+                    }
+                    return ArchitecturalCellSample {
+                        block,
+                        get_sky_light(x, y, z),
+                        get_block_light(x, y, z),
+                    };
+                };
                 architectural_mesh = architectural_mesher_.build_mesh(
                     architectural_section,
-                    [this, &vegetation](int x, int y, int z) {
-                        auto block = peek_block_or_generated(x, y, z);
-                        if (vegetation.has_value() &&
-                            coordinate_is_tree_wood(
-                                *vegetation,
-                                {x, y, z},
-                                block)) {
-                            block = to_block_id(BlockType::Air);
-                        }
-                        return ArchitecturalCellSample {
-                            block,
-                            get_sky_light(x, y, z),
-                            get_block_light(x, y, z),
-                        };
-                    },
+                    architectural_sampler,
                     record.architectural_vertex_capacity_hints[section_index],
                     record.architectural_index_capacity_hints[section_index]);
                 // Je transforme les descriptions de torches en primitives
@@ -4119,6 +4123,12 @@ auto World::rebuild_chunk_mesh(ChunkRecord& record) -> bool {
                     append_architectural_fixture_geometry(
                     architectural_mesh,
                     StylizedPrimitiveLod::Medium);
+                [[maybe_unused]] const auto prop_index_offset =
+                    append_modern_backrooms_prop_geometry(
+                        architectural_mesh,
+                        architectural_section,
+                        architectural_sampler,
+                        StylizedPrimitiveLod::Medium);
             }
             record.architectural_vertex_capacity_hints[section_index] =
                 std::max(
@@ -4452,6 +4462,42 @@ void World::publish_modern_visual_remesh(ChunkRecord& record) {
             std::move(state.staged_organic_meshes[section_index]);
         record.architectural_section_meshes[section_index] =
             std::move(state.staged_architectural_meshes[section_index]);
+        if (state.architectural_sections.test(section_index)) {
+            const auto coord = record.chunk.coord();
+            const ArchitecturalSection section {
+                {
+                    coord.x * kChunkSizeX,
+                    section_min_y(section_index),
+                    coord.z * kChunkSizeZ,
+                },
+                {
+                    coord.x * kChunkSizeX + kChunkSizeX - 1,
+                    section_max_y(section_index),
+                    coord.z * kChunkSizeZ + kChunkSizeZ - 1,
+                },
+                1,
+            };
+            [[maybe_unused]] const auto prop_index_offset =
+                append_modern_backrooms_prop_geometry(
+                    record.architectural_section_meshes[section_index],
+                    section,
+                    [this, &state](int x, int y, int z) {
+                        auto block = peek_block_or_generated(x, y, z);
+                        if (state.canonical_vegetation.has_value() &&
+                            coordinate_is_tree_wood(
+                                *state.canonical_vegetation,
+                                {x, y, z},
+                                block)) {
+                            block = to_block_id(BlockType::Air);
+                        }
+                        return ArchitecturalCellSample {
+                            block,
+                            get_sky_light(x, y, z),
+                            get_block_light(x, y, z),
+                        };
+                    },
+                    StylizedPrimitiveLod::Medium);
+        }
         record.section_mesh_vertex_capacity_hints[section_index] =
             std::max<std::size_t>(
                 128U,

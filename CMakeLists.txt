@@ -230,6 +230,8 @@ add_library(valcraft_core
     src/gameplay/PlayerController.cpp
     src/gameplay/BackroomsFlashlight.cpp
     src/gameplay/BackroomsJack.cpp
+    src/gameplay/BackroomsMarlow.cpp
+    src/gameplay/BackroomsThreatArbiter.cpp
     src/gameplay/PlayerMusket.cpp
     src/gameplay/PlayerMusketEffects.cpp
     src/gameplay/PlayerProgression.cpp
@@ -273,9 +275,11 @@ add_library(valcraft_core
     src/gameplay/OldGuard.cpp
     src/render/ArchitecturalFixtureMesh.cpp
     src/render/ArchitecturalMesher.cpp
+    src/render/BackroomsPropMesh.cpp
     src/render/BackroomsFlicker.cpp
     src/render/BackroomsJackScreamer.cpp
     src/render/BackroomsJackVisual.cpp
+    src/render/BackroomsMarlowVisual.cpp
     src/render/BackroomsVisibility.cpp
     src/render/ItemDropGeometry.cpp
     src/render/MarineDecor.cpp
@@ -382,6 +386,9 @@ add_custom_command(TARGET ValCraft POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/backrooms/jack_le_pirate_screamer.bmp
         $<TARGET_FILE_DIR:ValCraft>/assets/backrooms/jack_le_pirate_screamer.bmp
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/backrooms/marlow_le_noye_screamer.bmp
+        $<TARGET_FILE_DIR:ValCraft>/assets/backrooms/marlow_le_noye_screamer.bmp
 )
 
 add_executable(valcraft_tests
@@ -397,9 +404,16 @@ add_executable(valcraft_tests
     tests/BackroomsJackIntegrationTests.cpp
     tests/BackroomsJackSaveTests.cpp
     tests/BackroomsJackScreamerTests.cpp
+    tests/BackroomsJackPressureTests.cpp
+    tests/BackroomsJackDirectorAuditTests.cpp
     tests/BackroomsJackTests.cpp
     tests/BackroomsJackVisualTests.cpp
+    tests/BackroomsMarlowVisualTests.cpp
+    tests/BackroomsMarlowTests.cpp
+    tests/BackroomsMarlowSaveTests.cpp
+    tests/BackroomsThreatArbiterTests.cpp
     tests/BackroomsConnectorBlockTests.cpp
+    tests/BackroomsPropMeshTests.cpp
     tests/BackroomsSpatialStackTests.cpp
     tests/BackroomsLevelTests.cpp
     tests/BackroomsGeneratorTests.cpp

@@ -90,6 +90,8 @@ inline constexpr auto death_screen_cause_label(PlayerDeathCause cause) noexcept 
         return "CAUSE ZOMBIE";
     case PlayerDeathCause::JackThePirate:
         return "CAUSE JACK LE PIRATE";
+    case PlayerDeathCause::MarlowTheDrowned:
+        return "CAUSE MARLOW LE NOYE";
     case PlayerDeathCause::None:
     default:
         return "CAUSE INCONNUE";

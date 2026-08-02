@@ -1,4 +1,6 @@
 #include "render/BackroomsVisibility.h"
+#include "world/BackroomsGenerator.h"
+#include "world/Environment.h"
 
 #include <doctest/doctest.h>
 
@@ -6,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace valcraft {
@@ -729,6 +732,239 @@ TEST_CASE(
             std::numeric_limits<float>::max(),
             true) ==
         1.0F);
+}
+
+TEST_CASE(
+    "Backrooms darkness keeps a sanitized interior visibility floor") {
+    constexpr auto floor = 0.22F;
+    CHECK(
+        backrooms_darkness_visibility(
+            0.0F,
+            0.0F,
+            true,
+            floor) ==
+        doctest::Approx(floor));
+
+    const auto half_block_visibility =
+        backrooms_darkness_visibility(
+            kBackroomsDarknessBlockLightFullVisibilityThreshold * 0.5F,
+            0.0F,
+            true,
+            floor);
+    CHECK(
+        half_block_visibility ==
+        doctest::Approx(floor + (1.0F - floor) * 0.5F));
+    CHECK(
+        backrooms_darkness_visibility(
+            0.0F,
+            kBackroomsDarknessFlashlightFullVisibilityThreshold,
+            true,
+            floor) ==
+        1.0F);
+
+    // Je borne le plancher fourni par l'environnement avant de l'appliquer.
+    CHECK(
+        backrooms_darkness_visibility(
+            0.0F,
+            0.0F,
+            true,
+            -1.0F) ==
+        0.0F);
+    CHECK(
+        backrooms_darkness_visibility(
+            0.0F,
+            0.0F,
+            true,
+            2.0F) ==
+        1.0F);
+    CHECK(
+        backrooms_darkness_visibility(
+            0.0F,
+            0.0F,
+            true,
+            std::numeric_limits<float>::quiet_NaN()) ==
+        0.0F);
+    CHECK(
+        backrooms_darkness_visibility(
+            0.0F,
+            0.0F,
+            false,
+            std::numeric_limits<float>::infinity()) ==
+        1.0F);
+}
+
+TEST_CASE(
+    "Backrooms environment reserves absolute black for Blackout modules") {
+    constexpr auto seed = 424242;
+    const BackroomsGenerator generator {seed};
+    auto normal_module_x = 0;
+    auto normal_module_z = 0;
+    auto blackout_module_x = 0;
+    auto blackout_module_z = 0;
+    auto found_normal = false;
+    auto found_blackout = false;
+
+    for (auto module_z = -16;
+         module_z <= 16 && !(found_normal && found_blackout);
+         ++module_z) {
+        for (auto module_x = -16;
+             module_x <= 16;
+             ++module_x) {
+            const auto tension =
+                generator.module_descriptor(module_x, module_z).tension;
+            if (tension == BackroomsTension::Blackout) {
+                if (!found_blackout) {
+                    blackout_module_x = module_x;
+                    blackout_module_z = module_z;
+                    found_blackout = true;
+                }
+            } else if (!found_normal) {
+                normal_module_x = module_x;
+                normal_module_z = module_z;
+                found_normal = true;
+            }
+        }
+    }
+    REQUIRE(found_normal);
+    REQUIRE(found_blackout);
+
+    const auto state_at_module_center =
+        [&](int module_x, int module_z, bool poolrooms) {
+            return make_backrooms_environment_state(
+                17.0F,
+                seed,
+                static_cast<float>(
+                    module_x * kBackroomsModuleSize +
+                    kBackroomsModuleSize / 2),
+                static_cast<float>(
+                    module_z * kBackroomsModuleSize +
+                    kBackroomsModuleSize / 2),
+                poolrooms);
+        };
+
+    CHECK(
+        state_at_module_center(
+            normal_module_x,
+            normal_module_z,
+            false).interior_visibility_floor ==
+        doctest::Approx(kBackroomsOfficeInteriorVisibilityFloor));
+    CHECK(
+        state_at_module_center(
+            normal_module_x,
+            normal_module_z,
+            true).interior_visibility_floor ==
+        doctest::Approx(kPoolroomsInteriorVisibilityFloor));
+    CHECK(
+        state_at_module_center(
+            blackout_module_x,
+            blackout_module_z,
+            false).interior_visibility_floor ==
+        doctest::Approx(kBackroomsBlackoutVisibilityFloor));
+    CHECK(
+        state_at_module_center(
+            blackout_module_x,
+            blackout_module_z,
+            true).interior_visibility_floor ==
+        doctest::Approx(kBackroomsBlackoutVisibilityFloor));
+}
+
+TEST_CASE(
+    "Backrooms visibility floor blends continuously across Blackout boundaries") {
+    constexpr auto seed = 424242;
+    const BackroomsGenerator generator {seed};
+    auto boundary_module_x = 0;
+    auto boundary_module_z = 0;
+    auto boundary_along_x = true;
+    auto found_boundary = false;
+
+    for (auto module_z = -24;
+         module_z <= 24 && !found_boundary;
+         ++module_z) {
+        for (auto module_x = -24;
+             module_x <= 24;
+             ++module_x) {
+            const auto current_is_blackout =
+                generator.module_descriptor(module_x, module_z).tension ==
+                BackroomsTension::Blackout;
+            const auto right_is_blackout =
+                generator.module_descriptor(module_x + 1, module_z).tension ==
+                BackroomsTension::Blackout;
+            if (current_is_blackout != right_is_blackout) {
+                boundary_module_x = module_x;
+                boundary_module_z = module_z;
+                boundary_along_x = true;
+                found_boundary = true;
+                break;
+            }
+            const auto next_is_blackout =
+                generator.module_descriptor(module_x, module_z + 1).tension ==
+                BackroomsTension::Blackout;
+            if (current_is_blackout != next_is_blackout) {
+                boundary_module_x = module_x;
+                boundary_module_z = module_z;
+                boundary_along_x = false;
+                found_boundary = true;
+                break;
+            }
+        }
+    }
+    REQUIRE(found_boundary);
+
+    const auto fixed_x = static_cast<float>(
+        boundary_module_x * kBackroomsModuleSize +
+        kBackroomsModuleSize / 2);
+    const auto fixed_z = static_cast<float>(
+        boundary_module_z * kBackroomsModuleSize +
+        kBackroomsModuleSize / 2);
+    const auto boundary_coordinate = static_cast<float>(
+        (boundary_along_x ? boundary_module_x : boundary_module_z) *
+            kBackroomsModuleSize +
+        kBackroomsModuleSize);
+    const auto sample =
+        [&](float offset, bool poolrooms) {
+            return make_backrooms_environment_state(
+                23.0F,
+                seed,
+                boundary_along_x
+                    ? boundary_coordinate + offset
+                    : fixed_x,
+                boundary_along_x
+                    ? fixed_z
+                    : boundary_coordinate + offset,
+                poolrooms).interior_visibility_floor;
+        };
+
+    for (const auto& [poolrooms, normal_floor] :
+         std::array<std::pair<bool, float>, 2> {{
+             {false, kBackroomsOfficeInteriorVisibilityFloor},
+             {true, kPoolroomsInteriorVisibilityFloor},
+         }}) {
+        CAPTURE(poolrooms);
+        CHECK(
+            sample(0.0F, poolrooms) ==
+            doctest::Approx(normal_floor * 0.5F)
+                .epsilon(0.00001));
+        CHECK(
+            std::abs(
+                sample(-0.001F, poolrooms) -
+                sample(0.001F, poolrooms)) <
+            0.00001F);
+
+        const auto first_interior = sample(-4.0F, poolrooms);
+        const auto second_interior = sample(4.0F, poolrooms);
+        const auto first_is_normal =
+            first_interior == doctest::Approx(normal_floor);
+        const auto first_is_blackout =
+            first_interior == doctest::Approx(0.0F);
+        const auto second_is_normal =
+            second_interior == doctest::Approx(normal_floor);
+        const auto second_is_blackout =
+            second_interior == doctest::Approx(0.0F);
+        const auto endpoints_match_profiles =
+            (first_is_normal && second_is_blackout) ||
+            (first_is_blackout && second_is_normal);
+        CHECK(endpoints_match_profiles);
+    }
 }
 
 } // namespace valcraft

@@ -321,7 +321,9 @@ struct SemanticHints {
         CreatureAtlasTile::CrewOchreCloth,
         CreatureAtlasTile::CrewRedCloth,
         CreatureAtlasTile::CrewBurgundyCloth,
-        CreatureAtlasTile::CrewCanvas);
+        CreatureAtlasTile::CrewCanvas,
+        CreatureAtlasTile::MarlowUniform,
+        CreatureAtlasTile::MarlowSwimCap);
     constexpr auto flexible = tile_bits(
         CreatureAtlasTile::ZombieVein,
         CreatureAtlasTile::ZombieScar,

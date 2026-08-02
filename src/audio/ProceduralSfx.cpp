@@ -180,6 +180,18 @@ auto ProceduralSfxMixer::effect_duration(GameSfxKind kind) noexcept -> float {
         return 1.55F;
     case GameSfxKind::JackScreamer:
         return 1.20F;
+    case GameSfxKind::MarlowWaterSignal:
+        return 1.35F;
+    case GameSfxKind::MarlowSurface:
+        return 1.05F;
+    case GameSfxKind::MarlowSubmerge:
+        return 0.92F;
+    case GameSfxKind::MarlowGrab:
+        return 1.15F;
+    case GameSfxKind::MarlowScreamer:
+        return 1.30F;
+    case GameSfxKind::MarlowDistantSplash:
+        return 0.78F;
     }
     return 0.10F;
 }
@@ -666,6 +678,108 @@ auto ProceduralSfxMixer::render_voice_sample(Voice& voice) const noexcept -> flo
              high_noise * 0.50F) *
                 scream_envelope +
             sub_impact * 0.36F;
+        break;
+    }
+    case GameSfxKind::MarlowWaterSignal:
+    case GameSfxKind::MarlowDistantSplash: {
+        // Je compose ici les avertissements aquatiques de Marlow : une masse
+        // grave transmise par le bassin et des gouttes plus claires, sans
+        // confondre ce signal juste avec un depart de poursuite de Jack.
+        const auto t = voice.age;
+        const auto attack = 1.0F - std::exp(-t * 28.0F);
+        const auto release = decay * decay;
+        const auto distant =
+            voice.kind == GameSfxKind::MarlowDistantSplash;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) *
+            (distant ? 0.018F : 0.032F);
+        voice.phase +=
+            kTwoPi *
+            (distant ? 58.0F : 46.0F) /
+            sample_rate;
+        const auto droplets =
+            std::max(
+                std::sin(
+                    t * kTwoPi *
+                    (distant ? 7.0F : 11.0F)),
+                0.0F);
+        sample =
+            (std::sin(voice.phase) * 0.36F +
+             voice.filtered_noise * 0.45F) *
+                attack * release +
+            noise * droplets * release *
+                (distant ? 0.08F : 0.14F);
+        break;
+    }
+    case GameSfxKind::MarlowSurface:
+    case GameSfxKind::MarlowSubmerge: {
+        // Je differencie l'emergence et la replongee par le sens du glissando,
+        // tout en conservant la meme signature de remous epais et humide.
+        const auto t = voice.age;
+        const auto submerge =
+            voice.kind == GameSfxKind::MarlowSubmerge;
+        const auto attack = 1.0F - std::exp(-t * 70.0F);
+        const auto envelope = attack * decay * decay;
+        const auto frequency =
+            submerge
+                ? 96.0F - 58.0F * normalized_age
+                : 39.0F + 74.0F * normalized_age;
+        voice.phase +=
+            kTwoPi * frequency / sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.075F;
+        sample =
+            (std::sin(voice.phase) * 0.32F +
+             voice.filtered_noise * 0.62F) *
+            envelope;
+        break;
+    }
+    case GameSfxKind::MarlowGrab: {
+        // Je rends la saisie immediate avec un impact sourd, une aspiration
+        // liquide et un frottement qui prepare la noyade sans faux screamer.
+        const auto t = voice.age;
+        const auto impact = std::exp(-t * 34.0F);
+        const auto suction =
+            (1.0F - std::exp(-t * 16.0F)) *
+            std::exp(-t * 2.7F);
+        voice.phase +=
+            kTwoPi * (72.0F - 25.0F * normalized_age) /
+            sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.055F;
+        sample =
+            std::sin(voice.phase) * impact * 0.48F +
+            voice.filtered_noise * suction * 0.52F;
+        break;
+    }
+    case GameSfxKind::MarlowScreamer: {
+        // Je donne a Marlow un cri plus etouffe et hydrophonique que celui de
+        // Jack, avec deux formants instables et une percussion subaquatique.
+        const auto t = voice.age;
+        const auto attack = 1.0F - std::exp(-t * 150.0F);
+        const auto release = std::min(1.0F, decay * 7.0F);
+        const auto envelope =
+            attack * release *
+            (0.86F + 0.14F * std::sin(t * kTwoPi * 17.0F));
+        voice.phase +=
+            kTwoPi *
+            (910.0F - 510.0F * normalized_age) /
+            sample_rate;
+        voice.secondary_phase +=
+            kTwoPi *
+            (1'390.0F - 810.0F * normalized_age) /
+            sample_rate;
+        voice.filtered_noise +=
+            (noise - voice.filtered_noise) * 0.12F;
+        const auto pressure =
+            std::sin(t * kTwoPi * 48.0F) *
+            std::exp(-t * 5.2F);
+        sample =
+            (std::sin(voice.phase) * 0.38F +
+             std::sin(voice.secondary_phase) * 0.24F +
+             voice.filtered_noise * 0.46F) *
+                envelope +
+            pressure * 0.34F;
         break;
     }
     }

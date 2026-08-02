@@ -31,6 +31,7 @@ enum class PlayerDeathCause : std::uint8_t {
     Thirst = 6,
     Stranded = 7,
     JackThePirate = 8,
+    MarlowTheDrowned = 9,
 };
 
 inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept -> std::string_view {
@@ -51,6 +52,8 @@ inline constexpr auto player_death_cause_label(PlayerDeathCause cause) noexcept 
         return "NAVIRE PERDU";
     case PlayerDeathCause::JackThePirate:
         return "JACK LE PIRATE";
+    case PlayerDeathCause::MarlowTheDrowned:
+        return "MARLOW LE NOYE";
     case PlayerDeathCause::None:
     default:
         return "INCONNUE";

@@ -417,15 +417,21 @@ BackroomsSpatialStack::BackroomsSpatialStack(
             logical_level <= -2
                 ? BackroomsTheme::Poolrooms
                 : BackroomsTheme::Offices;
-        // Je decale seulement le sol nominal des Poolrooms V3 : leur fond
-        // humide peut ainsi occuper la base de la tranche sans sortir du monde.
+        // Je réserve un voxel sous le sol nominal en V3 et deux en V4. Les
+        // bassins profonds V4 restent ainsi contenus dans leur propre tranche
+        // sans toucher au plafond de l'étage inférieur.
+        const auto pool_floor_offset =
+            theme != BackroomsTheme::Poolrooms
+                ? 0
+                : profile ==
+                          BackroomsSpatialProfile::FloodedPoolroomsV4
+                      ? 2
+                      : profile ==
+                                BackroomsSpatialProfile::RecessedPoolroomsV3
+                            ? 1
+                            : 0;
         const auto floor_y =
-            base_y +
-            (profile ==
-                         BackroomsSpatialProfile::RecessedPoolroomsV3 &&
-                     theme == BackroomsTheme::Poolrooms
-                 ? 1
-                 : 0);
+            base_y + pool_floor_offset;
         const auto roof_y =
             index + 1U < placements_.size()
                 ? kBackroomsSpatialFloorY[index + 1U] - 1
@@ -439,9 +445,12 @@ BackroomsSpatialStack::BackroomsSpatialStack(
         };
         const auto pool_geometry_profile =
             profile ==
-                    BackroomsSpatialProfile::RecessedPoolroomsV3
-                ? BackroomsPoolGeometryProfile::RecessedOneBlock
-                : BackroomsPoolGeometryProfile::LegacyFlat;
+                    BackroomsSpatialProfile::FloodedPoolroomsV4
+                ? BackroomsPoolGeometryProfile::FloodedDistrictsV4
+                : profile ==
+                          BackroomsSpatialProfile::RecessedPoolroomsV3
+                      ? BackroomsPoolGeometryProfile::RecessedOneBlock
+                      : BackroomsPoolGeometryProfile::LegacyFlat;
         generators_[index] =
             BackroomsGenerator(
                 seed_,
@@ -1110,14 +1119,16 @@ auto BackroomsSpatialStack::needs_recessed_pool_shore(
     int world_x,
     int world_y,
     int world_z) const noexcept -> bool {
-    if (profile_ !=
-            BackroomsSpatialProfile::RecessedPoolroomsV3 ||
+    if ((profile_ !=
+             BackroomsSpatialProfile::RecessedPoolroomsV3 &&
+         profile_ !=
+             BackroomsSpatialProfile::FloodedPoolroomsV4) ||
         column.water_state == WaterState {0}) {
         return false;
     }
     const auto water_y =
         placements_[layer_index].floor_y +
-        (column.water_y - kBackroomsFloorY);
+        (column.water_top_y - kBackroomsFloorY);
     if (world_y != water_y) {
         return false;
     }
@@ -1198,9 +1209,12 @@ auto BackroomsSpatialStack::sample_water_state(
         generators_[layer_index].sample_column(
             world_x,
             world_z);
-    const auto water_y =
+    const auto water_bottom_y =
         placements_[layer_index].floor_y +
-        (column.water_y - kBackroomsFloorY);
+        (column.water_bottom_y - kBackroomsFloorY);
+    const auto water_top_y =
+        placements_[layer_index].floor_y +
+        (column.water_top_y - kBackroomsFloorY);
     if (needs_recessed_pool_shore(
             layer_index,
             column,
@@ -1209,7 +1223,9 @@ auto BackroomsSpatialStack::sample_water_state(
             world_z)) {
         return WaterState {0};
     }
-    return world_y == water_y
+    return column.water_state != WaterState {0} &&
+                   world_y >= water_bottom_y &&
+                   world_y <= water_top_y
                ? column.water_state
                : WaterState {0};
 }
@@ -1236,8 +1252,10 @@ auto BackroomsSpatialStack::rasterize_column(
     std::array<bool, kBackroomsSpatialLevelCount>
         recessed_pool_shores {};
     const auto has_recessed_water =
-        profile_ ==
-            BackroomsSpatialProfile::RecessedPoolroomsV3 &&
+        (profile_ ==
+             BackroomsSpatialProfile::RecessedPoolroomsV3 ||
+         profile_ ==
+             BackroomsSpatialProfile::FloodedPoolroomsV4) &&
         std::any_of(
             columns.begin(),
             columns.end(),
@@ -1270,7 +1288,7 @@ auto BackroomsSpatialStack::rasterize_column(
             }
             const auto water_y =
                 placements_[layer_index].floor_y +
-                (columns[layer_index].water_y -
+                (columns[layer_index].water_top_y -
                  kBackroomsFloorY);
             recessed_pool_shores[layer_index] =
                 std::any_of(
@@ -1309,7 +1327,7 @@ auto BackroomsSpatialStack::rasterize_column(
         } else if (recessed_pool_shores[layer_index]) {
             const auto water_y =
                 placements_[layer_index].floor_y +
-                (columns[layer_index].water_y -
+                (columns[layer_index].water_top_y -
                  kBackroomsFloorY);
             if (world_y == water_y) {
                 block = to_block_id(BlockType::PoolroomsMetal);
@@ -1322,11 +1340,17 @@ auto BackroomsSpatialStack::rasterize_column(
             block != to_block_id(BlockType::Air)) {
             continue;
         }
-        const auto water_y =
+        const auto water_bottom_y =
             placements_[layer_index].floor_y +
-            (columns[layer_index].water_y -
+            (columns[layer_index].water_bottom_y -
              kBackroomsFloorY);
-        if (world_y == water_y) {
+        const auto water_top_y =
+            placements_[layer_index].floor_y +
+            (columns[layer_index].water_top_y -
+             kBackroomsFloorY);
+        if (columns[layer_index].water_state != WaterState {0} &&
+            world_y >= water_bottom_y &&
+            world_y <= water_top_y) {
             result.water[static_cast<std::size_t>(world_y)] =
                 columns[layer_index].water_state;
         }

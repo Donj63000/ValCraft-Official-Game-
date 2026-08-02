@@ -17,6 +17,10 @@ namespace {
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kTwoPi = 2.0F * kPi;
 constexpr float kMinimumPartExtent = 1.0e-4F;
+constexpr float kOriginalJackStandingHeight = 3.82F;
+constexpr float kJackVerticalScale =
+    kBackroomsJackVisualStandingHeight /
+    kOriginalJackStandingHeight;
 
 constexpr float kMaterialFabric = 0.22F;
 constexpr float kMaterialSkin = 0.34F;
@@ -218,34 +222,6 @@ void append_segment(
         context);
 }
 
-void append_pair(
-    std::vector<CreaturePartInstance>& parts,
-    const glm::mat4& root,
-    const glm::vec3& center,
-    float side_offset,
-    const glm::vec3& half_extent,
-    const glm::vec3& rotation,
-    const glm::vec3& side_rotation,
-    CreatureAtlasTile tile,
-    float material_class,
-    float cavity_mask,
-    float emissive_strength,
-    const JackBuildContext& context) {
-    for (const auto side : {-1.0F, 1.0F}) {
-        append_box(
-            parts,
-            root,
-            center + glm::vec3 {0.0F, 0.0F, side * side_offset},
-            half_extent,
-            rotation + side_rotation * side,
-            tile,
-            material_class,
-            cavity_mask,
-            emissive_strength,
-            context);
-    }
-}
-
 void append_legs(
     std::vector<CreaturePartInstance>& parts,
     const glm::mat4& root,
@@ -285,7 +261,7 @@ void append_legs(
         0.105F,
         0.115F,
         0.025F,
-        CreatureAtlasTile::CrewHairBlack,
+        CreatureAtlasTile::JackCloth,
         kMaterialFabric,
         0.25F,
         0.0F,
@@ -298,7 +274,7 @@ void append_legs(
         0.078F,
         0.085F,
         0.025F,
-        CreatureAtlasTile::ZombieBone,
+        CreatureAtlasTile::JackBone,
         kMaterialBone,
         0.58F,
         0.0F,
@@ -313,7 +289,7 @@ void append_legs(
         },
         glm::vec3 {0.19F, 0.11F, 0.135F},
         glm::vec3 {0.0F, 0.0F, normal_step_x * -0.22F},
-        CreatureAtlasTile::CrewLeather,
+        CreatureAtlasTile::JackCloth,
         kMaterialLeather,
         0.18F,
         0.0F,
@@ -342,7 +318,7 @@ void append_legs(
         0.105F,
         0.115F,
         0.025F,
-        CreatureAtlasTile::CrewHairBlack,
+        CreatureAtlasTile::JackCloth,
         kMaterialFabric,
         0.27F,
         0.0F,
@@ -394,174 +370,223 @@ void append_torso_and_coat(
     append_box(
         parts,
         upper_root,
-        glm::vec3 {0.0F, 1.51F, 0.0F},
-        glm::vec3 {0.17F, 0.13F, 0.25F},
-        glm::vec3 {0.0F},
-        CreatureAtlasTile::CrewHairBlack,
-        kMaterialFabric,
-        0.36F,
-        0.0F,
-        context);
-    append_box(
-        parts,
-        upper_root,
-        glm::vec3 {-0.015F, 1.77F + breath, 0.0F},
-        glm::vec3 {0.12F, 0.23F, 0.23F},
-        glm::vec3 {0.0F, 0.0F, -0.025F},
-        CreatureAtlasTile::ZombieBone,
-        kMaterialBone,
-        0.70F,
-        0.0F,
-        context);
-    append_box(
-        parts,
-        upper_root,
-        glm::vec3 {0.015F, 2.20F + breath, 0.0F},
-        glm::vec3 {0.095F, 0.30F, 0.12F},
+        glm::vec3 {-0.025F, 1.51F, 0.025F},
+        glm::vec3 {0.19F, 0.15F, 0.29F},
         glm::vec3 {0.0F, 0.0F, -0.035F},
-        CreatureAtlasTile::ZombieBone,
+        CreatureAtlasTile::JackCloth,
+        kMaterialFabric,
+        0.72F,
+        0.0F,
+        context);
+    append_box(
+        parts,
+        upper_root,
+        glm::vec3 {-0.020F, 1.84F + breath, -0.015F},
+        glm::vec3 {0.14F, 0.25F, 0.27F},
+        glm::vec3 {0.0F, 0.0F, -0.055F},
+        CreatureAtlasTile::JackTar,
+        kMaterialSkin,
+        0.96F,
+        0.0F,
+        context);
+    append_box(
+        parts,
+        upper_root,
+        glm::vec3 {-0.080F, 2.23F + breath, 0.035F},
+        glm::vec3 {0.105F, 0.40F, 0.115F},
+        glm::vec3 {0.0F, 0.0F, -0.065F},
+        CreatureAtlasTile::JackBone,
         kMaterialBone,
-        0.78F,
+        0.91F,
         0.0F,
         context);
 
+    // Je casse la vieille grille symetrique du torse en deux demi-cages
+    // decalees. Les cotes dessinent maintenant un volume creux et malade.
     for (int rib = 0; rib < 5; ++rib) {
         const auto index = static_cast<float>(rib);
-        const auto y = 1.92F + index * 0.145F + breath;
-        const auto span = 0.22F + index * 0.018F;
-        append_segment(
+        const auto y = 1.93F + index * 0.145F + breath;
+        const auto span = 0.235F + index * 0.020F;
+        for (const auto side : {-1.0F, 1.0F}) {
+            const auto side_bias = side < 0.0F ? -0.012F : 0.018F;
+            append_segment(
+                parts,
+                upper_root,
+                glm::vec3 {
+                    0.115F + side_bias,
+                    y + side * 0.006F,
+                    side * 0.025F,
+                },
+                glm::vec3 {
+                    0.015F - index * 0.010F,
+                    y + 0.030F + side * 0.010F,
+                    side * span,
+                },
+                0.028F,
+                0.026F,
+                0.010F,
+                CreatureAtlasTile::JackBone,
+                kMaterialBone,
+                0.90F,
+                0.0F,
+                context);
+        }
+    }
+    append_segment(
+        parts,
+        upper_root,
+        glm::vec3 {0.115F, 1.82F + breath, -0.018F},
+        glm::vec3 {0.135F, 2.61F + breath, -0.050F},
+        0.034F,
+        0.030F,
+        0.012F,
+        CreatureAtlasTile::JackBone,
+        kMaterialBone,
+        0.88F,
+        0.0F,
+        context);
+
+    // Je donne un poids different aux deux revers : cette dissymetrie reste
+    // visible meme lorsque Jack n'est plus qu'une silhouette au fond du hall.
+    for (const auto side : {-1.0F, 1.0F}) {
+        const auto heavy_side = side > 0.0F ? 1.0F : 0.0F;
+        append_box(
             parts,
             upper_root,
-            glm::vec3 {0.075F - index * 0.006F, y, -span},
-            glm::vec3 {0.095F + index * 0.012F, y + 0.015F, span},
-            0.025F,
-            0.025F,
-            0.008F,
-            CreatureAtlasTile::ZombieBone,
-            kMaterialBone,
-            0.82F,
+            glm::vec3 {
+                0.168F + heavy_side * 0.018F,
+                2.38F + breath - heavy_side * 0.055F,
+                side * (0.155F + heavy_side * 0.018F),
+            },
+            glm::vec3 {
+                0.030F,
+                0.36F + heavy_side * 0.085F,
+                0.105F + heavy_side * 0.025F,
+            },
+            glm::vec3 {
+                side * 0.025F,
+                side * (0.11F + heavy_side * 0.045F),
+                -0.095F + side * 0.035F,
+            },
+            CreatureAtlasTile::JackCloth,
+            kMaterialFabric,
+            0.78F,
+            0.0F,
+            context);
+    }
+    append_box(
+        parts,
+        upper_root,
+        glm::vec3 {-0.130F, 2.34F + breath, 0.025F},
+        glm::vec3 {0.035F, 0.52F, 0.35F},
+        glm::vec3 {0.0F, 0.0F, 0.035F},
+        CreatureAtlasTile::JackCloth,
+        kMaterialFabric,
+        0.82F,
+        0.0F,
+        context);
+    for (const auto side : {-1.0F, 1.0F}) {
+        const auto shoulder_drop = side > 0.0F ? 0.075F : 0.0F;
+        append_box(
+            parts,
+            upper_root,
+            glm::vec3 {
+                -0.010F,
+                2.72F + breath - shoulder_drop,
+                side * (0.34F + shoulder_drop * 0.20F),
+            },
+            glm::vec3 {
+                0.155F,
+                0.17F + shoulder_drop * 0.25F,
+                0.145F,
+            },
+            glm::vec3 {
+                side * 0.08F,
+                side * 0.035F,
+                side * -0.16F,
+            },
+            CreatureAtlasTile::JackCloth,
+            kMaterialFabric,
+            0.79F,
             0.0F,
             context);
     }
 
-    // Je laisse une chemise claire apparaitre entre les deux revers : la
-    // lecture du costume reste nette même lorsque le manteau est très sombre.
     append_box(
         parts,
         upper_root,
-        glm::vec3 {0.145F, 2.37F + breath, 0.0F},
-        glm::vec3 {0.035F, 0.40F, 0.17F},
-        glm::vec3 {0.0F, 0.0F, -0.035F},
-        CreatureAtlasTile::CrewIvoryCloth,
-        kMaterialFabric,
-        0.28F,
-        0.0F,
-        context);
-    append_pair(
-        parts,
-        upper_root,
-        glm::vec3 {0.176F, 2.39F + breath, 0.0F},
-        0.145F,
-        glm::vec3 {0.030F, 0.41F, 0.11F},
-        glm::vec3 {0.0F, 0.0F, -0.08F},
-        glm::vec3 {0.0F, 0.14F, 0.045F},
-        CreatureAtlasTile::CrewBurgundyCloth,
-        kMaterialFabric,
-        0.43F,
-        0.0F,
-        context);
-    append_box(
-        parts,
-        upper_root,
-        glm::vec3 {-0.105F, 2.34F + breath, 0.0F},
-        glm::vec3 {0.042F, 0.48F, 0.31F},
-        glm::vec3 {0.0F, 0.0F, 0.015F},
-        CreatureAtlasTile::CrewHairBlack,
-        kMaterialFabric,
-        0.45F,
-        0.0F,
-        context);
-    append_pair(
-        parts,
-        upper_root,
-        glm::vec3 {0.0F, 2.49F + breath, 0.0F},
-        0.31F,
-        glm::vec3 {0.14F, 0.37F, 0.050F},
-        glm::vec3 {0.0F, 0.0F, -0.045F},
-        glm::vec3 {0.05F, 0.0F, 0.065F},
-        CreatureAtlasTile::CrewHairBlack,
-        kMaterialFabric,
-        0.46F,
-        0.0F,
-        context);
-
-    append_box(
-        parts,
-        upper_root,
-        glm::vec3 {0.015F, 1.61F, 0.0F},
-        glm::vec3 {0.205F, 0.065F, 0.31F},
-        glm::vec3 {0.0F, 0.0F, 0.02F},
-        CreatureAtlasTile::CrewLeather,
+        glm::vec3 {0.010F, 1.61F, 0.020F},
+        glm::vec3 {0.215F, 0.065F, 0.33F},
+        glm::vec3 {0.0F, 0.0F, 0.035F},
+        CreatureAtlasTile::JackCloth,
         kMaterialLeather,
-        0.31F,
+        0.68F,
         0.0F,
         context);
     append_box(
         parts,
         upper_root,
-        glm::vec3 {0.225F, 1.62F, 0.0F},
-        glm::vec3 {0.030F, 0.090F, 0.090F},
-        glm::vec3 {0.0F, 0.0F, 0.02F},
-        CreatureAtlasTile::CrewGold,
+        glm::vec3 {0.232F, 1.62F, -0.035F},
+        glm::vec3 {0.024F, 0.070F, 0.072F},
+        glm::vec3 {0.0F, 0.0F, 0.04F},
+        CreatureAtlasTile::JackBone,
         kMaterialMetal,
-        0.08F,
-        0.03F,
+        0.44F,
+        0.0F,
         context);
     append_box(
         parts,
         upper_root,
-        glm::vec3 {0.07F, 1.73F, 0.0F},
-        glm::vec3 {0.055F, 0.095F, 0.34F},
-        glm::vec3 {0.0F, 0.0F, -0.08F},
-        CreatureAtlasTile::CrewBurgundyCloth,
+        glm::vec3 {0.060F, 1.74F, -0.015F},
+        glm::vec3 {0.050F, 0.095F, 0.35F},
+        glm::vec3 {0.0F, 0.0F, -0.11F},
+        CreatureAtlasTile::JackCloth,
         kMaterialFabric,
-        0.32F,
+        0.72F,
         0.0F,
         context);
 
-    constexpr std::array<float, 5> kTailOffsets {{
-        -0.26F,
-        -0.13F,
-        0.0F,
-        0.13F,
-        0.26F,
+    constexpr std::array<float, 3> kTailOffsets {{
+        -0.235F,
+        0.015F,
+        0.265F,
+    }};
+    constexpr std::array<float, 3> kTailLengths {{
+        0.54F,
+        0.69F,
+        0.48F,
     }};
     for (std::size_t index = 0; index < kTailOffsets.size(); ++index) {
         const auto centered_index =
             static_cast<float>(index) -
             static_cast<float>(kTailOffsets.size() - 1U) * 0.5F;
-        const auto length =
-            0.39F + static_cast<float>((index * 3U) % 4U) * 0.055F;
+        const auto length = kTailLengths[index];
         append_box(
             parts,
             upper_root,
             glm::vec3 {
-                -0.075F +
+                -0.105F +
                     coat_sway *
-                        (0.12F +
-                         static_cast<float>(index) * 0.015F),
-                1.17F - length * 0.12F,
+                        (0.14F +
+                         static_cast<float>(index) * 0.022F),
+                1.14F - length * 0.10F,
                 kTailOffsets[index],
             },
-            glm::vec3 {0.045F, length, 0.095F},
             glm::vec3 {
-                centered_index * 0.025F,
-                0.0F,
-                0.025F + coat_sway * (0.16F + chase * 0.08F),
+                0.026F,
+                length,
+                index == 1U ? 0.145F : 0.135F,
             },
-            CreatureAtlasTile::CrewHairBlack,
+            glm::vec3 {
+                centered_index * 0.055F,
+                centered_index * 0.035F,
+                0.04F +
+                    centered_index * 0.030F +
+                    coat_sway * (0.18F + chase * 0.10F),
+            },
+            CreatureAtlasTile::JackCloth,
             kMaterialFabric,
-            0.52F,
+            0.86F,
             0.0F,
             context);
     }
@@ -584,7 +609,10 @@ void append_head_and_hat(
         glm::vec3 {0.0F, 1.0F, 0.0F});
     head_root = glm::rotate(
         head_root,
-        -0.075F - jumpscare * 0.10F,
+        -0.135F -
+            jumpscare * 0.12F +
+            wave(animation_time, 0.43F, 1.1F) *
+                (0.018F + chase * 0.010F),
         glm::vec3 {0.0F, 0.0F, 1.0F});
     head_root = glm::translate(head_root, -neck_pivot);
     head_root = glm::translate(
@@ -603,58 +631,74 @@ void append_head_and_hat(
         0.070F,
         0.065F,
         0.020F,
-        CreatureAtlasTile::ZombieBone,
+        CreatureAtlasTile::JackBone,
         kMaterialBone,
-        0.80F,
+        0.92F,
         0.0F,
         context);
     append_box(
         parts,
         head_root,
-        glm::vec3 {0.08F, 3.29F + breath, 0.0F},
-        glm::vec3 {0.245F, 0.275F, 0.245F},
-        glm::vec3 {0.0F, 0.0F, -0.045F},
-        CreatureAtlasTile::ZombieFlesh,
+        glm::vec3 {0.075F, 3.275F + breath, -0.018F},
+        glm::vec3 {0.285F, 0.305F, 0.275F},
+        glm::vec3 {0.0F, 0.0F, -0.075F},
+        CreatureAtlasTile::JackTar,
         kMaterialSkin,
-        0.77F,
+        0.94F,
         0.0F,
         context);
-    append_pair(
-        parts,
-        head_root,
-        glm::vec3 {0.18F, 3.30F + breath, 0.0F},
-        0.165F,
-        glm::vec3 {0.115F, 0.145F, 0.075F},
-        glm::vec3 {0.0F, 0.0F, -0.035F},
-        glm::vec3 {0.06F, 0.0F, 0.05F},
-        CreatureAtlasTile::ZombieBone,
-        kMaterialBone,
-        0.68F,
-        0.0F,
-        context);
+    for (const auto side : {-1.0F, 1.0F}) {
+        const auto sunken_side = side > 0.0F ? 1.0F : 0.0F;
+        append_box(
+            parts,
+            head_root,
+            glm::vec3 {
+                0.185F,
+                3.285F + breath - sunken_side * 0.035F,
+                side * (0.175F + sunken_side * 0.010F),
+            },
+            glm::vec3 {
+                0.125F,
+                0.150F - sunken_side * 0.018F,
+                0.078F,
+            },
+            glm::vec3 {
+                side * 0.065F,
+                side * 0.025F,
+                -0.055F + side * 0.045F,
+            },
+            CreatureAtlasTile::JackBone,
+            kMaterialBone,
+            0.88F,
+            0.0F,
+            context);
+    }
 
-    const auto jaw_open = jumpscare * 0.095F +
-                          chase * 0.018F *
-                              (0.5F + 0.5F * wave(animation_time, 8.0F));
+    const auto jaw_open =
+        0.032F +
+        jumpscare * 0.145F +
+        chase *
+            (0.055F +
+             0.022F * (0.5F + 0.5F * wave(animation_time, 7.3F)));
     append_box(
         parts,
         head_root,
-        glm::vec3 {0.255F, 3.145F - jaw_open * 0.35F + breath, 0.0F},
-        glm::vec3 {0.145F, 0.115F + jaw_open * 0.35F, 0.205F},
-        glm::vec3 {0.0F, 0.0F, -0.025F - jaw_open * 0.30F},
-        CreatureAtlasTile::ZombieFlesh,
+        glm::vec3 {0.270F, 3.125F - jaw_open * 0.42F + breath, 0.018F},
+        glm::vec3 {0.165F, 0.125F + jaw_open * 0.38F, 0.225F},
+        glm::vec3 {0.0F, 0.0F, -0.055F - jaw_open * 0.38F},
+        CreatureAtlasTile::JackTar,
         kMaterialSkin,
-        0.78F,
+        0.96F,
         0.0F,
         context);
     append_box(
         parts,
         head_root,
-        glm::vec3 {0.392F, 3.205F - jaw_open * 0.32F + breath, 0.0F},
+        glm::vec3 {0.425F, 3.190F - jaw_open * 0.40F + breath, 0.018F},
         glm::vec3 {
             0.025F,
             0.090F + jaw_open * 0.48F,
-            0.155F,
+            0.175F,
         },
         glm::vec3 {0.0F, 0.0F, -0.015F},
         CreatureAtlasTile::ZombieMouth,
@@ -665,62 +709,77 @@ void append_head_and_hat(
     append_box(
         parts,
         head_root,
-        glm::vec3 {0.355F, 3.335F + breath, 0.0F},
-        glm::vec3 {0.070F, 0.115F, 0.055F},
+        glm::vec3 {0.370F, 3.335F + breath, -0.015F},
+        glm::vec3 {0.075F, 0.125F, 0.060F},
         glm::vec3 {0.0F, 0.0F, -0.16F},
-        CreatureAtlasTile::ZombieFlesh,
+        CreatureAtlasTile::JackTar,
         kMaterialSkin,
-        0.63F,
+        0.90F,
         0.0F,
         context);
 
     for (const auto side : {-1.0F, 1.0F}) {
+        const auto sunken_side = side > 0.0F ? 1.0F : 0.0F;
         const auto eye_twitch =
             wave(animation_time, 10.5F, side * 1.7F) *
-            (0.006F + chase * 0.010F);
+            (0.009F + chase * 0.014F);
         append_box(
             parts,
             head_root,
             glm::vec3 {
-                0.350F,
-                3.425F + breath + eye_twitch,
-                side * 0.125F,
+                0.365F,
+                3.420F + breath + eye_twitch - sunken_side * 0.030F,
+                side * (0.132F + sunken_side * 0.008F),
             },
-            glm::vec3 {0.050F, 0.063F, 0.063F},
-            glm::vec3 {0.0F, 0.0F, -0.04F},
-            CreatureAtlasTile::ZombieEye,
-            kMaterialEye,
-            0.93F,
-            0.20F + jumpscare * 0.20F,
+            glm::vec3 {
+                0.064F,
+                0.082F + sunken_side * 0.006F,
+                0.082F,
+            },
+            glm::vec3 {0.0F, side * 0.035F, -0.06F + side * 0.025F},
+            CreatureAtlasTile::JackCloth,
+            kMaterialSkin,
+            1.0F,
+            0.0F,
             context);
         append_box(
             parts,
             head_root,
             glm::vec3 {
-                0.401F,
-                3.424F + breath + eye_twitch,
-                side * 0.125F,
+                0.427F,
+                3.420F + breath + eye_twitch - sunken_side * 0.030F,
+                side * (0.132F + sunken_side * 0.008F),
             },
-            glm::vec3 {0.014F, 0.022F, 0.022F},
-            glm::vec3 {0.0F},
-            CreatureAtlasTile::ZombieScar,
+            glm::vec3 {
+                0.022F,
+                0.043F + sunken_side * 0.007F,
+                0.043F + sunken_side * 0.007F,
+            },
+            glm::vec3 {0.0F, side * 0.020F, -0.04F},
+            CreatureAtlasTile::JackEye,
             kMaterialEye,
             1.0F,
-            0.03F,
+            0.76F +
+                (side < 0.0F ? 0.10F : 0.0F) +
+                jumpscare * 0.14F,
             context);
         append_box(
             parts,
             head_root,
             glm::vec3 {
-                0.330F,
-                3.505F + breath,
-                side * 0.125F,
+                0.335F,
+                3.520F + breath - sunken_side * 0.020F,
+                side * (0.132F + sunken_side * 0.008F),
             },
-            glm::vec3 {0.050F, 0.035F, 0.105F},
-            glm::vec3 {0.0F, side * 0.05F, side * -0.12F},
-            CreatureAtlasTile::ZombieBone,
+            glm::vec3 {
+                0.055F,
+                0.038F,
+                0.115F + sunken_side * 0.012F,
+            },
+            glm::vec3 {0.0F, side * 0.065F, side * -0.18F},
+            CreatureAtlasTile::JackBone,
             kMaterialBone,
-            0.83F,
+            0.94F,
             0.0F,
             context);
     }
@@ -795,9 +854,9 @@ void append_head_and_hat(
             0.025F,
             0.018F,
             0.006F,
-            CreatureAtlasTile::CrewHairBlack,
+            CreatureAtlasTile::JackCloth,
             kMaterialFabric,
-            0.72F,
+            0.88F,
             0.0F,
             context);
     }
@@ -807,35 +866,48 @@ void append_head_and_hat(
     append_box(
         parts,
         head_root,
-        glm::vec3 {-0.015F, 3.680F + breath, 0.0F},
-        glm::vec3 {0.205F, 0.125F, 0.235F},
-        glm::vec3 {0.0F, 0.0F, -0.025F},
-        CreatureAtlasTile::CrewLeather,
+        glm::vec3 {-0.030F, 3.675F + breath, 0.025F},
+        glm::vec3 {0.225F, 0.125F, 0.275F},
+        glm::vec3 {0.0F, 0.0F, -0.055F},
+        CreatureAtlasTile::JackCloth,
         kMaterialLeather,
-        0.38F,
+        0.82F,
         0.0F,
         context);
     append_box(
         parts,
         head_root,
-        glm::vec3 {0.175F, 3.620F + breath, 0.0F},
-        glm::vec3 {0.235F, 0.045F, 0.315F},
-        glm::vec3 {0.0F, 0.0F, -0.17F},
-        CreatureAtlasTile::CrewHairBlack,
+        glm::vec3 {0.155F, 3.615F + breath, -0.025F},
+        glm::vec3 {0.255F, 0.040F, 0.405F},
+        glm::vec3 {0.0F, -0.055F, -0.21F},
+        CreatureAtlasTile::JackCloth,
         kMaterialFabric,
-        0.47F,
+        0.86F,
         0.0F,
         context);
     for (const auto side : {-1.0F, 1.0F}) {
+        const auto torn_side = side > 0.0F ? 1.0F : 0.0F;
         append_box(
             parts,
             head_root,
-            glm::vec3 {-0.055F, 3.635F + breath, side * 0.205F},
-            glm::vec3 {0.255F, 0.042F, 0.125F},
-            glm::vec3 {side * 0.30F, side * 0.11F, 0.13F},
-            CreatureAtlasTile::CrewHairBlack,
+            glm::vec3 {
+                -0.075F + torn_side * 0.025F,
+                3.625F + breath - torn_side * 0.030F,
+                side * (0.265F + torn_side * 0.018F),
+            },
+            glm::vec3 {
+                0.285F - torn_side * 0.040F,
+                0.038F,
+                0.145F + torn_side * 0.020F,
+            },
+            glm::vec3 {
+                side * (0.34F + torn_side * 0.08F),
+                side * (0.14F - torn_side * 0.05F),
+                0.15F + side * 0.035F,
+            },
+            CreatureAtlasTile::JackCloth,
             kMaterialFabric,
-            0.48F,
+            0.88F,
             0.0F,
             context);
     }
@@ -849,156 +921,181 @@ void append_arms_and_hands(
     float chase,
     float jumpscare,
     float breath,
+    float animation_time,
     const JackBuildContext& context) {
     for (const auto side : {-1.0F, 1.0F}) {
-        const auto opposing_stride = stride * -side;
+        const auto heavy_side = side > 0.0F ? 1.0F : 0.0F;
+        const auto phase = side < 0.0F ? 0.35F : 2.10F;
+        const auto slow_curl =
+            wave(
+                animation_time,
+                0.82F + chase * 1.65F,
+                phase);
+        const auto living_sway =
+            wave(
+                animation_time,
+                1.37F + motion * 1.60F,
+                phase * 1.7F);
         const glm::vec3 shoulder {
-            0.015F,
-            2.75F + breath,
-            side * 0.34F,
-        };
-        const glm::vec3 idle_elbow {
-            -0.10F + opposing_stride * motion * 0.09F,
-            1.78F + breath * 0.35F,
-            side * 0.43F,
-        };
-        const glm::vec3 idle_wrist {
-            0.08F - opposing_stride * motion * 0.12F,
-            0.66F + std::abs(stride) * motion * 0.035F,
-            side * 0.47F,
-        };
-        const glm::vec3 chase_elbow {
-            0.46F + opposing_stride * 0.13F,
-            2.05F,
-            side * 0.42F,
-        };
-        const glm::vec3 chase_wrist {
-            0.88F - opposing_stride * 0.15F,
-            1.35F,
-            side * 0.38F,
-        };
-        const glm::vec3 scare_elbow {
-            0.70F,
-            2.42F,
-            side * 0.38F,
-        };
-        const glm::vec3 scare_wrist {
-            1.30F,
-            2.23F,
-            side * 0.27F,
+            -0.015F,
+            2.74F + breath - heavy_side * 0.075F,
+            side * (0.37F + heavy_side * 0.018F),
         };
 
-        const auto elbow = glm::mix(
-            glm::mix(idle_elbow, chase_elbow, chase),
-            scare_elbow,
-            jumpscare);
-        const auto wrist = glm::mix(
-            glm::mix(idle_wrist, chase_wrist, chase),
-            scare_wrist,
-            jumpscare);
+        // Je construis chaque bras comme une chaine continue. Les deux courbes
+        // n'ont ni la meme longueur ni la meme phase, ce qui retire toute
+        // lecture de mannequin articule lorsque Jack reste immobile.
+        std::array<glm::vec3, 6> idle_points {{
+            shoulder,
+            {-0.17F, 2.30F, side * 0.48F},
+            {0.06F, 1.86F - heavy_side * 0.035F,
+             side * (0.57F + heavy_side * 0.025F)},
+            {-0.035F, 1.40F - heavy_side * 0.060F,
+             side * (0.51F + heavy_side * 0.055F)},
+            {0.19F, 0.96F - heavy_side * 0.070F,
+             side * (0.59F + heavy_side * 0.040F)},
+            {0.10F + heavy_side * 0.075F,
+             0.62F + heavy_side * 0.085F,
+             side * (0.50F + heavy_side * 0.105F)},
+        }};
+        std::array<glm::vec3, 6> chase_points {{
+            shoulder,
+            {0.42F - stride * side * 0.08F, 2.43F, side * 0.45F},
+            {0.82F + stride * side * 0.06F, 2.05F, side * 0.39F},
+            {1.17F - stride * side * 0.08F, 1.68F, side * 0.32F},
+            {1.49F + stride * side * 0.07F, 1.39F, side * 0.25F},
+            {1.76F - heavy_side * 0.06F, 1.22F, side * 0.18F},
+        }};
+        const std::array<glm::vec3, 6> scare_points {{
+            shoulder,
+            {0.55F, 2.59F, side * 0.40F},
+            {1.04F, 2.44F, side * 0.31F},
+            {1.47F, 2.31F, side * 0.22F},
+            {1.84F, 2.22F, side * 0.14F},
+            {2.14F - heavy_side * 0.05F, 2.15F, side * 0.07F},
+        }};
+
+        std::array<glm::vec3, 6> points {};
+        points.front() = shoulder;
+        for (std::size_t index = 1U; index < points.size(); ++index) {
+            const auto along =
+                static_cast<float>(index) /
+                static_cast<float>(points.size() - 1U);
+            points[index] = glm::mix(
+                glm::mix(idle_points[index], chase_points[index], chase),
+                scare_points[index],
+                jumpscare);
+            const auto curl =
+                wave(
+                    animation_time,
+                    1.75F + chase * 2.40F,
+                    phase + static_cast<float>(index) * 0.72F);
+            points[index].x +=
+                (slow_curl * 0.055F + curl * 0.040F) *
+                along * (1.0F - jumpscare * 0.65F);
+            points[index].y +=
+                living_sway * 0.020F * along *
+                (0.55F + motion * 0.45F);
+            points[index].z +=
+                side * curl * 0.045F * along *
+                (1.0F + chase * 0.45F);
+        }
 
         append_box(
             parts,
             upper_root,
             shoulder,
-            glm::vec3 {0.115F, 0.125F, 0.095F},
-            glm::vec3 {0.0F, 0.0F, side * -0.13F},
-            CreatureAtlasTile::CrewHairBlack,
+            glm::vec3 {0.145F, 0.155F, 0.125F},
+            glm::vec3 {side * 0.05F, 0.0F, side * -0.18F},
+            CreatureAtlasTile::JackCloth,
             kMaterialFabric,
-            0.45F,
+            0.82F,
             0.0F,
             context);
-        append_segment(
-            parts,
-            upper_root,
-            shoulder,
-            elbow,
-            0.062F,
-            0.067F,
-            0.035F,
-            CreatureAtlasTile::CrewHairBlack,
-            kMaterialFabric,
-            0.51F,
-            0.0F,
-            context);
+        constexpr std::array<float, 5> kTentacleWidths {{
+            0.125F,
+            0.108F,
+            0.091F,
+            0.074F,
+            0.059F,
+        }};
+        for (std::size_t index = 0U;
+             index + 1U < points.size();
+             ++index) {
+            append_segment(
+                parts,
+                upper_root,
+                points[index],
+                points[index + 1U],
+                kTentacleWidths[index],
+                kTentacleWidths[index] * 0.86F,
+                0.040F,
+                CreatureAtlasTile::JackTar,
+                kMaterialSkin,
+                0.82F + static_cast<float>(index) * 0.030F,
+                0.0F,
+                context);
+        }
+
+        const auto palm = points.back();
         append_box(
             parts,
             upper_root,
-            elbow,
-            glm::vec3 {0.075F, 0.075F, 0.075F},
-            glm::vec3 {0.0F},
-            CreatureAtlasTile::ZombieBone,
-            kMaterialBone,
-            0.61F,
-            0.0F,
-            context);
-        append_segment(
-            parts,
-            upper_root,
-            elbow,
-            wrist,
-            0.048F,
-            0.052F,
-            0.030F,
-            CreatureAtlasTile::ZombieBone,
-            kMaterialBone,
-            0.70F,
-            0.0F,
-            context);
-        append_box(
-            parts,
-            upper_root,
-            wrist,
-            glm::vec3 {0.080F, 0.095F, 0.100F},
-            glm::vec3 {0.0F, 0.0F, -0.08F},
-            CreatureAtlasTile::ZombieClaw,
-            kMaterialClaw,
-            0.58F,
+            palm,
+            glm::vec3 {0.105F, 0.115F, 0.125F},
+            glm::vec3 {side * 0.08F, side * 0.035F, -0.12F},
+            CreatureAtlasTile::JackTar,
+            kMaterialSkin,
+            0.91F,
             0.0F,
             context);
 
+        const auto attack_reach =
+            std::max(chase * 0.88F, jumpscare);
         const auto reach =
             glm::normalize(
                 glm::mix(
-                    glm::vec3 {0.11F, -0.99F, 0.0F},
-                    glm::vec3 {0.98F, -0.20F, 0.0F},
-                    std::max(chase * 0.70F, jumpscare)));
-        for (int finger = 0; finger < 5; ++finger) {
-            const auto finger_index = static_cast<float>(finger);
-            const auto spread = (finger_index - 2.0F) * 0.044F;
+                    glm::vec3 {0.10F, -0.99F, side * 0.035F},
+                    glm::vec3 {0.98F, -0.16F, side * -0.08F},
+                    attack_reach));
+        for (int claw = 0; claw < 3; ++claw) {
+            const auto claw_index = static_cast<float>(claw);
+            const auto spread = (claw_index - 1.0F) * 0.105F;
             const auto length =
-                0.31F + static_cast<float>((finger * 3) % 4) * 0.025F;
-            const auto base = wrist +
-                              glm::vec3 {
-                                  0.025F,
-                                  -0.070F,
-                                  spread,
-                              };
+                0.36F +
+                static_cast<float>((claw * 2 + (side > 0.0F ? 1 : 0)) % 3) *
+                    0.045F;
+            const auto base =
+                palm + glm::vec3 {0.025F, -0.045F, spread};
             const auto knuckle =
-                base + reach * (length * 0.48F) +
+                base + reach * (length * 0.58F) +
                 glm::vec3 {
                     0.0F,
                     0.0F,
-                    side * spread * 0.08F,
+                    side * spread * 0.12F,
                 };
+            const auto hook_direction =
+                glm::normalize(
+                    reach +
+                    glm::vec3 {
+                        0.10F,
+                        -0.30F + attack_reach * 0.20F,
+                        side * 0.10F + spread * 0.22F,
+                    });
             const auto tip =
-                base + reach * length +
-                glm::vec3 {
-                    0.015F * finger_index,
-                    -0.012F * static_cast<float>(finger % 2),
-                    side * spread * 0.16F,
-                };
+                knuckle + hook_direction * (length * 0.48F) +
+                glm::vec3 {0.0F, -0.025F, spread * 0.08F};
             append_segment(
                 parts,
                 upper_root,
                 base,
                 knuckle,
-                0.021F,
+                0.034F,
+                0.029F,
                 0.018F,
-                0.010F,
                 CreatureAtlasTile::ZombieClaw,
                 kMaterialClaw,
-                0.49F,
+                0.72F,
                 0.0F,
                 context);
             append_segment(
@@ -1006,35 +1103,14 @@ void append_arms_and_hands(
                 upper_root,
                 knuckle,
                 tip,
-                0.017F,
+                0.026F,
+                0.021F,
                 0.014F,
-                0.008F,
                 CreatureAtlasTile::ZombieClaw,
                 kMaterialClaw,
-                0.53F,
+                0.80F,
                 0.0F,
                 context);
-
-            const auto fork_direction =
-                glm::normalize(
-                    reach +
-                    glm::vec3 {0.06F, -0.04F, side * 0.10F});
-            for (const auto fork_side : {-1.0F, 1.0F}) {
-                append_segment(
-                    parts,
-                    upper_root,
-                    tip,
-                    tip + fork_direction * 0.105F +
-                        glm::vec3 {0.0F, 0.0F, fork_side * 0.026F},
-                    0.011F,
-                    0.009F,
-                    0.004F,
-                    CreatureAtlasTile::ZombieClaw,
-                    kMaterialClaw,
-                    0.56F,
-                    0.0F,
-                    context);
-            }
         }
     }
 }
@@ -1077,7 +1153,7 @@ auto build_backrooms_jack_visual_parts(
 
     JackBuildContext context {};
     context.tension = glm::clamp(
-        0.84F + chase * 0.10F + jumpscare * 0.06F,
+        0.92F + chase * 0.06F + jumpscare * 0.02F,
         0.0F,
         1.0F);
     context.sky_light = saturate(source.sky_light);
@@ -1090,6 +1166,11 @@ auto build_backrooms_jack_visual_parts(
         root,
         periodic_angle(source.yaw_radians),
         glm::vec3 {0.0F, 1.0F, 0.0F});
+    // Je grandis Jack dans son repere local : sa translation gameplay reste
+    // exacte, ses pieds restent poses et sa silhouette atteint environ 4,5 m.
+    root = glm::scale(
+        root,
+        glm::vec3 {1.08F, kJackVerticalScale, 1.10F});
 
     std::vector<CreaturePartInstance> parts {};
     parts.reserve(kBackroomsJackVisualPartBudget);
@@ -1151,6 +1232,7 @@ auto build_backrooms_jack_visual_parts(
         chase,
         jumpscare,
         breath,
+        animation_time,
         context);
 
     return parts;

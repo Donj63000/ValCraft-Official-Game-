@@ -77,7 +77,17 @@ enum class VisualMaterialId : std::uint16_t {
     CoralFan = 51,
     ReefFish = 52,
     MarineShell = 53,
-    Count = 54,
+    BackroomsWallpaperYellow = 54,
+    BackroomsWallpaperGreen = 55,
+    BackroomsWallpaperBlue = 56,
+    BackroomsWallpaperRose = 57,
+    BackroomsWallpaperOxide = 58,
+    BackroomsDampCarpet = 59,
+    BackroomsAcousticCeiling = 60,
+    BackroomsPaintedConcrete = 61,
+    BackroomsFixtureMetal = 62,
+    BackroomsFluorescentDiffuser = 63,
+    Count = 64,
 };
 
 inline constexpr std::uint16_t kInvalidVisualMaterialLayer = 0xFFFFU;
@@ -159,6 +169,19 @@ inline constexpr std::array<VisualMaterialDefinition, kVisualMaterialCount>
         {VisualMaterialId::CoralFan, VisualSurfaceClass::Cutout, 50U, "coral_fan", 1.00F, 0.44F, 0.20F, true, true, false},
         {VisualMaterialId::ReefFish, VisualSurfaceClass::Cutout, 51U, "reef_fish", 1.00F, 0.38F, 0.18F, true, true, false},
         {VisualMaterialId::MarineShell, VisualSurfaceClass::Proxy, 52U, "marine_shell", 0.94F, 0.34F, 0.18F, false, false, false},
+        // Je reserve ces couches append-only aux surfaces modernes des
+        // Backrooms. Les BlockId historiques restent inchanges tandis que le
+        // shader recoit enfin des cartes physiques propres a chaque matiere.
+        {VisualMaterialId::BackroomsWallpaperYellow, VisualSurfaceClass::Architectural, 53U, "backrooms_wallpaper_yellow", 0.82F, 0.50F, 0.22F, false, false, false},
+        {VisualMaterialId::BackroomsWallpaperGreen, VisualSurfaceClass::Architectural, 54U, "backrooms_wallpaper_green", 0.82F, 0.50F, 0.22F, false, false, false},
+        {VisualMaterialId::BackroomsWallpaperBlue, VisualSurfaceClass::Architectural, 55U, "backrooms_wallpaper_blue", 0.82F, 0.50F, 0.22F, false, false, false},
+        {VisualMaterialId::BackroomsWallpaperRose, VisualSurfaceClass::Architectural, 56U, "backrooms_wallpaper_rose", 0.82F, 0.50F, 0.22F, false, false, false},
+        {VisualMaterialId::BackroomsWallpaperOxide, VisualSurfaceClass::Architectural, 57U, "backrooms_wallpaper_oxide", 0.82F, 0.54F, 0.24F, false, false, false},
+        {VisualMaterialId::BackroomsDampCarpet, VisualSurfaceClass::Architectural, 58U, "backrooms_damp_carpet", 1.28F, 0.68F, 0.30F, false, false, false},
+        {VisualMaterialId::BackroomsAcousticCeiling, VisualSurfaceClass::Architectural, 59U, "backrooms_acoustic_ceiling", 1.00F, 0.42F, 0.18F, false, false, false},
+        {VisualMaterialId::BackroomsPaintedConcrete, VisualSurfaceClass::Architectural, 60U, "backrooms_painted_concrete", 0.70F, 0.76F, 0.24F, false, false, false},
+        {VisualMaterialId::BackroomsFixtureMetal, VisualSurfaceClass::Architectural, 61U, "backrooms_fixture_metal", 0.92F, 0.56F, 0.12F, false, false, false},
+        {VisualMaterialId::BackroomsFluorescentDiffuser, VisualSurfaceClass::Architectural, 62U, "backrooms_fluorescent_diffuser", 1.00F, 0.18F, 0.06F, false, false, true},
     }};
 
 static_assert(
@@ -260,6 +283,47 @@ static_assert(
     case BlockType::Shovel:
     case BlockType::Musket:
         return VisualMaterialId::ToolWoodSteel;
+    case BlockType::BackroomsWallYellow:
+        return VisualMaterialId::BackroomsWallpaperYellow;
+    case BlockType::BackroomsWallGreen:
+        return VisualMaterialId::BackroomsWallpaperGreen;
+    case BlockType::BackroomsWallBlue:
+        return VisualMaterialId::BackroomsWallpaperBlue;
+    case BlockType::BackroomsWallRose:
+        return VisualMaterialId::BackroomsWallpaperRose;
+    case BlockType::BackroomsWallOxide:
+        return VisualMaterialId::BackroomsWallpaperOxide;
+    case BlockType::BackroomsConcrete:
+    case BlockType::BackroomsConnectorStep:
+    case BlockType::BackroomsRampPositiveX:
+    case BlockType::BackroomsRampNegativeX:
+    case BlockType::BackroomsRampPositiveZ:
+    case BlockType::BackroomsRampNegativeZ:
+        return VisualMaterialId::BackroomsPaintedConcrete;
+    case BlockType::BackroomsCarpet:
+        return VisualMaterialId::BackroomsDampCarpet;
+    case BlockType::BackroomsCeilingTile:
+        return VisualMaterialId::BackroomsAcousticCeiling;
+    case BlockType::BackroomsFluorescentLight:
+    case BlockType::BackroomsEmergencyLight:
+    case BlockType::PoolroomsLight:
+        return VisualMaterialId::BackroomsFluorescentDiffuser;
+    case BlockType::BackroomsFailedLight:
+    case BlockType::PoolroomsFailedLight:
+    case BlockType::BackroomsChair:
+        return VisualMaterialId::BackroomsFixtureMetal;
+    case BlockType::PoolroomsTile:
+    case BlockType::PoolroomsWetTile:
+    case BlockType::PoolroomsDarkTile:
+    case BlockType::PoolroomsPlastic:
+    case BlockType::PoolroomsFloat:
+        return VisualMaterialId::ShipCeramic;
+    case BlockType::PoolroomsMetal:
+        return VisualMaterialId::ShipIron;
+    case BlockType::BackroomsDesk:
+        return VisualMaterialId::ShipDeckOak;
+    case BlockType::BackroomsPlant:
+        return VisualMaterialId::Broadleaf;
     case BlockType::Air:
     default:
         return VisualMaterialId::None;

@@ -1,4 +1,5 @@
 #include "render/ArchitecturalMesher.h"
+#include "render/BackroomsVisibility.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,9 @@
 namespace valcraft {
 
 namespace {
+
+// Je garde toute la classification dans ArchitecturalMesher.h : ce fichier
+// consomme ainsi le meme contrat que ChunkMesher et le remeshing du monde.
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
@@ -73,6 +77,15 @@ struct FaceMaskCell {
 
     auto operator==(const FaceMaskCell&) const -> bool = default;
 };
+
+struct FaceLightSample {
+    std::uint8_t sky_light = 15;
+    std::uint8_t block_light = 0;
+};
+
+inline constexpr int kBackroomsLightPatchSpan = 4;
+inline constexpr float
+    kBackroomsLightPatchMaximumVisibilityError = 0.06F;
 
 [[nodiscard]] auto axis_value(BlockCoord coordinate, int axis) noexcept -> int {
     if (axis == 0) {
@@ -178,6 +191,12 @@ void set_axis_value(BlockCoord& coordinate, int axis, int value) noexcept {
 }
 
 [[nodiscard]] auto face_is_visible(BlockId block, BlockId neighbour) noexcept -> bool {
+    if (neighbour == to_block_id(BlockType::BackroomsDesk) ||
+        neighbour == to_block_id(BlockType::BackroomsChair)) {
+        // Je garde le sol et le mur visibles entre les pieds des meubles. Leur
+        // collision reste cubique, mais leur silhouette moderne est ajouree.
+        return true;
+    }
     if (!is_block_solid(neighbour)) {
         return true;
     }
@@ -208,6 +227,363 @@ void set_axis_value(BlockCoord& coordinate, int axis, int value) noexcept {
     -> BlockCoord {
     set_axis_value(coordinate, axis, axis_value(coordinate, axis) + delta);
     return coordinate;
+}
+
+[[nodiscard]] auto face_light_sample(
+    const SampledVolume& volume,
+    const FaceDefinition& definition,
+    BlockCoord owner) noexcept -> FaceLightSample {
+    const auto& sample = volume.get(owner);
+    if (!is_backrooms_architectural_block(sample.block_id)) {
+        return {sample.sky_light, sample.block_light};
+    }
+
+    const auto neighbour = offset_axis(
+        owner,
+        definition.normal_axis,
+        definition.normal_sign);
+    const auto& exterior = volume.get(neighbour);
+    // Je prends le ciel du volume expose et je garde l'energie propre d'un
+    // luminaire emissif. Le choix reste lie a la face : aucune lumiere ne peut
+    // ainsi traverser un mur depuis la piece situee de l'autre cote.
+    return {
+        exterior.sky_light,
+        std::max(sample.block_light, exterior.block_light),
+    };
+}
+
+[[nodiscard]] auto face_mask_cells_can_merge(
+    const FaceMaskCell& lhs,
+    const FaceMaskCell& rhs) noexcept -> bool {
+    if (lhs.visible != rhs.visible ||
+        lhs.material_block != rhs.material_block) {
+        return false;
+    }
+    if (!lhs.visible) {
+        return true;
+    }
+    if (is_backrooms_architectural_block(
+            lhs.material_block)) {
+        // Je fusionne les paliers d'eclairage voxel puis je les interpole aux
+        // sommets. Les murs restent continus au lieu de redevenir un damier.
+        return true;
+    }
+    return lhs.sky_light == rhs.sky_light &&
+           lhs.block_light == rhs.block_light;
+}
+
+[[nodiscard]] auto surface_vertex_light_sample(
+    const SampledVolume& volume,
+    const FaceDefinition& definition,
+    int slice,
+    int vertex_u,
+    int vertex_v) noexcept -> FaceLightSample {
+    FaceLightSample result {0U, 0U};
+    auto found = false;
+    for (int delta_v = -1; delta_v <= 0; ++delta_v) {
+        for (int delta_u = -1; delta_u <= 0; ++delta_u) {
+            const auto owner = make_cell_coordinate(
+                definition,
+                slice,
+                vertex_u + delta_u,
+                vertex_v + delta_v);
+            if (!volume.contains(owner)) {
+                continue;
+            }
+            const auto& sample = volume.get(owner);
+            if (!is_backrooms_architectural_block(
+                    sample.block_id)) {
+                continue;
+            }
+            const auto neighbour = offset_axis(
+                owner,
+                definition.normal_axis,
+                definition.normal_sign);
+            if (!volume.contains(neighbour) ||
+                !face_is_visible(
+                    sample.block_id,
+                    volume.get(neighbour).block_id)) {
+                continue;
+            }
+            const auto light = face_light_sample(
+                volume,
+                definition,
+                owner);
+            result.sky_light = std::max(
+                result.sky_light,
+                light.sky_light);
+            result.block_light = std::max(
+                result.block_light,
+                light.block_light);
+            found = true;
+        }
+    }
+    if (found) {
+        return result;
+    }
+
+    // Ce repli ne devrait concerner qu'une entree manipulee sans halo. Je
+    // garde alors le coin sombre au lieu de lire hors du volume compacte.
+    return {0U, 0U};
+}
+
+[[nodiscard]] auto backrooms_patch_vertex_lights(
+    const SampledVolume& volume,
+    const FaceDefinition& definition,
+    int slice,
+    int u_start,
+    int v_start,
+    int width,
+    int height) noexcept -> std::array<FaceLightSample, 4> {
+    return {{
+        surface_vertex_light_sample(
+            volume,
+            definition,
+            slice,
+            u_start,
+            v_start),
+        surface_vertex_light_sample(
+            volume,
+            definition,
+            slice,
+            u_start + width,
+            v_start),
+        surface_vertex_light_sample(
+            volume,
+            definition,
+            slice,
+            u_start + width,
+            v_start + height),
+        surface_vertex_light_sample(
+            volume,
+            definition,
+            slice,
+            u_start,
+        v_start + height),
+    }};
+}
+
+[[nodiscard]] auto backrooms_patch_lighting_is_affine(
+    const std::array<FaceLightSample, 4>& lights) noexcept -> bool {
+    const auto sky_diagonal_a =
+        static_cast<int>(lights[0].sky_light) +
+        static_cast<int>(lights[2].sky_light);
+    const auto sky_diagonal_b =
+        static_cast<int>(lights[1].sky_light) +
+        static_cast<int>(lights[3].sky_light);
+    const auto block_diagonal_a =
+        static_cast<int>(lights[0].block_light) +
+        static_cast<int>(lights[2].block_light);
+    const auto block_diagonal_b =
+        static_cast<int>(lights[1].block_light) +
+        static_cast<int>(lights[3].block_light);
+
+    // Je ne conserve un grand quad que si ses deux triangles interpolent le
+    // même plan sur chacun des canaux. La courbe d'obscurité ne peut alors
+    // plus amplifier une cassure artificielle le long de leur diagonale.
+    return sky_diagonal_a == sky_diagonal_b &&
+           block_diagonal_a == block_diagonal_b;
+}
+
+[[nodiscard]] auto face_light_score(
+    const FaceLightSample& light) noexcept -> int {
+    return static_cast<int>(light.block_light) * 4 +
+           static_cast<int>(light.sky_light);
+}
+
+[[nodiscard]] auto backrooms_patch_flips_diagonal(
+    const std::array<FaceLightSample, 4>& lights) noexcept -> bool {
+    return face_light_score(lights[0]) +
+               face_light_score(lights[2]) >
+           face_light_score(lights[1]) +
+               face_light_score(lights[3]);
+}
+
+[[nodiscard]] auto interpolated_light_channel(
+    const std::array<FaceLightSample, 4>& lights,
+    bool sky_channel,
+    bool flipped_diagonal,
+    float normalized_u,
+    float normalized_v) noexcept -> float {
+    const auto value = [&](std::size_t index) noexcept {
+        return static_cast<float>(
+            sky_channel
+                ? lights[index].sky_light
+                : lights[index].block_light);
+    };
+
+    if (flipped_diagonal) {
+        if (normalized_u + normalized_v <= 1.0F) {
+            return
+                value(0U) * (1.0F - normalized_u - normalized_v) +
+                value(1U) * normalized_u +
+                value(3U) * normalized_v;
+        }
+        return
+            value(1U) * (1.0F - normalized_v) +
+            value(2U) * (normalized_u + normalized_v - 1.0F) +
+            value(3U) * (1.0F - normalized_u);
+    }
+
+    if (normalized_v <= normalized_u) {
+        return
+            value(0U) * (1.0F - normalized_u) +
+            value(1U) * (normalized_u - normalized_v) +
+            value(2U) * normalized_v;
+    }
+    return
+        value(0U) * (1.0F - normalized_v) +
+        value(2U) * normalized_u +
+        value(3U) * (normalized_v - normalized_u);
+}
+
+[[nodiscard]] auto backrooms_perceptual_visibility(
+    float block_light) noexcept -> float {
+    const auto normalized_light = std::clamp(
+        block_light / 15.0F,
+        0.0F,
+        1.0F);
+    const auto normalized_ramp = std::clamp(
+        (normalized_light -
+         kBackroomsDarknessBlockLightBlackThreshold) /
+            (kBackroomsDarknessBlockLightFullVisibilityThreshold -
+             kBackroomsDarknessBlockLightBlackThreshold),
+        0.0F,
+        1.0F);
+
+    // Je mesure l'erreur avec le meme smoothstep que le shader. Je conserve
+    // volontairement ici un plancher nul : le maillage reste assez fin pour
+    // un Blackout, donc tous les profils plus lisibles sont automatiquement
+    // couverts sans devoir reconstruire la geometrie lors d'une transition.
+    return
+        normalized_ramp *
+        normalized_ramp *
+        (3.0F - 2.0F * normalized_ramp);
+}
+
+[[nodiscard]] auto backrooms_patch_block_samples_follow_affine_plane(
+    const SampledVolume& volume,
+    const FaceDefinition& definition,
+    int slice,
+    int u_start,
+    int v_start,
+    int width,
+    int height,
+    const std::array<FaceLightSample, 4>& corners) noexcept -> bool {
+    const auto denominator = width * height;
+    const auto full_visibility_light =
+        15.0F *
+        kBackroomsDarknessBlockLightFullVisibilityThreshold;
+
+    for (int offset_v = 0; offset_v <= height; ++offset_v) {
+        for (int offset_u = 0; offset_u <= width; ++offset_u) {
+            const auto actual = surface_vertex_light_sample(
+                volume,
+                definition,
+                slice,
+                u_start + offset_u,
+                v_start + offset_v);
+            const auto expected_numerator =
+                static_cast<int>(corners[0].block_light) * denominator +
+                (static_cast<int>(corners[1].block_light) -
+                 static_cast<int>(corners[0].block_light)) *
+                    offset_u * height +
+                (static_cast<int>(corners[3].block_light) -
+                 static_cast<int>(corners[0].block_light)) *
+                    offset_v * width;
+            if (static_cast<int>(actual.block_light) * denominator ==
+                expected_numerator) {
+                continue;
+            }
+
+            // Je tolere les paliers bruts uniquement lorsque le shader les a
+            // deja tous transformes en visibilite complete. Sous ce seuil, je
+            // force le raffinement afin qu'un raccord de patch ne puisse plus
+            // dessiner une grande couture dans la penombre.
+            if (static_cast<float>(actual.block_light) >=
+                    full_visibility_light &&
+                static_cast<float>(expected_numerator) >=
+                    full_visibility_light *
+                        static_cast<float>(denominator)) {
+                continue;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] auto backrooms_patch_needs_subdivision(
+    const SampledVolume& volume,
+    const FaceDefinition& definition,
+    int slice,
+    int u_start,
+    int v_start,
+    int width,
+    int height) noexcept -> bool {
+    if (width <= 1 && height <= 1) {
+        return false;
+    }
+
+    const auto vertex_lights = backrooms_patch_vertex_lights(
+        volume,
+        definition,
+        slice,
+        u_start,
+        v_start,
+        width,
+        height);
+    if (!backrooms_patch_lighting_is_affine(
+            vertex_lights)) {
+        return true;
+    }
+    if (!backrooms_patch_block_samples_follow_affine_plane(
+            volume,
+            definition,
+            slice,
+            u_start,
+            v_start,
+            width,
+            height,
+            vertex_lights)) {
+        return true;
+    }
+    const auto flipped_diagonal =
+        backrooms_patch_flips_diagonal(vertex_lights);
+    const auto inverse_width = 1.0F / static_cast<float>(width);
+    const auto inverse_height = 1.0F / static_cast<float>(height);
+
+    for (int offset_v = 0; offset_v < height; ++offset_v) {
+        for (int offset_u = 0; offset_u < width; ++offset_u) {
+            const auto owner = make_cell_coordinate(
+                definition,
+                slice,
+                u_start + offset_u,
+                v_start + offset_v);
+            const auto actual = face_light_sample(
+                volume,
+                definition,
+                owner);
+            const auto normalized_u =
+                (static_cast<float>(offset_u) + 0.5F) * inverse_width;
+            const auto normalized_v =
+                (static_cast<float>(offset_v) + 0.5F) * inverse_height;
+            const auto predicted_block = interpolated_light_channel(
+                vertex_lights,
+                false,
+                flipped_diagonal,
+                normalized_u,
+                normalized_v);
+            if (std::fabs(
+                    backrooms_perceptual_visibility(predicted_block) -
+                    backrooms_perceptual_visibility(
+                        static_cast<float>(actual.block_light))) >
+                kBackroomsLightPatchMaximumVisibilityError) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 [[nodiscard]] auto edge_is_exposed(
@@ -359,6 +735,72 @@ void append_quad(
     int height,
     const FaceMaskCell& mask,
     bool mark_silhouette_bevels) {
+    if (is_backrooms_architectural_block(mask.material_block) &&
+        backrooms_patch_needs_subdivision(
+            volume,
+            definition,
+            slice,
+            u_start,
+            v_start,
+            width,
+            height)) {
+        // Je coupe seulement le rectangle dont l'interpolation perdrait une
+        // source locale ou garderait deux plans lumineux différents. La
+        // profondeur reste bornée par le patch de quatre cellules et chaque
+        // enfant réutilise exactement les mêmes sommets que son voisin.
+        if (width >= height && width > 1) {
+            const auto first_width = width / 2;
+            append_quad(
+                mesh,
+                volume,
+                definition,
+                slice,
+                u_start,
+                v_start,
+                first_width,
+                height,
+                mask,
+                mark_silhouette_bevels);
+            append_quad(
+                mesh,
+                volume,
+                definition,
+                slice,
+                u_start + first_width,
+                v_start,
+                width - first_width,
+                height,
+                mask,
+                mark_silhouette_bevels);
+            return;
+        }
+
+        const auto first_height = height / 2;
+        append_quad(
+            mesh,
+            volume,
+            definition,
+            slice,
+            u_start,
+            v_start,
+            width,
+            first_height,
+            mask,
+            mark_silhouette_bevels);
+        append_quad(
+            mesh,
+            volume,
+            definition,
+            slice,
+            u_start,
+            v_start + first_height,
+            width,
+            height - first_height,
+            mask,
+            mark_silhouette_bevels);
+        return;
+    }
+
     const auto plane_offset = definition.normal_sign > 0 ? 1 : 0;
     const auto p0 = vertex_position(
         definition,
@@ -402,9 +844,31 @@ void append_quad(
     const auto first_index = static_cast<std::uint32_t>(mesh.indices.size());
     const auto u_max = fixed_uv(width);
     const auto v_max = fixed_uv(height);
+    const auto flat_light = FaceLightSample {
+        mask.sky_light,
+        mask.block_light,
+    };
+    auto vertex_lights = std::array<FaceLightSample, 4> {{
+        flat_light,
+        flat_light,
+        flat_light,
+        flat_light,
+    }};
+    if (is_backrooms_architectural_block(
+            mask.material_block)) {
+        vertex_lights = backrooms_patch_vertex_lights(
+            volume,
+            definition,
+            slice,
+            u_start,
+            v_start,
+            width,
+            height);
+    }
     const auto make_vertex = [&](const std::array<float, 3>& position,
                                  std::uint16_t u,
-                                 std::uint16_t v) {
+                                 std::uint16_t v,
+                                 const FaceLightSample& light) {
         HardSurfaceVertex vertex {};
         vertex.x = position[0];
         vertex.y = position[1];
@@ -415,25 +879,43 @@ void append_quad(
         vertex.u_fixed = u;
         vertex.v_fixed = v;
         vertex.material_block = mask.material_block;
-        vertex.sky_light = mask.sky_light;
-        vertex.block_light = mask.block_light;
+        vertex.sky_light = light.sky_light;
+        vertex.block_light = light.block_light;
         vertex.surface_flags = flags;
         return vertex;
     };
-    mesh.vertices.push_back(make_vertex(p0, 0U, 0U));
-    mesh.vertices.push_back(make_vertex(p1, u_max, 0U));
-    mesh.vertices.push_back(make_vertex(p2, u_max, v_max));
-    mesh.vertices.push_back(make_vertex(p3, 0U, v_max));
-    mesh.indices.insert(
-        mesh.indices.end(),
-        {
-            first_vertex,
-            first_vertex + 1U,
-            first_vertex + 2U,
-            first_vertex,
-            first_vertex + 2U,
-            first_vertex + 3U,
-        });
+    mesh.vertices.push_back(make_vertex(p0, 0U, 0U, vertex_lights[0]));
+    mesh.vertices.push_back(make_vertex(p1, u_max, 0U, vertex_lights[1]));
+    mesh.vertices.push_back(make_vertex(p2, u_max, v_max, vertex_lights[2]));
+    mesh.vertices.push_back(make_vertex(p3, 0U, v_max, vertex_lights[3]));
+    const auto flip_backrooms_diagonal =
+        is_backrooms_architectural_block(mask.material_block) &&
+        backrooms_patch_flips_diagonal(vertex_lights);
+    if (flip_backrooms_diagonal) {
+        // Je relie les deux coins les moins lumineux : une variation locale
+        // ne dessine plus une grande diagonale claire au milieu de la nappe.
+        mesh.indices.insert(
+            mesh.indices.end(),
+            {
+                first_vertex,
+                first_vertex + 1U,
+                first_vertex + 3U,
+                first_vertex + 1U,
+                first_vertex + 2U,
+                first_vertex + 3U,
+            });
+    } else {
+        mesh.indices.insert(
+            mesh.indices.end(),
+            {
+                first_vertex,
+                first_vertex + 1U,
+                first_vertex + 2U,
+                first_vertex,
+                first_vertex + 2U,
+                first_vertex + 3U,
+            });
+    }
 
     mesh.quads.push_back({
         first_vertex,
@@ -482,19 +964,25 @@ void build_face_direction(
                     coordinate,
                     definition.normal_axis,
                     definition.normal_sign);
+                const auto& neighbour_sample =
+                    volume.get(neighbour);
                 if (!face_is_visible(
                         sample.block_id,
-                        volume.get(neighbour).block_id)) {
+                        neighbour_sample.block_id)) {
                     continue;
                 }
+                const auto surface_light = face_light_sample(
+                    volume,
+                    definition,
+                    coordinate);
                 const auto mask_index =
                     static_cast<std::size_t>(v - v_min) * u_size +
                     static_cast<std::size_t>(u - u_min);
                 mask[mask_index] = {
                     true,
                     sample.block_id,
-                    sample.sky_light,
-                    sample.block_light,
+                    surface_light.sky_light,
+                    surface_light.block_light,
                 };
             }
         }
@@ -508,13 +996,21 @@ void build_face_direction(
                     continue;
                 }
                 const auto key = mask[start_index];
+                const auto maximum_span =
+                    is_backrooms_architectural_block(
+                        key.material_block)
+                        ? kBackroomsLightPatchSpan
+                        : std::numeric_limits<int>::max();
                 int width = 1;
-                while (u + width <= u_max) {
+                while (u + width <= u_max &&
+                       width < maximum_span) {
                     const auto candidate_index =
                         local_v * u_size +
                         static_cast<std::size_t>(u + width - u_min);
                     if (consumed[candidate_index] ||
-                        !(mask[candidate_index] == key)) {
+                        !face_mask_cells_can_merge(
+                            mask[candidate_index],
+                            key)) {
                         break;
                     }
                     ++width;
@@ -522,7 +1018,8 @@ void build_face_direction(
 
                 int height = 1;
                 bool can_grow = true;
-                while (v + height <= v_max && can_grow) {
+                while (v + height <= v_max && can_grow &&
+                       height < maximum_span) {
                     const auto candidate_v =
                         static_cast<std::size_t>(v + height - v_min);
                     for (int width_offset = 0;
@@ -533,7 +1030,9 @@ void build_face_direction(
                             static_cast<std::size_t>(
                                 u + width_offset - u_min);
                         if (consumed[candidate_index] ||
-                            !(mask[candidate_index] == key)) {
+                            !face_mask_cells_can_merge(
+                                mask[candidate_index],
+                                key)) {
                             can_grow = false;
                             break;
                         }
@@ -785,6 +1284,64 @@ auto architectural_mesh_deterministic_hash(
     }
     hash_bounds(hash, mesh.bounds);
     return hash;
+}
+
+auto order_architectural_indices_for_render(
+    const ArchitecturalMesh& mesh,
+    std::vector<std::uint32_t>& ordered_indices,
+    std::vector<std::uint8_t>& quad_index_coverage) -> std::size_t {
+    ordered_indices.clear();
+    ordered_indices.reserve(mesh.indices.size());
+    quad_index_coverage.assign(mesh.indices.size(), 0U);
+
+    constexpr std::size_t kQuadIndexCount = 6U;
+    for (const auto& quad : mesh.quads) {
+        const auto first = static_cast<std::size_t>(quad.first_index);
+        if (first > mesh.indices.size() ||
+            mesh.indices.size() - first < kQuadIndexCount) {
+            continue;
+        }
+        std::fill_n(
+            quad_index_coverage.begin() +
+                static_cast<std::ptrdiff_t>(first),
+            kQuadIndexCount,
+            static_cast<std::uint8_t>(1U));
+        if ((quad.surface_flags & ArchitecturalTransparent) != 0U) {
+            continue;
+        }
+        ordered_indices.insert(
+            ordered_indices.end(),
+            mesh.indices.begin() + static_cast<std::ptrdiff_t>(first),
+            mesh.indices.begin() +
+                static_cast<std::ptrdiff_t>(first + kQuadIndexCount));
+    }
+
+    // Les meubles, rampes et fixtures peuvent se trouver entre deux groupes
+    // de quads apres la fusion verticale. Je conserve chaque index non couvert
+    // dans son ordre d'origine afin de ne casser aucun triangle.
+    for (std::size_t index = 0U; index < mesh.indices.size(); ++index) {
+        if (quad_index_coverage[index] == 0U) {
+            ordered_indices.push_back(mesh.indices[index]);
+        }
+    }
+    const auto opaque_index_count = ordered_indices.size();
+
+    for (const auto& quad : mesh.quads) {
+        if ((quad.surface_flags & ArchitecturalTransparent) == 0U) {
+            continue;
+        }
+        const auto first = static_cast<std::size_t>(quad.first_index);
+        if (first > mesh.indices.size() ||
+            mesh.indices.size() - first < kQuadIndexCount) {
+            continue;
+        }
+        ordered_indices.insert(
+            ordered_indices.end(),
+            mesh.indices.begin() + static_cast<std::ptrdiff_t>(first),
+            mesh.indices.begin() +
+                static_cast<std::ptrdiff_t>(first + kQuadIndexCount));
+    }
+    return opaque_index_count;
 }
 
 } // namespace valcraft

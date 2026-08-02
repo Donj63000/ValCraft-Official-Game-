@@ -2395,6 +2395,160 @@ auto sample_creature_tile(CreatureAtlasTile tile, int x, int y) noexcept -> std:
         const auto fiber = std::sin(nx * 38.0F) * 4.0F + std::cos(ny * 39.0F) * 4.0F;
         return make_rgba(188.0F + fiber, 172.0F + fiber, 132.0F + fiber * 0.72F, 0.0F);
     }
+    case CreatureAtlasTile::JackTar: {
+        // Je garde la chair presque noire, mais ses reflets huileux revelent
+        // encore les volumes lorsque Jack traverse le faisceau de la lampe.
+        const auto oil =
+            0.5F +
+            0.5F * std::sin(nx * 19.0F - ny * 13.0F + grain * 7.0F);
+        const auto fissure =
+            smooth_range(
+                0.80F,
+                0.96F,
+                std::abs(
+                    std::sin(
+                        nx * 11.0F + ny * 23.0F + soft_grain * 5.0F)));
+        return make_rgba(
+            7.0F + oil * 16.0F + grain * 5.0F + fissure * 8.0F,
+            7.0F + oil * 12.0F + soft_grain * 4.0F,
+            8.0F + oil * 10.0F + grain * 3.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::JackBone: {
+        // Je salis l'ivoire jusqu'au brun cendreux : les os restent lisibles
+        // de pres sans transformer Jack en squelette blanc dans le couloir.
+        const auto ridge =
+            0.5F +
+            0.5F * std::sin(nx * 15.0F + ny * 9.0F + grain * 6.0F);
+        const auto crack =
+            ((x * 3 + y * 5) % 17 == 0) ? 22.0F : 0.0F;
+        return make_rgba(
+            42.0F + ridge * 28.0F + grain * 7.0F - crack,
+            37.0F + ridge * 23.0F + soft_grain * 6.0F - crack * 0.82F,
+            29.0F + ridge * 17.0F + grain * 5.0F - crack * 0.68F,
+            0.0F);
+    }
+    case CreatureAtlasTile::JackCloth: {
+        // Je melange un noir de suie et un bordeaux presque eteint pour que
+        // les pans dechires se detachent seulement dans les hautes lumieres.
+        const auto weave =
+            std::sin(nx * 31.0F + grain * 4.0F) * 3.0F +
+            std::cos(ny * 29.0F + soft_grain * 4.0F) * 2.0F;
+        const auto stain =
+            radial_falloff(nx, ny, 0.67F, 0.36F, 0.42F);
+        return make_rgba(
+            13.0F + weave + stain * 13.0F,
+            9.0F + weave * 0.60F + stain * 3.0F,
+            12.0F + weave * 0.72F + stain * 6.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::JackEye: {
+        // Je concentre l'emission dans un iris sale autour d'une pupille noire;
+        // les deux points de regard survivent ainsi a la lecture longue portee.
+        const auto iris =
+            radial_falloff(nx, ny, 0.50F, 0.50F, 0.43F);
+        const auto pupil =
+            radial_falloff(nx, ny, 0.52F, 0.52F, 0.105F);
+        const auto blood =
+            smooth_range(
+                0.72F,
+                0.94F,
+                std::abs(
+                    std::sin(nx * 17.0F + ny * 5.0F + grain * 4.0F)));
+        const auto emission =
+            iris * (210.0F + soft_grain * 120.0F) *
+            (1.0F - pupil * 0.72F);
+        return make_rgba(
+            170.0F + iris * 72.0F - pupil * 150.0F,
+            82.0F + iris * 76.0F - pupil * 76.0F - blood * 22.0F,
+            24.0F + iris * 30.0F - pupil * 22.0F,
+            emission);
+    }
+    case CreatureAtlasTile::MarlowSkin: {
+        // Je melange une peau gonflee gris-bleu, des marbrures froides et un
+        // reflet humide. La texture reste opaque : la silhouette porte deja
+        // toute la decoupe organique dans ses primitives.
+        const auto swelling =
+            radial_falloff(nx, ny, 0.48F, 0.46F, 0.72F);
+        const auto bruise =
+            radial_falloff(nx, ny, 0.72F, 0.66F, 0.30F) +
+            radial_falloff(nx, ny, 0.22F, 0.34F, 0.25F);
+        const auto wet_streak =
+            0.5F +
+            0.5F * std::sin(nx * 8.0F + ny * 27.0F + grain * 5.0F);
+        return make_rgba(
+            78.0F + swelling * 34.0F + wet_streak * 10.0F - bruise * 24.0F,
+            91.0F + swelling * 38.0F + wet_streak * 13.0F - bruise * 17.0F,
+            92.0F + swelling * 37.0F + wet_streak * 16.0F - bruise * 9.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::MarlowRot: {
+        const auto wound =
+            radial_falloff(nx, ny, 0.48F, 0.52F, 0.60F);
+        const auto ooze =
+            0.5F +
+            0.5F * std::sin(nx * 13.0F - ny * 21.0F + soft_grain * 6.0F);
+        const auto torn_edge = edge < 0.13F ? 1.0F : 0.0F;
+        return make_rgba(
+            16.0F + wound * 22.0F + ooze * 13.0F - torn_edge * 7.0F,
+            19.0F + wound * 17.0F + ooze * 15.0F - torn_edge * 8.0F,
+            18.0F + wound * 13.0F + ooze * 13.0F - torn_edge * 7.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::MarlowUniform: {
+        const auto weave =
+            std::sin(nx * 35.0F + grain * 3.0F) * 3.0F +
+            std::cos(ny * 33.0F + soft_grain * 4.0F) * 3.0F;
+        const auto washed =
+            radial_falloff(nx, ny, 0.36F, 0.42F, 0.48F);
+        const auto grime =
+            radial_falloff(nx, ny, 0.76F, 0.72F, 0.30F);
+        return make_rgba(
+            18.0F + weave + washed * 14.0F - grime * 8.0F,
+            39.0F + weave + washed * 24.0F - grime * 13.0F,
+            58.0F + weave + washed * 31.0F - grime * 17.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::MarlowEyeWhite: {
+        // Je bannis volontairement iris et pupille : meme le centre du carreau
+        // reste laiteux. Le volume ellipsoidal apporte seul le reflet mobile.
+        const auto pearl =
+            radial_falloff(nx, ny, 0.46F, 0.43F, 0.78F);
+        const auto glaze =
+            0.5F +
+            0.5F * std::sin(nx * 6.0F - ny * 5.0F + grain * 2.0F);
+        return make_rgba(
+            194.0F + pearl * 49.0F + glaze * 8.0F,
+            205.0F + pearl * 44.0F + glaze * 7.0F,
+            209.0F + pearl * 42.0F + glaze * 6.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::MarlowSwimCap: {
+        const auto rubber_ridge =
+            0.5F +
+            0.5F * std::sin(nx * 42.0F + ny * 3.0F + grain * 3.0F);
+        const auto wet_glint =
+            radial_falloff(nx, ny, 0.31F, 0.27F, 0.23F);
+        return make_rgba(
+            7.0F + rubber_ridge * 9.0F + wet_glint * 16.0F,
+            14.0F + rubber_ridge * 12.0F + wet_glint * 23.0F,
+            22.0F + rubber_ridge * 16.0F + wet_glint * 31.0F,
+            0.0F);
+    }
+    case CreatureAtlasTile::MarlowBuoyYellow: {
+        const auto rubber =
+            0.5F +
+            0.5F * std::sin(nx * 18.0F + ny * 11.0F + grain * 5.0F);
+        const auto scuff =
+            std::max(
+                line_mask(nx - ny * 0.31F, 0.22F, 0.025F),
+                line_mask(nx + ny * 0.26F, 0.91F, 0.022F));
+        return make_rgba(
+            188.0F + rubber * 48.0F - scuff * 51.0F,
+            132.0F + rubber * 42.0F - scuff * 43.0F,
+            22.0F + rubber * 20.0F - scuff * 12.0F,
+            0.0F);
+    }
     case CreatureAtlasTile::Count:
         break;
     }

@@ -6,6 +6,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -229,7 +230,7 @@ TEST_CASE("le ChunkMesher retire les faces internes de deux rampes parallèles")
     CHECK(mesh.indices.size() == 42U);
 }
 
-TEST_CASE("le pipeline moderne conserve la geometrie inclinee des rampes") {
+TEST_CASE("le pipeline moderne retire les rampes de son mesh voxel residuel") {
     World world(
         9135U,
         1,
@@ -256,9 +257,49 @@ TEST_CASE("le pipeline moderne conserve la geometrie inclinee des rampes") {
         0U,
         ChunkMeshContent::ModernNonOrganic);
 
-    CHECK(mesh.face_count == 5U);
-    CHECK(mesh.vertices.size() == 18U);
-    CHECK(mesh.indices.size() == 24U);
+    CHECK(mesh.face_count == 0U);
+    CHECK(mesh.vertices.empty());
+    CHECK(mesh.indices.empty());
+}
+
+TEST_CASE("le pipeline moderne fusionne les marches sans trou ni doublon voxel") {
+    World world(
+        9137U,
+        0,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV2,
+        VisualPipeline::ModernStylized,
+        0);
+    test::make_chunk_empty(world, {0, 0});
+    const auto step = to_block_id(BlockType::BackroomsConnectorStep);
+    for (int y = 8; y <= 10; ++y) {
+        for (int z = 5; z <= 6; ++z) {
+            for (int x = 4; x <= 5; ++x) {
+                world.set_block(x, y, z, step);
+            }
+        }
+    }
+    world.rebuild_dirty_meshes();
+
+    const auto* voxel_sections = world.section_meshes_for({0, 0});
+    const auto* architecture_sections =
+        world.architectural_section_meshes_for({0, 0});
+    REQUIRE(voxel_sections != nullptr);
+    REQUIRE(architecture_sections != nullptr);
+    for (const auto& voxel_mesh : *voxel_sections) {
+        CHECK(voxel_mesh.vertices.empty());
+        CHECK(voxel_mesh.indices.empty());
+    }
+    const auto& architecture = (*architecture_sections)[0];
+    REQUIRE_FALSE(architecture.empty());
+    CHECK(std::all_of(
+        architecture.quads.begin(),
+        architecture.quads.end(),
+        [step](const ArchitecturalQuad& quad) {
+            return quad.material_block == step;
+        }));
+    CHECK(architecture.vertices.size() == architecture.quads.size() * 4U);
+    CHECK(architecture.indices.size() == architecture.quads.size() * 6U);
 }
 
 TEST_CASE("le pipeline moderne traite le bois place dans les Backrooms comme une architecture") {

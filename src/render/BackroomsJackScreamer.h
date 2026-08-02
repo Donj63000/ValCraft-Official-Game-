@@ -35,4 +35,11 @@ struct BackroomsJackScreamerImage {
     const std::filesystem::path& working_directory)
     -> std::filesystem::path;
 
+// Je reutilise le lecteur BMP durci pour Marlow, mais je garde une resolution
+// de chemin propre afin que les deux screamers puissent etre empaquetes et
+// testes independamment.
+[[nodiscard]] auto resolve_backrooms_marlow_screamer_path(
+    const std::filesystem::path& working_directory)
+    -> std::filesystem::path;
+
 } // namespace valcraft

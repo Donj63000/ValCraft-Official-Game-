@@ -72,7 +72,21 @@ enum class CreatureAtlasTile : std::uint8_t {
     CrewWater = 48,
     CrewFish = 49,
     CrewCanvas = 50,
-    Count = 51,
+    // Je reserve ces matieres a Jack afin que sa palette ne recolore jamais
+    // les zombies ou les marins qui partagent cet atlas procedural.
+    JackTar = 51,
+    JackBone = 52,
+    JackCloth = 53,
+    JackEye = 54,
+    // Je reserve ces six dernieres cases a Marlow. Je les garde append-only :
+    // les indices historiques de l'atlas restent ainsi strictement stables.
+    MarlowSkin = 55,
+    MarlowRot = 56,
+    MarlowUniform = 57,
+    MarlowEyeWhite = 58,
+    MarlowSwimCap = 59,
+    MarlowBuoyYellow = 60,
+    Count = 61,
 };
 
 enum class CrewVisualRole : std::uint8_t {

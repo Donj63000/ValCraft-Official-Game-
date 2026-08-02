@@ -97,10 +97,37 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
             } else if (mode == "jumpscare") {
                 result.options.smoke_backrooms_jack =
                     BackroomsJackSmokeMode::Jumpscare;
+            } else if (mode == "corridor") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::CorridorStare;
+            } else if (mode == "rear") {
+                result.options.smoke_backrooms_jack =
+                    BackroomsJackSmokeMode::RearStare;
             } else {
                 return make_error(
                     "Invalid value for --smoke-backrooms-jack");
             }
+            continue;
+        }
+        if (argument.starts_with("--smoke-backrooms-jack-distance=")) {
+            constexpr auto prefix =
+                std::string_view {
+                    "--smoke-backrooms-jack-distance="};
+            float parsed_value = 0.0F;
+            if (!parse_number(
+                    argument.substr(prefix.size()),
+                    parsed_value) ||
+                parsed_value <
+                    kBackroomsJackSmokeCorridorDistanceMinimum ||
+                parsed_value >
+                    kBackroomsJackSmokeCorridorDistanceMaximum) {
+                return make_error(
+                    "Invalid value for --smoke-backrooms-jack-distance");
+            }
+            result.options.smoke_backrooms_jack_distance =
+                parsed_value;
+            result.options
+                .smoke_backrooms_jack_distance_explicitly_set = true;
             continue;
         }
         if (argument == "--freeze-time") {
@@ -347,6 +374,17 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
         result.ok = false;
         result.error_message = "Unknown argument: " + std::string(argument);
         return result;
+    }
+
+    // Je valide cette contrainte apres toute la ligne de commande afin que
+    // l'ordre des deux arguments de capture reste libre et deterministe.
+    if (result.options
+            .smoke_backrooms_jack_distance_explicitly_set &&
+        result.options.smoke_backrooms_jack !=
+            BackroomsJackSmokeMode::CorridorStare) {
+        return make_error(
+            "--smoke-backrooms-jack-distance requires "
+            "--smoke-backrooms-jack=corridor");
     }
 
     return result;

@@ -261,6 +261,7 @@ auto backrooms_v3_position_delta_y(
     WorldGenerationVersion source_version,
     float world_y) noexcept -> int {
     if (source_version == WorldGenerationVersion::BackroomsV3 ||
+        source_version == WorldGenerationVersion::BackroomsV4 ||
         !is_backrooms_generation_version(source_version)) {
         return 0;
     }
@@ -326,7 +327,8 @@ WorldGenerator::WorldGenerator(int seed,
         generation_version_ != WorldGenerationVersion::LivingOceanV3 &&
         generation_version_ != WorldGenerationVersion::BackroomsV1 &&
         generation_version_ != WorldGenerationVersion::BackroomsV2 &&
-        generation_version_ != WorldGenerationVersion::BackroomsV3) {
+        generation_version_ != WorldGenerationVersion::BackroomsV3 &&
+        generation_version_ != WorldGenerationVersion::BackroomsV4) {
         throw std::invalid_argument("Unknown world generation version");
     }
 
