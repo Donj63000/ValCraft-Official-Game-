@@ -1328,6 +1328,17 @@ auto World::raycast_collidable(const glm::vec3& origin,
     return raycast(origin, direction, max_distance, WorldRaycastMode::ProjectileCollidable);
 }
 
+auto World::raycast_water_or_opaque(
+    const glm::vec3& origin,
+    const glm::vec3& direction,
+    float max_distance) const -> RaycastHit {
+    return raycast(
+        origin,
+        direction,
+        max_distance,
+        WorldRaycastMode::WaterOrOpaque);
+}
+
 auto World::raycast(const glm::vec3& origin,
                     const glm::vec3& direction,
                     float max_distance,
@@ -1351,6 +1362,7 @@ auto World::raycast(const glm::vec3& origin,
     const auto blocks_ray = [mode](BlockId block_id) noexcept -> bool {
         switch (mode) {
         case WorldRaycastMode::VisibilityOpaque:
+        case WorldRaycastMode::WaterOrOpaque:
             return is_block_opaque(block_id);
         case WorldRaycastMode::ProjectileCollidable:
             return is_block_collidable(block_id);
@@ -1359,6 +1371,40 @@ auto World::raycast(const glm::vec3& origin,
             return is_block_targetable(block_id);
         }
     };
+
+    const auto water_or_opaque_hit = [&](const BlockCoord& cell,
+                                         const BlockCoord& adjacent,
+                                         float distance)
+        -> std::optional<RaycastHit> {
+        if (mode != WorldRaycastMode::WaterOrOpaque) {
+            return std::nullopt;
+        }
+        const auto block_id = get_block(cell.x, cell.y, cell.z);
+        if (is_block_opaque(block_id)) {
+            return RaycastHit {
+                true,
+                cell,
+                adjacent,
+                block_id,
+                distance,
+            };
+        }
+        if (has_water(cell.x, cell.y, cell.z)) {
+            return RaycastHit {
+                true,
+                cell,
+                adjacent,
+                to_block_id(BlockType::Water),
+                distance,
+            };
+        }
+        return std::nullopt;
+    };
+
+    if (const auto hit = water_or_opaque_hit(current, current, 0.0F);
+        hit.has_value()) {
+        return *hit;
+    }
 
     const auto starting_block = get_block(current.x, current.y, current.z);
     if (blocks_ray(starting_block)) {
@@ -1421,6 +1467,12 @@ auto World::raycast(const glm::vec3& origin,
 
         if (travelled > max_distance) {
             break;
+        }
+
+        if (const auto hit =
+                water_or_opaque_hit(current, previous, travelled);
+            hit.has_value()) {
+            return *hit;
         }
 
         const auto block_id = get_block(current.x, current.y, current.z);

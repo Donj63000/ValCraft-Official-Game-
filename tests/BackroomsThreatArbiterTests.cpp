@@ -65,4 +65,101 @@ TEST_CASE("L'arbitre assainit le temps et permet d'annuler une intention") {
     CHECK(resolve_backrooms_threat(runtime) == BackroomsThreatOwner::None);
 }
 
+TEST_CASE("L'arbitre valide les deux intentions une seule fois par frame") {
+    BackroomsThreatArbiterRuntime runtime {};
+    const BackroomsThreatIntent jack {
+        .request = true,
+    };
+    const BackroomsThreatIntent marlow {
+        .request = true,
+    };
+
+    CHECK(
+        commit_backrooms_threat_intents(runtime, jack, marlow, 17U) ==
+        BackroomsThreatOwner::Jack);
+    CHECK(runtime.pending_jack_arrival == kBackroomsThreatNoArrival);
+    CHECK(runtime.pending_marlow_arrival == 17U);
+
+    const BackroomsThreatIntent jack_holds {
+        .hold = true,
+    };
+    const BackroomsThreatIntent marlow_waits {
+        .request = true,
+        .hold = true,
+    };
+    CHECK(
+        commit_backrooms_threat_intents(
+            runtime,
+            jack_holds,
+            marlow_waits,
+            18U) == BackroomsThreatOwner::Jack);
+    CHECK(runtime.pending_marlow_arrival == 17U);
+}
+
+TEST_CASE("L'arbitre annule un ancien contexte sans creer de grace") {
+    BackroomsThreatArbiterRuntime runtime {};
+    request_backrooms_threat(runtime, BackroomsThreatOwner::Marlow, 4U);
+    REQUIRE(
+        resolve_backrooms_threat(runtime) ==
+        BackroomsThreatOwner::Marlow);
+    request_backrooms_threat(runtime, BackroomsThreatOwner::Jack, 5U);
+
+    reset_backrooms_threat_context(runtime);
+
+    CHECK(runtime.owner == BackroomsThreatOwner::None);
+    CHECK(runtime.pending_jack_arrival == kBackroomsThreatNoArrival);
+    CHECK(runtime.pending_marlow_arrival == kBackroomsThreatNoArrival);
+    CHECK(runtime.grace_seconds == doctest::Approx(0.0F));
+}
+
+TEST_CASE("Une annulation domine une nouvelle demande dans la meme intention") {
+    BackroomsThreatArbiterRuntime runtime {};
+    const BackroomsThreatIntent marlow {
+        .request = true,
+        .cancel = true,
+    };
+
+    CHECK(
+        commit_backrooms_threat_intents(
+            runtime,
+            {},
+            marlow,
+            9U) == BackroomsThreatOwner::None);
+    CHECK(runtime.pending_marlow_arrival == kBackroomsThreatNoArrival);
+}
+
+TEST_CASE("Le protocole request acquire hold release conserve la file refusee") {
+    BackroomsThreatArbiterRuntime runtime {};
+    CHECK(commit_backrooms_threat_intents(
+              runtime,
+              {},
+              {.request = true, .hold = true},
+              21U) == BackroomsThreatOwner::Marlow);
+
+    CHECK(commit_backrooms_threat_intents(
+              runtime,
+              {.request = true, .hold = true},
+              {.hold = true},
+              22U) == BackroomsThreatOwner::Marlow);
+    CHECK(runtime.pending_jack_arrival == 22U);
+
+    CHECK(commit_backrooms_threat_intents(
+              runtime,
+              {.request = true, .hold = true},
+              {.release = true},
+              23U) == BackroomsThreatOwner::None);
+    CHECK(runtime.pending_jack_arrival == 22U);
+    CHECK(runtime.grace_seconds >= 10.0F);
+
+    update_backrooms_threat_arbiter(runtime, 14.0F);
+    for (auto index = 0; index < 56; ++index) {
+        update_backrooms_threat_arbiter(runtime, 0.25F);
+    }
+    CHECK(commit_backrooms_threat_intents(
+              runtime,
+              {.request = true, .hold = true},
+              {},
+              24U) == BackroomsThreatOwner::Jack);
+}
+
 } // namespace valcraft

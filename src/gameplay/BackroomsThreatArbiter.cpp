@@ -26,6 +26,31 @@ auto pending_arrival(
                : runtime.pending_marlow_arrival;
 }
 
+void apply_intent_before_requests(
+    BackroomsThreatArbiterRuntime& runtime,
+    BackroomsThreatOwner owner,
+    const BackroomsThreatIntent& intent) noexcept {
+    if (intent.cancel || intent.release) {
+        cancel_backrooms_threat_request(runtime, owner);
+    }
+    if (runtime.owner == owner &&
+        (intent.release || !intent.hold)) {
+        release_backrooms_threat(runtime, owner);
+    }
+}
+
+void publish_intent_request(
+    BackroomsThreatArbiterRuntime& runtime,
+    BackroomsThreatOwner owner,
+    const BackroomsThreatIntent& intent,
+    std::uint64_t arrival_sequence) noexcept {
+    if (!intent.request || intent.cancel || intent.release ||
+        runtime.owner == owner) {
+        return;
+    }
+    request_backrooms_threat(runtime, owner, arrival_sequence);
+}
+
 } // namespace
 
 void request_backrooms_threat(
@@ -87,6 +112,45 @@ void release_backrooms_threat(
     runtime.grace_seconds = 10.0F +
         static_cast<float>(random & UINT32_C(0xFFFF)) /
             65535.0F * 4.0F;
+}
+
+auto commit_backrooms_threat_intents(
+    BackroomsThreatArbiterRuntime& runtime,
+    const BackroomsThreatIntent& jack,
+    const BackroomsThreatIntent& marlow,
+    std::uint64_t arrival_sequence) noexcept
+    -> BackroomsThreatOwner {
+    apply_intent_before_requests(
+        runtime,
+        BackroomsThreatOwner::Jack,
+        jack);
+    apply_intent_before_requests(
+        runtime,
+        BackroomsThreatOwner::Marlow,
+        marlow);
+
+    publish_intent_request(
+        runtime,
+        BackroomsThreatOwner::Jack,
+        jack,
+        arrival_sequence);
+    publish_intent_request(
+        runtime,
+        BackroomsThreatOwner::Marlow,
+        marlow,
+        arrival_sequence);
+    return resolve_backrooms_threat(runtime);
+}
+
+void reset_backrooms_threat_context(
+    BackroomsThreatArbiterRuntime& runtime) noexcept {
+    runtime.owner = BackroomsThreatOwner::None;
+    runtime.pending_jack_arrival = kBackroomsThreatNoArrival;
+    runtime.pending_marlow_arrival = kBackroomsThreatNoArrival;
+    runtime.grace_seconds = 0.0F;
+    if (runtime.random_state == 0U) {
+        runtime.random_state = UINT32_C(0x41524254);
+    }
 }
 
 void update_backrooms_threat_arbiter(

@@ -130,6 +130,27 @@ auto parse_game_options(std::span<const std::string_view> arguments) -> GameOpti
                 .smoke_backrooms_jack_distance_explicitly_set = true;
             continue;
         }
+        if (argument.starts_with("--smoke-backrooms-marlow=")) {
+            const auto mode = argument.substr(
+                std::string_view {"--smoke-backrooms-marlow="}.size());
+            if (mode == "peek") {
+                result.options.smoke_backrooms_marlow =
+                    BackroomsMarlowSmokeMode::Peek;
+            } else if (mode == "chase") {
+                result.options.smoke_backrooms_marlow =
+                    BackroomsMarlowSmokeMode::Chase;
+            } else if (mode == "capture-blocked") {
+                result.options.smoke_backrooms_marlow =
+                    BackroomsMarlowSmokeMode::CaptureBlocked;
+            } else if (mode == "screamer") {
+                result.options.smoke_backrooms_marlow =
+                    BackroomsMarlowSmokeMode::Screamer;
+            } else {
+                return make_error(
+                    "Invalid value for --smoke-backrooms-marlow");
+            }
+            continue;
+        }
         if (argument == "--freeze-time") {
             result.options.freeze_time = true;
             continue;

@@ -18,10 +18,28 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846F;
 constexpr float kMaximumAcceptedDeltaSeconds = 0.25F;
-constexpr float kMarlowMinimumClearance = 3.55F;
+constexpr float kMarlowMaximumStepHeight = 1.05F;
+constexpr float kMarlowPathNodeTolerance = 0.055F;
 constexpr float kMarlowDeepWaterThreshold = 1.45F;
+constexpr float kMarlowDrowningMinimumWaterDepth = 1.72F;
 constexpr float kMarlowMinimumSafeWaterDepth = 0.25F;
 constexpr float kMarlowGrabSeconds = 0.55F;
+constexpr float kMarlowDrowningTargetTolerance = 0.45F;
+constexpr float kMarlowDrowningVerticalTolerance = 0.12F;
+constexpr float kMarlowPursuitRepathSeconds = 0.35F;
+constexpr float kMarlowPursuitStuckTimeoutSeconds = 2.25F;
+constexpr float kMarlowPursuitMinimumSeconds = 9.0F;
+constexpr float kMarlowPursuitMaximumSeconds = 13.0F;
+constexpr float kMarlowPursuitBaseSpeed = 2.65F;
+constexpr float kMarlowPursuitStopDistance = 1.15F;
+constexpr float kMarlowPursuitPressureSpeedBonus = 1.75F;
+constexpr float kMarlowWaterAmbushSpeedBonus = 0.55F;
+constexpr float kMarlowCornerWallOffset = 0.0F;
+constexpr float kMarlowRenderFloorMargin = 0.02F;
+constexpr float kMarlowPressureAttackTrigger = 0.55F;
+constexpr float kMarlowPressureAttackReset = 0.25F;
+constexpr float kMarlowPressureReactionMinimumSeconds = 3.5F;
+constexpr float kMarlowPressureReactionMaximumSeconds = 6.0F;
 constexpr std::int32_t kMinimumLogicalLevel = -1'000'000;
 constexpr std::int32_t kMaximumLogicalLevel = 1'000'000;
 constexpr std::uint32_t kFallbackRandomState = 0xD1B54A35U;
@@ -174,6 +192,11 @@ struct OccluderSelection {
         local_z * kBackroomsMarlowNavigationSide + local_x);
 }
 
+[[nodiscard]] auto navigation_grid_has_valid_shape(
+    const BackroomsMarlowNavigationGrid& grid) noexcept -> bool {
+    return grid.cells.size() == kBackroomsMarlowNavigationCellCount;
+}
+
 [[nodiscard]] auto grid_local_coordinates(
     const BackroomsMarlowNavigationGrid& grid,
     int world_x,
@@ -200,6 +223,9 @@ struct OccluderSelection {
 [[nodiscard]] auto point_index(
     const BackroomsMarlowNavigationGrid& grid,
     BackroomsMarlowGridPoint point) noexcept -> int {
+    if (!navigation_grid_has_valid_shape(grid)) {
+        return -1;
+    }
     auto local_x = 0;
     auto local_z = 0;
     if (!grid_local_coordinates(
@@ -242,36 +268,6 @@ struct OccluderSelection {
         floor_y + 0.001F,
         static_cast<float>(point.z) + 0.5F,
     };
-}
-
-[[nodiscard]] auto nearest_walkable_index(
-    const BackroomsMarlowNavigationGrid& grid,
-    BackroomsMarlowGridPoint point) noexcept -> int {
-    const auto exact = point_index(grid, point);
-    if (exact >= 0 &&
-        grid.cells[static_cast<std::size_t>(exact)].walkable) {
-        return exact;
-    }
-
-    auto best_index = -1;
-    auto best_distance = std::numeric_limits<std::int64_t>::max();
-    for (std::size_t index = 0U; index < grid.cells.size(); ++index) {
-        if (!grid.cells[index].walkable) {
-            continue;
-        }
-        const auto candidate =
-            cell_world_point(grid, static_cast<int>(index));
-        const auto delta_x =
-            static_cast<std::int64_t>(candidate.x) - point.x;
-        const auto delta_z =
-            static_cast<std::int64_t>(candidate.z) - point.z;
-        const auto distance = delta_x * delta_x + delta_z * delta_z;
-        if (distance < best_distance) {
-            best_distance = distance;
-            best_index = static_cast<int>(index);
-        }
-    }
-    return best_index;
 }
 
 [[nodiscard]] auto next_random(std::uint32_t& state) noexcept
@@ -372,6 +368,191 @@ struct OccluderSelection {
     return chunk_ready(readiness, point_chunk(point));
 }
 
+[[nodiscard]] auto marlow_body_footprint_clear(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness* readiness,
+    float center_x,
+    float center_z,
+    float reference_floor_y) noexcept -> bool {
+    if (!std::isfinite(center_x) ||
+        !std::isfinite(center_z) ||
+        !std::isfinite(reference_floor_y) ||
+        !navigation_grid_has_valid_shape(grid)) {
+        return false;
+    }
+
+    const auto minimum_x_exact = std::floor(
+        static_cast<double>(center_x) -
+        static_cast<double>(kBackroomsMarlowRigVisualRadius));
+    const auto maximum_x_exact = std::floor(
+        static_cast<double>(center_x) +
+        static_cast<double>(kBackroomsMarlowRigVisualRadius));
+    const auto minimum_z_exact = std::floor(
+        static_cast<double>(center_z) -
+        static_cast<double>(kBackroomsMarlowRigVisualRadius));
+    const auto maximum_z_exact = std::floor(
+        static_cast<double>(center_z) +
+        static_cast<double>(kBackroomsMarlowRigVisualRadius));
+    const auto grid_minimum_x = static_cast<double>(grid.origin_world_x);
+    const auto grid_minimum_z = static_cast<double>(grid.origin_world_z);
+    const auto grid_maximum_x = grid_minimum_x +
+        static_cast<double>(kBackroomsMarlowNavigationSide - 1);
+    const auto grid_maximum_z = grid_minimum_z +
+        static_cast<double>(kBackroomsMarlowNavigationSide - 1);
+    if (minimum_x_exact < grid_minimum_x ||
+        maximum_x_exact > grid_maximum_x ||
+        minimum_z_exact < grid_minimum_z ||
+        maximum_z_exact > grid_maximum_z) {
+        return false;
+    }
+
+    const auto minimum_x = safe_floor_to_int(
+        center_x - kBackroomsMarlowRigVisualRadius);
+    const auto maximum_x = safe_floor_to_int(
+        center_x + kBackroomsMarlowRigVisualRadius);
+    const auto minimum_z = safe_floor_to_int(
+        center_z - kBackroomsMarlowRigVisualRadius);
+    const auto maximum_z = safe_floor_to_int(
+        center_z + kBackroomsMarlowRigVisualRadius);
+    constexpr auto kRadiusSquared =
+        kBackroomsMarlowRigVisualRadius *
+        kBackroomsMarlowRigVisualRadius;
+    for (auto world_z64 = static_cast<std::int64_t>(minimum_z);
+         world_z64 <= static_cast<std::int64_t>(maximum_z);
+         ++world_z64) {
+        const auto world_z = static_cast<int>(world_z64);
+        for (auto world_x64 = static_cast<std::int64_t>(minimum_x);
+             world_x64 <= static_cast<std::int64_t>(maximum_x);
+             ++world_x64) {
+            const auto world_x = static_cast<int>(world_x64);
+            const auto nearest_x = std::clamp(
+                center_x,
+                static_cast<float>(world_x),
+                static_cast<float>(world_x) + 1.0F);
+            const auto nearest_z = std::clamp(
+                center_z,
+                static_cast<float>(world_z),
+                static_cast<float>(world_z) + 1.0F);
+            const auto delta_x = center_x - nearest_x;
+            const auto delta_z = center_z - nearest_z;
+            if (delta_x * delta_x + delta_z * delta_z > kRadiusSquared) {
+                continue;
+            }
+
+            const BackroomsMarlowGridPoint sample {world_x, world_z};
+            const auto* cell = backrooms_marlow_navigation_cell(
+                grid,
+                sample.x,
+                sample.z);
+            if (cell == nullptr ||
+                !cell->walkable ||
+                cell->clearance < kBackroomsMarlowRigStandingHeight ||
+                (readiness != nullptr && !point_ready(*readiness, sample)) ||
+                std::abs(cell->floor_y - reference_floor_y) >
+                    kMarlowMaximumStepHeight) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] auto marlow_point_is_navigable(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness* readiness,
+    BackroomsMarlowGridPoint point) noexcept -> bool {
+    const auto* cell = backrooms_marlow_navigation_cell(
+        grid,
+        point.x,
+        point.z);
+    if (cell == nullptr ||
+        !cell->walkable ||
+        (readiness != nullptr && !point_ready(*readiness, point))) {
+        return false;
+    }
+    return marlow_body_footprint_clear(
+        grid,
+        readiness,
+        static_cast<float>(point.x) + 0.5F,
+        static_cast<float>(point.z) + 0.5F,
+        cell->floor_y);
+}
+
+[[nodiscard]] auto nearest_navigable_index(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness* readiness,
+    BackroomsMarlowGridPoint point) noexcept -> int {
+    const auto exact = point_index(grid, point);
+    if (exact >= 0 && marlow_point_is_navigable(grid, readiness, point)) {
+        return exact;
+    }
+
+    auto best_index = -1;
+    auto best_distance = std::numeric_limits<std::int64_t>::max();
+    for (std::size_t index = 0U; index < grid.cells.size(); ++index) {
+        if (!grid.cells[index].walkable) {
+            continue;
+        }
+        const auto candidate =
+            cell_world_point(grid, static_cast<int>(index));
+        if (!marlow_point_is_navigable(grid, readiness, candidate)) {
+            continue;
+        }
+        const auto delta_x =
+            static_cast<std::int64_t>(candidate.x) - point.x;
+        const auto delta_z =
+            static_cast<std::int64_t>(candidate.z) - point.z;
+        const auto distance = delta_x * delta_x + delta_z * delta_z;
+        if (distance < best_distance) {
+            best_distance = distance;
+            best_index = static_cast<int>(index);
+        }
+    }
+    return best_index;
+}
+
+[[nodiscard]] auto marlow_transition_allowed(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness* readiness,
+    BackroomsMarlowGridPoint from,
+    BackroomsMarlowGridPoint to) noexcept -> bool {
+    if (std::abs(from.x - to.x) + std::abs(from.z - to.z) != 1) {
+        return false;
+    }
+    const auto* from_cell = backrooms_marlow_navigation_cell(
+        grid,
+        from.x,
+        from.z);
+    const auto* to_cell = backrooms_marlow_navigation_cell(
+        grid,
+        to.x,
+        to.z);
+    if (from_cell == nullptr ||
+        to_cell == nullptr ||
+        !marlow_point_is_navigable(grid, readiness, from) ||
+        !marlow_point_is_navigable(grid, readiness, to) ||
+        std::abs(from_cell->floor_y - to_cell->floor_y) >
+            kMarlowMaximumStepHeight) {
+        return false;
+    }
+
+    // Le milieu de l'arête est l'endroit où le centre de Marlow peut encore
+    // être dans une cellule alors que son épaule est déjà dans la suivante.
+    // Le vérifier supprime les traversées de murs et les couloirs trop étroits.
+    const auto midpoint_x =
+        (static_cast<float>(from.x + to.x) + 1.0F) * 0.5F;
+    const auto midpoint_z =
+        (static_cast<float>(from.z + to.z) + 1.0F) * 0.5F;
+    const auto midpoint_floor =
+        (from_cell->floor_y + to_cell->floor_y) * 0.5F;
+    return marlow_body_footprint_clear(
+        grid,
+        readiness,
+        midpoint_x,
+        midpoint_z,
+        midpoint_floor);
+}
+
 [[nodiscard]] auto inner_revisions_equal(
     const BackroomsMarlowChunkReadiness& left,
     const BackroomsMarlowChunkReadiness& right,
@@ -412,14 +593,10 @@ struct OccluderSelection {
     const auto start_index = point_index(grid, start);
     const auto goal_index = point_index(grid, goal);
     const auto blocked_index = point_index(grid, blocked);
-    const auto ready = [&](BackroomsMarlowGridPoint point) noexcept {
-        return readiness == nullptr || point_ready(*readiness, point);
-    };
     if (start_index < 0 || goal_index < 0 || blocked_index < 0 ||
         start_index == blocked_index || goal_index == blocked_index ||
-        !grid.cells[static_cast<std::size_t>(start_index)].walkable ||
-        !grid.cells[static_cast<std::size_t>(goal_index)].walkable ||
-        !ready(start) || !ready(goal)) {
+        !marlow_point_is_navigable(grid, readiness, start) ||
+        !marlow_point_is_navigable(grid, readiness, goal)) {
         return false;
     }
     std::array<bool, kBackroomsMarlowNavigationCellCount> visited {};
@@ -446,11 +623,15 @@ struct OccluderSelection {
             const auto neighbor_index = point_index(grid, neighbor);
             if (neighbor_index < 0 ||
                 neighbor_index == blocked_index ||
-                !ready(neighbor)) {
+                !marlow_transition_allowed(
+                    grid,
+                    readiness,
+                    current,
+                    neighbor)) {
                 continue;
             }
             const auto offset = static_cast<std::size_t>(neighbor_index);
-            if (visited[offset] || !grid.cells[offset].walkable) {
+            if (visited[offset]) {
                 continue;
             }
             visited[offset] = true;
@@ -555,7 +736,7 @@ struct OccluderSelection {
     const BackroomsMarlowChunkReadiness& readiness,
     BackroomsMarlowGridPoint origin,
     float maximum_distance,
-    bool require_safe_depth) noexcept -> BackroomsMarlowGridPoint {
+    float minimum_water_depth) noexcept -> BackroomsMarlowGridPoint {
     auto best = BackroomsMarlowGridPoint {
         std::numeric_limits<int>::lowest(),
         std::numeric_limits<int>::lowest(),
@@ -580,8 +761,7 @@ struct OccluderSelection {
             if (cell == nullptr ||
                 !cell->walkable ||
                 !cell->has_water ||
-                (require_safe_depth &&
-                 cell->water_depth < kMarlowMinimumSafeWaterDepth) ||
+                cell->water_depth < minimum_water_depth ||
                 !point_ready(readiness, candidate)) {
                 continue;
             }
@@ -666,9 +846,20 @@ struct OccluderSelection {
     const auto distance = horizontal_distance(
         pending.position,
         player.feet_position);
+    const auto corner_peek_clear =
+        pending.mode == BackroomsMarlowEncounterMode::CornerPeek &&
+        cell != nullptr &&
+        cell->walkable &&
+        cell->clearance >= kBackroomsMarlowRigStandingHeight &&
+        point_ready(readiness, point);
     if (cell == nullptr ||
-        !cell->walkable ||
-        !point_ready(readiness, point) ||
+        (!corner_peek_clear &&
+         !marlow_body_footprint_clear(
+             runtime.navigation,
+             &readiness,
+             pending.position.x,
+             pending.position.z,
+             cell->floor_y)) ||
         !std::isfinite(distance) ||
         distance < 6.0F ||
         distance > 32.0F) {
@@ -706,8 +897,8 @@ struct OccluderSelection {
 [[nodiscard]] auto next_manifestation_delay(
     std::uint32_t& random_state,
     float pressure) noexcept -> float {
-    const auto base = random_range(random_state, 30.0F, 60.0F);
-    const auto multiplier = 1.0F - 0.45F * std::clamp(pressure, 0.0F, 1.0F);
+    const auto base = random_range(random_state, 24.0F, 42.0F);
+    const auto multiplier = 1.0F - 0.30F * std::clamp(pressure, 0.0F, 1.0F);
     return base * multiplier;
 }
 
@@ -731,9 +922,24 @@ void emit_event(
 }
 
 void reset_runtime_for_level(
-    BackroomsMarlowRuntime& runtime) noexcept {
+    BackroomsMarlowRuntime& runtime,
+    float durable_pressure,
+    bool apply_initial_grace) noexcept {
+    // Je conserve les buffers deja payes : quitter les Poolrooms ne doit pas
+    // provoquer une liberation puis une reallocation de 6 400 cellules.
+    auto navigation_cells = std::move(runtime.navigation.cells);
+    auto path_nodes = std::move(runtime.path.nodes);
     runtime = {};
-    runtime.grace_seconds = kBackroomsMarlowInitialGraceSeconds;
+    runtime.navigation.cells = std::move(navigation_cells);
+    runtime.navigation.cells.clear();
+    runtime.path.nodes = std::move(path_nodes);
+    runtime.path.clear();
+    runtime.grace_seconds = apply_initial_grace
+        ? kBackroomsMarlowInitialGraceSeconds
+        : 0.0F;
+    runtime.pressure_attack_armed =
+        durable_pressure < kMarlowPressureAttackTrigger;
+    runtime.pressure_hysteresis_initialized = true;
 }
 
 void enter_phase(
@@ -757,10 +963,13 @@ void begin_pending_manifestation(
     runtime.waiting_for_threat_slot = false;
     runtime.capture_event_emitted = false;
     runtime.kill_event_emitted = false;
+    runtime.capture_transport_blocked = false;
+    runtime.pursuit_stuck_seconds = 0.0F;
+    runtime.path.clear();
+    runtime.has_path_target = false;
+    runtime.pursuit_repath_seconds = 0.0F;
     state.last_mode = selection.mode;
     state.has_last_mode = true;
-    state.manifestation_seconds =
-        next_manifestation_delay(state.random_state, state.pressure);
 
     if (selection.mode == BackroomsMarlowEncounterMode::CornerPeek) {
         runtime.buoy_warning_active = false;
@@ -802,7 +1011,14 @@ void finish_manifestation(
     runtime.pending_manifestation = {};
     runtime.waiting_for_threat_slot = false;
     state.cooldown_seconds =
-        random_range(state.random_state, 18.0F, 24.0F);
+        random_range(state.random_state, 12.0F, 17.0F);
+    state.manifestation_seconds =
+        next_manifestation_delay(state.random_state, state.pressure);
+    runtime.path.clear();
+    runtime.has_path_target = false;
+    runtime.pursuit_repath_seconds = 0.0F;
+    runtime.pursuit_stuck_seconds = 0.0F;
+    runtime.capture_transport_blocked = false;
     enter_phase(
         runtime,
         BackroomsMarlowPhase::Cooldown,
@@ -831,7 +1047,8 @@ void finish_manifestation(
         1.0F);
     auto reveal = visible ? 1.0F : 0.0F;
     if (phase == BackroomsMarlowPhase::Emerging) {
-        reveal = std::min(1.0F, progress * 3.0F);
+        // La durée d'émergence ne dépend pas de la durée totale de chasse.
+        reveal = std::clamp(runtime.phase_seconds / 1.10F, 0.0F, 1.0F);
     } else if (phase == BackroomsMarlowPhase::Submerging) {
         reveal = 1.0F - progress;
     }
@@ -845,14 +1062,60 @@ void finish_manifestation(
                phase == BackroomsMarlowPhase::Screamer) {
         immersion = 0.20F;
     }
-    result.render = {
+
+    auto render_position = safe_vector(
         runtime.position,
+        glm::vec3 {
+            0.5F,
+            static_cast<float>(kBackroomsFloorY + 1),
+            0.5F,
+        });
+    auto available_submersion_depth = 0.0F;
+    const BackroomsMarlowGridPoint render_point {
+        safe_floor_to_int(render_position.x),
+        safe_floor_to_int(render_position.z),
+    };
+    const auto* render_cell = backrooms_marlow_navigation_cell(
+        runtime.navigation,
+        render_point.x,
+        render_point.z);
+    if (render_cell != nullptr &&
+        std::isfinite(render_cell->floor_y) &&
+        std::isfinite(render_cell->water_surface_y)) {
+        const auto floor_anchor =
+            render_cell->floor_y + kMarlowRenderFloorMargin;
+        render_position.y = floor_anchor;
+        if (render_cell->has_water &&
+            render_cell->water_surface_y > floor_anchor) {
+            // L'ancre monte à la surface, mais l'enfoncement disponible reste
+            // borné avant le plancher. Même une piscine d'un bloc ne peut donc
+            // plus avaler les jambes sous la géométrie solide.
+            render_position.y = render_cell->water_surface_y;
+            available_submersion_depth = std::max(
+                render_position.y -
+                    render_cell->floor_y -
+                    kMarlowRenderFloorMargin,
+                0.0F);
+        }
+    }
+    result.render = {
+        render_position,
         runtime.body_yaw_degrees,
         immersion,
+        available_submersion_depth,
         reveal,
         runtime.peek_side,
         phase,
         visible,
+        phase == BackroomsMarlowPhase::CornerPeek
+            ? BackroomsMarlowPresentation::HeadOnlyPeek
+            : phase == BackroomsMarlowPhase::Emerging ||
+                      phase == BackroomsMarlowPhase::Submerging
+                ? BackroomsMarlowPresentation::ProgressiveReveal
+                : BackroomsMarlowPresentation::FullBody,
+        safe_vector(
+            runtime.pending_manifestation.wall_normal,
+            glm::vec3 {0.0F}),
     };
     result.buoy = {
         runtime.buoy_position,
@@ -864,7 +1127,7 @@ void finish_manifestation(
     const auto interference_active =
         phase == BackroomsMarlowPhase::Signaling || visible;
     result.interference = {
-        runtime.position,
+        render_position,
         interference_active ? 18.0F : 0.0F,
         interference_active
             ? std::clamp(0.35F + state.pressure * 0.65F, 0.0F, 1.0F)
@@ -892,6 +1155,20 @@ void finish_manifestation(
 }
 
 } // namespace
+
+void reset_backrooms_marlow_runtime(
+    BackroomsMarlowRuntime& runtime,
+    float durable_pressure,
+    bool apply_initial_grace) noexcept {
+    reset_runtime_for_level(
+        runtime,
+        clamp_finite(
+            durable_pressure,
+            0.0F,
+            0.0F,
+            kBackroomsMarlowMaximumPressure),
+        apply_initial_grace);
+}
 
 auto initialize_backrooms_marlow(
     std::uint32_t seed,
@@ -938,9 +1215,11 @@ auto sanitize_backrooms_marlow_state(
             sanitized.logical_level,
             kMinimumLogicalLevel,
             kMaximumLogicalLevel));
-    if (!valid_mode(sanitized.last_mode)) {
+    if (!sanitized.has_last_mode || !valid_mode(sanitized.last_mode)) {
         sanitized.last_mode = BackroomsMarlowEncounterMode::CornerPeek;
-        sanitized.has_last_mode = false;
+        if (!valid_mode(state.last_mode)) {
+            sanitized.has_last_mode = false;
+        }
     }
     if (sanitized.random_state == 0U) {
         sanitized.random_state = kFallbackRandomState;
@@ -952,8 +1231,28 @@ auto sanitize_backrooms_marlow_state(
 }
 
 auto prepare_backrooms_marlow_for_persistence(
-    const BackroomsMarlowState& state) noexcept -> BackroomsMarlowState {
-    return sanitize_backrooms_marlow_state(state);
+    const BackroomsMarlowState& state,
+    const BackroomsMarlowRuntime& runtime) noexcept -> BackroomsMarlowState {
+    auto prepared = sanitize_backrooms_marlow_state(state);
+    const auto manifestation_active =
+        runtime.waiting_for_threat_slot ||
+        (runtime.phase != BackroomsMarlowPhase::Dormant &&
+         runtime.phase != BackroomsMarlowPhase::Cooldown);
+    if (!manifestation_active) {
+        return prepared;
+    }
+
+    // Je transforme toute cinematique en sa sortie durable normale. Le meme
+    // etat et le meme RNG produisent donc exactement le meme cooldown au save,
+    // sans restaurer une saisie ou une noyade a moitie jouee.
+    prepared.cooldown_seconds = random_range(
+        prepared.random_state,
+        12.0F,
+        17.0F);
+    prepared.manifestation_seconds = next_manifestation_delay(
+        prepared.random_state,
+        prepared.pressure);
+    return prepared;
 }
 
 auto evaluate_backrooms_marlow_pressure(
@@ -980,23 +1279,25 @@ auto evaluate_backrooms_marlow_pressure(
         4.0F);
 
     auto gain = 0.0F;
-    if (player.sprinting && !player.in_water) {
-        gain += 0.12F * safe_dt;
-    }
-    if (player.in_water) {
-        gain += 0.10F * distance;
-        if (player.sprinting) {
-            gain += 0.18F * safe_dt;
+    if (!player.motion_is_forced) {
+        if (player.sprinting && !player.in_water) {
+            gain += 0.12F * safe_dt;
         }
-    }
-    if (player.entered_water) {
-        gain += 0.22F;
-    }
-    if (player.jumped) {
-        gain += 0.10F;
-    }
-    if (player.landed_in_water) {
-        gain += 0.28F;
+        if (player.in_water) {
+            gain += 0.10F * distance;
+            if (player.sprinting) {
+                gain += 0.18F * safe_dt;
+            }
+        }
+        if (player.entered_water) {
+            gain += 0.22F;
+        }
+        if (player.jumped) {
+            gain += 0.10F;
+        }
+        if (player.landed_in_water) {
+            gain += 0.28F;
+        }
     }
     if (flashlight_water_started) {
         gain += 0.08F;
@@ -1038,8 +1339,8 @@ auto select_backrooms_marlow_mode(
     if (pressure >= 0.35F) {
         const std::array<float, 3> weights =
             pressure < 0.82F
-                ? std::array<float, 3> {{0.45F, 0.55F, 0.0F}}
-                : std::array<float, 3> {{0.35F, 0.45F, 0.20F}};
+                ? std::array<float, 3> {{0.20F, 0.65F, 0.15F}}
+                : std::array<float, 3> {{0.08F, 0.47F, 0.45F}};
         const auto previous_index = static_cast<std::size_t>(previous_mode);
         if (has_previous_mode &&
             valid_mode(previous_mode) &&
@@ -1096,6 +1397,9 @@ auto backrooms_marlow_navigation_cell(
     const BackroomsMarlowNavigationGrid& grid,
     int world_x,
     int world_z) noexcept -> const BackroomsMarlowNavigationCell* {
+    if (!navigation_grid_has_valid_shape(grid)) {
+        return nullptr;
+    }
     auto local_x = 0;
     auto local_z = 0;
     if (!grid_local_coordinates(
@@ -1109,13 +1413,17 @@ auto backrooms_marlow_navigation_cell(
     return &grid.cells[local_index(local_x, local_z)];
 }
 
-auto build_backrooms_marlow_navigation_grid(
+namespace {
+
+void rebuild_backrooms_marlow_navigation_grid(
+    BackroomsMarlowNavigationGrid& grid,
     const BackroomsGenerator& generator,
     const ChunkCoord& center_chunk,
     const World* spatial_world,
-    int spatial_world_y_offset) noexcept
-    -> BackroomsMarlowNavigationGrid {
-    BackroomsMarlowNavigationGrid grid {};
+    int spatial_world_y_offset) {
+    // Je redimensionne le buffer existant : apres un reset, sa capacite de
+    // 6 400 cellules est reutilisee sans nouvelle allocation.
+    grid.cells.resize(kBackroomsMarlowNavigationCellCount);
     grid.center_chunk = center_chunk;
     grid.logical_level = static_cast<std::int32_t>(std::clamp<std::int64_t>(
         generator.logical_level(),
@@ -1146,7 +1454,7 @@ auto build_backrooms_marlow_navigation_grid(
                 column.ceiling_y - column.floor_y - 1);
             auto walkable =
                 generator.is_walkable(world_x, world_z) &&
-                clearance >= kMarlowMinimumClearance;
+                clearance >= kBackroomsMarlowRigStandingHeight;
             if (walkable && spatial_world != nullptr) {
                 walkable = is_block_collidable(sample_spatial_block(
                     generator,
@@ -1157,7 +1465,8 @@ auto build_backrooms_marlow_navigation_grid(
                     world_z));
                 const auto occupied_top_y =
                     column.floor_y +
-                    static_cast<int>(std::ceil(kMarlowMinimumClearance));
+                    static_cast<int>(
+                        std::ceil(kBackroomsMarlowRigStandingHeight));
                 for (auto local_y = column.floor_y + 1;
                      walkable && local_y <= occupied_top_y;
                      ++local_y) {
@@ -1223,22 +1532,47 @@ auto build_backrooms_marlow_navigation_grid(
             };
         }
     }
+}
+
+} // namespace
+
+auto build_backrooms_marlow_navigation_grid(
+    const BackroomsGenerator& generator,
+    const ChunkCoord& center_chunk,
+    const World* spatial_world,
+    int spatial_world_y_offset)
+    -> BackroomsMarlowNavigationGrid {
+    BackroomsMarlowNavigationGrid grid {};
+    rebuild_backrooms_marlow_navigation_grid(
+        grid,
+        generator,
+        center_chunk,
+        spatial_world,
+        spatial_world_y_offset);
     return grid;
 }
 
-auto find_backrooms_marlow_path(
+namespace {
+
+[[nodiscard]] auto find_backrooms_marlow_path_impl(
     const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness* readiness,
     BackroomsMarlowGridPoint start,
     BackroomsMarlowGridPoint goal) -> BackroomsMarlowPath {
     BackroomsMarlowPath path {};
-    const auto start_index = nearest_walkable_index(grid, start);
-    const auto goal_index = nearest_walkable_index(grid, goal);
+    const auto start_index = nearest_navigable_index(
+        grid,
+        readiness,
+        start);
+    const auto goal_index = nearest_navigable_index(
+        grid,
+        readiness,
+        goal);
     if (start_index < 0 || goal_index < 0) {
         return path;
     }
     if (start_index == goal_index) {
-        path.nodes[0] = cell_world_point(grid, start_index);
-        path.count = 1U;
+        path.nodes.push_back(cell_world_point(grid, start_index));
         return path;
     }
 
@@ -1256,8 +1590,8 @@ auto find_backrooms_marlow_path(
     const auto start_h =
         manhattan(cell_world_point(grid, start_index), resolved_goal) * 0.50F;
     open.push({start_index, start_h, start_h});
-    constexpr std::array<int, 4> delta_x {{1, -1, 0, 0}};
-    constexpr std::array<int, 4> delta_z {{0, 0, 1, -1}};
+    constexpr std::array<int, 4> kDeltaX {{1, -1, 0, 0}};
+    constexpr std::array<int, 4> kDeltaZ {{0, 0, 1, -1}};
 
     while (!open.empty()) {
         const auto current = open.top();
@@ -1270,26 +1604,38 @@ auto find_backrooms_marlow_path(
         if (current.index == goal_index) {
             break;
         }
+
         const auto current_point = cell_world_point(grid, current.index);
+        const auto& current_cell = grid.cells[current_offset];
         for (std::size_t direction = 0U;
-             direction < delta_x.size();
+             direction < kDeltaX.size();
              ++direction) {
             const BackroomsMarlowGridPoint neighbor_point {
-                current_point.x + delta_x[direction],
-                current_point.z + delta_z[direction],
+                current_point.x + kDeltaX[direction],
+                current_point.z + kDeltaZ[direction],
             };
             const auto neighbor_index = point_index(grid, neighbor_point);
-            if (neighbor_index < 0) {
+            if (neighbor_index < 0 ||
+                !marlow_transition_allowed(
+                    grid,
+                    readiness,
+                    current_point,
+                    neighbor_point)) {
                 continue;
             }
             const auto neighbor_offset =
                 static_cast<std::size_t>(neighbor_index);
-            const auto& neighbor = grid.cells[neighbor_offset];
-            if (!neighbor.walkable || closed[neighbor_offset]) {
+            if (closed[neighbor_offset]) {
                 continue;
             }
-            const auto candidate_cost = costs[current_offset] +
-                movement_cost(neighbor);
+
+            const auto& neighbor = grid.cells[neighbor_offset];
+            const auto vertical_penalty =
+                std::abs(neighbor.floor_y - current_cell.floor_y) * 0.35F;
+            const auto candidate_cost =
+                costs[current_offset] +
+                movement_cost(neighbor) +
+                vertical_penalty;
             if (candidate_cost >= costs[neighbor_offset]) {
                 continue;
             }
@@ -1322,13 +1668,429 @@ auto find_backrooms_marlow_path(
         reverse[reverse_count - 1U] != start_index) {
         return {};
     }
-    path.count = reverse_count;
+
+    path.nodes.resize(reverse_count);
     for (std::size_t index = 0U; index < reverse_count; ++index) {
         path.nodes[index] = cell_world_point(
             grid,
             reverse[reverse_count - index - 1U]);
     }
     return path;
+}
+
+void invalidate_marlow_pursuit_path(
+    BackroomsMarlowRuntime& runtime) noexcept {
+    runtime.path.clear();
+    runtime.has_path_target = false;
+    runtime.pursuit_repath_seconds = 0.0F;
+}
+
+void refresh_marlow_pursuit_path(
+    BackroomsMarlowRuntime& runtime,
+    const BackroomsMarlowChunkReadiness& readiness,
+    const glm::vec3& player_position) {
+    const BackroomsMarlowGridPoint current {
+        safe_floor_to_int(runtime.position.x),
+        safe_floor_to_int(runtime.position.z),
+    };
+    const BackroomsMarlowGridPoint target {
+        safe_floor_to_int(player_position.x),
+        safe_floor_to_int(player_position.z),
+    };
+    const auto target_changed =
+        !runtime.has_path_target || !(runtime.path_target == target);
+    if (!target_changed && runtime.pursuit_repath_seconds > 0.0F) {
+        return;
+    }
+
+    runtime.path = find_backrooms_marlow_path_impl(
+        runtime.navigation,
+        &readiness,
+        current,
+        target);
+    // Le premier noeud est le centre de la cellule déjà occupée. Le rejouer à
+    // chaque recalcul ferait reculer Marlow vers ce centre toutes les 350 ms.
+    if (runtime.path.nodes.size() > 1U) {
+        runtime.path.cursor = 1U;
+    }
+    runtime.path_target = target;
+    runtime.has_path_target = true;
+    runtime.pursuit_repath_seconds = kMarlowPursuitRepathSeconds;
+}
+
+[[nodiscard]] auto approach_marlow_angle(
+    float current,
+    float target,
+    float maximum_delta) noexcept -> float {
+    const auto delta = wrap_degrees(target - current);
+    return wrap_degrees(
+        current + std::clamp(delta, -maximum_delta, maximum_delta));
+}
+
+[[nodiscard]] auto marlow_movement_segment_clear(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness& readiness,
+    const glm::vec3& from,
+    const glm::vec3& to) noexcept -> bool {
+    if (!finite_vector(from) || !finite_vector(to)) {
+        return false;
+    }
+
+    const glm::vec3 horizontal_delta {
+        to.x - from.x,
+        0.0F,
+        to.z - from.z,
+    };
+    const auto distance_squared =
+        glm::dot(horizontal_delta, horizontal_delta);
+    if (!std::isfinite(distance_squared)) {
+        return false;
+    }
+    const BackroomsMarlowGridPoint from_point {
+        safe_floor_to_int(from.x),
+        safe_floor_to_int(from.z),
+    };
+    const auto* from_cell = backrooms_marlow_navigation_cell(
+        grid,
+        from_point.x,
+        from_point.z);
+    if (from_cell == nullptr ||
+        !marlow_body_footprint_clear(
+            grid,
+            &readiness,
+            from.x,
+            from.z,
+            from_cell->floor_y)) {
+        return false;
+    }
+
+    constexpr auto kMovementSweepStep = 0.08F;
+    constexpr auto kMaximumMovementSweepSteps = 32;
+    const auto distance = std::sqrt(std::max(distance_squared, 0.0F));
+    const auto step_count = std::clamp(
+        static_cast<int>(std::ceil(distance / kMovementSweepStep)),
+        1,
+        kMaximumMovementSweepSteps);
+    auto previous_floor = from_cell->floor_y;
+    for (auto step = 1; step <= step_count; ++step) {
+        const auto ratio =
+            static_cast<float>(step) / static_cast<float>(step_count);
+        const auto candidate = from + horizontal_delta * ratio;
+        const BackroomsMarlowGridPoint point {
+            safe_floor_to_int(candidate.x),
+            safe_floor_to_int(candidate.z),
+        };
+        const auto* cell = backrooms_marlow_navigation_cell(
+            grid,
+            point.x,
+            point.z);
+        if (cell == nullptr ||
+            std::abs(cell->floor_y - previous_floor) >
+                kMarlowMaximumStepHeight ||
+            !marlow_body_footprint_clear(
+                grid,
+                &readiness,
+                candidate.x,
+                candidate.z,
+                cell->floor_y)) {
+            return false;
+        }
+        previous_floor = cell->floor_y;
+    }
+    return true;
+}
+
+[[nodiscard]] auto follow_marlow_pursuit_path(
+    BackroomsMarlowRuntime& runtime,
+    const BackroomsMarlowChunkReadiness& readiness,
+    float speed,
+    float dt) noexcept -> float {
+    if (runtime.path.empty() ||
+        !std::isfinite(speed) ||
+        speed <= 0.0F ||
+        !std::isfinite(dt) ||
+        dt <= 0.0F) {
+        return 0.0F;
+    }
+
+    auto remaining_distance = speed * dt;
+    auto travelled = 0.0F;
+    auto safety_iterations = 0U;
+    while (!runtime.path.empty() &&
+           remaining_distance > 0.0001F &&
+           safety_iterations++ < 12U) {
+        const auto target_point =
+            runtime.path.nodes[runtime.path.cursor];
+        const auto* target_cell = backrooms_marlow_navigation_cell(
+            runtime.navigation,
+            target_point.x,
+            target_point.z);
+        if (target_cell == nullptr ||
+            !marlow_point_is_navigable(
+                runtime.navigation,
+                &readiness,
+                target_point)) {
+            invalidate_marlow_pursuit_path(runtime);
+            return travelled;
+        }
+
+        const glm::vec3 target {
+            static_cast<float>(target_point.x) + 0.5F,
+            target_cell->floor_y + 0.001F,
+            static_cast<float>(target_point.z) + 0.5F,
+        };
+        const glm::vec3 horizontal_delta {
+            target.x - runtime.position.x,
+            0.0F,
+            target.z - runtime.position.z,
+        };
+        const auto distance_squared =
+            glm::dot(horizontal_delta, horizontal_delta);
+        if (!std::isfinite(distance_squared)) {
+            invalidate_marlow_pursuit_path(runtime);
+            return travelled;
+        }
+        const auto distance = std::sqrt(std::max(distance_squared, 0.0F));
+        if (distance <= kMarlowPathNodeTolerance) {
+            runtime.position = target;
+            ++runtime.path.cursor;
+            continue;
+        }
+
+        const auto direction = horizontal_delta / distance;
+        const auto travel = std::min(remaining_distance, distance);
+        auto candidate = runtime.position + direction * travel;
+        const BackroomsMarlowGridPoint candidate_point {
+            safe_floor_to_int(candidate.x),
+            safe_floor_to_int(candidate.z),
+        };
+        const auto* candidate_cell = backrooms_marlow_navigation_cell(
+            runtime.navigation,
+            candidate_point.x,
+            candidate_point.z);
+        if (candidate_cell == nullptr ||
+            !marlow_movement_segment_clear(
+                runtime.navigation,
+                readiness,
+                runtime.position,
+                candidate)) {
+            // Le balayage complet interdit le tunneling lorsque le framerate
+            // chute ou qu'un recalcul de chemin change de direction en cellule.
+            invalidate_marlow_pursuit_path(runtime);
+            return travelled;
+        }
+
+        candidate.y = candidate_cell->floor_y + 0.001F;
+        runtime.body_yaw_degrees = approach_marlow_angle(
+            runtime.body_yaw_degrees,
+            yaw_toward(runtime.position, candidate),
+            360.0F * dt);
+        runtime.position = candidate;
+        travelled += travel;
+        remaining_distance -= travel;
+
+        if (travel + kMarlowPathNodeTolerance >= distance) {
+            runtime.position = target;
+            ++runtime.path.cursor;
+        }
+    }
+    return travelled;
+}
+
+[[nodiscard]] auto marlow_runtime_position_is_valid(
+    const BackroomsMarlowRuntime& runtime,
+    const BackroomsMarlowChunkReadiness& readiness) noexcept -> bool {
+    if (!finite_vector(runtime.position)) {
+        return false;
+    }
+    const BackroomsMarlowGridPoint point {
+        safe_floor_to_int(runtime.position.x),
+        safe_floor_to_int(runtime.position.z),
+    };
+    const auto* cell = backrooms_marlow_navigation_cell(
+        runtime.navigation,
+        point.x,
+        point.z);
+    if (runtime.phase == BackroomsMarlowPhase::CornerPeek) {
+        // Je n'impose pas le rayon du corps absent au mode HeadOnlyPeek : la
+        // tete doit precisement pouvoir se placer contre son mur d'occlusion.
+        return cell != nullptr &&
+               cell->walkable &&
+               cell->clearance >= kBackroomsMarlowRigStandingHeight &&
+               point_ready(readiness, point);
+    }
+    return cell != nullptr &&
+           marlow_body_footprint_clear(
+               runtime.navigation,
+               &readiness,
+               runtime.position.x,
+               runtime.position.z,
+               cell->floor_y);
+}
+
+[[nodiscard]] auto marlow_capture_transition_is_valid(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness& readiness,
+    BackroomsMarlowGridPoint from,
+    BackroomsMarlowGridPoint to) noexcept -> bool {
+    const auto* from_cell = backrooms_marlow_navigation_cell(
+        grid,
+        from.x,
+        from.z);
+    const auto* to_cell = backrooms_marlow_navigation_cell(
+        grid,
+        to.x,
+        to.z);
+    return from_cell != nullptr &&
+           to_cell != nullptr &&
+           from_cell->walkable &&
+           to_cell->walkable &&
+           point_ready(readiness, from) &&
+           point_ready(readiness, to) &&
+           std::abs(from_cell->floor_y - to_cell->floor_y) <=
+               kMarlowMaximumStepHeight;
+}
+
+[[nodiscard]] auto marlow_capture_corridor_is_clear(
+    const BackroomsMarlowNavigationGrid& grid,
+    const BackroomsMarlowChunkReadiness& readiness,
+    BackroomsMarlowGridPoint from,
+    BackroomsMarlowGridPoint to) noexcept -> bool {
+    if (!marlow_capture_transition_is_valid(
+            grid,
+            readiness,
+            from,
+            from) ||
+        !marlow_capture_transition_is_valid(
+            grid,
+            readiness,
+            to,
+            to)) {
+        return false;
+    }
+
+    const auto delta_x = to.x - from.x;
+    const auto delta_z = to.z - from.z;
+    const auto count_x = std::abs(delta_x);
+    const auto count_z = std::abs(delta_z);
+    const auto step_x = delta_x > 0 ? 1 : delta_x < 0 ? -1 : 0;
+    const auto step_z = delta_z > 0 ? 1 : delta_z < 0 ? -1 : 0;
+    auto current = from;
+    auto traversed_x = 0;
+    auto traversed_z = 0;
+    while (traversed_x < count_x || traversed_z < count_z) {
+        const auto decision_x =
+            static_cast<std::int64_t>(1 + 2 * traversed_x) * count_z;
+        const auto decision_z =
+            static_cast<std::int64_t>(1 + 2 * traversed_z) * count_x;
+        if (decision_x == decision_z) {
+            const BackroomsMarlowGridPoint side_x {
+                current.x + step_x,
+                current.z,
+            };
+            const BackroomsMarlowGridPoint side_z {
+                current.x,
+                current.z + step_z,
+            };
+            const BackroomsMarlowGridPoint diagonal {
+                current.x + step_x,
+                current.z + step_z,
+            };
+            // Je valide les deux branches d'un coin exact : aucune marche
+            // infranchissable ne peut etre masquee par une diagonale.
+            if (!marlow_capture_transition_is_valid(
+                    grid,
+                    readiness,
+                    current,
+                    side_x) ||
+                !marlow_capture_transition_is_valid(
+                    grid,
+                    readiness,
+                    current,
+                    side_z) ||
+                !marlow_capture_transition_is_valid(
+                    grid,
+                    readiness,
+                    side_x,
+                    diagonal) ||
+                !marlow_capture_transition_is_valid(
+                    grid,
+                    readiness,
+                    side_z,
+                    diagonal)) {
+                return false;
+            }
+            current = diagonal;
+            ++traversed_x;
+            ++traversed_z;
+            continue;
+        }
+
+        auto next = current;
+        if (decision_x < decision_z) {
+            next.x += step_x;
+            ++traversed_x;
+        } else {
+            next.z += step_z;
+            ++traversed_z;
+        }
+        if (!marlow_capture_transition_is_valid(
+                grid,
+                readiness,
+                current,
+                next)) {
+            return false;
+        }
+        current = next;
+    }
+    return true;
+}
+
+[[nodiscard]] auto marlow_capture_corridor_is_valid(
+    const BackroomsMarlowRuntime& runtime,
+    const BackroomsMarlowChunkReadiness& readiness,
+    const glm::vec3& player_position) noexcept -> bool {
+    if (!finite_vector(runtime.capture_target) ||
+        !finite_vector(player_position)) {
+        return false;
+    }
+    const BackroomsMarlowGridPoint player_point {
+        safe_floor_to_int(player_position.x),
+        safe_floor_to_int(player_position.z),
+    };
+    const BackroomsMarlowGridPoint target_point {
+        safe_floor_to_int(runtime.capture_target.x),
+        safe_floor_to_int(runtime.capture_target.z),
+    };
+    const auto* target_cell = backrooms_marlow_navigation_cell(
+        runtime.navigation,
+        target_point.x,
+        target_point.z);
+    return target_cell != nullptr &&
+           target_cell->walkable &&
+           target_cell->has_water &&
+           point_ready(readiness, target_point) &&
+           target_cell->deep_water &&
+           target_cell->water_depth >=
+               kMarlowDrowningMinimumWaterDepth &&
+           marlow_capture_corridor_is_clear(
+               runtime.navigation,
+               readiness,
+               player_point,
+               target_point);
+}
+
+} // namespace
+
+auto find_backrooms_marlow_path(
+    const BackroomsMarlowNavigationGrid& grid,
+    BackroomsMarlowGridPoint start,
+    BackroomsMarlowGridPoint goal) -> BackroomsMarlowPath {
+    return find_backrooms_marlow_path_impl(
+        grid,
+        nullptr,
+        start,
+        goal);
 }
 
 auto backrooms_marlow_has_detour(
@@ -1402,12 +2164,16 @@ auto select_backrooms_marlow_manifestation(
     const BackroomsMarlowChunkReadiness& readiness,
     const BackroomsMarlowPlayerContext& player,
     BackroomsMarlowEncounterMode mode,
-    std::uint32_t random_state) noexcept
+    std::uint32_t random_state)
     -> BackroomsMarlowManifestationSelection {
     BackroomsMarlowManifestationSelection selection {};
     selection.mode = valid_mode(mode)
         ? mode
         : BackroomsMarlowEncounterMode::CornerPeek;
+    selection.presentation =
+        selection.mode == BackroomsMarlowEncounterMode::CornerPeek
+            ? BackroomsMarlowPresentation::HeadOnlyPeek
+            : BackroomsMarlowPresentation::FullBody;
     if (random_state == 0U) {
         random_state = kFallbackRandomState;
     }
@@ -1438,7 +2204,10 @@ auto select_backrooms_marlow_manifestation(
                 continue;
             }
             const auto point = cell_world_point(grid, static_cast<int>(index));
-            if (!point_ready(readiness, point)) {
+            if (!marlow_point_is_navigable(
+                    grid,
+                    &readiness,
+                    point)) {
                 continue;
             }
             const auto position = cell_position(grid, point);
@@ -1463,8 +2232,9 @@ auto select_backrooms_marlow_manifestation(
             selection.next_random_state = random_state;
             return selection;
         }
-        direct_path = find_backrooms_marlow_path(
+        direct_path = find_backrooms_marlow_path_impl(
             grid,
+            &readiness,
             player_point,
             route_goal);
         if (direct_path.empty()) {
@@ -1472,7 +2242,7 @@ auto select_backrooms_marlow_manifestation(
             return selection;
         }
         for (std::size_t path_index = 0U;
-             path_index < direct_path.count;
+             path_index < direct_path.nodes.size();
              ++path_index) {
             if (!point_ready(readiness, direct_path.nodes[path_index])) {
                 selection.next_random_state = random_state;
@@ -1556,13 +2326,21 @@ auto select_backrooms_marlow_manifestation(
             continue;
         }
         const auto point = cell_world_point(grid, static_cast<int>(index));
-        if (!point_ready(readiness, point)) {
+        const auto point_is_clear =
+            selection.mode == BackroomsMarlowEncounterMode::CornerPeek
+                ? cell.clearance >= kBackroomsMarlowRigStandingHeight &&
+                      point_ready(readiness, point)
+                : marlow_point_is_navigable(
+                      grid,
+                      &readiness,
+                      point);
+        if (!point_is_clear) {
             continue;
         }
         auto on_direct_route = false;
         if (selection.mode == BackroomsMarlowEncounterMode::Blocking) {
             for (std::size_t path_index = 1U;
-                 path_index + 1U < direct_path.count;
+                 path_index + 1U < direct_path.nodes.size();
                  ++path_index) {
                 if (direct_path.nodes[path_index] == point) {
                     on_direct_route = true;
@@ -1580,7 +2358,7 @@ auto select_backrooms_marlow_manifestation(
             selection.mode == BackroomsMarlowEncounterMode::Blocking
                 ? 8.0F
                 : 2.0F,
-            true);
+            kMarlowMinimumSafeWaterDepth);
         const auto has_detour =
             selection.mode == BackroomsMarlowEncounterMode::Blocking &&
             has_detour_impl(
@@ -1630,13 +2408,20 @@ auto select_backrooms_marlow_manifestation(
             best_point,
             player.feet_position - selection.position);
         if (occluder.found) {
-            // Je rapproche le bassin du vrai mur sans quitter la cellule
-            // praticable, puis je fais pencher le haut du corps du cote libre.
+            // Le centre reste à plus du rayon corporel de la paroi. Le rig
+            // supérieur effectue seul le mouvement de regard autour de l'angle.
             selection.position.x +=
-                static_cast<float>(occluder.offset.x) * 0.32F;
+                static_cast<float>(occluder.offset.x) *
+                kMarlowCornerWallOffset;
             selection.position.z +=
-                static_cast<float>(occluder.offset.z) * 0.32F;
+                static_cast<float>(occluder.offset.z) *
+                kMarlowCornerWallOffset;
             selection.peek_side = occluder.peek_side;
+            selection.wall_normal = {
+                -static_cast<float>(occluder.offset.x),
+                0.0F,
+                -static_cast<float>(occluder.offset.z),
+            };
         }
     }
     selection.found = true;
@@ -1649,7 +2434,7 @@ auto evaluate_backrooms_marlow_capture(
     const BackroomsMarlowChunkReadiness& readiness,
     const BackroomsMarlowPlayerContext& player,
     const glm::vec3& marlow_position,
-    bool buoy_warning_active) noexcept
+    bool buoy_warning_active)
     -> BackroomsMarlowCaptureEvaluation {
     BackroomsMarlowCaptureEvaluation evaluation {};
     const auto safe_player = safe_vector(
@@ -1668,7 +2453,7 @@ auto evaluate_backrooms_marlow_capture(
         safe_floor_to_int(safe_marlow.x),
         safe_floor_to_int(safe_marlow.z),
     };
-    evaluation.player_reachable = backrooms_marlow_supercover_clear(
+    evaluation.player_reachable = marlow_capture_corridor_is_clear(
         grid,
         readiness,
         marlow_point,
@@ -1685,33 +2470,45 @@ auto evaluate_backrooms_marlow_capture(
         readiness,
         player_point,
         maximum_water_distance,
-        true);
-    if (!valid_grid_point(water_point)) {
+        kMarlowDrowningMinimumWaterDepth);
+    if (!valid_grid_point(water_point) ||
+        !marlow_capture_corridor_is_clear(
+            grid,
+            readiness,
+            player_point,
+            water_point)) {
         return evaluation;
     }
-    const auto path = find_backrooms_marlow_path(
+
+    // La route de Marlow et la trajectoire de traction sont deux contraintes
+    // distinctes : un A* autour d'un mur n'autorise jamais à tirer le joueur
+    // en ligne droite à travers ce même mur.
+    const auto path = find_backrooms_marlow_path_impl(
         grid,
+        &readiness,
         marlow_point,
         water_point);
     if (path.empty()) {
         return evaluation;
     }
-    evaluation.connected_water_found = true;
-    evaluation.water_target = cell_position(grid, water_point);
     const auto* water_cell = backrooms_marlow_navigation_cell(
         grid,
         water_point.x,
         water_point.z);
-    if (water_cell != nullptr) {
-        // Je fournis le fond et la surface au futur controleur via une cible
-        // bornee au plancher ; la camera n'a aucune raison de passer dessous.
-        evaluation.water_target.y = std::max(
-            water_cell->floor_y + 0.05F,
-            std::min(
-                water_cell->water_surface_y - 0.10F,
-                water_cell->floor_y +
-                    std::max(water_cell->water_depth * 0.55F, 0.10F)));
+    if (water_cell == nullptr ||
+        !water_cell->deep_water ||
+        water_cell->water_depth < kMarlowDrowningMinimumWaterDepth) {
+        return evaluation;
     }
+
+    evaluation.connected_water_found = true;
+    // Je tire les pieds juste au-dessus du fond. La noyade ne sera validee
+    // ensuite que si la vraie tete du joueur se trouve sous cette surface.
+    evaluation.water_target = {
+        static_cast<float>(water_point.x) + 0.5F,
+        water_cell->floor_y + 0.05F,
+        static_cast<float>(water_point.z) + 0.5F,
+    };
     evaluation.allowed = buoy_warning_active;
     return evaluation;
 }
@@ -1735,11 +2532,19 @@ auto update_backrooms_marlow(
             kMinimumLogicalLevel,
             kMaximumLogicalLevel));
     if (!generator.is_poolrooms() || logical_level > -2) {
-        reset_runtime_for_level(runtime);
+        BackroomsMarlowUpdateResult lifecycle {};
+        lifecycle.cancels_threat_request =
+            runtime.waiting_for_threat_slot;
+        lifecycle.releases_threat_slot = context.threat_slot_owned;
+        reset_backrooms_marlow_runtime(runtime, state.pressure);
         state.logical_level = logical_level;
-        return {};
+        return lifecycle;
     }
     if (state.logical_level != logical_level) {
+        BackroomsMarlowUpdateResult lifecycle {};
+        lifecycle.cancels_threat_request =
+            runtime.waiting_for_threat_slot;
+        lifecycle.releases_threat_slot = context.threat_slot_owned;
         state.logical_level = logical_level;
         state.cooldown_seconds = std::max(
             state.cooldown_seconds,
@@ -1747,7 +2552,14 @@ auto update_backrooms_marlow(
         state.manifestation_seconds = std::max(
             state.manifestation_seconds,
             kBackroomsMarlowInitialGraceSeconds);
-        reset_runtime_for_level(runtime);
+        reset_backrooms_marlow_runtime(runtime, state.pressure);
+        return lifecycle;
+    }
+
+    if (!runtime.pressure_hysteresis_initialized) {
+        runtime.pressure_attack_armed =
+            state.pressure < kMarlowPressureAttackTrigger;
+        runtime.pressure_hysteresis_initialized = true;
     }
 
     const auto safe_dt = clamp_finite(
@@ -1761,6 +2573,7 @@ auto update_backrooms_marlow(
     const auto player_chunk = backrooms_marlow_chunk_at(player_position);
     const auto rebuild_navigation =
         !runtime.navigation_valid ||
+        !navigation_grid_has_valid_shape(runtime.navigation) ||
         runtime.navigation.logical_level != logical_level ||
         runtime.navigation.center_chunk.x != player_chunk.x ||
         runtime.navigation.center_chunk.z != player_chunk.z ||
@@ -1772,7 +2585,8 @@ auto update_backrooms_marlow(
     const auto pending_invalidated_by_navigation =
         rebuild_navigation && runtime.waiting_for_threat_slot;
     if (rebuild_navigation) {
-        runtime.navigation = build_backrooms_marlow_navigation_grid(
+        rebuild_backrooms_marlow_navigation_grid(
+            runtime.navigation,
             generator,
             player_chunk,
             context.spatial_world,
@@ -1780,7 +2594,9 @@ auto update_backrooms_marlow(
         runtime.navigation_readiness = context.chunk_readiness;
         runtime.navigation_valid = true;
         runtime.navigation_readiness_valid = true;
-        runtime.path = {};
+        runtime.path.clear();
+        runtime.has_path_target = false;
+        runtime.pursuit_repath_seconds = 0.0F;
         if (pending_invalidated_by_navigation) {
             runtime.pending_manifestation = {};
             runtime.waiting_for_threat_slot = false;
@@ -1822,6 +2638,24 @@ auto update_backrooms_marlow(
         runtime.quiet_seconds = pressure.quiet_seconds;
     }
 
+    if (state.pressure <= kMarlowPressureAttackReset) {
+        runtime.pressure_attack_armed = true;
+    }
+    if (runtime.pressure_attack_armed &&
+        state.pressure >= kMarlowPressureAttackTrigger &&
+        context.player_alive &&
+        (runtime.phase == BackroomsMarlowPhase::Dormant ||
+         runtime.phase == BackroomsMarlowPhase::Cooldown)) {
+        const auto reaction_delay = random_range(
+            state.random_state,
+            kMarlowPressureReactionMinimumSeconds,
+            kMarlowPressureReactionMaximumSeconds);
+        state.manifestation_seconds = std::min(
+            state.manifestation_seconds,
+            reaction_delay);
+        runtime.pressure_attack_armed = false;
+    }
+
     runtime.grace_seconds = std::max(
         runtime.grace_seconds - safe_dt,
         0.0F);
@@ -1831,6 +2665,9 @@ auto update_backrooms_marlow(
     state.cue_seconds -= safe_dt;
     state.manifestation_seconds -= safe_dt;
     runtime.retry_seconds = std::max(runtime.retry_seconds - safe_dt, 0.0F);
+    runtime.pursuit_repath_seconds = std::max(
+        runtime.pursuit_repath_seconds - safe_dt,
+        0.0F);
     runtime.phase_seconds += safe_dt;
 
     if (state.cue_seconds <= 0.0F &&
@@ -1905,15 +2742,32 @@ auto update_backrooms_marlow(
             mode.mode,
             state.random_state);
         state.random_state = selection.next_random_state;
+        const auto retry_aggressive_mode =
+            [&](BackroomsMarlowEncounterMode retry_mode) {
+                selection = select_backrooms_marlow_manifestation(
+                    runtime.navigation,
+                    context.chunk_readiness,
+                    context.player,
+                    retry_mode,
+                    state.random_state);
+                state.random_state = selection.next_random_state;
+            };
+        if (!selection.found &&
+            mode.mode == BackroomsMarlowEncounterMode::Blocking) {
+            retry_aggressive_mode(
+                BackroomsMarlowEncounterMode::WaterAmbush);
+        } else if (
+            !selection.found &&
+            mode.mode == BackroomsMarlowEncounterMode::WaterAmbush) {
+            retry_aggressive_mode(
+                BackroomsMarlowEncounterMode::Blocking);
+        }
         if (!selection.found &&
             mode.mode != BackroomsMarlowEncounterMode::CornerPeek) {
-            selection = select_backrooms_marlow_manifestation(
-                runtime.navigation,
-                context.chunk_readiness,
-                context.player,
-                BackroomsMarlowEncounterMode::CornerPeek,
-                state.random_state);
-            state.random_state = selection.next_random_state;
+            // L'observation d'angle reste le dernier repli sûr, uniquement
+            // après avoir tenté les deux variantes capables de poursuivre.
+            retry_aggressive_mode(
+                BackroomsMarlowEncounterMode::CornerPeek);
         }
         if (selection.found) {
             runtime.pending_manifestation = selection;
@@ -1941,7 +2795,48 @@ auto update_backrooms_marlow(
         runtime.phase != BackroomsMarlowPhase::Drowning &&
         runtime.phase != BackroomsMarlowPhase::Screamer) {
         runtime.buoy_warning_active = false;
+        invalidate_marlow_pursuit_path(runtime);
         enter_phase(runtime, BackroomsMarlowPhase::Submerging, 0.65F);
+    }
+
+    const auto transport_was_blocked =
+        std::exchange(runtime.capture_transport_blocked, false);
+    const auto capture_in_progress =
+        runtime.phase == BackroomsMarlowPhase::Dragging ||
+        runtime.phase == BackroomsMarlowPhase::Drowning;
+    if (capture_in_progress &&
+        (transport_was_blocked ||
+         !context.player_alive ||
+         !marlow_capture_corridor_is_valid(
+             runtime,
+             context.chunk_readiness,
+             player_position))) {
+        // Une collision réelle ou une modification du décor annule la noyade :
+        // on ne téléporte jamais le joueur et on ne tue jamais à travers un mur.
+        runtime.buoy_warning_active = false;
+        runtime.capture_target = {};
+        invalidate_marlow_pursuit_path(runtime);
+        enter_phase(runtime, BackroomsMarlowPhase::Submerging, 0.30F);
+    }
+
+    const auto body_must_remain_spatially_valid =
+        runtime.phase != BackroomsMarlowPhase::Dormant &&
+        runtime.phase != BackroomsMarlowPhase::Cooldown &&
+        runtime.phase != BackroomsMarlowPhase::Screamer;
+    if (body_must_remain_spatially_valid &&
+        !marlow_runtime_position_is_valid(
+            runtime,
+            context.chunk_readiness)) {
+        runtime.buoy_warning_active = false;
+        runtime.capture_target = {};
+        invalidate_marlow_pursuit_path(runtime);
+        if (runtime.phase == BackroomsMarlowPhase::Submerging) {
+            runtime.phase_duration_seconds = std::min(
+                runtime.phase_duration_seconds,
+                runtime.phase_seconds + 0.15F);
+        } else {
+            enter_phase(runtime, BackroomsMarlowPhase::Submerging, 0.20F);
+        }
     }
 
     switch (runtime.phase) {
@@ -1958,7 +2853,12 @@ auto update_backrooms_marlow(
             enter_phase(
                 runtime,
                 next_phase,
-                random_range(state.random_state, 4.0F, 8.0F));
+                random_range(
+                    state.random_state,
+                    kMarlowPursuitMinimumSeconds,
+                    kMarlowPursuitMaximumSeconds));
+            runtime.pursuit_stuck_seconds = 0.0F;
+            invalidate_marlow_pursuit_path(runtime);
             emit_event(
                 result,
                 state,
@@ -1973,6 +2873,49 @@ auto update_backrooms_marlow(
         break;
     case BackroomsMarlowPhase::Emerging:
     case BackroomsMarlowPhase::Blocking: {
+        const auto distance_before_move = horizontal_distance(
+            runtime.position,
+            player_position);
+        auto travelled = 0.0F;
+        if (context.threat_slot_owned &&
+            context.player_alive &&
+            distance_before_move > kMarlowPursuitStopDistance) {
+            refresh_marlow_pursuit_path(
+                runtime,
+                context.chunk_readiness,
+                player_position);
+            const auto desired_speed =
+                kMarlowPursuitBaseSpeed +
+                std::clamp(state.pressure, 0.0F, 1.0F) *
+                    kMarlowPursuitPressureSpeedBonus +
+                (runtime.pending_manifestation.mode ==
+                         BackroomsMarlowEncounterMode::WaterAmbush
+                     ? kMarlowWaterAmbushSpeedBonus
+                     : 0.0F);
+            const auto maximum_useful_speed =
+                (distance_before_move - kMarlowPursuitStopDistance) /
+                std::max(safe_dt, 0.001F);
+            travelled = follow_marlow_pursuit_path(
+                runtime,
+                context.chunk_readiness,
+                std::min(desired_speed, maximum_useful_speed),
+                safe_dt);
+        }
+
+        const auto distance_after_move = horizontal_distance(
+            runtime.position,
+            player_position);
+        runtime.body_yaw_degrees = approach_marlow_angle(
+            runtime.body_yaw_degrees,
+            yaw_toward(runtime.position, player_position),
+            360.0F * safe_dt);
+        if (travelled > 0.0001F ||
+            distance_after_move <= kMarlowPursuitStopDistance) {
+            runtime.pursuit_stuck_seconds = 0.0F;
+        } else {
+            runtime.pursuit_stuck_seconds += safe_dt;
+        }
+
         const auto capture = evaluate_backrooms_marlow_capture(
             runtime.navigation,
             context.chunk_readiness,
@@ -1984,6 +2927,9 @@ auto update_backrooms_marlow(
             context.player_alive &&
             capture.allowed) {
             runtime.capture_target = capture.water_target;
+            runtime.capture_transport_blocked = false;
+            runtime.pursuit_stuck_seconds = 0.0F;
+            invalidate_marlow_pursuit_path(runtime);
             enter_phase(
                 runtime,
                 BackroomsMarlowPhase::Dragging,
@@ -1999,7 +2945,10 @@ auto update_backrooms_marlow(
             }
         } else if (
             runtime.phase_seconds >= runtime.phase_duration_seconds ||
-            capture.distance < 2.0F) {
+            runtime.pursuit_stuck_seconds >=
+                kMarlowPursuitStuckTimeoutSeconds) {
+            runtime.buoy_warning_active = false;
+            invalidate_marlow_pursuit_path(runtime);
             enter_phase(runtime, BackroomsMarlowPhase::Submerging, 0.65F);
         }
         break;
@@ -2028,6 +2977,49 @@ auto update_backrooms_marlow(
         break;
     case BackroomsMarlowPhase::Drowning:
         if (runtime.phase_seconds >= runtime.phase_duration_seconds) {
+            const auto target_horizontal_distance = horizontal_distance(
+                player_position,
+                runtime.capture_target);
+            const auto target_vertical_distance = std::abs(
+                player_position.y - runtime.capture_target.y);
+            const BackroomsMarlowGridPoint target_point {
+                safe_floor_to_int(runtime.capture_target.x),
+                safe_floor_to_int(runtime.capture_target.z),
+            };
+            const auto* target_cell = backrooms_marlow_navigation_cell(
+                runtime.navigation,
+                target_point.x,
+                target_point.z);
+            const auto target_is_deep_water =
+                target_cell != nullptr &&
+                target_cell->walkable &&
+                target_cell->has_water &&
+                target_cell->deep_water &&
+                target_cell->water_depth >=
+                    kMarlowDrowningMinimumWaterDepth;
+            const auto eye_is_below_target_surface =
+                target_is_deep_water &&
+                finite_vector(context.player.eye_position) &&
+                context.player.eye_position.y <=
+                    target_cell->water_surface_y - 0.05F;
+            if (target_horizontal_distance >
+                    kMarlowDrowningTargetTolerance ||
+                target_vertical_distance >
+                    kMarlowDrowningVerticalTolerance ||
+                !finite_vector(context.player.feet_position) ||
+                !context.player.head_in_water ||
+                !eye_is_below_target_surface) {
+                // La durée seule ne suffit pas : la victime doit réellement
+                // avoir les pieds au fond et la tête sous la vraie surface.
+                // Toute incohérence annule la capture sans jamais tuer.
+                runtime.buoy_warning_active = false;
+                runtime.capture_target = {};
+                enter_phase(
+                    runtime,
+                    BackroomsMarlowPhase::Submerging,
+                    0.30F);
+                break;
+            }
             if (!runtime.kill_event_emitted) {
                 result.kill_player = true;
                 runtime.kill_event_emitted = true;

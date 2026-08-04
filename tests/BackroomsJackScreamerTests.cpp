@@ -54,4 +54,27 @@ TEST_CASE("Jack screamer decoder rejects a truncated bitmap") {
     std::filesystem::remove(path, ignored);
 }
 
+TEST_CASE("Marlow screamer asset resolves and decodes with its own diagnostics") {
+    const auto asset_path =
+        resolve_backrooms_marlow_screamer_path(
+            std::filesystem::current_path());
+    REQUIRE_FALSE(asset_path.empty());
+    const auto asset = load_backrooms_marlow_screamer_bmp(asset_path);
+    INFO(asset.error);
+    REQUIRE(asset.valid());
+    CHECK(asset.width == 1280);
+    CHECK(asset.height == 720);
+
+    const auto invalid_path =
+        std::filesystem::temp_directory_path() /
+        "valcraft_marlow_missing_screamer.bmp";
+    std::error_code ignored;
+    std::filesystem::remove(invalid_path, ignored);
+    const auto invalid =
+        load_backrooms_marlow_screamer_bmp(invalid_path);
+    CHECK_FALSE(invalid.valid());
+    CHECK(invalid.error.find("Marlow") != std::string::npos);
+    CHECK(invalid.error.find("Jack") == std::string::npos);
+}
+
 } // namespace valcraft

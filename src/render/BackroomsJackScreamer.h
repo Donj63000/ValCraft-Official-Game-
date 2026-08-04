@@ -29,6 +29,11 @@ struct BackroomsJackScreamerImage {
 [[nodiscard]] auto load_backrooms_jack_screamer_bmp(
     const std::filesystem::path& path) -> BackroomsJackScreamerImage;
 
+// Je garde le même décodeur durci mais j'identifie Marlow dans chaque erreur :
+// un asset invalide ne doit plus orienter le diagnostic vers Jack.
+[[nodiscard]] auto load_backrooms_marlow_screamer_bmp(
+    const std::filesystem::path& path) -> BackroomsJackScreamerImage;
+
 // Je cherche les memes emplacements en developpement, dans bin/ et dans un
 // paquet installe. Aucun chemin absolu n'est fige dans l'executable.
 [[nodiscard]] auto resolve_backrooms_jack_screamer_path(

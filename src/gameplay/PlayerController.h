@@ -71,6 +71,17 @@ struct PlayerInput {
     bool toggle_fly = false;
 };
 
+struct PlayerWaterContactSnapshot {
+    bool feet_in_water = false;
+    bool body_in_water = false;
+    bool head_in_water = false;
+    bool swimming = false;
+
+    [[nodiscard]] constexpr auto any_contact() const noexcept -> bool {
+        return feet_in_water || body_in_water || head_in_water;
+    }
+};
+
 struct PlayerState {
     glm::vec3 position {0.0F, 70.0F, 0.0F};
     glm::vec3 velocity {0.0F};
@@ -163,6 +174,12 @@ public:
     [[nodiscard]] auto block_break_speed_multiplier() const noexcept -> float;
     [[nodiscard]] auto is_dead() const noexcept -> bool;
     [[nodiscard]] auto is_climbing_dynamic_obstacle() const noexcept -> bool;
+    // Je rends l'etat d'eau physique consultable sans exposer ni modifier
+    // l'etat interne du joueur. La position fournie represente toujours ses pieds.
+    [[nodiscard]] auto sample_world_water_contact(
+        const World& world,
+        const glm::vec3& feet_position) const noexcept
+        -> PlayerWaterContactSnapshot;
 
     void load_state(const PlayerState& state) noexcept;
     void set_position(const glm::vec3& position) noexcept;
@@ -220,14 +237,9 @@ public:
                                                         const ShipEntity& obstacle) -> bool;
 
 private:
-    struct WaterContactState {
-        bool feet_in_water = false;
-        bool body_in_water = false;
-        bool head_in_water = false;
-        bool swimming = false;
-    };
-
-    void update_survival_state(float dt, const WaterContactState& water_contact);
+    void update_survival_state(
+        float dt,
+        const PlayerWaterContactSnapshot& water_contact);
     void update_body_yaw(float dt, const glm::vec2& horizontal_displacement) noexcept;
     void move_axis(float delta, int axis, const World& world, const ShipEntity* dynamic_obstacle);
     [[nodiscard]] auto try_step_onto_backrooms_connector(
@@ -255,7 +267,7 @@ private:
         const glm::vec3& feet_position,
         const ShipEntity* dynamic_obstacle,
         const OceanState* dynamic_ocean) const noexcept
-        -> WaterContactState;
+        -> PlayerWaterContactSnapshot;
     [[nodiscard]] auto dynamic_support_height_at(const ShipEntity& obstacle,
                                                  const glm::vec3& feet_position,
                                                  float min_height,

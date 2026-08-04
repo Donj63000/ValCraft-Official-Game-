@@ -93,6 +93,14 @@ enum class BackroomsJackSmokeMode {
     RearStare = 7,
 };
 
+enum class BackroomsMarlowSmokeMode {
+    None = 0,
+    Peek = 1,
+    Chase = 2,
+    CaptureBlocked = 3,
+    Screamer = 4,
+};
+
 inline constexpr auto kBackroomsJackSmokeCorridorDistanceMinimum = 32.0F;
 inline constexpr auto kBackroomsJackSmokeCorridorDistanceDefault = 40.0F;
 inline constexpr auto kBackroomsJackSmokeCorridorDistanceMaximum = 52.0F;
@@ -134,6 +142,8 @@ struct GameOptions {
     float smoke_backrooms_jack_distance =
         kBackroomsJackSmokeCorridorDistanceDefault;
     bool smoke_backrooms_jack_distance_explicitly_set = false;
+    BackroomsMarlowSmokeMode smoke_backrooms_marlow =
+        BackroomsMarlowSmokeMode::None;
     // Je peux capturer directement un étage profond sans devoir automatiser
     // plusieurs escaliers dans un smoke visuel.
     int smoke_backrooms_level = 0;

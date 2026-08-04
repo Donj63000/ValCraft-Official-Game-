@@ -1095,4 +1095,21 @@ TEST_CASE("maritime orchestration changes are quantized at the next measure") {
     CHECK(samples_are_finite_and_bounded(after_measure));
 }
 
+TEST_CASE("le filtre de noyade publie toujours une cible atomique bornee") {
+    GameMusic music {};
+
+    music.set_backrooms_drowning_filter(0.63F);
+    CHECK(music.backrooms_drowning_filter() == doctest::Approx(0.63F));
+
+    music.set_backrooms_drowning_filter(-4.0F);
+    CHECK(music.backrooms_drowning_filter() == doctest::Approx(0.0F));
+
+    music.set_backrooms_drowning_filter(4.0F);
+    CHECK(music.backrooms_drowning_filter() == doctest::Approx(1.0F));
+
+    music.set_backrooms_drowning_filter(
+        std::numeric_limits<float>::quiet_NaN());
+    CHECK(music.backrooms_drowning_filter() == doctest::Approx(0.0F));
+}
+
 }

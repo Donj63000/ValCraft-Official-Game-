@@ -37,6 +37,10 @@ inline constexpr float kBackroomsMarlowConnectedShoreDistance = 1.5F;
 inline constexpr float kBackroomsMarlowDrowningSeconds = 1.8F;
 inline constexpr float kBackroomsMarlowScreamerSeconds = 0.85F;
 inline constexpr float kBackroomsMarlowInitialGraceSeconds = 12.0F;
+// Je partage les dimensions maximales du rig avec la navigation : aucune
+// apparition ne peut etre validee dans un volume ou son visuel traverserait.
+inline constexpr float kBackroomsMarlowRigStandingHeight = 3.85F;
+inline constexpr float kBackroomsMarlowRigVisualRadius = 1.90F;
 
 enum class BackroomsMarlowPhase : std::uint8_t {
     Dormant = 0,
@@ -55,6 +59,12 @@ enum class BackroomsMarlowEncounterMode : std::uint8_t {
     CornerPeek = 0,
     Blocking = 1,
     WaterAmbush = 2,
+};
+
+enum class BackroomsMarlowPresentation : std::uint8_t {
+    FullBody = 0,
+    ProgressiveReveal = 1,
+    HeadOnlyPeek = 2,
 };
 
 enum class BackroomsMarlowEventKind : std::uint8_t {
@@ -93,24 +103,24 @@ struct BackroomsMarlowNavigationGrid {
         -kBackroomsMarlowNavigationChunkRadius * kChunkSizeX;
     int origin_world_z =
         -kBackroomsMarlowNavigationChunkRadius * kChunkSizeZ;
-    // Je garde la grille sur le tas : une grille 5x5 chunks est trop grande
-    // pour etre retournee par valeur sans risquer d'epuiser la pile Windows.
-    std::vector<BackroomsMarlowNavigationCell> cells =
-        std::vector<BackroomsMarlowNavigationCell>(
-            kBackroomsMarlowNavigationCellCount);
+    // Je garde la grille sur le tas et je ne l'alloue qu'a sa construction :
+    // un runtime dormant ne reserve donc jamais 6 400 cellules inutilement.
+    std::vector<BackroomsMarlowNavigationCell> cells {};
 };
 
 struct BackroomsMarlowPath {
-    // Je reserve le chemin sur le tas pour que le runtime reste leger sur la
-    // pile, notamment dans les tests et lors des transitions de niveau.
-    std::vector<BackroomsMarlowGridPoint> nodes =
-        std::vector<BackroomsMarlowGridPoint>(
-            kBackroomsMarlowNavigationCellCount);
-    std::size_t count = 0U;
+    // Le chemin reste sur le tas, mais sa capacité suit le trajet réellement
+    // trouvé au lieu d'allouer toute la grille à chaque recalcul A*.
+    std::vector<BackroomsMarlowGridPoint> nodes {};
     std::size_t cursor = 0U;
 
     [[nodiscard]] auto empty() const noexcept -> bool {
-        return count == 0U || cursor >= count;
+        return cursor >= nodes.size();
+    }
+
+    void clear() noexcept {
+        nodes.clear();
+        cursor = 0U;
     }
 };
 
@@ -136,9 +146,14 @@ struct BackroomsMarlowPlayerContext {
     // Je recois ici uniquement la distance horizontale parcourue depuis le
     // precedent update, jamais une vitesse ni une distance cumulee.
     float travelled_horizontal_distance = 0.0F;
-    float water_depth = 0.0F;
     bool sprinting = false;
     bool in_water = false;
+    // Je distingue l'immersion reelle de la tete de celle des pieds : seule
+    // cette information physique autorise la conclusion d'une noyade.
+    bool head_in_water = false;
+    // Je marque le mouvement impose par Marlow pour qu'il ne nourrisse jamais
+    // lui-meme sa jauge de pression avec les impulsions de la cinematique.
+    bool motion_is_forced = false;
     // Je traite ces trois booleens comme des impulsions d'une seule frame.
     bool entered_water = false;
     bool jumped = false;
@@ -184,6 +199,9 @@ struct BackroomsMarlowManifestationSelection {
     std::uint32_t next_random_state = 1U;
     bool found = false;
     bool has_guaranteed_detour = false;
+    BackroomsMarlowPresentation presentation =
+        BackroomsMarlowPresentation::FullBody;
+    glm::vec3 wall_normal {0.0F};
 };
 
 struct BackroomsMarlowCaptureEvaluation {
@@ -205,10 +223,16 @@ struct BackroomsMarlowRenderView {
     glm::vec3 position {0.0F};
     float body_yaw_degrees = 0.0F;
     float immersion_ratio = 0.0F;
+    // Profondeur verticale réellement disponible sous l'ancre de rendu.
+    // Le renderer ne peut donc jamais enfouir le rig sous le plancher.
+    float available_submersion_depth = 0.0F;
     float reveal_amount = 0.0F;
     float peek_side = 1.0F;
     BackroomsMarlowPhase phase = BackroomsMarlowPhase::Dormant;
     bool visible = false;
+    BackroomsMarlowPresentation presentation =
+        BackroomsMarlowPresentation::FullBody;
+    glm::vec3 wall_normal {0.0F};
 };
 
 struct BackroomsMarlowBuoyView {
@@ -278,6 +302,9 @@ struct BackroomsMarlowRuntime {
     float quiet_seconds = 0.0F;
     float grace_seconds = kBackroomsMarlowInitialGraceSeconds;
     float retry_seconds = 0.0F;
+    float pursuit_repath_seconds = 0.0F;
+    float pursuit_stuck_seconds = 0.0F;
+    BackroomsMarlowGridPoint path_target {};
     BackroomsMarlowPhase phase = BackroomsMarlowPhase::Dormant;
     bool navigation_valid = false;
     bool navigation_readiness_valid = false;
@@ -286,6 +313,16 @@ struct BackroomsMarlowRuntime {
     bool previous_flashlight_on_water = false;
     bool capture_event_emitted = false;
     bool kill_event_emitted = false;
+    bool has_path_target = false;
+    // Le déclencheur à seuil possède une hystérésis : un même pic de bruit ne
+    // peut pas programmer plusieurs manifestations.
+    bool pressure_attack_armed = true;
+    // Je derive l'etat initial de l'hysteresis de la pression durable une seule
+    // fois, notamment apres un chargement ou un changement de niveau.
+    bool pressure_hysteresis_initialized = false;
+    // Le déplacement réel du joueur est validé dans Game contre le World. Ce
+    // drapeau remonte un blocage au contrôleur de Marlow à la frame suivante.
+    bool capture_transport_blocked = false;
 };
 
 [[nodiscard]] auto initialize_backrooms_marlow(
@@ -296,7 +333,15 @@ struct BackroomsMarlowRuntime {
     const BackroomsMarlowState& state) noexcept -> BackroomsMarlowState;
 
 [[nodiscard]] auto prepare_backrooms_marlow_for_persistence(
-    const BackroomsMarlowState& state) noexcept -> BackroomsMarlowState;
+    const BackroomsMarlowState& state,
+    const BackroomsMarlowRuntime& runtime) noexcept -> BackroomsMarlowState;
+
+// Je remets le runtime a zero sans rendre ses buffers au tas. L'appelant peut
+// retirer la grace uniquement pour un reset technique hors changement de zone.
+void reset_backrooms_marlow_runtime(
+    BackroomsMarlowRuntime& runtime,
+    float durable_pressure,
+    bool apply_initial_grace = true) noexcept;
 
 [[nodiscard]] auto evaluate_backrooms_marlow_pressure(
     float pressure,
@@ -324,7 +369,7 @@ struct BackroomsMarlowRuntime {
     const BackroomsGenerator& generator,
     const ChunkCoord& center_chunk,
     const World* spatial_world = nullptr,
-    int spatial_world_y_offset = 0) noexcept
+    int spatial_world_y_offset = 0)
     -> BackroomsMarlowNavigationGrid;
 
 [[nodiscard]] auto find_backrooms_marlow_path(
@@ -349,7 +394,7 @@ struct BackroomsMarlowRuntime {
     const BackroomsMarlowChunkReadiness& readiness,
     const BackroomsMarlowPlayerContext& player,
     BackroomsMarlowEncounterMode mode,
-    std::uint32_t random_state) noexcept
+    std::uint32_t random_state)
     -> BackroomsMarlowManifestationSelection;
 
 [[nodiscard]] auto evaluate_backrooms_marlow_capture(
@@ -357,7 +402,7 @@ struct BackroomsMarlowRuntime {
     const BackroomsMarlowChunkReadiness& readiness,
     const BackroomsMarlowPlayerContext& player,
     const glm::vec3& marlow_position,
-    bool buoy_warning_active) noexcept
+    bool buoy_warning_active)
     -> BackroomsMarlowCaptureEvaluation;
 
 [[nodiscard]] auto update_backrooms_marlow(

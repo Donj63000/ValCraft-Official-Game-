@@ -189,7 +189,7 @@ auto ProceduralSfxMixer::effect_duration(GameSfxKind kind) noexcept -> float {
     case GameSfxKind::MarlowGrab:
         return 1.15F;
     case GameSfxKind::MarlowScreamer:
-        return 1.30F;
+        return 0.85F;
     case GameSfxKind::MarlowDistantSplash:
         return 0.78F;
     }

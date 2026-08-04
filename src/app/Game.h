@@ -263,6 +263,7 @@ private:
         bool backrooms_marlow_previous_on_ground = true;
         bool backrooms_marlow_previous_jump_input = false;
         bool backrooms_marlow_has_previous_player_position = false;
+        bool backrooms_marlow_poolrooms_active = false;
         bool blade_pose_valid = false;
         bool weapon_was_selected = false;
         bool sea_encounter_started = false;
@@ -521,6 +522,7 @@ private:
     void update_smoke_ship_camera();
     void update_menu_preview_camera(float dt);
     void validate_smoke_frame(const WorldWorkBudget& budget, const WorldWorkStats& stats) const;
+    void validate_backrooms_marlow_smoke_completion() const;
     void capture_current_frame_if_requested();
     void record_frame_stats(const FramePerformanceStats& frame_stats);
     void record_performance_event(PerformanceEventKind kind, const BlockCoord& block, std::string_view label);
@@ -549,6 +551,7 @@ private:
         -> bool;
     [[nodiscard]] auto backrooms_marlow_cinematic_active() const noexcept
         -> bool;
+    [[nodiscard]] auto backrooms_cinematic_active() const noexcept -> bool;
     [[nodiscard]] auto current_environment_state() const -> EnvironmentState;
     void reset_backrooms_jack_runtime() noexcept;
     void update_backrooms_simulation(float dt);
@@ -652,6 +655,8 @@ private:
     glm::vec3 backrooms_smoke_camera_position_ {0.0F};
     float backrooms_smoke_camera_yaw_degrees_ = -90.0F;
     bool backrooms_smoke_camera_pose_valid_ = false;
+    bool backrooms_marlow_smoke_checkpoint_reached_ = false;
+    std::size_t backrooms_marlow_smoke_update_count_ = 0U;
     double audit_elapsed_ms_ = 0.0;
     std::size_t frame_raw_input_events_ = 0;
     std::size_t frame_input_action_events_ = 0;
@@ -811,6 +816,7 @@ private:
     bool backrooms_marlow_previous_on_ground_ = true;
     bool backrooms_marlow_previous_jump_input_ = false;
     bool backrooms_marlow_has_previous_player_position_ = false;
+    bool backrooms_marlow_poolrooms_active_ = false;
     float menu_preview_time_of_day_ = 8.25F;
     float preview_orbit_radians_ = 0.0F;
     bool has_active_session_ = false;

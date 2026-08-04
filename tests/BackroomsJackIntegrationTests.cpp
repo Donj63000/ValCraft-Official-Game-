@@ -73,6 +73,100 @@ TEST_CASE("Jack smoke poses are parsed explicitly") {
     CHECK_FALSE(rejected.error_message.empty());
 }
 
+TEST_CASE("Marlow smoke checkpoints are parsed explicitly") {
+    constexpr std::array cases {
+        std::pair {
+            std::string_view {"peek"},
+            BackroomsMarlowSmokeMode::Peek,
+        },
+        std::pair {
+            std::string_view {"chase"},
+            BackroomsMarlowSmokeMode::Chase,
+        },
+        std::pair {
+            std::string_view {"capture-blocked"},
+            BackroomsMarlowSmokeMode::CaptureBlocked,
+        },
+        std::pair {
+            std::string_view {"screamer"},
+            BackroomsMarlowSmokeMode::Screamer,
+        },
+    };
+    for (const auto& [name, expected] : cases) {
+        const auto argument =
+            std::string {"--smoke-backrooms-marlow="} +
+            std::string {name};
+        const std::array<std::string_view, 1> arguments {argument};
+        const auto parsed = parse_game_options(arguments);
+        INFO(argument);
+        REQUIRE(parsed.ok);
+        CHECK(parsed.options.smoke_backrooms_marlow == expected);
+    }
+
+    const auto invalid = parse_game_options(
+        std::array<std::string_view, 1> {
+            "--smoke-backrooms-marlow=teleport",
+        });
+    CHECK_FALSE(invalid.ok);
+    CHECK_FALSE(invalid.error_message.empty());
+}
+
+TEST_CASE("Marlow smoke scenarios commit and validate an explicit checkpoint") {
+    const auto game_path =
+        std::filesystem::path {__FILE__}.parent_path().parent_path() /
+        "src" / "app" / "Game.cpp";
+    std::ifstream input(game_path, std::ios::binary);
+    REQUIRE(input.is_open());
+    const std::string source {
+        std::istreambuf_iterator<char> {input},
+        std::istreambuf_iterator<char> {},
+    };
+
+    // Je verrouille ici le contrat du smoke graphique : chaque mode produit
+    // son propre etat, puis la fin du processus refuse un checkpoint absent.
+    CHECK(source.find("make_backrooms_marlow_smoke_preview(") !=
+          std::string::npos);
+    CHECK(source.find("find_backrooms_marlow_smoke_anchor(") !=
+          std::string::npos);
+    CHECK(source.find("backrooms_marlow_smoke_checkpoint_matches(") !=
+          std::string::npos);
+    CHECK(source.find("validate_backrooms_marlow_smoke_completion();") !=
+          std::string::npos);
+    CHECK(source.find("Marlow smoke did not reach checkpoint '") !=
+          std::string::npos);
+    CHECK(source.find("BackroomsMarlowPhase::CornerPeek") !=
+          std::string::npos);
+    CHECK(source.find("BackroomsMarlowPhase::Blocking") !=
+          std::string::npos);
+    CHECK(source.find("BackroomsMarlowPhase::Submerging") !=
+          std::string::npos);
+    CHECK(source.find("BackroomsMarlowPhase::Screamer") !=
+          std::string::npos);
+    CHECK(source.find("sweep_backrooms_marlow_drag(") !=
+          std::string::npos);
+
+    const auto cinematic_gate = source.find(
+        "auto Game::backrooms_marlow_cinematic_active() const noexcept");
+    REQUIRE(cinematic_gate != std::string::npos);
+    const auto combined_gate = source.find(
+        "auto Game::backrooms_cinematic_active() const noexcept",
+        cinematic_gate);
+    REQUIRE(combined_gate != std::string::npos);
+    const auto gate_source = std::string_view {source}.substr(
+        cinematic_gate,
+        combined_gate - cinematic_gate);
+    CHECK(gate_source.find("BackroomsMarlowPhase::Dragging") !=
+          std::string_view::npos);
+    CHECK(gate_source.find("BackroomsMarlowPhase::Drowning") !=
+          std::string_view::npos);
+    CHECK(gate_source.find("BackroomsMarlowPhase::Screamer") !=
+          std::string_view::npos);
+    CHECK(gate_source.find("backrooms_marlow_death_pending_") !=
+          std::string_view::npos);
+    CHECK(source.find("backrooms_cinematic_blocks_input_event(") !=
+          std::string::npos);
+}
+
 TEST_CASE("Jack corridor smoke distance is bounded and order independent") {
     const auto parse_corridor_distance =
         [](std::string_view distance,

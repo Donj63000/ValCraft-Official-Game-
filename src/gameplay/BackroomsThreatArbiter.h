@@ -22,6 +22,13 @@ struct BackroomsThreatArbiterRuntime {
     float grace_seconds = 0.0F;
 };
 
+struct BackroomsThreatIntent {
+    bool request = false;
+    bool cancel = false;
+    bool hold = false;
+    bool release = false;
+};
+
 // Je laisse les signaux distants hors de cet arbitre : seule une demande de
 // manifestation physique doit reserver la scene partagee.
 void request_backrooms_threat(
@@ -42,6 +49,20 @@ void cancel_backrooms_threat_request(
 void release_backrooms_threat(
     BackroomsThreatArbiterRuntime& runtime,
     BackroomsThreatOwner threat) noexcept;
+
+// Je valide les intentions des deux directeurs comme une seule transaction de
+// frame. Deux demandes publiees ensemble recoivent ainsi la meme anciennete.
+[[nodiscard]] auto commit_backrooms_threat_intents(
+    BackroomsThreatArbiterRuntime& runtime,
+    const BackroomsThreatIntent& jack,
+    const BackroomsThreatIntent& marlow,
+    std::uint64_t arrival_sequence) noexcept
+    -> BackroomsThreatOwner;
+
+// Je change ici de contexte spatial sans transformer l'abandon de l'ancien
+// etage en repos artificiel pour le nouveau.
+void reset_backrooms_threat_context(
+    BackroomsThreatArbiterRuntime& runtime) noexcept;
 
 void update_backrooms_threat_arbiter(
     BackroomsThreatArbiterRuntime& runtime,

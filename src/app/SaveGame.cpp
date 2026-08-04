@@ -341,9 +341,13 @@ auto is_sane_saved_world_position(const glm::vec3& position) noexcept -> bool {
            is_valid_backrooms_logical_level(
                state.logical_level) &&
            mode_value <= static_cast<std::uint8_t>(
-                             BackroomsMarlowEncounterMode::WaterAmbush) &&
+                              BackroomsMarlowEncounterMode::WaterAmbush) &&
+           (state.has_last_mode ||
+            state.last_mode ==
+                BackroomsMarlowEncounterMode::CornerPeek) &&
            state.random_state != 0U &&
-           state.next_event_sequence != 0U;
+           state.next_event_sequence != 0U &&
+           state.initialized;
 }
 
 void write_generation_profile(BinaryWriter& writer, WorldGenerationProfile profile);
@@ -1753,8 +1757,11 @@ void write_backrooms_marlow_state_extension(
     const BackroomsMarlowState& state) {
     // Je fixe MRLW v1 a 40 octets et je n'y place que le directeur durable.
     // Le corps, le chemin, les cellules et la noyade en cours restent runtime.
+    const BackroomsMarlowRuntime dormant_runtime {};
     const auto persistent =
-        prepare_backrooms_marlow_for_persistence(state);
+        prepare_backrooms_marlow_for_persistence(
+            state,
+            dormant_runtime);
     writer.write_bytes(
         kBackroomsMarlowStateMagic.data(),
         kBackroomsMarlowStateMagic.size());

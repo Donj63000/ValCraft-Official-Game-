@@ -106,6 +106,15 @@ void write_file(
     }
 }
 
+[[nodiscard]] auto tail_extension_offset(
+    const std::vector<std::uint8_t>& bytes,
+    std::size_t extension_size) -> std::size_t {
+    if (bytes.size() < extension_size) {
+        throw std::runtime_error("Extension terminale Marlow tronquee");
+    }
+    return bytes.size() - extension_size;
+}
+
 template <typename T>
 void overwrite_value(
     std::vector<std::uint8_t>& bytes,
@@ -181,9 +190,17 @@ TEST_CASE("MRLW v1 reste terminal apres BJCK et BRLV et accepte Backrooms V4") {
         sizeof(save_version));
     CHECK(save_version == 19U);
 
-    const auto marlow_offset = bytes.size() - kMarlowExtensionSize;
-    const auto level_offset = marlow_offset - kBackroomsLevelExtensionSize;
-    const auto jack_offset = level_offset - kJackExtensionSize;
+    const auto marlow_offset = tail_extension_offset(
+        bytes,
+        kMarlowExtensionSize);
+    const auto level_offset = tail_extension_offset(
+        bytes,
+        kMarlowExtensionSize + kBackroomsLevelExtensionSize);
+    const auto jack_offset = tail_extension_offset(
+        bytes,
+        kMarlowExtensionSize +
+            kBackroomsLevelExtensionSize +
+            kJackExtensionSize);
     CHECK(std::memcmp(bytes.data() + jack_offset, "BJCK", 4U) == 0);
     CHECK(std::memcmp(bytes.data() + level_offset, "BRLV", 4U) == 0);
     CHECK(std::memcmp(bytes.data() + marlow_offset, "MRLW", 4U) == 0);
@@ -210,7 +227,9 @@ TEST_CASE("les slots v18 et v17 creent un Marlow dormant derive du seed et du ni
             kMarlowExtensionSize + kBackroomsLevelExtensionSize);
 
     auto version_18 = valid;
-    version_18.resize(version_18.size() - kMarlowExtensionSize);
+    version_18.resize(tail_extension_offset(
+        version_18,
+        kMarlowExtensionSize));
     overwrite_value(
         version_18,
         kSaveVersionOffset,
@@ -228,10 +247,9 @@ TEST_CASE("les slots v18 et v17 creent un Marlow dormant derive du seed et du ni
     CHECK(loaded_18->backrooms_marlow.cooldown_seconds == 0.0F);
 
     auto version_17 = valid;
-    version_17.resize(
-        version_17.size() -
-        kMarlowExtensionSize -
-        kBackroomsLevelExtensionSize);
+    version_17.resize(tail_extension_offset(
+        version_17,
+        kMarlowExtensionSize + kBackroomsLevelExtensionSize));
     overwrite_value(
         version_17,
         kSaveVersionOffset,
@@ -255,7 +273,9 @@ TEST_CASE("MRLW rejette magic version floats enum RNG sequence niveau et booleen
     const auto path = save_slot_file_path(directory.path(), 0U);
     const auto valid = read_file(path);
     REQUIRE(valid.size() >= kMarlowExtensionSize);
-    const auto offset = valid.size() - kMarlowExtensionSize;
+    const auto offset = tail_extension_offset(
+        valid,
+        kMarlowExtensionSize);
 
     const auto rejected = [&](std::vector<std::uint8_t> corrupt) {
         write_file(path, corrupt);

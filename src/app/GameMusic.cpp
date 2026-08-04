@@ -53,7 +53,7 @@ auto GameMusic::initialize() -> bool {
     sfx_mixer_.set_sample_rate(obtained_spec_.freq);
     sfx_mixer_.reset();
     drowning_filter_state_.fill(0.0F);
-    drowning_filter_intensity_ = 0.0F;
+    drowning_filter_intensity_.store(0.0F, std::memory_order_relaxed);
     SDL_PauseAudioDevice(device_id_, 0);
     return true;
 }
@@ -68,7 +68,7 @@ void GameMusic::shutdown() noexcept {
     backrooms_ambience_.reset();
     sfx_mixer_.reset();
     drowning_filter_state_.fill(0.0F);
-    drowning_filter_intensity_ = 0.0F;
+    drowning_filter_intensity_.store(0.0F, std::memory_order_relaxed);
 
     if (owns_audio_subsystem_ && SDL_WasInit(SDL_INIT_AUDIO) != 0U) {
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -157,13 +157,16 @@ void GameMusic::set_backrooms_drowning_filter(float intensity) noexcept {
         std::isfinite(intensity)
             ? std::clamp(intensity, 0.0F, 1.0F)
             : 0.0F;
-    if (device_id_ == 0) {
-        drowning_filter_intensity_ = sanitized;
-        return;
-    }
-    SDL_LockAudioDevice(device_id_);
-    drowning_filter_intensity_ = sanitized;
-    SDL_UnlockAudioDevice(device_id_);
+    // Je publie uniquement une cible scalaire au callback. Son propre thread
+    // reste l'unique proprietaire de l'historique du filtre et le thread jeu
+    // ne bloque donc plus le peripherique a chaque frame de noyade.
+    drowning_filter_intensity_.store(
+        sanitized,
+        std::memory_order_relaxed);
+}
+
+auto GameMusic::backrooms_drowning_filter() const noexcept -> float {
+    return drowning_filter_intensity_.load(std::memory_order_relaxed);
 }
 
 auto GameMusic::available() const noexcept -> bool {
@@ -210,7 +213,10 @@ void GameMusic::render_callback_stream(Uint8* stream, int len) noexcept {
     // Je place le filtre apres tous les bus : pendant la saisie de Marlow,
     // musique, ambiance et effets semblent traverser la meme masse d'eau.
     const auto drowning =
-        std::clamp(drowning_filter_intensity_, 0.0F, 1.0F);
+        std::clamp(
+            drowning_filter_intensity_.load(std::memory_order_relaxed),
+            0.0F,
+            1.0F);
     const auto tracked_channels =
         std::min(channel_count, drowning_filter_state_.size());
     const auto cutoff_hz =

@@ -85,6 +85,7 @@ enum class WorldRaycastMode : std::uint8_t {
     Selection = 0,
     VisibilityOpaque = 1,
     ProjectileCollidable = 2,
+    WaterOrOpaque = 3,
 };
 
 struct WorldCellSnapshot {
@@ -282,6 +283,12 @@ public:
     [[nodiscard]] auto raycast_collidable(const glm::vec3& origin,
                                           const glm::vec3& direction,
                                           float max_distance) const -> RaycastHit;
+    // Je retourne la premiere eau atteinte ou le premier voxel opaque. Les
+    // blocs transparents ne masquent donc jamais une surface d'eau situee derriere.
+    [[nodiscard]] auto raycast_water_or_opaque(
+        const glm::vec3& origin,
+        const glm::vec3& direction,
+        float max_distance) const -> RaycastHit;
     [[nodiscard]] auto can_place_torch_at(const BlockCoord& world_coord) const -> bool;
     [[nodiscard]] auto can_place_torch_at(const BlockCoord& world_coord, const BlockCoord& support_coord) const -> bool;
     [[nodiscard]] auto torch_block_to_place(const BlockCoord& world_coord, const BlockCoord& support_coord) const

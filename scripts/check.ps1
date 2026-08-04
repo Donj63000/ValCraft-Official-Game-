@@ -2,6 +2,7 @@
 param(
     [int]$MinimumTests = 20,
     [double]$CriticalCoverageThreshold = 80.0,
+    [double]$MarlowBranchCoverageThreshold = 70.0,
     [int]$SmokeFrames = 60
 )
 
@@ -167,11 +168,11 @@ function Get-GcovSummary {
     $normalizedSource = $SourcePath.Replace('\', '/')
 
     $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
-    $pattern = "File '$([regex]::Escape($normalizedSource))'.*?Lines executed:(?<percent>[0-9.]+)% of (?<lines>\d+)"
+    $pattern = "File '$([regex]::Escape($normalizedSource))'(?<section>.*?)(?=File '|$)"
     $match = [regex]::Match($text, $pattern, $options)
 
     if (-not $match.Success) {
-        $fallbackPattern = "File '.*$([regex]::Escape([System.IO.Path]::GetFileName($SourcePath)))'.*?Lines executed:(?<percent>[0-9.]+)% of (?<lines>\d+)"
+        $fallbackPattern = "File '.*$([regex]::Escape([System.IO.Path]::GetFileName($SourcePath)))'(?<section>.*?)(?=File '|$)"
         $match = [regex]::Match($text, $fallbackPattern, $options)
     }
 
@@ -179,13 +180,40 @@ function Get-GcovSummary {
         throw "Unable to extract gcov summary for '$SourcePath'."
     }
 
-    $lines = [int]$match.Groups["lines"].Value
-    $percent = [double]::Parse($match.Groups["percent"].Value, [System.Globalization.CultureInfo]::InvariantCulture)
+    $section = $match.Groups["section"].Value
+    $lineMatch = [regex]::Match(
+        $section,
+        "Lines executed:(?<percent>[0-9.]+)% of (?<lines>\d+)")
+    if (-not $lineMatch.Success) {
+        throw "Unable to extract gcov line summary for '$SourcePath'."
+    }
+    $branchMatch = [regex]::Match(
+        $section,
+        "Taken at least once:(?<percent>[0-9.]+)% of (?<branches>\d+)")
+
+    $lines = [int]$lineMatch.Groups["lines"].Value
+    $percent = [double]::Parse(
+        $lineMatch.Groups["percent"].Value,
+        [System.Globalization.CultureInfo]::InvariantCulture)
+    $branches = if ($branchMatch.Success) {
+        [int]$branchMatch.Groups["branches"].Value
+    } else {
+        0
+    }
+    $branchPercent = if ($branchMatch.Success) {
+        [double]::Parse(
+            $branchMatch.Groups["percent"].Value,
+            [System.Globalization.CultureInfo]::InvariantCulture)
+    } else {
+        0.0
+    }
 
     return [PSCustomObject]@{
         Source = $SourcePath
         Lines = $lines
         Executed = ($percent / 100.0) * $lines
+        Branches = $branches
+        TakenBranches = ($branchPercent / 100.0) * $branches
     }
 }
 
@@ -230,6 +258,9 @@ Invoke-External -FilePath $cmakeExe -Arguments @("--build", $strictBuildDir, "--
 Write-Host "==> Running discovered tests"
 Invoke-External -FilePath $cmakeExe -Arguments @("--build", $strictBuildDir, "--target", "valcraft_check_tests", "--parallel")
 
+Write-Host "==> Replaying Marlow tests in deterministic random orders"
+Invoke-External -FilePath $cmakeExe -Arguments @("--build", $strictBuildDir, "--target", "valcraft_check_marlow", "--parallel")
+
 $testCount = Get-DiscoveredTestCount -CTestExe $ctestExe -BuildDir $strictBuildDir
 Write-Host ("==> Discovered tests: {0}" -f $testCount)
 if ($testCount -lt $MinimumTests) {
@@ -241,7 +272,11 @@ $smokeScenarios = @(
     @{ Name = "legacy-day"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=legacy", "--initial-time=8") },
     @{ Name = "modern-day"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=8") },
     @{ Name = "modern-dusk"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=18.5") },
-    @{ Name = "modern-night"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=0") }
+    @{ Name = "modern-night"; Arguments = @("--smoke-test", "--smoke-frames=$SmokeFrames", "--hidden-window", "--visual-pipeline=modern", "--initial-time=0") },
+    @{ Name = "marlow-peek"; Arguments = @("--smoke-test", "--smoke-session=backrooms", "--smoke-backrooms-level=-2", "--smoke-backrooms-marlow=peek", "--smoke-frames=2", "--hidden-window") },
+    @{ Name = "marlow-chase"; Arguments = @("--smoke-test", "--smoke-session=backrooms", "--smoke-backrooms-level=-2", "--smoke-backrooms-marlow=chase", "--smoke-frames=2", "--hidden-window") },
+    @{ Name = "marlow-capture-blocked"; Arguments = @("--smoke-test", "--smoke-session=backrooms", "--smoke-backrooms-level=-2", "--smoke-backrooms-marlow=capture-blocked", "--smoke-frames=2", "--hidden-window") },
+    @{ Name = "marlow-screamer"; Arguments = @("--smoke-test", "--smoke-session=backrooms", "--smoke-backrooms-level=-2", "--smoke-backrooms-marlow=screamer", "--smoke-frames=2", "--hidden-window") }
 )
 foreach ($scenario in $smokeScenarios) {
     Write-Host ("   -> smoke checkpoint '{0}'" -f $scenario.Name)
@@ -302,6 +337,50 @@ Write-Host ("==> Aggregate critical coverage: {0:N2}% ({1:N2}/{2})" -f $aggregat
 
 if ($aggregateCoverage -lt $CriticalCoverageThreshold) {
     throw "Strict gate failed: critical coverage is $([math]::Round($aggregateCoverage, 2))%, below the required $CriticalCoverageThreshold%."
+}
+
+# Je mesure separement le coeur Marlow, son rendu procedural et l'adaptateur
+# World : l'agregat global ne doit pas pouvoir masquer une branche non testee.
+$marlowSources = @(
+    Join-Path $repoRoot "src\gameplay\BackroomsMarlow.cpp"
+    Join-Path $repoRoot "src\gameplay\BackroomsMarlowWorld.cpp"
+    Join-Path $repoRoot "src\render\BackroomsMarlowVisual.cpp"
+)
+$marlowCoveredLines = 0.0
+$marlowInstrumentedLines = 0
+$marlowTakenBranches = 0.0
+$marlowInstrumentedBranches = 0
+
+Write-Host "==> Computing Marlow coverage gate"
+foreach ($sourcePath in $marlowSources) {
+    if (-not (Test-Path $sourcePath)) {
+        throw "Strict gate failed: Marlow source not found at '$sourcePath'."
+    }
+    $relativeSource = $sourcePath.Substring($repoRoot.Length + 1)
+    $objectDirectory = Join-Path $coverageBuildDir (Join-Path "CMakeFiles\valcraft_core.dir" (Split-Path $relativeSource -Parent))
+    $coverageInputPath = Join-Path $objectDirectory ((Split-Path $sourcePath -Leaf) + ".gcno")
+    if (-not (Test-Path $coverageInputPath)) {
+        throw "Strict gate failed: gcov notes file not found for '$sourcePath' at '$coverageInputPath'."
+    }
+
+    $summary = Get-GcovSummary -GcovExe $gcovExe -CoverageWorkingDirectory $coverageReportDir -ObjectDirectory $objectDirectory -CoverageInputPath $coverageInputPath -SourcePath $sourcePath
+    $marlowCoveredLines += $summary.Executed
+    $marlowInstrumentedLines += $summary.Lines
+    $marlowTakenBranches += $summary.TakenBranches
+    $marlowInstrumentedBranches += $summary.Branches
+}
+
+if ($marlowInstrumentedLines -le 0 -or $marlowInstrumentedBranches -le 0) {
+    throw "Strict gate failed: Marlow line or branch instrumentation is empty."
+}
+$marlowLineCoverage = ($marlowCoveredLines / $marlowInstrumentedLines) * 100.0
+$marlowBranchCoverage = ($marlowTakenBranches / $marlowInstrumentedBranches) * 100.0
+Write-Host ("==> Marlow coverage: lines {0:N2}%, branches {1:N2}%" -f $marlowLineCoverage, $marlowBranchCoverage)
+if ($marlowLineCoverage -lt $CriticalCoverageThreshold) {
+    throw "Strict gate failed: Marlow line coverage is $([math]::Round($marlowLineCoverage, 2))%, below the required $CriticalCoverageThreshold%."
+}
+if ($marlowBranchCoverage -lt $MarlowBranchCoverageThreshold) {
+    throw "Strict gate failed: Marlow branch coverage is $([math]::Round($marlowBranchCoverage, 2))%, below the required $MarlowBranchCoverageThreshold%."
 }
 
 Write-Host "==> Strict gate passed successfully."

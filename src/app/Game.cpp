@@ -4,6 +4,7 @@
 #include "app/GameBranding.h"
 #include "app/InputBindings.h"
 #include "app/GameLoop.h"
+#include "gameplay/BackroomsMarlowWorld.h"
 #include "gameplay/StartingPort.h"
 #include "gameplay/progression/VanguardTargeting.h"
 #include "player/PlayerGeometry.h"
@@ -1586,37 +1587,6 @@ struct BackroomsJackSpatialAudio {
     }
 }
 
-[[nodiscard]] auto backrooms_flashlight_hits_water(
-    const World& world,
-    const glm::vec3& eye,
-    const glm::vec3& look_direction,
-    const BackroomsFlashlightState& flashlight) -> bool {
-    if (backrooms_flashlight_intensity(flashlight) <= 0.0F) {
-        return false;
-    }
-    auto direction = finite_vec3_or(
-        look_direction,
-        glm::vec3 {0.0F, 0.0F, -1.0F});
-    const auto length_squared = glm::dot(direction, direction);
-    if (!std::isfinite(length_squared) || length_squared <= 1.0e-6F) {
-        return false;
-    }
-    direction /= std::sqrt(length_squared);
-    // Je sonde le coeur du faisceau tous les 50 cm. Cela couvre les surfaces
-    // horizontales proches sans lancer un raycast opaque qui ignorerait l'eau.
-    for (auto step = 1; step <= 36; ++step) {
-        const auto point = eye + direction * (static_cast<float>(step) * 0.5F);
-        const auto x = safe_light_block_coordinate(point.x);
-        const auto y = safe_light_block_coordinate(point.y);
-        const auto z = safe_light_block_coordinate(point.z);
-        if (x.has_value() && y.has_value() && z.has_value() &&
-            is_world_y_valid(*y) && world.has_water(*x, *y, *z)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void translate_backrooms_marlow_result_y(
     BackroomsMarlowUpdateResult& result,
     float delta_y) noexcept {
@@ -1654,6 +1624,246 @@ void translate_backrooms_marlow_result_y(
     }
 }
 
+struct BackroomsMarlowSmokeAnchor {
+    glm::vec3 water_surface_position {0.0F};
+    float available_submersion_depth = 0.0F;
+    bool found = false;
+};
+
+[[nodiscard]] constexpr auto backrooms_marlow_smoke_mode_name(
+    BackroomsMarlowSmokeMode mode) noexcept -> std::string_view {
+    switch (mode) {
+    case BackroomsMarlowSmokeMode::Peek:
+        return "peek";
+    case BackroomsMarlowSmokeMode::Chase:
+        return "chase";
+    case BackroomsMarlowSmokeMode::CaptureBlocked:
+        return "capture-blocked";
+    case BackroomsMarlowSmokeMode::Screamer:
+        return "screamer";
+    case BackroomsMarlowSmokeMode::None:
+    default:
+        return "none";
+    }
+}
+
+[[nodiscard]] auto find_backrooms_marlow_smoke_anchor(
+    const World& world,
+    const BackroomsGenerator& generator,
+    const glm::vec3& camera_position,
+    const glm::vec3& camera_direction,
+    int world_y_offset) -> BackroomsMarlowSmokeAnchor {
+    const auto forward = safe_horizontal_direction(camera_direction);
+    auto previous_x = (std::numeric_limits<int>::min)();
+    auto previous_z = (std::numeric_limits<int>::min)();
+
+    // Je suis la ligne de vue choisie par le smoke Poolrooms et je prends la
+    // premiere vraie surface d'eau du World. Un override reste donc capable
+    // d'invalider ce checkpoint exactement comme pendant une partie.
+    for (auto step = 1; step <= kPoolroomsSmokeSightline * 2; ++step) {
+        const auto distance = static_cast<float>(step) * 0.5F;
+        const auto world_x = static_cast<int>(std::floor(
+            camera_position.x + forward.x * distance));
+        const auto world_z = static_cast<int>(std::floor(
+            camera_position.z + forward.z * distance));
+        if (world_x == previous_x && world_z == previous_z) {
+            continue;
+        }
+        previous_x = world_x;
+        previous_z = world_z;
+
+        const auto column = generator.sample_column(world_x, world_z);
+        if (column.wall) {
+            break;
+        }
+        const auto interval_valid =
+            column.water_bottom_y >= column.floor_y + 1 &&
+            column.water_top_y >= column.water_bottom_y &&
+            column.water_top_y < column.ceiling_y;
+        const auto water_bottom = interval_valid
+            ? column.water_bottom_y
+            : column.floor_y + 1;
+        const auto water_top = interval_valid
+            ? column.water_top_y
+            : std::min(column.floor_y + 3, column.ceiling_y - 1);
+        auto surface_y =
+            -(std::numeric_limits<float>::infinity)();
+        for (auto local_y = water_bottom;
+             local_y <= water_top;
+             ++local_y) {
+            const auto translated_y = local_y + world_y_offset;
+            const auto level = world.peek_water_level_or_generated(
+                world_x,
+                translated_y,
+                world_z);
+            if (level == 0U) {
+                continue;
+            }
+            surface_y = std::max(
+                surface_y,
+                static_cast<float>(translated_y) +
+                    static_cast<float>(level) /
+                        static_cast<float>(kMaxWaterLevel));
+        }
+        if (!std::isfinite(surface_y)) {
+            continue;
+        }
+
+        const auto floor_y = static_cast<float>(
+            column.floor_y + 1 + world_y_offset);
+        const auto available_depth = std::max(
+            surface_y - floor_y - 0.02F,
+            0.0F);
+        return {
+            {
+                static_cast<float>(world_x) + 0.5F,
+                surface_y,
+                static_cast<float>(world_z) + 0.5F,
+            },
+            available_depth,
+            true,
+        };
+    }
+
+    return {};
+}
+
+[[nodiscard]] auto make_backrooms_marlow_smoke_preview(
+    BackroomsMarlowSmokeMode mode,
+    const BackroomsMarlowSmokeAnchor& anchor,
+    const glm::vec3& player_position,
+    const glm::vec3& player_look,
+    float animation_time_seconds) noexcept
+    -> BackroomsMarlowUpdateResult {
+    const auto forward = safe_horizontal_direction(player_look);
+    const auto fallback_position =
+        player_position + forward * 5.0F + glm::vec3 {0.0F, 0.55F, 0.0F};
+    auto position = anchor.found
+        ? anchor.water_surface_position
+        : fallback_position;
+    const auto toward_player = safe_horizontal_direction(
+        player_position - position,
+        -forward);
+    const auto yaw_degrees = std::atan2(
+                                 toward_player.x,
+                                 -toward_player.z) *
+                             kRadiansToDegrees;
+
+    BackroomsMarlowUpdateResult result {};
+    result.render = {
+        .position = position,
+        .body_yaw_degrees = yaw_degrees,
+        .immersion_ratio = 0.35F,
+        .available_submersion_depth =
+            anchor.available_submersion_depth,
+        .reveal_amount = 1.0F,
+        .peek_side = 1.0F,
+        .phase = BackroomsMarlowPhase::Blocking,
+        .visible = true,
+        .presentation = BackroomsMarlowPresentation::FullBody,
+        .wall_normal = toward_player,
+    };
+    result.interference = {
+        .position = position,
+        .radius = 18.0F,
+        .intensity = 0.82F,
+        .blackout_pulse = true,
+    };
+    result.requests_threat_slot = true;
+    result.holds_threat_slot = true;
+
+    switch (mode) {
+    case BackroomsMarlowSmokeMode::Peek:
+        result.render.phase = BackroomsMarlowPhase::CornerPeek;
+        result.render.immersion_ratio = 0.90F;
+        result.render.presentation =
+            BackroomsMarlowPresentation::HeadOnlyPeek;
+        break;
+
+    case BackroomsMarlowSmokeMode::Chase: {
+        // Je garde Marlow dans le bassin tout en donnant au corps une derive
+        // laterale deterministe, assez faible pour ne jamais sortir du cadre.
+        const glm::vec3 lateral {-forward.z, 0.0F, forward.x};
+        position += lateral *
+                    (std::sin(
+                         finite_or(animation_time_seconds, 0.0F) * 1.7F) *
+                     0.22F);
+        result.render.position = position;
+        result.interference.position = position;
+        break;
+    }
+
+    case BackroomsMarlowSmokeMode::CaptureBlocked:
+        result.render.phase = BackroomsMarlowPhase::Submerging;
+        result.render.immersion_ratio = 0.68F;
+        result.render.reveal_amount = 0.48F;
+        result.render.presentation =
+            BackroomsMarlowPresentation::ProgressiveReveal;
+        result.requests_threat_slot = false;
+        result.holds_threat_slot = false;
+        result.releases_threat_slot = true;
+        break;
+
+    case BackroomsMarlowSmokeMode::Screamer:
+        result.render.phase = BackroomsMarlowPhase::Screamer;
+        result.render.immersion_ratio = 0.20F;
+        result.capture = {
+            .water_target = position,
+            .drag_amount = 1.0F,
+            .drowning_amount = 1.0F,
+            .active = true,
+            .lock_player_controls = true,
+        };
+        break;
+
+    case BackroomsMarlowSmokeMode::None:
+    default:
+        return {};
+    }
+    return result;
+}
+
+[[nodiscard]] auto backrooms_marlow_smoke_checkpoint_matches(
+    BackroomsMarlowSmokeMode mode,
+    const BackroomsMarlowUpdateResult& result,
+    bool capture_transport_blocked) noexcept -> bool {
+    switch (mode) {
+    case BackroomsMarlowSmokeMode::Peek:
+        return result.render.visible &&
+               result.render.phase == BackroomsMarlowPhase::CornerPeek &&
+               result.render.presentation ==
+                   BackroomsMarlowPresentation::HeadOnlyPeek &&
+               std::isfinite(glm::dot(
+                   result.render.wall_normal,
+                   result.render.wall_normal)) &&
+               glm::dot(
+                   result.render.wall_normal,
+                   result.render.wall_normal) > 0.25F;
+    case BackroomsMarlowSmokeMode::Chase:
+        return result.render.visible &&
+               result.render.phase == BackroomsMarlowPhase::Blocking &&
+               result.render.presentation ==
+                   BackroomsMarlowPresentation::FullBody &&
+               result.holds_threat_slot;
+    case BackroomsMarlowSmokeMode::CaptureBlocked:
+        return capture_transport_blocked &&
+               result.render.phase == BackroomsMarlowPhase::Submerging &&
+               result.render.presentation ==
+                   BackroomsMarlowPresentation::ProgressiveReveal &&
+               !result.capture.active &&
+               !result.kill_player &&
+               result.releases_threat_slot;
+    case BackroomsMarlowSmokeMode::Screamer:
+        return result.render.phase == BackroomsMarlowPhase::Screamer &&
+               result.capture.active &&
+               result.capture.lock_player_controls &&
+               result.capture.drowning_amount == 1.0F;
+    case BackroomsMarlowSmokeMode::None:
+    default:
+        return true;
+    }
+}
+
 [[nodiscard]] auto backrooms_jack_smoke_camera_yaw(
     float base_yaw_degrees,
     BackroomsJackSmokeMode mode) noexcept -> float {
@@ -1679,7 +1889,7 @@ void translate_backrooms_marlow_result_y(
            kRadiansToDegrees;
 }
 
-[[nodiscard]] auto backrooms_jack_blocks_input_event(
+[[nodiscard]] auto backrooms_cinematic_blocks_input_event(
     Uint32 event_type) noexcept -> bool {
     switch (event_type) {
     case SDL_KEYDOWN:
@@ -2641,6 +2851,7 @@ auto Game::run() -> int {
 
         finalize_pending_frame(clock::now());
         finish_pending_save(true);
+        validate_backrooms_marlow_smoke_completion();
         if (should_capture_performance()) {
             final_report = build_performance_report();
             try {
@@ -2959,8 +3170,8 @@ void Game::process_events() {
             continue;
         }
 
-        if (backrooms_jack_jumpscare_active() &&
-            backrooms_jack_blocks_input_event(
+        if (backrooms_cinematic_active() &&
+            backrooms_cinematic_blocks_input_event(
                 event.type)) {
             // Je laisse uniquement les événements de fenêtre et de fermeture
             // traverser le screamer. Aucun mouvement, regard, menu ou F ne
@@ -7529,6 +7740,7 @@ auto Game::can_open_command_console() const noexcept -> bool {
     return !options_.smoke_test &&
            has_active_session_ &&
            !front_end_visible() &&
+           !backrooms_cinematic_active() &&
            !confirm_dialog_.visible &&
            !death_screen_visible_ &&
            !paused_ &&
@@ -12854,6 +13066,8 @@ auto Game::enter_issou_scenario() -> bool {
         backrooms_marlow_previous_jump_input_;
     runtime_restore.backrooms_marlow_has_previous_player_position =
         backrooms_marlow_has_previous_player_position_;
+    runtime_restore.backrooms_marlow_poolrooms_active =
+        backrooms_marlow_poolrooms_active_;
     runtime_restore.blade_pose_valid =
         colossal_blade_pose_valid_;
     runtime_restore.weapon_was_selected =
@@ -13454,6 +13668,8 @@ void Game::restore_scenario_snapshot(
             runtime_restore->backrooms_marlow_previous_jump_input;
         backrooms_marlow_has_previous_player_position_ =
             runtime_restore->backrooms_marlow_has_previous_player_position;
+        backrooms_marlow_poolrooms_active_ =
+            runtime_restore->backrooms_marlow_poolrooms_active;
         super_vision_active_ =
             runtime_restore
                 ->super_vision_active;
@@ -14353,11 +14569,17 @@ auto Game::backrooms_jack_jumpscare_active() const noexcept
 
 auto Game::backrooms_marlow_cinematic_active() const noexcept
     -> bool {
+    const auto phase = backrooms_marlow_runtime_.phase;
     return backrooms_active() &&
-           (backrooms_marlow_last_result_.capture.lock_player_controls ||
-            backrooms_marlow_runtime_.phase ==
-                BackroomsMarlowPhase::Screamer ||
+           (phase == BackroomsMarlowPhase::Dragging ||
+            phase == BackroomsMarlowPhase::Drowning ||
+            phase == BackroomsMarlowPhase::Screamer ||
             backrooms_marlow_death_pending_);
+}
+
+auto Game::backrooms_cinematic_active() const noexcept -> bool {
+    return backrooms_jack_jumpscare_active() ||
+           backrooms_marlow_cinematic_active();
 }
 
 void Game::reset_backrooms_jack_runtime() noexcept {
@@ -14382,11 +14604,12 @@ void Game::reset_backrooms_jack_runtime() noexcept {
             logical_level);
     translate_backrooms_jack_state_y(
         backrooms_jack_,
-        backrooms_runtime_anchor_y_offset(
-            world_.seed(),
-            world_.backrooms_level(),
-            logical_level,
-            world_.generation_version()));
+        static_cast<float>(
+            backrooms_runtime_anchor_y_offset(
+                world_.seed(),
+                world_.backrooms_level(),
+                logical_level,
+                world_.generation_version())));
     backrooms_jack_runtime_ = {};
     backrooms_jack_last_result_ = {};
     backrooms_jack_death_delay_seconds_ =
@@ -14411,6 +14634,7 @@ void Game::reset_backrooms_jack_runtime() noexcept {
     backrooms_marlow_previous_on_ground_ = true;
     backrooms_marlow_previous_jump_input_ = false;
     backrooms_marlow_has_previous_player_position_ = false;
+    backrooms_marlow_poolrooms_active_ = false;
     music_.set_backrooms_drowning_filter(0.0F);
 }
 
@@ -14476,8 +14700,7 @@ void Game::update_backrooms_simulation(float dt) {
     const auto gameplay_input_enabled =
         !options_.smoke_test &&
         !gameplay_interaction_blocked() &&
-        !backrooms_jack_jumpscare_active() &&
-        !backrooms_marlow_cinematic_active();
+        !backrooms_cinematic_active();
     PlayerInput input {};
     if (gameplay_input_enabled) {
         input = read_player_movement_input(
@@ -14495,8 +14718,7 @@ void Game::update_backrooms_simulation(float dt) {
             ? std::exchange(pending_look_y_, 0.0F)
             : 0.0F;
 
-    if (backrooms_jack_jumpscare_active() ||
-        backrooms_marlow_cinematic_active()) {
+    if (backrooms_cinematic_active()) {
         // Je consomme aussi le regard accumulé avant la capture. Il ne sera
         // pas réappliqué brutalement après le screamer ou au respawn.
         pending_look_x_ = 0.0F;
@@ -14523,6 +14745,10 @@ void Game::update_backrooms_simulation(float dt) {
             ? requested_backrooms_jack_smoke_pose(
                   options_.smoke_backrooms_jack)
             : std::nullopt;
+    const auto marlow_smoke_requested =
+        options_.smoke_test &&
+        options_.smoke_backrooms_marlow !=
+            BackroomsMarlowSmokeMode::None;
     const auto jack_logical_level =
         current_backrooms_level();
     const auto jack_vertical_offset =
@@ -14531,45 +14757,47 @@ void Game::update_backrooms_simulation(float dt) {
             world_.backrooms_level(),
             jack_logical_level,
             world_.generation_version());
+    const auto jack_vertical_offset_float =
+        static_cast<float>(jack_vertical_offset);
+    const auto marlow_poolrooms_was_active =
+        backrooms_marlow_poolrooms_active_;
+    const auto marlow_poolrooms_active =
+        session_backrooms_supports_jack() &&
+        world_.backrooms_theme_at_y(player_.position().y) ==
+            BackroomsTheme::Poolrooms &&
+        (!options_.smoke_test || marlow_smoke_requested);
+    const auto logical_context_changed =
+        backrooms_jack_.logical_level != jack_logical_level ||
+        backrooms_marlow_.logical_level != jack_logical_level;
+    const auto threat_context_changed =
+        logical_context_changed ||
+        marlow_poolrooms_was_active != marlow_poolrooms_active;
+    if (threat_context_changed) {
+        reset_backrooms_threat_context(backrooms_threat_arbiter_);
+        backrooms_marlow_previous_player_position_ = {};
+        backrooms_marlow_previous_in_water_ = false;
+        backrooms_marlow_previous_on_ground_ = true;
+        backrooms_marlow_previous_jump_input_ = false;
+        backrooms_marlow_has_previous_player_position_ = false;
+    }
     update_backrooms_threat_arbiter(
         backrooms_threat_arbiter_,
         safe_dt);
-    const auto queue_threat_request =
-        [this](BackroomsThreatOwner threat) {
-            const auto already_pending =
-                threat == BackroomsThreatOwner::Jack
-                    ? backrooms_threat_arbiter_
-                          .pending_jack_arrival !=
-                          kBackroomsThreatNoArrival
-                    : backrooms_threat_arbiter_
-                          .pending_marlow_arrival !=
-                          kBackroomsThreatNoArrival;
-            if (threat == BackroomsThreatOwner::None ||
-                already_pending ||
-                backrooms_threat_arbiter_.owner == threat) {
-                return;
-            }
-            ++backrooms_threat_request_sequence_;
-            if (backrooms_threat_request_sequence_ == 0U) {
-                ++backrooms_threat_request_sequence_;
-            }
-            request_backrooms_threat(
-                backrooms_threat_arbiter_,
-                threat,
-                backrooms_threat_request_sequence_);
-        };
-    if (backrooms_jack_runtime_.pending_reveal) {
-        queue_threat_request(BackroomsThreatOwner::Jack);
-    }
-    if (backrooms_marlow_runtime_.waiting_for_threat_slot) {
-        queue_threat_request(BackroomsThreatOwner::Marlow);
-    }
-    static_cast<void>(
-        resolve_backrooms_threat(
-            backrooms_threat_arbiter_));
+    const auto jack_pending_before_update =
+        backrooms_jack_runtime_.pending_reveal;
     auto caught_this_update = false;
+    auto marlow_killed_this_update = false;
     if (!session_backrooms_supports_jack()) {
         reset_backrooms_jack_runtime();
+    } else if (marlow_smoke_requested) {
+        // Je neutralise Jack pendant ce smoke dedie afin que l'arbitre et le
+        // renderer n'introduisent aucune silhouette concurrente dans l'image.
+        backrooms_jack_.active = false;
+        backrooms_jack_.phase = BackroomsJackPhase::Dormant;
+        backrooms_jack_runtime_ = {};
+        backrooms_jack_last_result_ = {};
+        backrooms_jack_death_delay_seconds_ = 0.0F;
+        backrooms_jack_death_pending_ = false;
     } else if (smoke_pose.has_value()) {
         auto preview =
             make_backrooms_jack_smoke_preview(
@@ -14579,10 +14807,10 @@ void Game::update_backrooms_simulation(float dt) {
                     UINT32_C(0x4A41434B));
         translate_backrooms_jack_state_y(
             preview.state,
-            jack_vertical_offset);
-        preview.render.position.y += jack_vertical_offset;
+            jack_vertical_offset_float);
+        preview.render.position.y += jack_vertical_offset_float;
         preview.light_interference.position.y +=
-            jack_vertical_offset;
+            jack_vertical_offset_float;
         preview.state.logical_level =
             jack_logical_level;
         if (*smoke_pose !=
@@ -14674,11 +14902,11 @@ void Game::update_backrooms_simulation(float dt) {
         auto simulated_jack = backrooms_jack_;
         translate_backrooms_jack_state_y(
             simulated_jack,
-            -jack_vertical_offset);
+            -jack_vertical_offset_float);
         auto local_player_feet = player_.position();
-        local_player_feet.y -= jack_vertical_offset;
+        local_player_feet.y -= jack_vertical_offset_float;
         auto local_player_eye = player_.eye_position();
-        local_player_eye.y -= jack_vertical_offset;
+        local_player_eye.y -= jack_vertical_offset_float;
         const auto ui_blocks_simulation =
             gameplay_interaction_blocked();
         const BackroomsJackUpdateContext context {
@@ -14726,18 +14954,10 @@ void Game::update_backrooms_simulation(float dt) {
         backrooms_jack_ = simulated_jack;
         translate_backrooms_jack_state_y(
             backrooms_jack_,
-            jack_vertical_offset);
+            jack_vertical_offset_float);
         translate_backrooms_jack_result_y(
             backrooms_jack_last_result_,
-            jack_vertical_offset);
-
-        if (backrooms_jack_runtime_.pending_reveal) {
-            queue_threat_request(
-                BackroomsThreatOwner::Jack);
-            static_cast<void>(
-                resolve_backrooms_threat(
-                    backrooms_threat_arbiter_));
-        }
+            jack_vertical_offset_float);
 
         const auto event_count =
             std::min(
@@ -14802,21 +15022,91 @@ void Game::update_backrooms_simulation(float dt) {
         backrooms_jack_.active ||
         backrooms_jack_runtime_.pending_reveal ||
         backrooms_jack_last_result_.render.jumpscare;
-    if (!jack_holds_threat &&
-        backrooms_threat_arbiter_.owner ==
-            BackroomsThreatOwner::Jack &&
-        !smoke_pose.has_value()) {
-        release_backrooms_threat(
-            backrooms_threat_arbiter_,
-            BackroomsThreatOwner::Jack);
-    }
+    const BackroomsThreatIntent jack_threat_intent {
+        .request =
+            backrooms_jack_runtime_.pending_reveal ||
+            (jack_holds_threat &&
+             backrooms_threat_arbiter_.owner !=
+                 BackroomsThreatOwner::Jack),
+        .cancel =
+            jack_pending_before_update &&
+            !backrooms_jack_runtime_.pending_reveal &&
+            !jack_holds_threat,
+        .hold = jack_holds_threat,
+        .release =
+            !smoke_pose.has_value() &&
+            backrooms_threat_arbiter_.owner ==
+                BackroomsThreatOwner::Jack &&
+            !jack_holds_threat,
+    };
+    auto marlow_threat_intent = BackroomsThreatIntent {};
+    auto reset_marlow_after_intent_commit = false;
+    if (marlow_smoke_requested) {
+        const BackroomsGenerator marlow_generator {
+            world_.seed(),
+            jack_logical_level,
+            kBackroomsSpatialConnectorDistrictModules,
+            backrooms_runtime_pool_geometry_profile(
+                world_.generation_version()),
+        };
+        const auto anchor = find_backrooms_marlow_smoke_anchor(
+            world_,
+            marlow_generator,
+            player_.position(),
+            player_.look_direction(),
+            jack_vertical_offset);
 
-    const auto marlow_poolrooms_active =
-        !options_.smoke_test &&
-        session_backrooms_supports_jack() &&
-        world_.backrooms_theme_at_y(player_.position().y) ==
-            BackroomsTheme::Poolrooms;
-    if (marlow_poolrooms_active) {
+        auto capture_transport_blocked = false;
+        if (options_.smoke_backrooms_marlow ==
+            BackroomsMarlowSmokeMode::CaptureBlocked) {
+            // Je dirige volontairement la traction vers le plancher reel. Le
+            // sweep doit rencontrer ce solide et le scenario ne peut valider
+            // son abandon par Submerging sur un simple apercu fabrique.
+            const auto sweep = sweep_backrooms_marlow_drag(
+                player_,
+                world_,
+                player_.position(),
+                player_.position() + glm::vec3 {0.0F, -4.0F, 0.0F},
+                kBackroomsMarlowMaximumDragDistance);
+            capture_transport_blocked = sweep.blocked;
+        }
+        backrooms_marlow_runtime_.capture_transport_blocked =
+            capture_transport_blocked;
+        backrooms_marlow_last_result_ =
+            make_backrooms_marlow_smoke_preview(
+                options_.smoke_backrooms_marlow,
+                anchor,
+                player_.position(),
+                player_.look_direction(),
+                smoke_elapsed_seconds_);
+        backrooms_marlow_runtime_.phase =
+            backrooms_marlow_last_result_.render.phase;
+        backrooms_marlow_runtime_.position =
+            backrooms_marlow_last_result_.render.position;
+        backrooms_marlow_runtime_.pending_manifestation.wall_normal =
+            backrooms_marlow_last_result_.render.wall_normal;
+        marlow_threat_intent = {
+            .request =
+                backrooms_marlow_last_result_.requests_threat_slot,
+            .cancel =
+                backrooms_marlow_last_result_.cancels_threat_request,
+            .hold =
+                backrooms_marlow_last_result_.holds_threat_slot,
+            .release =
+                backrooms_marlow_last_result_.releases_threat_slot,
+        };
+        music_.set_backrooms_drowning_filter(
+            backrooms_marlow_last_result_.capture.drowning_amount);
+
+        ++backrooms_marlow_smoke_update_count_;
+        backrooms_marlow_smoke_checkpoint_reached_ =
+            backrooms_marlow_smoke_checkpoint_reached_ ||
+            (anchor.found &&
+             backrooms_marlow_smoke_checkpoint_matches(
+                 options_.smoke_backrooms_marlow,
+                 backrooms_marlow_last_result_,
+                 capture_transport_blocked));
+    } else if (marlow_poolrooms_active) {
         const BackroomsGenerator marlow_generator {
             world_.seed(),
             jack_logical_level,
@@ -14825,22 +15115,21 @@ void Game::update_backrooms_simulation(float dt) {
                 world_.generation_version()),
         };
         auto local_player_feet = player_.position();
-        local_player_feet.y -= jack_vertical_offset;
+        local_player_feet.y -= jack_vertical_offset_float;
         auto local_player_eye = player_.eye_position();
-        local_player_eye.y -= jack_vertical_offset;
-        const auto column_x = static_cast<int>(
-            std::floor(local_player_feet.x));
-        const auto column_z = static_cast<int>(
-            std::floor(local_player_feet.z));
-        const auto player_column =
-            marlow_generator.sample_column(
-                column_x,
-                column_z);
-        const auto in_water =
-            player_column.water_state != WaterState {0} &&
-            local_player_feet.y <=
-                static_cast<float>(
-                    player_column.water_top_y + 1);
+        local_player_eye.y -= jack_vertical_offset_float;
+        const auto water_contact =
+            player_.sample_world_water_contact(
+                world_,
+                player_.position());
+        const auto in_water = water_contact.any_contact();
+        const auto motion_is_forced =
+            backrooms_marlow_runtime_.phase ==
+                BackroomsMarlowPhase::Dragging ||
+            backrooms_marlow_runtime_.phase ==
+                BackroomsMarlowPhase::Drowning ||
+            backrooms_marlow_runtime_.phase ==
+                BackroomsMarlowPhase::Screamer;
         auto travelled_distance = 0.0F;
         if (backrooms_marlow_has_previous_player_position_) {
             auto travelled = player_.position() -
@@ -14854,21 +15143,25 @@ void Game::update_backrooms_simulation(float dt) {
             }
         }
         const auto jumped =
+            backrooms_marlow_has_previous_player_position_ &&
             input.jump &&
             !backrooms_marlow_previous_jump_input_ &&
             (backrooms_marlow_previous_on_ground_ ||
              backrooms_marlow_previous_in_water_) &&
             player_.state().velocity.y > 0.10F;
         const auto landed_in_water =
+            backrooms_marlow_has_previous_player_position_ &&
             in_water &&
             player_.state().on_ground &&
             !backrooms_marlow_previous_on_ground_;
         const auto flashlight_on_water =
-            backrooms_flashlight_hits_water(
+            backrooms_marlow_flashlight_hits_water(
                 world_,
                 player_.eye_position(),
                 player_.look_direction(),
-                backrooms_flashlight_);
+                backrooms_flashlight_.enabled,
+                backrooms_flashlight_intensity(
+                    backrooms_flashlight_));
         const auto ui_blocks_simulation =
             gameplay_interaction_blocked();
         const auto threat_slot_available =
@@ -14884,14 +15177,15 @@ void Game::update_backrooms_simulation(float dt) {
                 .eye_position = local_player_eye,
                 .look_direction = player_.look_direction(),
                 .travelled_horizontal_distance = travelled_distance,
-                .water_depth = static_cast<float>(
-                    player_column.water_depth_cells),
                 .sprinting =
                     input.sprint &&
                     (std::abs(input.move_forward) > 0.01F ||
                      std::abs(input.move_right) > 0.01F),
                 .in_water = in_water,
+                .head_in_water = water_contact.head_in_water,
+                .motion_is_forced = motion_is_forced,
                 .entered_water =
+                    backrooms_marlow_has_previous_player_position_ &&
                     in_water &&
                     !backrooms_marlow_previous_in_water_,
                 .jumped = jumped,
@@ -14930,25 +15224,18 @@ void Game::update_backrooms_simulation(float dt) {
                 safe_dt);
         translate_backrooms_marlow_result_y(
             backrooms_marlow_last_result_,
-            static_cast<float>(jack_vertical_offset));
+            jack_vertical_offset_float);
 
-        if (backrooms_marlow_last_result_.requests_threat_slot) {
-            queue_threat_request(
-                BackroomsThreatOwner::Marlow);
-            static_cast<void>(
-                resolve_backrooms_threat(
-                    backrooms_threat_arbiter_));
-        }
-        if (backrooms_marlow_last_result_.cancels_threat_request) {
-            cancel_backrooms_threat_request(
-                backrooms_threat_arbiter_,
-                BackroomsThreatOwner::Marlow);
-        }
-        if (backrooms_marlow_last_result_.releases_threat_slot) {
-            release_backrooms_threat(
-                backrooms_threat_arbiter_,
-                BackroomsThreatOwner::Marlow);
-        }
+        marlow_threat_intent = {
+            .request =
+                backrooms_marlow_last_result_.requests_threat_slot,
+            .cancel =
+                backrooms_marlow_last_result_.cancels_threat_request,
+            .hold =
+                backrooms_marlow_last_result_.holds_threat_slot,
+            .release =
+                backrooms_marlow_last_result_.releases_threat_slot,
+        };
 
         const auto marlow_event_count = std::min(
             backrooms_marlow_last_result_.event_count,
@@ -14985,18 +15272,24 @@ void Game::update_backrooms_simulation(float dt) {
 
         if (backrooms_marlow_last_result_.capture.active) {
             const auto current = player_.position();
-            const auto target = finite_vec3_or(
-                backrooms_marlow_last_result_.capture.water_target,
-                current);
-            const auto drag_speed =
-                5.5F +
-                backrooms_marlow_last_result_.capture.drag_amount * 10.5F;
-            const auto blend = std::clamp(
-                safe_dt * drag_speed,
-                0.0F,
-                1.0F);
-            player_.set_position(
-                current + (target - current) * blend);
+            const auto target =
+                backrooms_marlow_last_result_.capture.water_target;
+            if (!context.simulation_frozen) {
+                const auto drag_speed =
+                    5.5F +
+                    backrooms_marlow_last_result_.capture.drag_amount * 10.5F;
+                const auto swept = sweep_backrooms_marlow_drag(
+                    player_,
+                    world_,
+                    current,
+                    target,
+                    drag_speed * safe_dt);
+                player_.set_position(swept.position);
+                // Le contrôleur gameplay consomme ce retour à la frame suivante
+                // et annule la noyade avant toute mise à mort.
+                backrooms_marlow_runtime_.capture_transport_blocked =
+                    swept.blocked;
+            }
             player_.set_velocity(glm::vec3 {0.0F});
             pending_look_x_ = 0.0F;
             pending_look_y_ = 0.0F;
@@ -15006,12 +15299,14 @@ void Game::update_backrooms_simulation(float dt) {
                 .capture.drowning_amount);
 
         if (backrooms_marlow_last_result_.kill_player &&
+            !backrooms_marlow_runtime_.capture_transport_blocked &&
             !backrooms_marlow_death_pending_) {
             player_.force_death(
                 PlayerDeathCause::MarlowTheDrowned);
             backrooms_marlow_death_delay_seconds_ =
                 kBackroomsMarlowScreamerSeconds;
             backrooms_marlow_death_pending_ = true;
+            marlow_killed_this_update = true;
             pending_look_x_ = 0.0F;
             pending_look_y_ = 0.0F;
         }
@@ -15019,30 +15314,66 @@ void Game::update_backrooms_simulation(float dt) {
         backrooms_marlow_previous_player_position_ =
             player_.position();
         backrooms_marlow_has_previous_player_position_ = true;
-        backrooms_marlow_previous_in_water_ = in_water;
+        backrooms_marlow_previous_in_water_ =
+            player_.sample_world_water_contact(
+                world_,
+                player_.position())
+                .any_contact();
         backrooms_marlow_previous_on_ground_ =
             player_.state().on_ground;
         backrooms_marlow_previous_jump_input_ = input.jump;
     } else {
         backrooms_marlow_last_result_ = {};
-        // Je retire toujours le corps en quittant les Poolrooms. Le directeur
-        // durable garde sa pression, mais aucune phase de capture ne peut
-        // reprendre au retour sur cet etage.
-        backrooms_marlow_runtime_ = {};
-        backrooms_marlow_.logical_level = jack_logical_level;
-        backrooms_marlow_.cooldown_seconds = std::max(
-            backrooms_marlow_.cooldown_seconds,
-            kBackroomsMarlowInitialGraceSeconds);
-        music_.set_backrooms_drowning_filter(0.0F);
-        if (backrooms_threat_arbiter_.owner ==
-            BackroomsThreatOwner::Marlow) {
-            release_backrooms_threat(
-                backrooms_threat_arbiter_,
-                BackroomsThreatOwner::Marlow);
+        if (marlow_poolrooms_was_active || logical_context_changed) {
+            // Je differe le reset apres le commit : l'annulation et la
+            // liberation de l'ancien contexte sont publiees avant d'effacer le
+            // runtime qui les a produites.
+            reset_marlow_after_intent_commit = true;
         }
-        cancel_backrooms_threat_request(
-            backrooms_threat_arbiter_,
-            BackroomsThreatOwner::Marlow);
+        marlow_threat_intent = {
+            .cancel = true,
+            .release =
+                backrooms_threat_arbiter_.owner ==
+                BackroomsThreatOwner::Marlow,
+        };
+    }
+
+    backrooms_marlow_poolrooms_active_ = marlow_poolrooms_active;
+    const auto request_is_new = [this](
+                                    BackroomsThreatOwner owner,
+                                    const BackroomsThreatIntent& intent) {
+        if (!intent.request || intent.cancel || intent.release ||
+            backrooms_threat_arbiter_.owner == owner) {
+            return false;
+        }
+        return owner == BackroomsThreatOwner::Jack
+                   ? backrooms_threat_arbiter_.pending_jack_arrival ==
+                         kBackroomsThreatNoArrival
+                   : backrooms_threat_arbiter_.pending_marlow_arrival ==
+                         kBackroomsThreatNoArrival;
+    };
+    if (request_is_new(BackroomsThreatOwner::Jack, jack_threat_intent) ||
+        request_is_new(BackroomsThreatOwner::Marlow, marlow_threat_intent)) {
+        ++backrooms_threat_request_sequence_;
+        if (backrooms_threat_request_sequence_ == 0U ||
+            backrooms_threat_request_sequence_ ==
+                kBackroomsThreatNoArrival) {
+            backrooms_threat_request_sequence_ = 1U;
+        }
+    }
+    static_cast<void>(commit_backrooms_threat_intents(
+        backrooms_threat_arbiter_,
+        jack_threat_intent,
+        marlow_threat_intent,
+        backrooms_threat_request_sequence_));
+    if (reset_marlow_after_intent_commit) {
+        // Je retire le corps uniquement sur le front de sortie. Le directeur
+        // durable garde sa pression et les buffers conservent leur capacite.
+        reset_backrooms_marlow_runtime(
+            backrooms_marlow_runtime_,
+            backrooms_marlow_.pressure);
+        backrooms_marlow_.logical_level = jack_logical_level;
+        music_.set_backrooms_drowning_filter(0.0F);
     }
 
     if (backrooms_jack_death_pending_) {
@@ -15064,9 +15395,11 @@ void Game::update_backrooms_simulation(float dt) {
                     JackThePirate);
         }
     } else if (backrooms_marlow_death_pending_) {
-        backrooms_marlow_death_delay_seconds_ = std::max(
-            backrooms_marlow_death_delay_seconds_ - safe_dt,
-            0.0F);
+        backrooms_marlow_death_delay_seconds_ =
+            advance_backrooms_marlow_death_delay(
+                backrooms_marlow_death_delay_seconds_,
+                safe_dt,
+                marlow_killed_this_update);
         if (backrooms_marlow_death_delay_seconds_ <= 0.0F) {
             // Je laisse les 0,85 s du visage noyé se terminer avant d'afficher
             // la cause de mort, puis je purge le filtre audio subaquatique.
@@ -15241,7 +15574,8 @@ auto Game::make_world_snapshot() const -> SaveGameSnapshot {
                 backrooms_jack_runtime_);
         snapshot.backrooms_marlow =
             prepare_backrooms_marlow_for_persistence(
-                backrooms_marlow_);
+                backrooms_marlow_,
+                backrooms_marlow_runtime_);
         snapshot.backrooms_marlow.logical_level =
             saved_backrooms_level;
         sanitize_backrooms_player_state(
@@ -17420,6 +17754,7 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
             backrooms_marlow_previous_player_position_ =
                 player_.position();
             backrooms_marlow_has_previous_player_position_ = false;
+            backrooms_marlow_poolrooms_active_ = false;
             backrooms_marlow_previous_in_water_ = false;
             backrooms_marlow_previous_on_ground_ =
                 player_.state().on_ground;
@@ -17541,6 +17876,9 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
 auto Game::start_smoke_session() -> bool {
     constexpr auto kSmokeSlot = std::size_t {0U};
     constexpr auto kSmokeSeed = 1337;
+
+    backrooms_marlow_smoke_checkpoint_reached_ = false;
+    backrooms_marlow_smoke_update_count_ = 0U;
 
     if (options_.smoke_session == SmokeSessionMode::SeaNew) {
         start_new_game_in_slot(kSmokeSlot, GameMode::SeaAdventure);
@@ -17769,6 +18107,17 @@ auto Game::start_smoke_session() -> bool {
             generator.descriptor_at(
                 player_block_x,
                 player_block_z);
+        const auto marlow_smoke_requested =
+            options_.smoke_backrooms_marlow !=
+            BackroomsMarlowSmokeMode::None;
+        if (marlow_smoke_requested &&
+            (options_.smoke_backrooms_level > -2 ||
+             world_.backrooms_theme_at_y(player_.position().y) !=
+                 BackroomsTheme::Poolrooms)) {
+            throw std::runtime_error(
+                "Marlow smoke requires a deterministic Poolrooms level "
+                "(--smoke-backrooms-level=-2 or lower)");
+        }
         auto luminous_fixture_near_blackout =
             false;
         auto maximum_actual_block_light =
@@ -18553,6 +18902,35 @@ void Game::validate_smoke_frame(const WorldWorkBudget& budget, const WorldWorkSt
                 << ", pending_mesh=" << world_.pending_mesh_count() << ')';
         throw std::runtime_error(message.str());
     }
+}
+
+void Game::validate_backrooms_marlow_smoke_completion() const {
+    if (!options_.smoke_test ||
+        options_.smoke_backrooms_marlow ==
+            BackroomsMarlowSmokeMode::None) {
+        return;
+    }
+    if (backrooms_marlow_smoke_checkpoint_reached_ &&
+        backrooms_marlow_smoke_update_count_ > 0U) {
+        return;
+    }
+
+    std::ostringstream message;
+    message
+        << "Marlow smoke did not reach checkpoint '"
+        << backrooms_marlow_smoke_mode_name(
+               options_.smoke_backrooms_marlow)
+        << "' (updates="
+        << backrooms_marlow_smoke_update_count_
+        << ", session="
+        << static_cast<int>(options_.smoke_session)
+        << ", level="
+        << options_.smoke_backrooms_level
+        << ", phase="
+        << static_cast<int>(
+               backrooms_marlow_last_result_.render.phase)
+        << ')';
+    throw std::runtime_error(message.str());
 }
 
 void Game::capture_current_frame_if_requested() {

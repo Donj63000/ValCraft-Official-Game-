@@ -231,6 +231,7 @@ add_library(valcraft_core
     src/gameplay/BackroomsFlashlight.cpp
     src/gameplay/BackroomsJack.cpp
     src/gameplay/BackroomsMarlow.cpp
+    src/gameplay/BackroomsMarlowWorld.cpp
     src/gameplay/BackroomsThreatArbiter.cpp
     src/gameplay/PlayerMusket.cpp
     src/gameplay/PlayerMusketEffects.cpp
@@ -392,6 +393,7 @@ add_custom_command(TARGET ValCraft POST_BUILD
 )
 
 add_executable(valcraft_tests
+    src/app/GameMusic.cpp
     src/render/Renderer.cpp
     tests/main.cpp
     tests/AppTests.cpp
@@ -408,8 +410,10 @@ add_executable(valcraft_tests
     tests/BackroomsJackDirectorAuditTests.cpp
     tests/BackroomsJackTests.cpp
     tests/BackroomsJackVisualTests.cpp
+    tests/BackroomsMarlowAudioTests.cpp
     tests/BackroomsMarlowVisualTests.cpp
     tests/BackroomsMarlowTests.cpp
+    tests/BackroomsMarlowWorldTests.cpp
     tests/BackroomsMarlowSaveTests.cpp
     tests/BackroomsThreatArbiterTests.cpp
     tests/BackroomsConnectorBlockTests.cpp
@@ -518,6 +522,7 @@ add_executable(valcraft_model_icon_atlas_tool EXCLUDE_FROM_ALL
 )
 target_link_libraries(valcraft_model_icon_atlas_tool PRIVATE valcraft_core)
 valcraft_apply_strict_warnings(valcraft_model_icon_atlas_tool)
+valcraft_enable_coverage_for(valcraft_model_icon_atlas_tool)
 valcraft_enable_address_sanitizer_for(valcraft_model_icon_atlas_tool)
 # Je rends l'outil disponible avant CTest, même lorsque la CI ne construit
 # explicitement que le binaire de tests.
@@ -671,10 +676,48 @@ add_custom_target(valcraft_check_tests
     USES_TERMINAL
 )
 
+# Je rejoue le perimetre Marlow dans plusieurs ordres deterministes afin de
+# detecter une dependance cachee entre tests sans ralentir toute la suite.
+add_custom_target(valcraft_check_marlow
+    COMMAND $<TARGET_FILE:valcraft_tests>
+        "--source-file=*BackroomsMarlow*,*BackroomsThreatArbiter*,*BackroomsJackIntegration*"
+        --order-by=rand
+        --rand-seed=15485863
+    COMMAND $<TARGET_FILE:valcraft_tests>
+        "--source-file=*BackroomsMarlow*,*BackroomsThreatArbiter*,*BackroomsJackIntegration*"
+        --order-by=rand
+        --rand-seed=32452843
+    COMMAND $<TARGET_FILE:valcraft_tests>
+        "--source-file=*BackroomsMarlow*,*BackroomsThreatArbiter*,*BackroomsJackIntegration*"
+        --order-by=rand
+        --rand-seed=49979687
+    DEPENDS valcraft_tests
+    USES_TERMINAL
+    VERBATIM
+)
+
 add_custom_target(valcraft_check_smoke
     COMMAND $<TARGET_FILE:ValCraft> --smoke-test --smoke-frames=360 --hidden-window
     DEPENDS ValCraft
     USES_TERMINAL
+)
+
+add_custom_target(valcraft_check_marlow_smoke
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test --smoke-session=backrooms --smoke-backrooms-level=-2
+        --smoke-backrooms-marlow=peek --smoke-frames=2 --hidden-window
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test --smoke-session=backrooms --smoke-backrooms-level=-2
+        --smoke-backrooms-marlow=chase --smoke-frames=2 --hidden-window
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test --smoke-session=backrooms --smoke-backrooms-level=-2
+        --smoke-backrooms-marlow=capture-blocked --smoke-frames=2 --hidden-window
+    COMMAND $<TARGET_FILE:ValCraft>
+        --smoke-test --smoke-session=backrooms --smoke-backrooms-level=-2
+        --smoke-backrooms-marlow=screamer --smoke-frames=2 --hidden-window
+    DEPENDS ValCraft
+    USES_TERMINAL
+    VERBATIM
 )
 
 add_custom_target(valcraft_check_modern_visual_smoke
@@ -712,6 +755,33 @@ add_custom_target(valcraft_check_sea_loading_smoke
 # la cible valcraft_check_sea_loading_smoke reste toujours disponible sur un
 # poste equipe pour valider le vrai chemin SDL/GPU.
 if(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS)
+    function(valcraft_add_marlow_gpu_smoke test_name smoke_mode)
+        add_test(
+            NAME ${test_name}
+            COMMAND $<TARGET_FILE:ValCraft>
+                --smoke-test
+                --smoke-session=backrooms
+                --smoke-backrooms-level=-2
+                --smoke-backrooms-marlow=${smoke_mode}
+                --smoke-frames=2
+                --hidden-window
+        )
+        set_tests_properties(
+            ${test_name}
+            PROPERTIES
+                LABELS "gpu;integration;backrooms;marlow"
+                TIMEOUT 90
+                RESOURCE_LOCK valcraft_gpu
+        )
+    endfunction()
+
+    valcraft_add_marlow_gpu_smoke(valcraft_marlow_peek_smoke peek)
+    valcraft_add_marlow_gpu_smoke(valcraft_marlow_chase_smoke chase)
+    valcraft_add_marlow_gpu_smoke(
+        valcraft_marlow_capture_blocked_smoke
+        capture-blocked)
+    valcraft_add_marlow_gpu_smoke(valcraft_marlow_screamer_smoke screamer)
+
     add_test(
         NAME valcraft_modern_visual_smoke
         COMMAND $<TARGET_FILE:ValCraft>

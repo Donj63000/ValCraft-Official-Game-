@@ -28,6 +28,7 @@ struct MarlowBuildContext {
     float tension = 0.90F;
     float sky_light = 0.0F;
     float block_light = 0.0F;
+    std::size_t part_limit = kBackroomsMarlowVisualPartBudget;
 };
 
 [[nodiscard]] auto finite_or(float value, float fallback) noexcept -> float {
@@ -54,6 +55,89 @@ struct MarlowBuildContext {
 [[nodiscard]] auto smoothstep01(float value) noexcept -> float {
     const auto clamped = saturate(value);
     return clamped * clamped * (3.0F - 2.0F * clamped);
+}
+
+[[nodiscard]] auto presentation_or_default(
+    BackroomsMarlowVisualPresentation presentation) noexcept
+    -> BackroomsMarlowVisualPresentation {
+    switch (presentation) {
+    case BackroomsMarlowVisualPresentation::FullBody:
+    case BackroomsMarlowVisualPresentation::ProgressiveReveal:
+    case BackroomsMarlowVisualPresentation::HeadOnlyPeek:
+        return presentation;
+    }
+    return BackroomsMarlowVisualPresentation::FullBody;
+}
+
+[[nodiscard]] auto reveal_group_progress(
+    float reveal,
+    float start,
+    float end) noexcept -> float {
+    if (reveal <= start) {
+        return 0.0F;
+    }
+    if (reveal >= end) {
+        return 1.0F;
+    }
+    return smoothstep01((reveal - start) / (end - start));
+}
+
+[[nodiscard]] auto horizontal_wall_normal(
+    const glm::vec3& source) noexcept -> glm::vec3 {
+    const auto finite = finite_position(source);
+    const glm::vec3 horizontal {finite.x, 0.0F, finite.z};
+    const auto length_squared = glm::dot(horizontal, horizontal);
+    if (!std::isfinite(length_squared) || length_squared <= 1.0e-6F) {
+        return glm::vec3 {0.0F};
+    }
+    return horizontal / std::sqrt(length_squared);
+}
+
+[[nodiscard]] auto bounded_part_limit(
+    std::size_t initial_size,
+    std::size_t budget) noexcept -> std::size_t {
+    const auto maximum = std::numeric_limits<std::size_t>::max();
+    return initial_size > maximum - budget
+               ? maximum
+               : initial_size + budget;
+}
+
+[[nodiscard]] auto part_minimum_y(
+    const CreaturePartInstance& part) noexcept -> float {
+    auto minimum = std::numeric_limits<float>::infinity();
+    for (const auto x : {-0.5F, 0.5F}) {
+        for (const auto y : {-0.5F, 0.5F}) {
+            for (const auto z : {-0.5F, 0.5F}) {
+                const auto world = part.transform * glm::vec4 {x, y, z, 1.0F};
+                if (std::isfinite(world.y)) {
+                    minimum = std::min(minimum, world.y);
+                }
+            }
+        }
+    }
+    return minimum;
+}
+
+void keep_parts_above_anchor(
+    std::vector<CreaturePartInstance>& parts,
+    std::size_t first_part,
+    float anchor_y) noexcept {
+    if (first_part >= parts.size() || !std::isfinite(anchor_y)) {
+        return;
+    }
+    auto minimum = std::numeric_limits<float>::infinity();
+    for (auto index = first_part; index < parts.size(); ++index) {
+        minimum = std::min(minimum, part_minimum_y(parts[index]));
+    }
+    if (!std::isfinite(minimum) || minimum >= anchor_y) {
+        return;
+    }
+    const auto correction = anchor_y - minimum;
+    for (auto index = first_part; index < parts.size(); ++index) {
+        // Je corrige en espace monde afin qu'une rotation de membre ne puisse
+        // jamais pousser une primitive sous le plancher disponible.
+        parts[index].transform[3].y += correction;
+    }
 }
 
 [[nodiscard]] auto periodic_angle(float value) noexcept -> float {
@@ -128,7 +212,10 @@ void append_part(
     float cavity_mask,
     float local_light_boost,
     const MarlowBuildContext& context) {
-    if (parts.size() >= budget) {
+    // Je conserve le paramètre historique aux points d'appel, mais la limite
+    // absolue du contexte sait désormais ajouter un lot à un buffer existant.
+    static_cast<void>(budget);
+    if (parts.size() >= context.part_limit) {
         return;
     }
 
@@ -721,6 +808,32 @@ void append_arm(
     }
 }
 
+[[nodiscard]] auto make_upper_root(
+    const glm::mat4& root,
+    float reach,
+    float jumpscare,
+    float peek,
+    float body_bob) noexcept -> glm::mat4 {
+    const glm::vec3 upper_pivot {0.0F, 1.86F, 0.0F};
+    auto upper_root = glm::translate(root, upper_pivot);
+    upper_root = glm::rotate(
+        upper_root,
+        -0.045F - reach * 0.12F - jumpscare * 0.08F,
+        glm::vec3 {0.0F, 0.0F, 1.0F});
+    upper_root = glm::rotate(
+        upper_root,
+        peek * 0.16F,
+        glm::vec3 {1.0F, 0.0F, 0.0F});
+    upper_root = glm::translate(upper_root, -upper_pivot);
+    return glm::translate(
+        upper_root,
+        glm::vec3 {
+            reach * 0.05F,
+            body_bob,
+            peek * 0.28F,
+        });
+}
+
 } // namespace
 
 auto backrooms_marlow_visual_body_yaw_radians(
@@ -751,12 +864,28 @@ auto backrooms_marlow_visual_submersion_ratio(
         1.0F);
 }
 
-auto build_backrooms_marlow_visual_parts(
-    const BackroomsMarlowVisualPose& source)
-    -> std::vector<CreaturePartInstance> {
+void append_backrooms_marlow_visual_parts(
+    const BackroomsMarlowVisualPose& source,
+    std::vector<CreaturePartInstance>& parts) {
+    const auto first_part = parts.size();
+    const auto part_limit = bounded_part_limit(
+        first_part,
+        kBackroomsMarlowVisualPartBudget);
+    if (parts.capacity() < part_limit) {
+        parts.reserve(part_limit);
+    }
+
     const auto animation_time = finite_or(source.animation_time, 0.0F);
     const auto motion = smoothstep01(source.motion_amount);
     const auto submersion = smoothstep01(source.submersion_ratio);
+    const auto maximum_submersion = glm::clamp(
+        finite_or(
+            source.maximum_submersion,
+            kBackroomsMarlowMaximumSubmersion),
+        0.0F,
+        kBackroomsMarlowMaximumSubmersion);
+    const auto reveal = saturate(source.reveal_amount);
+    const auto presentation = presentation_or_default(source.presentation);
     const auto peek = signed_unit(source.peek_amount);
     const auto jumpscare = source.jumpscare ? 1.0F : 0.0F;
     const auto reach = std::max(
@@ -777,44 +906,33 @@ auto build_backrooms_marlow_visual_parts(
         1.0F);
     context.sky_light = saturate(source.sky_light);
     context.block_light = saturate(source.block_light);
+    context.part_limit = part_limit;
+
+    auto root_position =
+        finite_position(source.position) -
+        glm::vec3 {
+            0.0F,
+            submersion * maximum_submersion,
+            0.0F,
+        };
+    if (presentation ==
+        BackroomsMarlowVisualPresentation::HeadOnlyPeek) {
+        const auto wall_offset = glm::clamp(
+            finite_or(source.wall_offset, 0.0F),
+            -1.0F,
+            1.0F);
+        root_position +=
+            horizontal_wall_normal(source.wall_normal) * wall_offset;
+    }
 
     auto root = glm::translate(
         glm::mat4 {1.0F},
-        finite_position(source.position) -
-            glm::vec3 {
-                0.0F,
-                submersion * kBackroomsMarlowMaximumSubmersion,
-                0.0F,
-            });
+        root_position);
     root = glm::rotate(
         root,
         periodic_angle(source.yaw_radians),
         glm::vec3 {0.0F, 1.0F, 0.0F});
 
-    std::vector<CreaturePartInstance> parts {};
-    parts.reserve(kBackroomsMarlowVisualPartBudget);
-    append_legs(parts, root, stride, motion, body_bob, context);
-
-    const glm::vec3 upper_pivot {0.0F, 1.86F, 0.0F};
-    auto upper_root = glm::translate(root, upper_pivot);
-    upper_root = glm::rotate(
-        upper_root,
-        -0.045F - reach * 0.12F - jumpscare * 0.08F,
-        glm::vec3 {0.0F, 0.0F, 1.0F});
-    upper_root = glm::rotate(
-        upper_root,
-        peek * 0.16F,
-        glm::vec3 {1.0F, 0.0F, 0.0F});
-    upper_root = glm::translate(upper_root, -upper_pivot);
-    upper_root = glm::translate(
-        upper_root,
-        glm::vec3 {
-            reach * 0.05F,
-            body_bob,
-            peek * 0.28F,
-        });
-
-    append_torso(parts, upper_root, breath, body_sway, context);
     const auto idle_scan =
         wave(animation_time, 0.31F) *
         (1.0F - motion) * (1.0F - jumpscare) * 0.055F;
@@ -822,45 +940,117 @@ auto build_backrooms_marlow_visual_parts(
         finite_or(source.head_scan_radians, 0.0F) + idle_scan,
         -0.72F,
         0.72F);
-    append_head(
-        parts,
-        upper_root,
-        animation_time,
-        breath,
-        head_scan,
-        peek,
-        reach,
-        jumpscare,
-        context);
-    append_arm(
-        parts,
-        upper_root,
-        -1.0F,
-        stride,
-        animation_time,
-        motion,
-        reach,
-        jumpscare,
-        context);
-    append_arm(
-        parts,
-        upper_root,
-        1.0F,
-        stride,
-        animation_time,
-        motion,
-        reach,
-        jumpscare,
-        context);
+
+    auto leg_progress = 1.0F;
+    auto torso_progress = 1.0F;
+    auto head_progress = 1.0F;
+    if (presentation ==
+        BackroomsMarlowVisualPresentation::ProgressiveReveal) {
+        // Je fais émerger chaque groupe depuis l'ancre commune. La tête est
+        // lisible d'abord, puis le buste et les bras, enfin les jambes.
+        head_progress = reveal_group_progress(reveal, 0.0F, 0.30F);
+        torso_progress = reveal_group_progress(reveal, 0.20F, 0.75F);
+        leg_progress = reveal_group_progress(reveal, 0.55F, 1.0F);
+    } else if (presentation ==
+               BackroomsMarlowVisualPresentation::HeadOnlyPeek) {
+        leg_progress = 0.0F;
+        torso_progress = 0.0F;
+    }
+
+    const auto revealed_root = [&root](float progress) noexcept {
+        return glm::scale(
+            root,
+            glm::vec3 {progress, progress, progress});
+    };
+
+    if (leg_progress > kMinimumPartExtent) {
+        append_legs(
+            parts,
+            revealed_root(leg_progress),
+            stride,
+            motion,
+            body_bob,
+            context);
+    }
+    if (torso_progress > kMinimumPartExtent) {
+        const auto upper_root = make_upper_root(
+            revealed_root(torso_progress),
+            reach,
+            jumpscare,
+            peek,
+            body_bob);
+        append_torso(parts, upper_root, breath, body_sway, context);
+    }
+    if (head_progress > kMinimumPartExtent) {
+        const auto upper_root = make_upper_root(
+            revealed_root(head_progress),
+            reach,
+            jumpscare,
+            peek,
+            body_bob);
+        append_head(
+            parts,
+            upper_root,
+            animation_time,
+            breath,
+            head_scan,
+            peek,
+            reach,
+            jumpscare,
+            context);
+    }
+    if (torso_progress > kMinimumPartExtent) {
+        const auto upper_root = make_upper_root(
+            revealed_root(torso_progress),
+            reach,
+            jumpscare,
+            peek,
+            body_bob);
+        append_arm(
+            parts,
+            upper_root,
+            -1.0F,
+            stride,
+            animation_time,
+            motion,
+            reach,
+            jumpscare,
+            context);
+        append_arm(
+            parts,
+            upper_root,
+            1.0F,
+            stride,
+            animation_time,
+            motion,
+            reach,
+            jumpscare,
+            context);
+    }
+
+    keep_parts_above_anchor(parts, first_part, root_position.y);
+}
+
+auto build_backrooms_marlow_visual_parts(
+    const BackroomsMarlowVisualPose& source)
+    -> std::vector<CreaturePartInstance> {
+    std::vector<CreaturePartInstance> parts {};
+    append_backrooms_marlow_visual_parts(source, parts);
     return parts;
 }
 
-auto build_backrooms_marlow_buoy_visual_parts(
-    const BackroomsMarlowBuoyVisualPose& source)
-    -> std::vector<CreaturePartInstance> {
+void append_backrooms_marlow_buoy_visual_parts(
+    const BackroomsMarlowBuoyVisualPose& source,
+    std::vector<CreaturePartInstance>& parts) {
     constexpr auto kSegmentCount = 16;
     constexpr auto kRadius = 0.39F;
     constexpr auto kTubeRadius = 0.065F;
+    const auto part_limit = bounded_part_limit(
+        parts.size(),
+        kBackroomsMarlowBuoyVisualPartBudget);
+    if (parts.capacity() < part_limit) {
+        parts.reserve(part_limit);
+    }
     const auto animation_time = finite_or(source.animation_time, 0.0F);
     const auto disturbance = smoothstep01(source.disturbance);
     const auto bob =
@@ -876,6 +1066,7 @@ auto build_backrooms_marlow_buoy_visual_parts(
     context.tension = 0.72F + disturbance * 0.18F;
     context.sky_light = saturate(source.sky_light);
     context.block_light = saturate(source.block_light);
+    context.part_limit = part_limit;
 
     auto root = glm::translate(
         glm::mat4 {1.0F},
@@ -888,8 +1079,6 @@ auto build_backrooms_marlow_buoy_visual_parts(
     root = glm::rotate(root, pitch, glm::vec3 {1.0F, 0.0F, 0.0F});
     root = glm::rotate(root, roll, glm::vec3 {0.0F, 0.0F, 1.0F});
 
-    std::vector<CreaturePartInstance> parts {};
-    parts.reserve(kBackroomsMarlowBuoyVisualPartBudget);
     for (auto segment = 0; segment < kSegmentCount; ++segment) {
         const auto angle0 =
             static_cast<float>(segment) * kTwoPi /
@@ -922,6 +1111,13 @@ auto build_backrooms_marlow_buoy_visual_parts(
             0.0F,
             context);
     }
+}
+
+auto build_backrooms_marlow_buoy_visual_parts(
+    const BackroomsMarlowBuoyVisualPose& source)
+    -> std::vector<CreaturePartInstance> {
+    std::vector<CreaturePartInstance> parts {};
+    append_backrooms_marlow_buoy_visual_parts(source, parts);
     return parts;
 }
 

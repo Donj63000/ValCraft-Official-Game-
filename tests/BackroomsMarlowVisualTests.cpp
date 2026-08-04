@@ -57,6 +57,31 @@ struct MarlowBounds {
     return bounds;
 }
 
+[[nodiscard]] auto visual_horizontal_radius(
+    const std::vector<CreaturePartInstance>& parts,
+    const glm::vec3& anchor) noexcept -> float {
+    constexpr std::array<float, 2> kCornerCoordinates {{-0.5F, 0.5F}};
+    auto radius = 0.0F;
+    for (const auto& part : parts) {
+        for (const auto x : kCornerCoordinates) {
+            for (const auto y : kCornerCoordinates) {
+                for (const auto z : kCornerCoordinates) {
+                    const auto world =
+                        part.transform * glm::vec4 {x, y, z, 1.0F};
+                    const auto offset_x = world.x - anchor.x;
+                    const auto offset_z = world.z - anchor.z;
+                    radius = std::max(
+                        radius,
+                        std::sqrt(
+                            offset_x * offset_x +
+                            offset_z * offset_z));
+                }
+            }
+        }
+    }
+    return radius;
+}
+
 [[nodiscard]] auto part_tile(
     const CreaturePartInstance& part) noexcept -> CreatureAtlasTile {
     const auto tile_x = static_cast<int>(
@@ -242,6 +267,25 @@ TEST_CASE("Marlow mesure environ trois metres quatre-vingt-cinq et touche le sol
                         .epsilon(0.018));
 }
 
+TEST_CASE("le rayon partage contient le rig complet non screamer") {
+    BackroomsMarlowVisualPose pose {};
+    pose.position = {7.25F, 39.0F, -13.5F};
+    pose.animation_time = 2.26F;
+    pose.motion_amount = 1.0F;
+    pose.reach_amount = 1.0F;
+    pose.peek_amount = 1.0F;
+    pose.presentation = BackroomsMarlowVisualPresentation::FullBody;
+    pose.jumpscare = false;
+
+    const auto parts = build_backrooms_marlow_visual_parts(pose);
+    REQUIRE_FALSE(parts.empty());
+    const auto radius = visual_horizontal_radius(parts, pose.position);
+    // Je garde une pose connue pour pousser les bras et les doigts au maximum :
+    // le test echouerait si le rayon redevenait un simple collider de torse.
+    CHECK(radius > 1.80F);
+    CHECK(radius <= kBackroomsMarlowRigVisualRadius);
+}
+
 TEST_CASE("le visage de Marlow garde deux globes blancs enormes sans masque ni pupille") {
     const auto parts =
         build_backrooms_marlow_visual_parts(BackroomsMarlowVisualPose {});
@@ -404,6 +448,17 @@ TEST_CASE("l'immersion et le regard d'angle animent Marlow sans changer son rig"
     CHECK((submerged_bounds.maximum.y - submerged_bounds.minimum.y) ==
           doctest::Approx(idle_bounds.maximum.y - idle_bounds.minimum.y));
 
+    auto shallow_pose = idle_pose;
+    shallow_pose.submersion_ratio = 1.0F;
+    shallow_pose.maximum_submersion = 0.62F;
+    const auto shallow =
+        build_backrooms_marlow_visual_parts(shallow_pose);
+    const auto shallow_bounds = visual_bounds(shallow);
+    CHECK(shallow_bounds.minimum.y ==
+          doctest::Approx(idle_bounds.minimum.y - 0.62F));
+    CHECK(shallow_bounds.maximum.y ==
+          doctest::Approx(idle_bounds.maximum.y - 0.62F));
+
     auto peek_pose = idle_pose;
     peek_pose.peek_amount = 1.0F;
     const auto peek = build_backrooms_marlow_visual_parts(peek_pose);
@@ -423,6 +478,202 @@ TEST_CASE("la revelation fait emerger puis replonger Marlow progressivement") {
               std::numeric_limits<float>::quiet_NaN(),
               std::numeric_limits<float>::infinity()) ==
           doctest::Approx(1.0F));
+}
+
+TEST_CASE("la presentation progressive revele les groupes dans l ordre attendu") {
+    BackroomsMarlowVisualPose pose {};
+    pose.presentation =
+        BackroomsMarlowVisualPresentation::ProgressiveReveal;
+
+    pose.reveal_amount = 0.0F;
+    CHECK(build_backrooms_marlow_visual_parts(pose).empty());
+
+    pose.reveal_amount = 0.10F;
+    const auto head_only = build_backrooms_marlow_visual_parts(pose);
+    REQUIRE_FALSE(head_only.empty());
+    CHECK(count_tile(
+              head_only,
+              CreatureAtlasTile::MarlowEyeWhite) == 2U);
+    CHECK(count_tile(
+              head_only,
+              CreatureAtlasTile::MarlowUniform) == 0U);
+
+    pose.reveal_amount = 0.40F;
+    const auto upper_body = build_backrooms_marlow_visual_parts(pose);
+    CHECK(upper_body.size() > head_only.size());
+    CHECK(count_tile(
+              upper_body,
+              CreatureAtlasTile::MarlowUniform) > 0U);
+
+    pose.reveal_amount = 0.54F;
+    const auto before_legs = build_backrooms_marlow_visual_parts(pose);
+    pose.reveal_amount = 0.56F;
+    const auto with_legs = build_backrooms_marlow_visual_parts(pose);
+    CHECK(with_legs.size() > before_legs.size());
+}
+
+TEST_CASE("la revelation complete reproduit exactement le rig complet") {
+    BackroomsMarlowVisualPose pose {};
+    pose.position = {3.5F, 14.0F, -7.25F};
+    pose.yaw_radians = 0.61F;
+    pose.animation_time = 2.47F;
+    pose.motion_amount = 0.68F;
+    pose.submersion_ratio = 0.42F;
+    pose.maximum_submersion = 0.62F;
+    pose.peek_amount = -0.21F;
+    pose.head_scan_radians = 0.17F;
+    pose.reach_amount = 0.33F;
+    const auto full = build_backrooms_marlow_visual_parts(pose);
+
+    pose.presentation =
+        BackroomsMarlowVisualPresentation::ProgressiveReveal;
+    pose.reveal_amount = 1.0F;
+    const auto revealed = build_backrooms_marlow_visual_parts(pose);
+    REQUIRE(revealed.size() == full.size());
+    for (std::size_t index = 0U; index < full.size(); ++index) {
+        CHECK(same_part(revealed[index], full[index]));
+    }
+}
+
+TEST_CASE("la revelation reste au-dessus du plancher en bassin sec peu profond et profond") {
+    constexpr std::array<float, 3> kDepths {{0.0F, 0.62F, 3.35F}};
+    constexpr std::array<float, 7> kReveals {{
+        0.0F,
+        0.08F,
+        0.25F,
+        0.42F,
+        0.60F,
+        0.82F,
+        1.0F,
+    }};
+    for (const auto depth : kDepths) {
+        BackroomsMarlowVisualPose pose {};
+        pose.position = {2.0F, 20.0F, -3.0F};
+        pose.presentation =
+            BackroomsMarlowVisualPresentation::ProgressiveReveal;
+        pose.submersion_ratio = 1.0F;
+        pose.maximum_submersion = depth;
+        const auto floor_anchor = pose.position.y - depth;
+        auto previous_height = 0.0F;
+        auto previous_count = std::size_t {0U};
+        for (const auto reveal : kReveals) {
+            pose.reveal_amount = reveal;
+            const auto parts = build_backrooms_marlow_visual_parts(pose);
+            INFO(depth);
+            INFO(reveal);
+            CHECK(parts.size() >= previous_count);
+            previous_count = parts.size();
+            if (parts.empty()) {
+                CHECK(reveal == 0.0F);
+                continue;
+            }
+            const auto bounds = visual_bounds(parts);
+            CHECK(bounds.minimum.y >= floor_anchor - 0.0001F);
+            const auto height_above_anchor =
+                bounds.maximum.y - floor_anchor;
+            CHECK(height_above_anchor + 0.0001F >= previous_height);
+            previous_height = height_above_anchor;
+        }
+    }
+}
+
+TEST_CASE("le regard d angle ne construit que la tete et suit la normale du mur") {
+    BackroomsMarlowVisualPose pose {};
+    pose.position = {5.0F, 8.0F, -4.0F};
+    pose.presentation =
+        BackroomsMarlowVisualPresentation::HeadOnlyPeek;
+    pose.peek_amount = 0.92F;
+    pose.wall_offset = 0.35F;
+
+    pose.wall_normal = {2.0F, 0.0F, 0.0F};
+    const auto positive_x = build_backrooms_marlow_visual_parts(pose);
+    REQUIRE_FALSE(positive_x.empty());
+    CHECK(count_tile(
+              positive_x,
+              CreatureAtlasTile::MarlowEyeWhite) == 2U);
+    CHECK(count_tile(
+              positive_x,
+              CreatureAtlasTile::MarlowSwimCap) == 1U);
+    // Je prouve l'absence de jambes, torse et bras : chacun de ces groupes
+    // contient au moins une pièce d'uniforme, contrairement à la tête.
+    CHECK(count_tile(
+              positive_x,
+              CreatureAtlasTile::MarlowUniform) == 0U);
+    CHECK(visual_bounds(positive_x).minimum.y > pose.position.y + 2.70F);
+
+    pose.wall_normal = {-3.0F, 0.0F, 0.0F};
+    const auto negative_x = build_backrooms_marlow_visual_parts(pose);
+    const auto positive_center =
+        (visual_bounds(positive_x).minimum +
+         visual_bounds(positive_x).maximum) * 0.5F;
+    const auto negative_center =
+        (visual_bounds(negative_x).minimum +
+         visual_bounds(negative_x).maximum) * 0.5F;
+    CHECK(positive_center.x - negative_center.x ==
+          doctest::Approx(0.70F).epsilon(0.0001));
+
+    pose.wall_normal = {0.0F, 0.0F, 4.0F};
+    const auto positive_z = build_backrooms_marlow_visual_parts(pose);
+    const auto positive_z_center =
+        (visual_bounds(positive_z).minimum +
+         visual_bounds(positive_z).maximum) * 0.5F;
+    CHECK(positive_z_center.z - negative_center.z ==
+          doctest::Approx(0.35F).epsilon(0.0001));
+}
+
+TEST_CASE("le regard d angle neutralise les normales de mur degeneres") {
+    BackroomsMarlowVisualPose pose {};
+    pose.position = {5.0F, 8.0F, -4.0F};
+    pose.presentation =
+        BackroomsMarlowVisualPresentation::HeadOnlyPeek;
+    pose.wall_offset = 0.35F;
+
+    // Je conserve la tete a son ancre lorsque la normale n'a aucune direction.
+    pose.wall_normal = {0.0F, 0.0F, 0.0F};
+    const auto zero_normal = build_backrooms_marlow_visual_parts(pose);
+    REQUIRE_FALSE(zero_normal.empty());
+    CHECK(count_tile(
+              zero_normal,
+              CreatureAtlasTile::MarlowUniform) == 0U);
+    for (const auto& part : zero_normal) {
+        CHECK(matrix_is_finite(part.transform));
+    }
+
+    // Je neutralise aussi un produit scalaire qui deborde malgre des
+    // composantes individuellement finies.
+    const auto maximum = std::numeric_limits<float>::max();
+    pose.wall_normal = {maximum, 0.0F, maximum};
+    const auto overflowing_normal =
+        build_backrooms_marlow_visual_parts(pose);
+    REQUIRE(overflowing_normal.size() == zero_normal.size());
+    for (const auto& part : overflowing_normal) {
+        CHECK(matrix_is_finite(part.transform));
+    }
+}
+
+TEST_CASE("les constructeurs peuvent reutiliser un buffer Marlow reserve") {
+    std::vector<CreaturePartInstance> parts {};
+    parts.reserve(
+        kBackroomsMarlowVisualPartBudget +
+        kBackroomsMarlowBuoyVisualPartBudget);
+    auto* const allocation = parts.data();
+    append_backrooms_marlow_visual_parts(
+        BackroomsMarlowVisualPose {},
+        parts);
+    const auto body_count = parts.size();
+    append_backrooms_marlow_buoy_visual_parts(
+        BackroomsMarlowBuoyVisualPose {},
+        parts);
+    CHECK(parts.data() == allocation);
+    CHECK(body_count > 0U);
+    CHECK(parts.size() == body_count + 16U);
+
+    parts.clear();
+    append_backrooms_marlow_visual_parts(
+        BackroomsMarlowVisualPose {},
+        parts);
+    CHECK(parts.data() == allocation);
+    CHECK(parts.size() == body_count);
 }
 
 TEST_CASE("la bouee jaune forme un anneau flottant lisse et deterministe") {
@@ -470,7 +721,17 @@ TEST_CASE("les entrees non finies de Marlow et de sa bouee sont neutralisees") {
     hostile.animation_time = std::numeric_limits<float>::infinity();
     hostile.motion_amount = -std::numeric_limits<float>::infinity();
     hostile.submersion_ratio = std::numeric_limits<float>::quiet_NaN();
+    hostile.maximum_submersion = std::numeric_limits<float>::infinity();
+    hostile.reveal_amount = std::numeric_limits<float>::quiet_NaN();
+    hostile.presentation =
+        static_cast<BackroomsMarlowVisualPresentation>(255U);
     hostile.peek_amount = std::numeric_limits<float>::infinity();
+    hostile.wall_normal = {
+        std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN(),
+        -std::numeric_limits<float>::infinity(),
+    };
+    hostile.wall_offset = std::numeric_limits<float>::infinity();
     hostile.head_scan_radians = std::numeric_limits<float>::infinity();
     hostile.reach_amount = std::numeric_limits<float>::quiet_NaN();
     hostile.sky_light = std::numeric_limits<float>::quiet_NaN();

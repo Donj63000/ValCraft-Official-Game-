@@ -7,6 +7,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -91,6 +92,7 @@ public:
                   float attenuation = 1.0F,
                   std::uint32_t deterministic_seed = 0U) noexcept;
     void set_backrooms_drowning_filter(float intensity) noexcept;
+    [[nodiscard]] auto backrooms_drowning_filter() const noexcept -> float;
 
     [[nodiscard]] auto available() const noexcept -> bool;
 
@@ -105,7 +107,7 @@ private:
     BackroomsAmbience backrooms_ambience_ {};
     ProceduralSfxMixer sfx_mixer_ {};
     std::array<float, 8U> drowning_filter_state_ {};
-    float drowning_filter_intensity_ = 0.0F;
+    std::atomic<float> drowning_filter_intensity_ {0.0F};
 };
 
 } // namespace valcraft

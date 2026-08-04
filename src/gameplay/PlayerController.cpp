@@ -941,6 +941,78 @@ auto PlayerController::is_climbing_dynamic_obstacle() const noexcept -> bool {
     return climbed_dynamic_obstacle_ != nullptr && !state_.dead && !state_.fly_mode;
 }
 
+auto PlayerController::sample_world_water_contact(
+    const World& world,
+    const glm::vec3& feet_position) const noexcept
+    -> PlayerWaterContactSnapshot {
+    if (!std::isfinite(feet_position.x) ||
+        !std::isfinite(feet_position.y) ||
+        !std::isfinite(feet_position.z)) {
+        return {};
+    }
+    constexpr auto coordinate_margin = 4.0;
+    constexpr auto minimum_coordinate =
+        static_cast<double>(std::numeric_limits<int>::lowest()) +
+        coordinate_margin;
+    constexpr auto maximum_coordinate =
+        static_cast<double>(std::numeric_limits<int>::max()) -
+        coordinate_margin;
+    if (static_cast<double>(feet_position.x) < minimum_coordinate ||
+        static_cast<double>(feet_position.x) > maximum_coordinate ||
+        static_cast<double>(feet_position.y) < minimum_coordinate ||
+        static_cast<double>(feet_position.y) > maximum_coordinate ||
+        static_cast<double>(feet_position.z) < minimum_coordinate ||
+        static_cast<double>(feet_position.z) > maximum_coordinate) {
+        return {};
+    }
+
+    constexpr auto sample_radius = kPlayerWidth * 0.35F;
+    constexpr std::array<glm::vec2, 5U> horizontal_offsets {{
+        {0.0F, 0.0F},
+        {-sample_radius, -sample_radius},
+        {-sample_radius, sample_radius},
+        {sample_radius, -sample_radius},
+        {sample_radius, sample_radius},
+    }};
+    const auto any_sample_at_height_is_liquid = [&](float height) noexcept {
+        std::array<BlockCoord, horizontal_offsets.size()> sampled_blocks {};
+        auto sampled_block_count = std::size_t {0U};
+        for (const auto& offset : horizontal_offsets) {
+            const auto point =
+                feet_position + glm::vec3 {offset.x, height, offset.y};
+            const BlockCoord block {
+                static_cast<int>(std::floor(point.x)),
+                static_cast<int>(std::floor(point.y)),
+                static_cast<int>(std::floor(point.z)),
+            };
+            const auto duplicate = std::find(
+                sampled_blocks.begin(),
+                sampled_blocks.begin() +
+                    static_cast<std::ptrdiff_t>(sampled_block_count),
+                block);
+            if (duplicate != sampled_blocks.begin() +
+                                 static_cast<std::ptrdiff_t>(
+                                     sampled_block_count)) {
+                continue;
+            }
+            sampled_blocks[sampled_block_count++] = block;
+            if (is_liquid_at(world, point)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    PlayerWaterContactSnapshot result {};
+    result.feet_in_water =
+        any_sample_at_height_is_liquid(kWaterFeetSampleHeight);
+    result.body_in_water =
+        any_sample_at_height_is_liquid(kWaterBodySampleHeight);
+    result.head_in_water = any_sample_at_height_is_liquid(kEyeHeight);
+    result.swimming = result.body_in_water || result.head_in_water;
+    return result;
+}
+
 void PlayerController::load_state(const PlayerState& state) noexcept {
     const PlayerState defaults {};
     state_ = state;
@@ -1648,7 +1720,9 @@ void PlayerController::update_body_yaw(float dt, const glm::vec2& horizontal_dis
     state_.body_yaw_degrees = rotate_towards_degrees(state_.body_yaw_degrees, target_yaw, turn_speed * clamped_dt);
 }
 
-void PlayerController::update_survival_state(float dt, const WaterContactState& water_contact) {
+void PlayerController::update_survival_state(
+    float dt,
+    const PlayerWaterContactSnapshot& water_contact) {
     if (state_.dead) {
         return;
     }
@@ -2339,20 +2413,17 @@ auto PlayerController::is_liquid_at(
         return false;
     }
 
+    // Je lis l'etat autoritaire expose par le World : un chunk materialise et
+    // ses ecoulements runtime priment, puis les overrides, et enfin seulement
+    // la cellule generee si le chunk n'est pas encore charge autour du joueur.
     const auto level =
-        world.peek_water_level_or_generated(
-            block_x,
-            block_y,
-            block_z);
+        world.peek_water_level_or_generated(block_x, block_y, block_z);
     if (level == 0) {
         return false;
     }
 
     const auto top_height =
-        world.peek_water_level_or_generated(
-            block_x,
-            block_y + 1,
-            block_z) > 0
+        world.peek_water_level_or_generated(block_x, block_y + 1, block_z) > 0
             ? 1.0F
             : static_cast<float>(level) /
                   static_cast<float>(kMaxWaterLevel);
@@ -2366,9 +2437,9 @@ auto PlayerController::sample_water_contact(
     const glm::vec3& feet_position,
     const ShipEntity* dynamic_obstacle,
     const OceanState* dynamic_ocean) const noexcept
-    -> WaterContactState {
+    -> PlayerWaterContactSnapshot {
 
-    WaterContactState water_contact {};
+    PlayerWaterContactSnapshot water_contact {};
     if (state_.fly_mode) {
         return water_contact;
     }

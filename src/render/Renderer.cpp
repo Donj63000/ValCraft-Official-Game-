@@ -4812,10 +4812,40 @@ void Renderer::set_backrooms_marlow(
       std::isfinite(result.render.position.y) &&
       std::isfinite(result.render.position.z)) {
     const auto phase = result.render.phase;
-    auto body_parts = build_backrooms_marlow_visual_parts({
+    const auto body_yaw = backrooms_marlow_visual_body_yaw_radians(
+        result.render.body_yaw_degrees);
+    const auto peek_side =
+        std::isfinite(result.render.peek_side)
+            ? std::clamp(result.render.peek_side, -1.0F, 1.0F)
+            : 1.0F;
+    const auto presentation = [&result]() noexcept {
+      switch (result.render.presentation) {
+      case BackroomsMarlowPresentation::ProgressiveReveal:
+        return BackroomsMarlowVisualPresentation::ProgressiveReveal;
+      case BackroomsMarlowPresentation::HeadOnlyPeek:
+        return BackroomsMarlowVisualPresentation::HeadOnlyPeek;
+      case BackroomsMarlowPresentation::FullBody:
+      default:
+        return BackroomsMarlowVisualPresentation::FullBody;
+      }
+    }();
+    auto wall_normal = result.render.wall_normal;
+    wall_normal.y = 0.0F;
+    const auto wall_normal_length_squared =
+        glm::dot(wall_normal, wall_normal);
+    if (!std::isfinite(wall_normal_length_squared) ||
+        wall_normal_length_squared <= 1.0e-6F) {
+      // Je conserve une orientation défensive pour les anciens états runtime,
+      // mais la normale sélectionnée par le cœur reste la source prioritaire.
+      wall_normal = {
+          std::sin(body_yaw) * peek_side,
+          0.0F,
+          std::cos(body_yaw) * peek_side,
+      };
+    }
+    append_backrooms_marlow_visual_parts({
         .position = result.render.position,
-        .yaw_radians = backrooms_marlow_visual_body_yaw_radians(
-            result.render.body_yaw_degrees),
+        .yaw_radians = body_yaw,
         .animation_time = safe_time,
         .motion_amount =
             phase == BackroomsMarlowPhase::Emerging ||
@@ -4826,10 +4856,23 @@ void Renderer::set_backrooms_marlow(
         .submersion_ratio =
             backrooms_marlow_visual_submersion_ratio(
                 result.render.immersion_ratio,
-                result.render.reveal_amount),
+                1.0F),
+        .maximum_submersion = std::clamp(
+            std::isfinite(result.render.available_submersion_depth)
+                ? result.render.available_submersion_depth
+                : 0.0F,
+            0.0F,
+            kBackroomsMarlowMaximumSubmersion),
+        .reveal_amount = result.render.reveal_amount,
+        .presentation = presentation,
         .peek_amount =
-            phase == BackroomsMarlowPhase::CornerPeek
-                ? std::clamp(result.render.peek_side, -1.0F, 1.0F) * 0.92F
+            presentation == BackroomsMarlowVisualPresentation::HeadOnlyPeek
+                ? peek_side * 0.92F
+                : 0.0F,
+        .wall_normal = wall_normal,
+        .wall_offset =
+            presentation == BackroomsMarlowVisualPresentation::HeadOnlyPeek
+                ? 0.18F
                 : 0.0F,
         .head_scan_radians =
             std::sin(safe_time * 0.47F) * 0.10F,
@@ -4842,32 +4885,24 @@ void Renderer::set_backrooms_marlow(
         .jumpscare = phase == BackroomsMarlowPhase::Screamer,
         .sky_light = safe_sky,
         .block_light = safe_block,
-    });
+    }, backrooms_marlow_parts_);
     backrooms_marlow_visual_anchor_ = result.render.position;
-    backrooms_marlow_parts_.insert(
-        backrooms_marlow_parts_.end(),
-        body_parts.begin(),
-        body_parts.end());
   }
   if (result.buoy.visible &&
       std::isfinite(result.buoy.position.x) &&
       std::isfinite(result.buoy.position.y) &&
       std::isfinite(result.buoy.position.z)) {
-    auto buoy_parts = build_backrooms_marlow_buoy_visual_parts({
+    append_backrooms_marlow_buoy_visual_parts({
         .water_surface_position = result.buoy.position,
         .yaw_radians = safe_time * 0.19F,
         .animation_time = safe_time,
         .disturbance = result.buoy.warning_amount,
         .sky_light = safe_sky,
         .block_light = safe_block,
-    });
+    }, backrooms_marlow_parts_);
     if (!result.render.visible) {
       backrooms_marlow_visual_anchor_ = result.buoy.position;
     }
-    backrooms_marlow_parts_.insert(
-        backrooms_marlow_parts_.end(),
-        buoy_parts.begin(),
-        buoy_parts.end());
   }
 }
 
@@ -15518,7 +15553,7 @@ auto Renderer::create_backrooms_marlow_screamer_texture() -> bool {
         "Missing assets/backrooms/marlow_le_noye_screamer.bmp";
     return false;
   }
-  const auto image = load_backrooms_jack_screamer_bmp(path);
+  const auto image = load_backrooms_marlow_screamer_bmp(path);
   if (!image.valid()) {
     last_initialization_error_ = image.error.empty()
                                      ? "Invalid Marlow screamer bitmap"
