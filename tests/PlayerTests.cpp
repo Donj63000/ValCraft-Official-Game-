@@ -5030,6 +5030,31 @@ TEST_CASE("jump input just before landing is buffered") {
     CHECK(player.position().y >= 1.001F);
 }
 
+TEST_CASE("discarding a buffered jump prevents an action after a frozen interface") {
+    World world(243, 1);
+    test::make_chunk_empty(world, {0, 0});
+    test::make_flat_floor(world, -2, 2, 0, -2, 2);
+
+    PlayerController player({0.5F, 1.35F, 0.5F});
+    player.set_velocity({0.0F, -7.0F, 0.0F});
+
+    PlayerInput early_jump {};
+    early_jump.jump = true;
+    player.update(early_jump, 1.0F / 60.0F, world);
+    REQUIRE_FALSE(player.state().on_ground);
+    player.discard_buffered_jump();
+
+    auto jumped_after_resume = false;
+    for (int frame = 0; frame < 8; ++frame) {
+        player.update(PlayerInput {}, 1.0F / 60.0F, world);
+        jumped_after_resume =
+            jumped_after_resume || player.state().velocity.y > 0.0F;
+    }
+
+    CHECK_FALSE(jumped_after_resume);
+    CHECK(player.state().on_ground);
+}
+
 TEST_CASE("player cannot place a block inside the player volume") {
     World world(33, 1);
     test::make_chunk_empty(world, {0, 0});

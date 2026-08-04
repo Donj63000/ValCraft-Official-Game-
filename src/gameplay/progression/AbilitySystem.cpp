@@ -32,7 +32,7 @@ namespace {
 
 [[nodiscard]] auto construction_cell_limit(
     std::uint8_t rank,
-    const ConstructionPlan&,
+    const ConstructionPlan& plan,
     bool mastery_active) noexcept -> std::uint8_t {
     if (mastery_active) {
         return static_cast<std::uint8_t>(
@@ -45,7 +45,11 @@ namespace {
         return 3U;
     }
     if (rank >= 3U) {
-        return 5U;
+        // Je reserve le plan 3 x 3 au rang trois sans relever la longueur
+        // maximale d'une ligne. La maitrise reste seule a autoriser dix blocs.
+        return plan.shape == ConstructionPlanShape::Grid
+                   ? 9U
+                   : 5U;
     }
     return 0U;
 }

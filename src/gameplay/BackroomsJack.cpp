@@ -213,9 +213,14 @@ struct OpenNodeLater {
 [[nodiscard]] auto horizontal_distance(
     const glm::vec3& first,
     const glm::vec3& second) noexcept -> float {
-    const auto delta_x = first.x - second.x;
-    const auto delta_z = first.z - second.z;
-    return std::sqrt(delta_x * delta_x + delta_z * delta_z);
+    const auto delta_x =
+        static_cast<double>(first.x) - second.x;
+    const auto delta_z =
+        static_cast<double>(first.z) - second.z;
+    const auto distance = std::hypot(delta_x, delta_z);
+    return static_cast<float>(std::min(
+        distance,
+        static_cast<double>(std::numeric_limits<float>::max())));
 }
 
 [[nodiscard]] auto clamp_finite(
@@ -311,11 +316,23 @@ struct OpenNodeLater {
     return static_cast<int>(std::clamp(floored, minimum, maximum));
 }
 
-[[nodiscard]] auto saturating_int(std::int64_t value) noexcept -> int {
-    return static_cast<int>(std::clamp(
-        value,
-        static_cast<std::int64_t>(std::numeric_limits<int>::lowest()),
-        static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+[[nodiscard]] constexpr auto checked_int(std::int64_t value) noexcept
+    -> std::optional<int> {
+    if (value < std::numeric_limits<int>::lowest() ||
+        value > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+[[nodiscard]] constexpr auto navigation_grid_domain_is_valid(
+    const BackroomsJackNavigationGrid& grid) noexcept -> bool {
+    return static_cast<std::int64_t>(grid.origin_world_x) +
+                   kBackroomsJackNavigationSide - 1 <=
+               std::numeric_limits<int>::max() &&
+           static_cast<std::int64_t>(grid.origin_world_z) +
+                   kBackroomsJackNavigationSide - 1 <=
+               std::numeric_limits<int>::max();
 }
 
 [[nodiscard]] constexpr auto local_index(int local_x, int local_z) noexcept
@@ -353,18 +370,19 @@ struct OpenNodeLater {
     const auto local_z = index / kBackroomsJackNavigationSide;
     const auto local_x = index % kBackroomsJackNavigationSide;
     return {
-        saturating_int(
-            static_cast<std::int64_t>(grid.origin_world_x) +
-            local_x),
-        saturating_int(
-            static_cast<std::int64_t>(grid.origin_world_z) +
-            local_z),
+        static_cast<int>(
+            static_cast<std::int64_t>(grid.origin_world_x) + local_x),
+        static_cast<int>(
+            static_cast<std::int64_t>(grid.origin_world_z) + local_z),
     };
 }
 
 [[nodiscard]] auto point_index(
     const BackroomsJackNavigationGrid& grid,
     BackroomsJackGridPoint point) noexcept -> int {
+    if (!navigation_grid_domain_is_valid(grid)) {
+        return -1;
+    }
     auto local_x = 0;
     auto local_z = 0;
     if (!grid_local_coordinates(
@@ -381,6 +399,9 @@ struct OpenNodeLater {
 [[nodiscard]] auto nearest_walkable_index(
     const BackroomsJackNavigationGrid& grid,
     BackroomsJackGridPoint point) noexcept -> int {
+    if (!navigation_grid_domain_is_valid(grid)) {
+        return -1;
+    }
     const auto exact = point_index(grid, point);
     if (exact >= 0 &&
         grid.cells[static_cast<std::size_t>(exact)].walkable) {
@@ -388,7 +409,7 @@ struct OpenNodeLater {
     }
 
     auto best_index = -1;
-    auto best_distance = std::numeric_limits<std::int64_t>::max();
+    auto best_distance = std::numeric_limits<double>::infinity();
     for (std::size_t index = 0U; index < grid.cells.size(); ++index) {
         if (!grid.cells[index].walkable) {
             continue;
@@ -396,11 +417,9 @@ struct OpenNodeLater {
         const auto candidate =
             cell_world_point(grid, static_cast<int>(index));
         const auto delta_x =
-            static_cast<std::int64_t>(candidate.x) -
-            static_cast<std::int64_t>(point.x);
+            static_cast<double>(candidate.x) - point.x;
         const auto delta_z =
-            static_cast<std::int64_t>(candidate.z) -
-            static_cast<std::int64_t>(point.z);
+            static_cast<double>(candidate.z) - point.z;
         const auto distance =
             delta_x * delta_x + delta_z * delta_z;
         if (distance < best_distance) {
@@ -2906,6 +2925,9 @@ auto backrooms_jack_navigation_cell(
     const BackroomsJackNavigationGrid& grid,
     int world_x,
     int world_z) noexcept -> const BackroomsJackNavigationCell* {
+    if (!navigation_grid_domain_is_valid(grid)) {
+        return nullptr;
+    }
     auto local_x = 0;
     auto local_z = 0;
     if (!grid_local_coordinates(
@@ -2930,16 +2952,29 @@ auto build_backrooms_jack_navigation_grid_impl(
     grid.center_chunk = center_chunk;
     grid.logical_level =
         generator_logical_level(generator);
-    grid.origin_world_x = saturating_int(
+    const auto origin_world_x = checked_int(
         static_cast<std::int64_t>(center_chunk.x) * kChunkSizeX -
         static_cast<std::int64_t>(
             kBackroomsJackNavigationChunkRadius) *
-            kChunkSizeX);
-    grid.origin_world_z = saturating_int(
+        kChunkSizeX);
+    const auto origin_world_z = checked_int(
         static_cast<std::int64_t>(center_chunk.z) * kChunkSizeZ -
         static_cast<std::int64_t>(
             kBackroomsJackNavigationChunkRadius) *
-            kChunkSizeZ);
+        kChunkSizeZ);
+    if (!origin_world_x.has_value() || !origin_world_z.has_value() ||
+        static_cast<std::int64_t>(*origin_world_x) +
+                kBackroomsJackNavigationSide - 1 >
+            std::numeric_limits<int>::max() ||
+        static_cast<std::int64_t>(*origin_world_z) +
+                kBackroomsJackNavigationSide - 1 >
+            std::numeric_limits<int>::max()) {
+        // Je rends une grille vide quand son domaine ne tient pas dans int :
+        // aucune cellule extreme ne peut etre repliee sur une autre.
+        return grid;
+    }
+    grid.origin_world_x = *origin_world_x;
+    grid.origin_world_z = *origin_world_z;
 
     for (auto local_z = 0;
          local_z < kBackroomsJackNavigationSide;
@@ -2947,10 +2982,10 @@ auto build_backrooms_jack_navigation_grid_impl(
         for (auto local_x = 0;
              local_x < kBackroomsJackNavigationSide;
              ++local_x) {
-            const auto world_x = saturating_int(
+            const auto world_x = static_cast<int>(
                 static_cast<std::int64_t>(grid.origin_world_x) +
                 local_x);
-            const auto world_z = saturating_int(
+            const auto world_z = static_cast<int>(
                 static_cast<std::int64_t>(grid.origin_world_z) +
                 local_z);
             const auto column =
@@ -3043,6 +3078,9 @@ auto find_backrooms_jack_path(
     BackroomsJackGridPoint start,
     BackroomsJackGridPoint goal) -> BackroomsJackPath {
     BackroomsJackPath path {};
+    if (!navigation_grid_domain_is_valid(grid)) {
+        return path;
+    }
     const auto start_index = point_index(grid, start);
     if (start_index < 0 ||
         !grid.cells[static_cast<std::size_t>(start_index)].walkable) {
@@ -3720,23 +3758,38 @@ auto select_backrooms_jack_spawn_impl(
         for (auto chunk_delta_x = -kBackroomsJackReadinessChunkRadius;
              chunk_delta_x <= kBackroomsJackReadinessChunkRadius;
              ++chunk_delta_x) {
-            const ChunkCoord chunk {
-                readiness.center_chunk.x + chunk_delta_x,
-                readiness.center_chunk.z + chunk_delta_z,
-            };
+            const auto chunk_x = checked_int(
+                static_cast<std::int64_t>(readiness.center_chunk.x) +
+                chunk_delta_x);
+            const auto chunk_z = checked_int(
+                static_cast<std::int64_t>(readiness.center_chunk.z) +
+                chunk_delta_z);
+            if (!chunk_x.has_value() || !chunk_z.has_value()) {
+                continue;
+            }
+            const ChunkCoord chunk {*chunk_x, *chunk_z};
             if (!readiness_at(readiness, chunk)) {
                 continue;
             }
-            const auto origin_x = saturating_int(
+            const auto origin_x = checked_int(
                 static_cast<std::int64_t>(chunk.x) * kChunkSizeX);
-            const auto origin_z = saturating_int(
+            const auto origin_z = checked_int(
                 static_cast<std::int64_t>(chunk.z) * kChunkSizeZ);
+            if (!origin_x.has_value() || !origin_z.has_value() ||
+                static_cast<std::int64_t>(*origin_x) +
+                        kChunkSizeX - 1 >
+                    std::numeric_limits<int>::max() ||
+                static_cast<std::int64_t>(*origin_z) +
+                        kChunkSizeZ - 1 >
+                    std::numeric_limits<int>::max()) {
+                continue;
+            }
             for (auto local_z = 0; local_z < kChunkSizeZ; ++local_z) {
                 for (auto local_x = 0; local_x < kChunkSizeX; ++local_x) {
-                    const auto world_x = saturating_int(
-                        static_cast<std::int64_t>(origin_x) + local_x);
-                    const auto world_z = saturating_int(
-                        static_cast<std::int64_t>(origin_z) + local_z);
+                    const auto world_x = static_cast<int>(
+                        static_cast<std::int64_t>(*origin_x) + local_x);
+                    const auto world_z = static_cast<int>(
+                        static_cast<std::int64_t>(*origin_z) + local_z);
                     const auto column = generator.sample_column(
                         world_x,
                         world_z);

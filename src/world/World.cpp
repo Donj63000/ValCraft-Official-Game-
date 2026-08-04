@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -60,6 +61,33 @@ constexpr std::uint8_t kWaterVerticalFlowUnitsPerStep = 2U;
 constexpr std::uint8_t kWaterHorizontalFlowUnitsPerStep = 1U;
 constexpr std::uint8_t kWaterPressureRiseUnitsPerStep = 1U;
 constexpr std::size_t kPressureSearchVisitLimit = 16384U;
+
+struct BackroomsFixtureLayoutHash {
+    [[nodiscard]] auto operator()(
+        const BackroomsLightFixtureLayout& layout) const noexcept
+        -> std::size_t {
+        auto hash = UINT64_C(0xCBF29CE484222325);
+        const auto combine = [&hash](std::uint64_t value) noexcept {
+            hash ^= value;
+            hash *= UINT64_C(0x100000001B3);
+        };
+        combine(static_cast<std::uint32_t>(layout.logical_level));
+        combine(static_cast<std::uint32_t>(layout.module_x));
+        combine(static_cast<std::uint32_t>(layout.module_z));
+        combine(static_cast<std::uint32_t>(layout.nominal_anchor_x));
+        combine(static_cast<std::uint32_t>(layout.nominal_anchor_z));
+        combine(static_cast<std::uint32_t>(layout.ceiling_y));
+        combine(static_cast<std::uint32_t>(layout.nominal_length));
+        combine(static_cast<std::uint32_t>(layout.connector_district_modules));
+        combine(layout.primary_axis_x ? 1U : 0U);
+        combine(static_cast<std::uint32_t>(layout.theme));
+        combine(static_cast<std::uint32_t>(layout.archetype));
+        combine(static_cast<std::uint32_t>(layout.state));
+        combine(static_cast<std::uint32_t>(layout.pool_geometry_profile));
+        combine(static_cast<std::uint32_t>(layout.block));
+        return static_cast<std::size_t>(hash);
+    }
+};
 
 constexpr auto kUnlimitedBudget = std::numeric_limits<std::size_t>::max() / 4U;
 constexpr auto kSkyColumnCount = static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
@@ -146,12 +174,58 @@ auto is_finite_vec3(const glm::vec3& value) noexcept -> bool {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
 
+[[nodiscard]] auto checked_floor_to_block_coordinate(double value) noexcept
+    -> std::optional<int> {
+    if (!std::isfinite(value)) {
+        return std::nullopt;
+    }
+    const auto floored = std::floor(value);
+    if (floored <
+            static_cast<double>(std::numeric_limits<int>::lowest()) ||
+        floored >
+            static_cast<double>(std::numeric_limits<int>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<int>(floored);
+}
+
 auto sky_column_index(int local_x, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>(local_z * kChunkSizeX + local_x);
 }
 
 auto chunk_linear_index(int local_x, int local_y, int local_z) noexcept -> std::size_t {
     return static_cast<std::size_t>((local_y * kChunkSizeZ + local_z) * kChunkSizeX + local_x);
+}
+
+[[nodiscard]] auto checked_world_coord_from_chunk_index(
+    const ChunkCoord& chunk_coord,
+    std::size_t block_index) noexcept -> std::optional<BlockCoord> {
+    if (block_index >= kChunkVolume) {
+        return std::nullopt;
+    }
+    const auto local_x = static_cast<int>(
+        block_index % static_cast<std::size_t>(kChunkSizeX));
+    const auto yz_index =
+        block_index / static_cast<std::size_t>(kChunkSizeX);
+    const auto local_z = static_cast<int>(
+        yz_index % static_cast<std::size_t>(kChunkSizeZ));
+    const auto local_y = static_cast<int>(
+        yz_index / static_cast<std::size_t>(kChunkSizeZ));
+    const auto world_x =
+        static_cast<std::int64_t>(chunk_coord.x) * kChunkSizeX + local_x;
+    const auto world_z =
+        static_cast<std::int64_t>(chunk_coord.z) * kChunkSizeZ + local_z;
+    if (world_x < std::numeric_limits<int>::lowest() ||
+        world_x > std::numeric_limits<int>::max() ||
+        world_z < std::numeric_limits<int>::lowest() ||
+        world_z > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return BlockCoord {
+        static_cast<int>(world_x),
+        local_y,
+        static_cast<int>(world_z),
+    };
 }
 
 auto player_placed_mask_test(
@@ -1227,6 +1301,12 @@ auto World::restore_generated_cell(int x, int y, int z) -> bool {
             return false;
         }
 
+        const auto fixture_state_changed =
+            backrooms_block_change_affects_fixture(
+                BlockCoord {x, y, z},
+                current_block,
+                generated_block);
+
         // Je retire directement l'override persistant. Aucun chunk, eclairage,
         // fluide ou mesh n'est cree pendant une migration de sauvegarde.
         set_chunk_override_cell(
@@ -1243,6 +1323,9 @@ auto World::restore_generated_cell(int x, int y, int z) -> bool {
         if (entry.generator_mismatch_count == 0U &&
             entry.player_placed_count == 0U) {
             chunk_overrides_.erase(override_iterator);
+        }
+        if (fixture_state_changed) {
+            bump_backrooms_light_fixture_revision();
         }
         return true;
     }
@@ -1343,21 +1426,53 @@ auto World::raycast(const glm::vec3& origin,
                     const glm::vec3& direction,
                     float max_distance,
                     WorldRaycastMode mode) const -> RaycastHit {
-    if (!is_finite_vec3(origin) || !is_finite_vec3(direction) || !std::isfinite(max_distance) || max_distance <= 0.0F) {
+    if (!is_finite_vec3(origin) || !is_finite_vec3(direction) ||
+        !std::isfinite(max_distance) || max_distance <= 0.0F ||
+        max_distance > kMaximumWorldRaycastDistance) {
         return {};
     }
 
-    if (glm::dot(direction, direction) < 1.0e-6F) {
+    const auto direction_x = static_cast<double>(direction.x);
+    const auto direction_y = static_cast<double>(direction.y);
+    const auto direction_z = static_cast<double>(direction.z);
+    const auto direction_length_squared =
+        direction_x * direction_x +
+        direction_y * direction_y +
+        direction_z * direction_z;
+    if (!std::isfinite(direction_length_squared) ||
+        direction_length_squared < 1.0e-6) {
         return {};
     }
+    const auto direction_length = std::sqrt(direction_length_squared);
+    if (!std::isfinite(direction_length) || direction_length <= 0.0) {
+        return {};
+    }
+    const std::array<double, 3U> ray_direction {{
+        direction_x / direction_length,
+        direction_y / direction_length,
+        direction_z / direction_length,
+    }};
 
-    const auto dir = glm::normalize(direction);
-    BlockCoord current {
-        static_cast<int>(std::floor(origin.x)),
-        static_cast<int>(std::floor(origin.y)),
-        static_cast<int>(std::floor(origin.z)),
+    const auto checked_floor = [](double value) noexcept
+        -> std::optional<int> {
+        const auto floored = std::floor(value);
+        if (!std::isfinite(floored) ||
+            floored <
+                static_cast<double>(std::numeric_limits<int>::lowest()) ||
+            floored >
+                static_cast<double>(std::numeric_limits<int>::max())) {
+            return std::nullopt;
+        }
+        return static_cast<int>(floored);
     };
-    BlockCoord previous = current;
+    const auto origin_x = checked_floor(origin.x);
+    const auto origin_y = checked_floor(origin.y);
+    const auto origin_z = checked_floor(origin.z);
+    if (!origin_x.has_value() || !origin_y.has_value() ||
+        !origin_z.has_value()) {
+        return {};
+    }
+    BlockCoord current {*origin_x, *origin_y, *origin_z};
 
     const auto blocks_ray = [mode](BlockId block_id) noexcept -> bool {
         switch (mode) {
@@ -1372,52 +1487,40 @@ auto World::raycast(const glm::vec3& origin,
         }
     };
 
-    const auto water_or_opaque_hit = [&](const BlockCoord& cell,
-                                         const BlockCoord& adjacent,
-                                         float distance)
+    const auto hit_at = [&](const BlockCoord& cell,
+                            const BlockCoord& adjacent,
+                            double distance)
         -> std::optional<RaycastHit> {
-        if (mode != WorldRaycastMode::WaterOrOpaque) {
-            return std::nullopt;
-        }
         const auto block_id = get_block(cell.x, cell.y, cell.z);
-        if (is_block_opaque(block_id)) {
+        if (blocks_ray(block_id)) {
             return RaycastHit {
                 true,
                 cell,
                 adjacent,
                 block_id,
-                distance,
+                static_cast<float>(distance),
             };
         }
-        if (has_water(cell.x, cell.y, cell.z)) {
+        if ((mode == WorldRaycastMode::Selection ||
+             mode == WorldRaycastMode::WaterOrOpaque) &&
+            has_water(cell.x, cell.y, cell.z)) {
             return RaycastHit {
                 true,
                 cell,
                 adjacent,
                 to_block_id(BlockType::Water),
-                distance,
+                static_cast<float>(distance),
             };
         }
         return std::nullopt;
     };
 
-    if (const auto hit = water_or_opaque_hit(current, current, 0.0F);
+    if (const auto hit = hit_at(current, current, 0.0);
         hit.has_value()) {
         return *hit;
     }
 
-    const auto starting_block = get_block(current.x, current.y, current.z);
-    if (blocks_ray(starting_block)) {
-        return {
-            true,
-            current,
-            current,
-            starting_block,
-            0.0F,
-        };
-    }
-
-    const auto compute_step = [](float component) -> int {
+    const auto compute_step = [](double component) noexcept -> int {
         if (component > 0.0F) {
             return 1;
         }
@@ -1427,78 +1530,172 @@ auto World::raycast(const glm::vec3& origin,
         return 0;
     };
 
-    const auto step_x = compute_step(dir.x);
-    const auto step_y = compute_step(dir.y);
-    const auto step_z = compute_step(dir.z);
-
-    const auto inf = std::numeric_limits<float>::infinity();
-    const auto next_boundary = [](float origin_component, int current_cell, int step) -> float {
-        if (step > 0) {
-            return static_cast<float>(current_cell + 1) - origin_component;
+    const std::array<int, 3U> steps {{
+        compute_step(ray_direction[0]),
+        compute_step(ray_direction[1]),
+        compute_step(ray_direction[2]),
+    }};
+    const std::array<double, 3U> ray_origin {{
+        static_cast<double>(origin.x),
+        static_cast<double>(origin.y),
+        static_cast<double>(origin.z),
+    }};
+    const std::array<int, 3U> starting_cells {{
+        current.x,
+        current.y,
+        current.z,
+    }};
+    const auto infinity = std::numeric_limits<double>::infinity();
+    std::array<double, 3U> t_max {{infinity, infinity, infinity}};
+    std::array<double, 3U> t_delta {{infinity, infinity, infinity}};
+    for (std::size_t axis = 0U; axis < steps.size(); ++axis) {
+        if (steps[axis] == 0) {
+            continue;
         }
-        return origin_component - static_cast<float>(current_cell);
+        const auto absolute_direction = std::abs(ray_direction[axis]);
+        const auto boundary_distance =
+            steps[axis] > 0
+                ? static_cast<double>(starting_cells[axis]) + 1.0 -
+                      ray_origin[axis]
+                : ray_origin[axis] -
+                      static_cast<double>(starting_cells[axis]);
+        t_max[axis] = boundary_distance / absolute_direction;
+        t_delta[axis] = 1.0 / absolute_direction;
+    }
+
+    const auto tied = [](double value, double reference) noexcept -> bool {
+        if (!std::isfinite(value) || !std::isfinite(reference)) {
+            return false;
+        }
+        const auto scale =
+            std::max({1.0, std::abs(value), std::abs(reference)});
+        constexpr auto tolerance_units = 32.0;
+        return std::abs(value - reference) <=
+               tolerance_units *
+                   std::numeric_limits<double>::epsilon() * scale;
+    };
+    const auto checked_step = [](int value, int step) noexcept
+        -> std::optional<int> {
+        const auto candidate =
+            static_cast<std::int64_t>(value) + step;
+        if (candidate < std::numeric_limits<int>::lowest() ||
+            candidate > std::numeric_limits<int>::max()) {
+            return std::nullopt;
+        }
+        return static_cast<int>(candidate);
+    };
+    const auto candidate_for_mask =
+        [&checked_step, &steps](BlockCoord base, unsigned mask) noexcept
+            -> std::optional<BlockCoord> {
+        if ((mask & 1U) != 0U) {
+            const auto next = checked_step(base.x, steps[0]);
+            if (!next.has_value()) {
+                return std::nullopt;
+            }
+            base.x = *next;
+        }
+        if ((mask & 2U) != 0U) {
+            const auto next = checked_step(base.y, steps[1]);
+            if (!next.has_value()) {
+                return std::nullopt;
+            }
+            base.y = *next;
+        }
+        if ((mask & 4U) != 0U) {
+            const auto next = checked_step(base.z, steps[2]);
+            if (!next.has_value()) {
+                return std::nullopt;
+            }
+            base.z = *next;
+        }
+        return base;
     };
 
-    float t_max_x = step_x == 0 ? inf : next_boundary(origin.x, current.x, step_x) / std::abs(dir.x);
-    float t_max_y = step_y == 0 ? inf : next_boundary(origin.y, current.y, step_y) / std::abs(dir.y);
-    float t_max_z = step_z == 0 ? inf : next_boundary(origin.z, current.z, step_z) / std::abs(dir.z);
+    for (std::size_t boundary_step = 0U;
+         boundary_step < kMaximumWorldRaycastBoundarySteps;
+         ++boundary_step) {
+        const auto travelled = std::min({t_max[0], t_max[1], t_max[2]});
+        if (!std::isfinite(travelled) ||
+            travelled > static_cast<double>(max_distance)) {
+            return {};
+        }
 
-    const auto t_delta_x = step_x == 0 ? inf : 1.0F / std::abs(dir.x);
-    const auto t_delta_y = step_y == 0 ? inf : 1.0F / std::abs(dir.y);
-    const auto t_delta_z = step_z == 0 ? inf : 1.0F / std::abs(dir.z);
+        auto crossing_mask = 0U;
+        for (std::size_t axis = 0U; axis < t_max.size(); ++axis) {
+            if (tied(t_max[axis], travelled)) {
+                crossing_mask |= 1U << axis;
+            }
+        }
+        if (crossing_mask == 0U) {
+            return {};
+        }
 
-    float travelled = 0.0F;
-    while (travelled <= max_distance) {
-        previous = current;
+        const auto next_current =
+            candidate_for_mask(current, crossing_mask);
+        if (!next_current.has_value()) {
+            return {};
+        }
 
-        if (t_max_x <= t_max_y && t_max_x <= t_max_z) {
-            current.x += step_x;
-            travelled = t_max_x;
-            t_max_x += t_delta_x;
-        } else if (t_max_y <= t_max_z) {
-            current.y += step_y;
-            travelled = t_max_y;
-            t_max_y += t_delta_y;
+        if (mode == WorldRaycastMode::Selection) {
+            // La selection reste un rayon fin : une egalite avance tous les
+            // axes ensemble et ne cible jamais les cellules laterales.
+            const auto previous = current;
+            current = *next_current;
+            if (const auto hit = hit_at(current, previous, travelled);
+                hit.has_value()) {
+                return *hit;
+            }
         } else {
-            current.z += step_z;
-            travelled = t_max_z;
-            t_max_z += t_delta_z;
+            // Les requetes d'obstruction utilisent un supercover : je teste
+            // chaque sous-ensemble de l'arete ou du coin touche a ce meme t.
+            std::optional<RaycastHit> best_hit;
+            for (auto subset = crossing_mask;
+                 subset != 0U;
+                 subset = (subset - 1U) & crossing_mask) {
+                const auto candidate = candidate_for_mask(current, subset);
+                if (!candidate.has_value()) {
+                    return {};
+                }
+                const auto hit = hit_at(*candidate, current, travelled);
+                if (!hit.has_value()) {
+                    continue;
+                }
+                const auto hit_rank =
+                    hit->block_id == to_block_id(BlockType::Water) ? 0 : 1;
+                const auto best_rank =
+                    best_hit.has_value() &&
+                            best_hit->block_id !=
+                                to_block_id(BlockType::Water)
+                        ? 1
+                        : 0;
+                const auto lexicographically_before =
+                    !best_hit.has_value() ||
+                    hit->block.x < best_hit->block.x ||
+                    (hit->block.x == best_hit->block.x &&
+                     (hit->block.y < best_hit->block.y ||
+                      (hit->block.y == best_hit->block.y &&
+                       hit->block.z < best_hit->block.z)));
+                if (!best_hit.has_value() || hit_rank > best_rank ||
+                    (hit_rank == best_rank && lexicographically_before)) {
+                    best_hit = *hit;
+                }
+            }
+            if (best_hit.has_value()) {
+                return *best_hit;
+            }
+            current = *next_current;
         }
 
-        if (travelled > max_distance) {
-            break;
-        }
-
-        if (const auto hit =
-                water_or_opaque_hit(current, previous, travelled);
-            hit.has_value()) {
-            return *hit;
-        }
-
-        const auto block_id = get_block(current.x, current.y, current.z);
-        if (blocks_ray(block_id)) {
-            return {
-                true,
-                current,
-                previous,
-                block_id,
-                travelled,
-            };
-        }
-
-        // Je conserve le comportement historique de la selection : l'eau est
-        // ciblable, mais elle ne masque ni la vision ni une balle.
-        if (mode == WorldRaycastMode::Selection && has_water(current.x, current.y, current.z)) {
-            return {
-                true,
-                current,
-                previous,
-                to_block_id(BlockType::Water),
-                travelled,
-            };
+        for (std::size_t axis = 0U; axis < t_max.size(); ++axis) {
+            if ((crossing_mask & (1U << axis)) != 0U) {
+                t_max[axis] += t_delta[axis];
+            }
         }
     }
 
+    // Cette borne est mathematiquement superieure au nombre de frontieres
+    // traversables sur 4096 m. L'atteindre signale donc une entree numerique
+    // incoherente, que je traite comme un echec ferme.
     return {};
 }
 
@@ -1613,9 +1810,17 @@ auto World::update_streaming(const glm::vec3& player_position, int requested_rad
         return stats;
     }
 
+    const auto player_block_x = checked_floor_to_block_coordinate(
+        static_cast<double>(player_position.x));
+    const auto player_block_z = checked_floor_to_block_coordinate(
+        static_cast<double>(player_position.z));
+    if (!player_block_x.has_value() || !player_block_z.has_value()) {
+        return stats;
+    }
+
     const auto center = world_to_chunk(
-        static_cast<int>(std::floor(player_position.x)),
-        static_cast<int>(std::floor(player_position.z)));
+        *player_block_x,
+        *player_block_z);
 
     requested_radius = std::clamp(requested_radius, 0, stream_radius_);
     const auto center_changed = !has_stream_center_ || center != stream_center_;
@@ -1946,9 +2151,251 @@ auto World::backrooms_theme_at_y(float world_y) const noexcept
     return generator_.backrooms_theme_at_y(world_y);
 }
 
-auto World::backrooms_spawn_block(int logical_level) const noexcept
+auto World::backrooms_generation_context(
+    int logical_level) const noexcept
+    -> std::optional<BackroomsGenerationContext> {
+    return generator_.backrooms_generation_context(logical_level);
+}
+
+auto World::backrooms_light_fixture_revision() const noexcept
+    -> std::uint64_t {
+    return backrooms_light_fixture_revision_;
+}
+
+auto World::query_backrooms_light_fixtures(
+    double position_x,
+    double position_z,
+    int search_radius,
+    int logical_level,
+    bool include_emergency) const -> BackroomsLightFixtureQuery {
+    BackroomsLightFixtureQuery result {};
+    if (generator_.profile() != WorldGenerationProfile::Backrooms ||
+        !std::isfinite(position_x) || !std::isfinite(position_z)) {
+        return result;
+    }
+
+    const auto radius =
+        std::clamp(
+            search_radius,
+            0,
+            kMaximumBackroomsLightFixtureQueryRadius);
+    constexpr auto maximum_fixture_extension =
+        kBackroomsLightFixtureNominalLength - 1;
+    const auto scan_radius = radius + maximum_fixture_extension;
+    const auto minimum_safe_coordinate =
+        static_cast<double>(std::numeric_limits<int>::min() +
+                            kMaximumBackroomsLightFixtureQueryRadius +
+                            maximum_fixture_extension);
+    const auto maximum_safe_coordinate =
+        static_cast<double>(std::numeric_limits<int>::max() -
+                            kMaximumBackroomsLightFixtureQueryRadius -
+                            maximum_fixture_extension);
+    if (position_x < minimum_safe_coordinate ||
+        position_x > maximum_safe_coordinate ||
+        position_z < minimum_safe_coordinate ||
+        position_z > maximum_safe_coordinate) {
+        return result;
+    }
+
+    const auto center_x =
+        static_cast<int>(std::floor(position_x));
+    const auto center_z =
+        static_cast<int>(std::floor(position_z));
+    const auto minimum_chunk =
+        world_to_chunk(
+            center_x - scan_radius,
+            center_z - scan_radius);
+    const auto maximum_chunk =
+        world_to_chunk(
+            center_x + scan_radius,
+            center_z + scan_radius);
+    const auto radius_squared =
+        static_cast<double>(radius) * static_cast<double>(radius);
+
+    std::unordered_set<
+        BackroomsLightFixtureLayout,
+        BackroomsFixtureLayoutHash>
+        visited_candidates {};
+
+    const auto checked_footprint_coordinate =
+        [](int anchor, int step, int offset) noexcept
+            -> std::optional<int> {
+        const auto coordinate =
+            static_cast<std::int64_t>(anchor) +
+            static_cast<std::int64_t>(step) * offset;
+        if (coordinate < std::numeric_limits<int>::lowest() ||
+            coordinate > std::numeric_limits<int>::max()) {
+            return std::nullopt;
+        }
+        return static_cast<int>(coordinate);
+    };
+
+    const auto footprint_cell_matches =
+        [this, &result](
+            const BackroomsLightFixtureLayout& candidate,
+            int offset) noexcept -> bool {
+        ++result.inspected_fixture_footprint_cells;
+        const auto step_x = candidate.primary_axis_x ? 1 : 0;
+        const auto step_z = candidate.primary_axis_x ? 0 : 1;
+        const auto candidate_x =
+            static_cast<std::int64_t>(candidate.nominal_anchor_x) +
+            static_cast<std::int64_t>(step_x) * offset;
+        const auto candidate_z =
+            static_cast<std::int64_t>(candidate.nominal_anchor_z) +
+            static_cast<std::int64_t>(step_z) * offset;
+        if (candidate_x < std::numeric_limits<int>::lowest() ||
+            candidate_x > std::numeric_limits<int>::max() ||
+            candidate_z < std::numeric_limits<int>::lowest() ||
+            candidate_z > std::numeric_limits<int>::max()) {
+            return false;
+        }
+        const auto world_x = static_cast<int>(candidate_x);
+        const auto world_z = static_cast<int>(candidate_z);
+        const auto generated_layout =
+            generator_.backrooms_light_fixture_at(
+                world_x,
+                candidate.ceiling_y,
+                world_z);
+        return generated_layout.has_value() &&
+               *generated_layout == candidate &&
+               peek_block_or_generated(
+                   world_x,
+                   candidate.ceiling_y,
+                   world_z) == candidate.block;
+    };
+
+    const auto append_segment =
+        [this,
+         position_x,
+         position_z,
+         radius_squared,
+         &checked_footprint_coordinate,
+         &result](
+            const BackroomsLightFixtureLayout& candidate,
+            int segment_offset,
+            int segment_length) {
+        const auto step_x = candidate.primary_axis_x ? 1 : 0;
+        const auto step_z = candidate.primary_axis_x ? 0 : 1;
+        const auto segment_anchor_x = checked_footprint_coordinate(
+            candidate.nominal_anchor_x,
+            step_x,
+            segment_offset);
+        const auto segment_anchor_z = checked_footprint_coordinate(
+            candidate.nominal_anchor_z,
+            step_z,
+            segment_offset);
+        if (!segment_anchor_x.has_value() ||
+            !segment_anchor_z.has_value()) {
+            return;
+        }
+
+        const auto half_span =
+            0.5 * static_cast<double>(segment_length - 1);
+        const auto fixture_x =
+            static_cast<double>(*segment_anchor_x) + 0.5 +
+            static_cast<double>(step_x) * half_span;
+        const auto fixture_z =
+            static_cast<double>(*segment_anchor_z) + 0.5 +
+            static_cast<double>(step_z) * half_span;
+        const auto delta_x = fixture_x - position_x;
+        const auto delta_z = fixture_z - position_z;
+        if (delta_x * delta_x + delta_z * delta_z > radius_squared) {
+            return;
+        }
+
+        result.fixtures.push_back({
+            .id = {
+                .seed = generator_.seed(),
+                .logical_level = candidate.logical_level,
+                .module_x = candidate.module_x,
+                .module_z = candidate.module_z,
+                .nominal_anchor_x = candidate.nominal_anchor_x,
+                .nominal_anchor_z = candidate.nominal_anchor_z,
+                .segment_anchor_x = *segment_anchor_x,
+                .segment_anchor_z = *segment_anchor_z,
+                .physical_ceiling_y = candidate.ceiling_y,
+                .connector_district_modules =
+                    candidate.connector_district_modules,
+                .segment_length = segment_length,
+                .primary_axis_x = candidate.primary_axis_x,
+                .valid = true,
+                .theme = candidate.theme,
+                .archetype = candidate.archetype,
+                .state = candidate.state,
+                .pool_geometry_profile =
+                    candidate.pool_geometry_profile,
+                .generation_version = generator_.generation_version(),
+                .block = candidate.block,
+            },
+            .position_x = static_cast<float>(fixture_x),
+            .position_y = static_cast<float>(candidate.ceiling_y),
+            .position_z = static_cast<float>(fixture_z),
+        });
+    };
+
+    for (auto chunk_z = minimum_chunk.z;
+         chunk_z <= maximum_chunk.z;
+         ++chunk_z) {
+        for (auto chunk_x = minimum_chunk.x;
+             chunk_x <= maximum_chunk.x;
+             ++chunk_x) {
+            const ChunkCoord chunk_coord {chunk_x, chunk_z};
+            const auto iterator = chunks_.find(chunk_coord);
+            if (iterator == chunks_.end()) {
+                continue;
+            }
+
+            for (const auto& candidate :
+                 iterator->second.backrooms_fixture_candidates) {
+                ++result.inspected_fixture_candidates;
+                if (candidate.logical_level != logical_level ||
+                    (candidate.state != BackroomsLightState::Active &&
+                     (!include_emergency ||
+                      candidate.state != BackroomsLightState::Emergency)) ||
+                    !visited_candidates.insert(candidate).second) {
+                    continue;
+                }
+
+                const auto nominal_length = std::clamp(
+                    candidate.nominal_length,
+                    1,
+                    kBackroomsLightFixtureNominalLength);
+                auto segment_offset = 0;
+                auto segment_length = 0;
+                for (auto offset = 0; offset <= nominal_length; ++offset) {
+                    const auto matches =
+                        offset < nominal_length &&
+                        footprint_cell_matches(candidate, offset);
+                    if (matches) {
+                        if (segment_length == 0) {
+                            segment_offset = offset;
+                        }
+                        ++segment_length;
+                        continue;
+                    }
+                    if (segment_length == 0) {
+                        continue;
+                    }
+                    append_segment(
+                        candidate,
+                        segment_offset,
+                        segment_length);
+                    segment_length = 0;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+auto World::backrooms_anchor_spawn_block() const noexcept
     -> BlockCoord {
-    return generator_.backrooms_spawn_block(logical_level);
+    return generator_.backrooms_anchor_spawn_block();
+}
+
+auto World::backrooms_spawn_block_for_level(
+    int logical_level) const noexcept -> std::optional<BlockCoord> {
+    return generator_.backrooms_spawn_block_for_level(logical_level);
 }
 
 auto World::visual_pipeline() const noexcept -> VisualPipeline {
@@ -2061,6 +2508,9 @@ auto World::memory_stats() const noexcept -> WorldMemoryStats {
         // reservees, pas seulement le nombre d'elements actuellement utilises.
         stats.chunk_cpu_bytes += sizeof(ChunkCoord) + sizeof(ChunkRecord) + 2U * sizeof(void*);
         stats.chunk_cpu_bytes += record.emissive_blocks.capacity() * sizeof(BlockCoord);
+        stats.chunk_cpu_bytes +=
+            record.backrooms_fixture_candidates.capacity() *
+            sizeof(BackroomsLightFixtureLayout);
         account_mesh(record.mesh);
         for (const auto& section_mesh : record.section_meshes) {
             account_mesh(section_mesh);
@@ -2160,13 +2610,22 @@ auto World::has_pending_work() const noexcept -> bool {
 }
 
 auto World::are_chunks_ready(const glm::vec3& player_position, int radius) const -> bool {
-    if (!is_finite_vec3(player_position) || radius < 0) {
+    if (!is_finite_vec3(player_position) || radius < 0 ||
+        radius > kMaxStreamRadius) {
+        return false;
+    }
+
+    const auto player_block_x = checked_floor_to_block_coordinate(
+        static_cast<double>(player_position.x));
+    const auto player_block_z = checked_floor_to_block_coordinate(
+        static_cast<double>(player_position.z));
+    if (!player_block_x.has_value() || !player_block_z.has_value()) {
         return false;
     }
 
     const auto center = world_to_chunk(
-        static_cast<int>(std::floor(player_position.x)),
-        static_cast<int>(std::floor(player_position.z)));
+        *player_block_x,
+        *player_block_z);
 
     for (int dz = -radius; dz <= radius; ++dz) {
         for (int dx = -radius; dx <= radius; ++dx) {
@@ -2292,9 +2751,16 @@ void World::begin_restore_save_plan(WorldSavePlan plan) {
                 : chunk.sparse_cells.size();
     }
 
+    const auto removed_unloaded_fixture_cells =
+        backrooms_unloaded_fixture_override_cells();
     // Je remplace atomiquement le plan logique; ses vecteurs seront liberes
     // chunk par chunk au fil de la restauration.
     chunk_overrides_.clear();
+    if (!removed_unloaded_fixture_cells.empty()) {
+        // Les chunks charges conservent encore leur etat reel. Seuls les
+        // overrides decharges changent immediatement la vue de peek().
+        bump_backrooms_light_fixture_revision();
+    }
     if (plan.chunks.empty()) {
         save_restore_state_.reset();
         return;
@@ -2325,15 +2791,38 @@ auto World::process_save_restore(std::size_t cell_budget, double max_ms) -> Worl
     const auto complete_current_chunk = [&](WorldSavePlanChunk& chunk_plan) {
         if (state.pending_override.generator_mismatch_count > 0U ||
             state.pending_override.player_placed_count > 0U) {
+            auto previous_fixture_cells =
+                std::unordered_set<BlockCoord, BlockCoordHash> {};
+            if (const auto previous =
+                    chunk_overrides_.find(chunk_plan.coord);
+                previous != chunk_overrides_.end()) {
+                previous_fixture_cells =
+                    backrooms_fixture_override_cells(
+                        chunk_plan.coord,
+                        previous->second);
+            }
+            const auto next_fixture_cells =
+                backrooms_fixture_override_cells(
+                    chunk_plan.coord,
+                    state.pending_override);
             auto [override_iterator, inserted] = chunk_overrides_.insert_or_assign(
                 chunk_plan.coord,
                 std::move(state.pending_override));
             (void)inserted;
+            auto fixture_state_changed = false;
             if (auto loaded = chunks_.find(chunk_plan.coord); loaded != chunks_.end()) {
-                apply_chunk_override_to_record(loaded->second, override_iterator->second);
+                fixture_state_changed = apply_chunk_override_to_record(
+                    loaded->second,
+                    override_iterator->second);
                 enqueue_lighting_update(chunk_plan.coord);
                 invalidate_loaded_mesh_neighbors_for_chunk_load(chunk_plan.coord);
                 apply_chunk_load_fluid_revalidation(chunk_plan.coord);
+            } else {
+                fixture_state_changed =
+                    previous_fixture_cells != next_fixture_cells;
+            }
+            if (fixture_state_changed) {
+                bump_backrooms_light_fixture_revision();
             }
         }
 
@@ -2515,6 +3004,8 @@ auto World::save_restore_progress() const noexcept -> float {
 }
 
 void World::replace_chunk_snapshots(const std::vector<WorldChunkSnapshot>& snapshots) {
+    const auto previous_unloaded_fixture_cells =
+        backrooms_unloaded_fixture_override_cells();
     chunk_overrides_.clear();
     for (const auto& snapshot : snapshots) {
         auto entry =
@@ -2529,15 +3020,23 @@ void World::replace_chunk_snapshots(const std::vector<WorldChunkSnapshot>& snaps
         chunk_overrides_.insert_or_assign(snapshot.coord, std::move(*entry));
     }
 
+    auto fixture_state_changed =
+        previous_unloaded_fixture_cells !=
+        backrooms_unloaded_fixture_override_cells();
     for (auto& [coord, record] : chunks_) {
         const auto iterator = chunk_overrides_.find(coord);
         if (iterator == chunk_overrides_.end()) {
             continue;
         }
-        apply_chunk_override_to_record(record, iterator->second);
+        fixture_state_changed =
+            apply_chunk_override_to_record(record, iterator->second) ||
+            fixture_state_changed;
         enqueue_lighting_update(coord);
         invalidate_loaded_mesh_neighbors_for_chunk_load(coord);
         apply_chunk_load_fluid_revalidation(coord);
+    }
+    if (fixture_state_changed) {
+        bump_backrooms_light_fixture_revision();
     }
 }
 
@@ -2664,8 +3163,18 @@ void World::install_generated_chunk(Chunk&& chunk) {
     }
 
     iterator->second.chunk.clear_lighting();
+    const auto is_backrooms =
+        generator_.profile() == WorldGenerationProfile::Backrooms;
+    if (is_backrooms) {
+        // Je construis l'index depuis le chunk procedural encore intact. Les
+        // overrides appliques ensuite peuvent decouper une rampe sans effacer
+        // son candidat nominal ni relancer la generation de toute la colonne.
+        refresh_chunk_backrooms_fixture_index(iterator->second);
+    }
     if (const auto override_iterator = chunk_overrides_.find(coord); override_iterator != chunk_overrides_.end()) {
-        apply_chunk_override_to_record(iterator->second, override_iterator->second);
+        (void)apply_chunk_override_to_record(
+            iterator->second,
+            override_iterator->second);
     } else if (
         generator_.profile() ==
         WorldGenerationProfile::Backrooms) {
@@ -2676,6 +3185,12 @@ void World::install_generated_chunk(Chunk&& chunk) {
         // Les profils extérieurs ne placent pas de bloc émissif pendant la
         // génération et évitent ainsi un scan complet de chaque chunk.
         iterator->second.emissive_blocks.clear();
+    }
+    if (is_backrooms &&
+        !iterator->second.backrooms_fixture_candidates.empty()) {
+        // Je publie l'installation et l'override eventuel comme une seule
+        // mutation observable. Le cache ne voit jamais l'etat intermediaire.
+        bump_backrooms_light_fixture_revision();
     }
     iterator->second.sky_columns_dirty.set();
     iterator->second.chunk.mark_dirty();
@@ -3952,10 +4467,18 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
         }
     }
 
+    auto fixture_index_changed = false;
     for (const auto& coord : to_remove) {
         const auto record_iterator = chunks_.find(coord);
         if (record_iterator != chunks_.end()) {
             sync_chunk_override_snapshot(coord, record_iterator->second.chunk);
+            if (generator_.profile() ==
+                    WorldGenerationProfile::Backrooms &&
+                (!record_iterator->second.emissive_blocks.empty() ||
+                 !record_iterator->second
+                      .backrooms_fixture_candidates.empty())) {
+                fixture_index_changed = true;
+            }
         }
         for (const auto& offset : kNeighborOffsets) {
             const ChunkCoord neighbor_coord {coord.x + offset.x, coord.z + offset.z};
@@ -3975,6 +4498,9 @@ auto World::unload_far_chunks(const ChunkCoord& center) -> std::size_t {
         enqueue_gpu_unload(coord);
         chunks_.erase(coord);
         invalidate_loaded_mesh_neighbors(coord, true);
+    }
+    if (fixture_index_changed) {
+        bump_backrooms_light_fixture_revision();
     }
 
     std::deque<ChunkCoord> kept_priority_meshes;
@@ -4704,6 +5230,158 @@ void World::remove_unsupported_torches_around(int x, int y, int z) {
     }
 }
 
+void World::bump_backrooms_light_fixture_revision() noexcept {
+    ++backrooms_light_fixture_revision_;
+    if (backrooms_light_fixture_revision_ == 0U) {
+        backrooms_light_fixture_revision_ = 1U;
+    }
+}
+
+auto World::backrooms_block_change_affects_fixture(
+    const BlockCoord& world_coord,
+    BlockId previous_block,
+    BlockId next_block) const noexcept -> bool {
+    if (generator_.profile() != WorldGenerationProfile::Backrooms ||
+        previous_block == next_block ||
+        (block_emissive_level(previous_block) == 0U &&
+         block_emissive_level(next_block) == 0U)) {
+        return false;
+    }
+    const auto layout = generator_.backrooms_light_fixture_at(
+        world_coord.x,
+        world_coord.y,
+        world_coord.z);
+    return layout.has_value() &&
+           ((previous_block == layout->block) !=
+            (next_block == layout->block));
+}
+
+auto World::backrooms_chunk_fixture_state_changes(
+    const ChunkRecord& record,
+    const WorldChunkSnapshot& snapshot) const noexcept -> bool {
+    if (generator_.profile() != WorldGenerationProfile::Backrooms ||
+        snapshot.coord != record.chunk.coord()) {
+        return false;
+    }
+    const auto& current_blocks = record.chunk.blocks();
+    for (std::size_t block_index = 0U;
+         block_index < kChunkVolume;
+         ++block_index) {
+        const auto previous_block = current_blocks[block_index];
+        const auto next_block = snapshot.blocks[block_index];
+        if (previous_block == next_block) {
+            continue;
+        }
+        const auto world_coord = checked_world_coord_from_chunk_index(
+            snapshot.coord,
+            block_index);
+        if (world_coord.has_value() &&
+            backrooms_block_change_affects_fixture(
+                *world_coord,
+                previous_block,
+                next_block)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+auto World::backrooms_fixture_override_cells(
+    const ChunkCoord& coord,
+    const ChunkOverrideEntry& entry) const
+    -> std::unordered_set<BlockCoord, BlockCoordHash> {
+    std::unordered_set<BlockCoord, BlockCoordHash> result {};
+    if (generator_.profile() != WorldGenerationProfile::Backrooms) {
+        return result;
+    }
+
+    const auto inspect_cell = [this, &coord, &result](
+                                  std::size_t block_index,
+                                  BlockId overridden_block) {
+        const auto world_coord = checked_world_coord_from_chunk_index(
+            coord,
+            block_index);
+        if (!world_coord.has_value()) {
+            return;
+        }
+        const auto layout = generator_.backrooms_light_fixture_at(
+            world_coord->x,
+            world_coord->y,
+            world_coord->z);
+        if (layout.has_value() && overridden_block != layout->block) {
+            result.insert(*world_coord);
+        }
+    };
+
+    if (entry.dense != nullptr) {
+        for (std::size_t block_index = 0U;
+             block_index < kChunkVolume;
+             ++block_index) {
+            if (!entry.changed_cells.test(block_index)) {
+                continue;
+            }
+            inspect_cell(
+                block_index,
+                entry.dense->blocks[block_index]);
+        }
+        return result;
+    }
+    for (const auto& cell : entry.sparse_cells) {
+        inspect_cell(
+            static_cast<std::size_t>(cell.index),
+            cell.block);
+    }
+    return result;
+}
+
+auto World::backrooms_unloaded_fixture_override_cells() const
+    -> std::unordered_set<BlockCoord, BlockCoordHash> {
+    std::unordered_set<BlockCoord, BlockCoordHash> result {};
+    for (const auto& [coord, entry] : chunk_overrides_) {
+        if (chunks_.contains(coord)) {
+            continue;
+        }
+        auto cells = backrooms_fixture_override_cells(coord, entry);
+        result.insert(cells.begin(), cells.end());
+    }
+    return result;
+}
+
+void World::refresh_chunk_backrooms_fixture_index(ChunkRecord& record) {
+    record.backrooms_fixture_candidates.clear();
+    if (generator_.profile() != WorldGenerationProfile::Backrooms) {
+        return;
+    }
+
+    std::unordered_set<
+        BackroomsLightFixtureLayout,
+        BackroomsFixtureLayoutHash>
+        indexed_candidates {};
+    const auto& blocks = record.chunk.blocks();
+    for (int y = kWorldMinY; y <= kWorldMaxY; ++y) {
+        for (int z = 0; z < kChunkSizeZ; ++z) {
+            for (int x = 0; x < kChunkSizeX; ++x) {
+                const auto block_id = blocks[chunk_linear_index(x, y, z)];
+                if (block_emissive_level(block_id) == 0U) {
+                    continue;
+                }
+                const auto world_coord = local_to_world(
+                    record.chunk.coord(),
+                    BlockCoord {x, y, z});
+                const auto candidate =
+                    generator_.backrooms_light_fixture_at(
+                        world_coord.x,
+                        world_coord.y,
+                        world_coord.z);
+                if (candidate.has_value() && candidate->block == block_id &&
+                    indexed_candidates.insert(*candidate).second) {
+                    record.backrooms_fixture_candidates.push_back(*candidate);
+                }
+            }
+        }
+    }
+}
+
 void World::refresh_chunk_emissive_cache(ChunkRecord& record) {
     record.emissive_blocks.clear();
     const auto& blocks = record.chunk.blocks();
@@ -4711,10 +5389,9 @@ void World::refresh_chunk_emissive_cache(ChunkRecord& record) {
         for (int z = 0; z < kChunkSizeZ; ++z) {
             for (int x = 0; x < kChunkSizeX; ++x) {
                 const auto block_id = blocks[chunk_linear_index(x, y, z)];
-                if (block_emissive_level(block_id) == 0) {
+                if (block_emissive_level(block_id) == 0U) {
                     continue;
                 }
-
                 record.emissive_blocks.push_back({x, y, z});
             }
         }
@@ -4727,7 +5404,8 @@ void World::update_chunk_emissive_cache(ChunkRecord& record,
                                         BlockId next_block) {
     const auto previous_emissive = block_emissive_level(previous_block);
     const auto next_emissive = block_emissive_level(next_block);
-    if (previous_emissive == 0 && next_emissive == 0) {
+    if (previous_block == next_block ||
+        (previous_emissive == 0 && next_emissive == 0)) {
         return;
     }
 
@@ -4736,6 +5414,19 @@ void World::update_chunk_emissive_cache(ChunkRecord& record,
         record.emissive_blocks.end());
     if (next_emissive > 0) {
         record.emissive_blocks.push_back(local_coord);
+    }
+    const auto world_coord = checked_world_coord_from_chunk_index(
+        record.chunk.coord(),
+        chunk_linear_index(
+            local_coord.x,
+            local_coord.y,
+            local_coord.z));
+    if (world_coord.has_value() &&
+        backrooms_block_change_affects_fixture(
+            *world_coord,
+            previous_block,
+            next_block)) {
+        bump_backrooms_light_fixture_revision();
     }
 }
 
@@ -4758,13 +5449,18 @@ void World::sync_chunk_override_snapshot(const ChunkCoord& coord, const Chunk& c
     iterator->second = std::move(*refreshed_entry);
 }
 
-void World::apply_chunk_override_to_record(ChunkRecord& record, const ChunkOverrideEntry& entry) {
+auto World::apply_chunk_override_to_record(
+    ChunkRecord& record,
+    const ChunkOverrideEntry& entry) -> bool {
     const auto snapshot = materialize_chunk_override(record.chunk.coord(), entry);
+    const auto fixture_state_changed =
+        backrooms_chunk_fixture_state_changes(record, snapshot);
     record.chunk.copy_blocks_from(snapshot.blocks.data(), snapshot.blocks.size());
     record.chunk.copy_water_from(snapshot.water_state.data(), snapshot.water_state.size());
     record.chunk.clear_lighting();
     record.sky_columns_dirty.set();
     refresh_chunk_emissive_cache(record);
+    return fixture_state_changed;
 }
 
 auto World::make_chunk_override_entry(

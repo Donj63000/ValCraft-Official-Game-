@@ -26,6 +26,7 @@
 #include "gameplay/BackroomsFlashlight.h"
 #include "gameplay/BackroomsJack.h"
 #include "gameplay/BackroomsMarlow.h"
+#include "gameplay/BackroomsSimulationTime.h"
 #include "gameplay/BackroomsThreatArbiter.h"
 #include "gameplay/ItemDropSystem.h"
 #include "gameplay/MusketCombat.h"
@@ -817,6 +818,7 @@ private:
     bool backrooms_marlow_previous_jump_input_ = false;
     bool backrooms_marlow_has_previous_player_position_ = false;
     bool backrooms_marlow_poolrooms_active_ = false;
+    BackroomsResumeState backrooms_resume_state_ {};
     float menu_preview_time_of_day_ = 8.25F;
     float preview_orbit_radians_ = 0.0F;
     bool has_active_session_ = false;

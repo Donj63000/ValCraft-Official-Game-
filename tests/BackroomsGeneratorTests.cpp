@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <queue>
 #include <set>
@@ -223,6 +224,172 @@ TEST_CASE("BackRooms signed coordinates use floor division") {
     CHECK(BackroomsGenerator::local_coordinate(-1) == 63);
     CHECK(BackroomsGenerator::local_coordinate(-64) == 0);
     CHECK(BackroomsGenerator::local_coordinate(-65) == 63);
+}
+
+TEST_CASE("BackRooms keeps descriptor topology deterministic at integer boundaries") {
+    const BackroomsGenerator generator(-9081, -2);
+    constexpr auto minimum = std::numeric_limits<int>::lowest();
+    constexpr auto maximum = std::numeric_limits<int>::max();
+
+    const auto maximum_descriptor =
+        generator.module_descriptor(maximum, maximum);
+    const auto minimum_descriptor =
+        generator.module_descriptor(minimum, minimum);
+    CHECK(
+        maximum_descriptor ==
+        generator.module_descriptor(maximum, maximum));
+    CHECK(
+        minimum_descriptor ==
+        generator.module_descriptor(minimum, minimum));
+
+    const auto before_east_edge =
+        generator.module_descriptor(maximum - 1, 0);
+    const auto east_edge = generator.module_descriptor(maximum, 0);
+    CHECK(before_east_edge.east_portal_z == east_edge.west_portal_z);
+    const auto before_south_edge =
+        generator.module_descriptor(0, maximum - 1);
+    const auto south_edge = generator.module_descriptor(0, maximum);
+    CHECK(before_south_edge.south_portal_x == south_edge.north_portal_x);
+
+    const auto minimum_edge = generator.module_descriptor(minimum, 0);
+    const auto after_minimum_edge =
+        generator.module_descriptor(minimum + 1, 0);
+    CHECK(minimum_edge.east_portal_z == after_minimum_edge.west_portal_z);
+    const auto minimum_south_edge = generator.module_descriptor(0, minimum);
+    const auto after_minimum_south_edge =
+        generator.module_descriptor(0, minimum + 1);
+    CHECK(
+        minimum_south_edge.south_portal_x ==
+        after_minimum_south_edge.north_portal_x);
+
+    CHECK(
+        generator.sample_column(maximum, maximum) ==
+        generator.sample_column(maximum, maximum));
+    CHECK(
+        generator.sample_column(minimum, minimum) ==
+        generator.sample_column(minimum, minimum));
+}
+
+TEST_CASE("BackRooms rejects connector requests outside its bounded numeric contract") {
+    constexpr auto minimum = std::numeric_limits<int>::lowest();
+    constexpr auto maximum = std::numeric_limits<int>::max();
+    constexpr auto invalid_direction =
+        static_cast<BackroomsConnectorDirection>(
+            std::numeric_limits<std::uint8_t>::max());
+    constexpr auto district_world_size =
+        kBackroomsConnectorDistrictModules * kBackroomsModuleSize;
+    constexpr auto maximum_safe_district = maximum / district_world_size;
+    constexpr auto minimum_safe_district = minimum / district_world_size;
+    const BackroomsGenerator generator(63017, 0);
+
+    const auto nominal = generator.connector_in_district(
+        BackroomsConnectorDirection::Up,
+        0,
+        0);
+    REQUIRE(nominal.has_value());
+    CHECK(generator.connector_near(
+        nominal->trigger_block.x,
+        nominal->trigger_block.y,
+        nominal->trigger_block.z,
+        0).has_value());
+    CHECK_FALSE(generator.connector_near(0, kBackroomsFloorY + 1, 0, -1));
+    CHECK_FALSE(generator.connector_near(
+        0,
+        kBackroomsFloorY + 1,
+        0,
+        kBackroomsMaximumConnectorSearchRadius + 1));
+
+    CHECK(generator.connector_in_district(
+        BackroomsConnectorDirection::Up,
+        maximum_safe_district,
+        0).has_value());
+    CHECK(generator.connector_in_district(
+        BackroomsConnectorDirection::Up,
+        minimum_safe_district,
+        0).has_value());
+    CHECK_FALSE(generator.connector_in_district(
+        BackroomsConnectorDirection::Up,
+        maximum_safe_district + 1,
+        0));
+    CHECK_FALSE(generator.connector_in_district(
+        BackroomsConnectorDirection::Up,
+        minimum_safe_district - 1,
+        0));
+
+    CHECK_FALSE(generator.connector_near(maximum, 0, maximum, 0));
+    CHECK_FALSE(generator.connector_near(minimum, 0, minimum, 0));
+
+    const BackroomsGenerator highest_level(63017, maximum);
+    const BackroomsGenerator lowest_level(63017, minimum);
+    CHECK_FALSE(highest_level.connector_in_district(
+        BackroomsConnectorDirection::Up,
+        0,
+        0));
+    CHECK_FALSE(lowest_level.connector_in_district(
+        BackroomsConnectorDirection::Down,
+        0,
+        0));
+    CHECK_FALSE(generator.connector_in_district(
+        invalid_direction,
+        0,
+        0));
+    CHECK_FALSE(highest_level.connector_in_district(
+        invalid_direction,
+        0,
+        0));
+    CHECK_FALSE(lowest_level.connector_in_district(
+        invalid_direction,
+        0,
+        0));
+}
+
+TEST_CASE("BackRooms chunk generation rejects coordinates outside the block domain") {
+    WorldGenerator generator(
+        63017,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV4,
+        0);
+    constexpr auto maximum_valid_chunk_x =
+        std::numeric_limits<int>::max() / kChunkSizeX;
+    constexpr auto minimum_valid_chunk_x =
+        std::numeric_limits<int>::lowest() / kChunkSizeX;
+    constexpr auto maximum_valid_chunk_z =
+        std::numeric_limits<int>::max() / kChunkSizeZ;
+    constexpr auto minimum_valid_chunk_z =
+        std::numeric_limits<int>::lowest() / kChunkSizeZ;
+    constexpr std::array<ChunkCoord, 4U> invalid_chunks {{
+        {maximum_valid_chunk_x + 1, 0},
+        {minimum_valid_chunk_x - 1, 0},
+        {0, maximum_valid_chunk_z + 1},
+        {0, minimum_valid_chunk_z - 1},
+    }};
+
+    for (const auto chunk : invalid_chunks) {
+        CAPTURE(chunk.x);
+        CAPTURE(chunk.z);
+        WorldGenerator::ChunkGenerationState state {chunk};
+        CHECK_NOTHROW(generator.advance_chunk_generation(state, 1U));
+        CHECK(generator.is_chunk_generation_complete(state));
+        CHECK(state.next_column ==
+              static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ));
+        CHECK(std::all_of(
+            state.chunk.blocks().begin(),
+            state.chunk.blocks().end(),
+            [](BlockId block) {
+                return block == to_block_id(BlockType::Air);
+            }));
+    }
+
+    WorldGenerator::ChunkGenerationState maximum_boundary {
+        {maximum_valid_chunk_x, 0}};
+    WorldGenerator::ChunkGenerationState minimum_boundary {
+        {minimum_valid_chunk_x, 0}};
+    generator.advance_chunk_generation(maximum_boundary, 1U);
+    generator.advance_chunk_generation(minimum_boundary, 1U);
+    CHECK(maximum_boundary.next_column == 1U);
+    CHECK(minimum_boundary.next_column == 1U);
+    CHECK_FALSE(generator.is_chunk_generation_complete(maximum_boundary));
+    CHECK_FALSE(generator.is_chunk_generation_complete(minimum_boundary));
 }
 
 TEST_CASE("BackRooms neighbouring modules share every portal") {
@@ -1914,6 +2081,9 @@ TEST_CASE("BackRooms light blocks expose only the intended emission levels") {
 TEST_CASE("BackRooms grading preserves realistic bounded interior light") {
     constexpr auto seed = 424242;
     const BackroomsGenerator generator(seed);
+    const BackroomsGenerationContext generation_context {
+        .seed = seed,
+    };
     std::array<EnvironmentState, 6> tension_states {};
     std::array<bool, 6> found_tensions {};
 
@@ -1930,7 +2100,7 @@ TEST_CASE("BackRooms grading preserves realistic bounded interior light") {
             const auto state =
                 make_backrooms_environment_state(
                     37.5F,
-                    seed,
+                    generation_context,
                     static_cast<float>(world_x),
                     static_cast<float>(world_z));
 
@@ -1991,6 +2161,9 @@ TEST_CASE("BackRooms lighting crosses module thresholds without one-frame jumps"
     constexpr auto seed = 424242;
     constexpr auto elapsed_seconds = 19.75F;
     const BackroomsGenerator generator(seed);
+    const BackroomsGenerationContext generation_context {
+        .seed = seed,
+    };
 
     auto boundary_module_x = 0;
     auto boundary_module_z = 0;
@@ -2024,31 +2197,31 @@ TEST_CASE("BackRooms lighting crosses module thresholds without one-frame jumps"
     const auto left_center =
         make_backrooms_environment_state(
             elapsed_seconds,
-            seed,
+            generation_context,
             boundary_x - 8.0F,
             sample_z);
     const auto right_center =
         make_backrooms_environment_state(
             elapsed_seconds,
-            seed,
+            generation_context,
             boundary_x + 8.0F,
             sample_z);
     const auto boundary =
         make_backrooms_environment_state(
             elapsed_seconds,
-            seed,
+            generation_context,
             boundary_x,
             sample_z);
     const auto just_before =
         make_backrooms_environment_state(
             elapsed_seconds,
-            seed,
+            generation_context,
             boundary_x - 0.001F,
             sample_z);
     const auto just_after =
         make_backrooms_environment_state(
             elapsed_seconds,
-            seed,
+            generation_context,
             boundary_x + 0.001F,
             sample_z);
 

@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 
 class FastNoiseLite;
 
@@ -54,6 +55,56 @@ enum class WorldGenerationVersion : std::uint32_t {
                ? BackroomsSpatialProfile::RecessedPoolroomsV3
                : BackroomsSpatialProfile::LegacyV2;
 }
+
+// Je transporte partout le contexte immuable qui a reellement produit un
+// etage. Le rendu et l'ambiance ne peuvent ainsi plus reconstruire une V1 par
+// defaut au milieu d'un monde V2, V3 ou V4.
+struct BackroomsGenerationContext {
+    int seed = 1337;
+    int logical_level = 0;
+    int connector_district_modules =
+        kBackroomsConnectorDistrictModules;
+    int physical_floor_y = kBackroomsFloorY;
+    BackroomsPoolGeometryProfile pool_geometry_profile =
+        BackroomsPoolGeometryProfile::LegacyFlat;
+    WorldGenerationVersion generation_version =
+        WorldGenerationVersion::BackroomsV1;
+    BackroomsTheme theme = BackroomsTheme::Offices;
+
+    auto operator==(const BackroomsGenerationContext&) const -> bool = default;
+};
+
+// Je donne a chaque segment lumineux une identite stable et complete. L'ancre
+// nominale appartient au layout; l'ancre et la longueur de segment decrivent
+// la portion contigue qui existe vraiment dans l'etat charge, surcharge ou
+// genere. Le streaming ne peut donc jamais changer son centre ni sa phase.
+struct BackroomsFixtureId {
+    int seed = 1337;
+    int logical_level = 0;
+    int module_x = 0;
+    int module_z = 0;
+    int nominal_anchor_x = 0;
+    int nominal_anchor_z = 0;
+    int segment_anchor_x = 0;
+    int segment_anchor_z = 0;
+    int physical_ceiling_y = kBackroomsFloorY;
+    int connector_district_modules =
+        kBackroomsConnectorDistrictModules;
+    int segment_length = 1;
+    bool primary_axis_x = true;
+    bool valid = false;
+    BackroomsTheme theme = BackroomsTheme::Offices;
+    BackroomsArchetype archetype =
+        BackroomsArchetype::ClassicOffice;
+    BackroomsLightState state = BackroomsLightState::None;
+    BackroomsPoolGeometryProfile pool_geometry_profile =
+        BackroomsPoolGeometryProfile::LegacyFlat;
+    WorldGenerationVersion generation_version =
+        WorldGenerationVersion::BackroomsV1;
+    BlockId block = to_block_id(BlockType::Air);
+
+    auto operator==(const BackroomsFixtureId&) const -> bool = default;
+};
 
 [[nodiscard]] inline constexpr auto resolve_world_generation_version(
     WorldGenerationProfile profile,
@@ -147,8 +198,18 @@ public:
     [[nodiscard]] auto backrooms_level_at_y(float world_y) const noexcept -> int;
     [[nodiscard]] auto backrooms_theme_at_y(float world_y) const noexcept
         -> BackroomsTheme;
-    [[nodiscard]] auto backrooms_spawn_block(int logical_level) const noexcept
+    [[nodiscard]] auto backrooms_generation_context(
+        int logical_level) const noexcept
+        -> std::optional<BackroomsGenerationContext>;
+    [[nodiscard]] auto backrooms_light_fixture_at(
+        int world_x,
+        int world_y,
+        int world_z) const noexcept
+        -> std::optional<BackroomsLightFixtureLayout>;
+    [[nodiscard]] auto backrooms_anchor_spawn_block() const noexcept
         -> BlockCoord;
+    [[nodiscard]] auto backrooms_spawn_block_for_level(
+        int logical_level) const noexcept -> std::optional<BlockCoord>;
     [[nodiscard]] auto biome_at(int world_x, int world_z) const noexcept -> BiomeType;
     [[nodiscard]] auto sample_surface(int world_x, int world_z) const noexcept -> TerrainSurfaceSample;
     [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept -> BlockId;

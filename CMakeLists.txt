@@ -29,11 +29,54 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 include(FetchContent)
 include(CheckIPOSupported)
+include(CheckCXXSourceCompiles)
 enable_testing()
 option(VALCRAFT_STRICT_WARNINGS "Enable strict warnings on project targets" ON)
 option(VALCRAFT_ENABLE_COVERAGE "Enable gcov coverage for critical modules" OFF)
 option(VALCRAFT_ENABLE_ADDRESS_SANITIZER "Instrument ValCraft targets with AddressSanitizer" OFF)
+option(VALCRAFT_ENABLE_UNDEFINED_SANITIZER "Instrument ValCraft targets with UndefinedBehaviorSanitizer" OFF)
 option(VALCRAFT_ENABLE_GPU_INTEGRATION_TESTS "Register SDL/OpenGL smoke tests in the default CTest suite" ON)
+option(VALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS "Allow CMake to download dependencies which are not available locally" ON)
+option(VALCRAFT_HEADLESS_BACKROOMS_TESTS_ONLY "Configure only the Backrooms logic tests without SDL or OpenGL" OFF)
+set(
+    VALCRAFT_DEPENDENCY_SOURCE_ROOT
+    ""
+    CACHE PATH
+    "Optional directory containing pre-populated sdl2, glm, fastnoise, doctest and glad source trees"
+)
+set(
+    VALCRAFT_GLAD_GENERATED_SOURCE_DIR
+    ""
+    CACHE PATH
+    "Optional directory containing verified generated glad2 include/glad/gl.h and src/gl.c files"
+)
+
+set(VALCRAFT_GLM_GIT_REVISION "8d1fd52e5ab5590e2c81768ace50c72bae28f2ed")
+set(VALCRAFT_FASTNOISE_GIT_REVISION "7ccfbc16eb1c932568f177d63a9ba51d89bbe516")
+set(VALCRAFT_DOCTEST_GIT_REVISION "1da23a3e8119ec5cce4f9388e91b065e20bf06f5")
+set(VALCRAFT_SDL2_GIT_REVISION "c98c4fbff6d8f3016a3ce6685bf8f43433c3efcc")
+set(VALCRAFT_GLAD_GIT_REVISION "73db193f853e2ee079bf3ca8a64aa2eaf6459043")
+set(VALCRAFT_GLAD_JINJA2_VERSION "3.1.6")
+set(VALCRAFT_GLAD_MARKUPSAFE_VERSION "3.0.3")
+set(VALCRAFT_GLAD_HEADER_SHA256
+    "38555534130ab0f6bdf7815fbbae52241f4f7aeb6165949fccd284348a1daa1a"
+)
+set(VALCRAFT_GLAD_SOURCE_SHA256
+    "60ba6709b27cde10e2b617a4a4ca6793ffb733fab18623a0e7b7513167a44fc9"
+)
+set(VALCRAFT_GLAD_KHRPLATFORM_SHA256
+    "5ee5d5c2c6b2abd028cec8dc1a24e995bb47b075654a6fc55f3a1293de36943f"
+)
+
+if(VALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS)
+    # Je remets aussi explicitement le cache en ligne lors d'une reconfiguration
+    # afin qu'un ancien build hors ligne ne reste pas bloque silencieusement.
+    set(FETCHCONTENT_FULLY_DISCONNECTED OFF CACHE BOOL "Disable FetchContent network access" FORCE)
+else()
+    # Je rends le contrat hors ligne explicite : FetchContent reutilise un
+    # cache deja peuple ou un repertoire fourni, mais ne contacte jamais Git.
+    set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "Disable FetchContent network access" FORCE)
+endif()
 
 check_ipo_supported(RESULT VALCRAFT_IPO_SUPPORTED OUTPUT VALCRAFT_IPO_ERROR)
 if(NOT VALCRAFT_IPO_SUPPORTED AND VALCRAFT_IPO_ERROR)
@@ -52,47 +95,502 @@ set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(DOCTEST_WITH_TESTS OFF CACHE BOOL "" FORCE)
 set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
 
-FetchContent_Declare(
-    sdl2
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-    GIT_TAG release-2.30.9
-    GIT_SHALLOW TRUE
-)
+function(valcraft_clear_legacy_managed_dependency_source dependency_name)
+    string(TOUPPER "${dependency_name}" dependency_name_upper)
+    set(source_override_variable "FETCHCONTENT_SOURCE_DIR_${dependency_name_upper}")
+    set(managed_override_variable
+        "VALCRAFT_MANAGED_FETCHCONTENT_SOURCE_DIR_${dependency_name_upper}"
+    )
 
-FetchContent_Declare(
-    glm
-    GIT_REPOSITORY https://github.com/g-truc/glm.git
-    GIT_TAG 1.0.3
-    GIT_SHALLOW TRUE
-)
+    get_property(
+        managed_override_is_cached
+        CACHE "${managed_override_variable}"
+        PROPERTY TYPE
+        SET
+    )
+    if(managed_override_is_cached)
+        get_property(
+            managed_override
+            CACHE "${managed_override_variable}"
+            PROPERTY VALUE
+        )
+        if(VALCRAFT_DEPENDENCY_SOURCE_ROOT)
+            set(current_managed_override
+                "${VALCRAFT_DEPENDENCY_SOURCE_ROOT}/${dependency_name}"
+            )
+            cmake_path(
+                ABSOLUTE_PATH current_managed_override
+                BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                NORMALIZE
+            )
+        else()
+            set(current_managed_override "")
+        endif()
 
-FetchContent_Declare(
-    fastnoise
-    GIT_REPOSITORY https://github.com/Auburn/FastNoiseLite.git
-    GIT_TAG v1.1.1
-    GIT_SHALLOW TRUE
-)
+        if(NOT managed_override STREQUAL current_managed_override)
+            get_property(
+                source_override_is_cached
+                CACHE "${source_override_variable}"
+                PROPERTY TYPE
+                SET
+            )
+            if(source_override_is_cached)
+                get_property(
+                    source_override
+                    CACHE "${source_override_variable}"
+                    PROPERTY VALUE
+                )
+                if(source_override STREQUAL managed_override)
+                    # Je retire uniquement la valeur que ValCraft avait placee.
+                    # Un override remplace depuis par l'utilisateur est preserve.
+                    unset(${source_override_variable} CACHE)
+                endif()
+            endif()
+            unset(${managed_override_variable} CACHE)
+            message(STATUS
+                "Cleared stale ValCraft source override for ${dependency_name}"
+            )
+        endif()
+    endif()
 
-FetchContent_Declare(
-    doctest
-    GIT_REPOSITORY https://github.com/doctest/doctest.git
-    GIT_TAG v2.4.12
-    GIT_SHALLOW TRUE
-)
+    get_property(
+        source_override_is_cached
+        CACHE "${source_override_variable}"
+        PROPERTY TYPE
+        SET
+    )
+    if(NOT source_override_is_cached)
+        return()
+    endif()
 
-FetchContent_Declare(
-    glad
-    GIT_REPOSITORY https://github.com/Dav1dde/glad.git
-    GIT_TAG v2.0.8
-    GIT_SHALLOW TRUE
-)
+    get_property(
+        source_override_help
+        CACHE "${source_override_variable}"
+        PROPERTY HELPSTRING
+    )
+    if(source_override_help STREQUAL "Local source override for ${dependency_name}")
+        # Je ne supprime que les anciennes entrees creees par ValCraft. Une
+        # valeur -DFETCHCONTENT_SOURCE_DIR_* fournie directement reste intacte.
+        unset(${source_override_variable} CACHE)
+        message(STATUS "Cleared legacy ValCraft source override for ${dependency_name}")
+    endif()
+endfunction()
 
-FetchContent_MakeAvailable(sdl2 glm fastnoise doctest)
-FetchContent_GetProperties(glad)
-if(NOT glad_POPULATED)
-    FetchContent_Populate(glad)
+foreach(dependency_name IN ITEMS glm fastnoise doctest sdl2 glad)
+    valcraft_clear_legacy_managed_dependency_source(${dependency_name})
+endforeach()
+
+function(valcraft_use_cached_dependency_source dependency_name)
+    if(NOT VALCRAFT_DEPENDENCY_SOURCE_ROOT)
+        return()
+    endif()
+
+    string(TOUPPER "${dependency_name}" dependency_name_upper)
+    set(dependency_source "${VALCRAFT_DEPENDENCY_SOURCE_ROOT}/${dependency_name}")
+    cmake_path(
+        ABSOLUTE_PATH dependency_source
+        BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        NORMALIZE
+    )
+    if(NOT IS_DIRECTORY "${dependency_source}")
+        message(FATAL_ERROR
+            "Missing cached dependency '${dependency_name}' in "
+            "VALCRAFT_DEPENDENCY_SOURCE_ROOT=${VALCRAFT_DEPENDENCY_SOURCE_ROOT}"
+        )
+    endif()
+    # Je garde l'override dans la portee de cette configuration seulement. Il
+    # ne peut donc pas survivre au changement ou a la suppression de la racine.
+    set(
+        FETCHCONTENT_SOURCE_DIR_${dependency_name_upper}
+        "${dependency_source}"
+        PARENT_SCOPE
+    )
+    set(
+        VALCRAFT_MANAGED_FETCHCONTENT_SOURCE_DIR_${dependency_name_upper}
+        "${dependency_source}"
+        CACHE INTERNAL
+        "FetchContent source override managed by ValCraft"
+        FORCE
+    )
+endfunction()
+
+function(valcraft_require_offline_source dependency_name)
+    string(TOUPPER "${dependency_name}" dependency_name_upper)
+    set(source_override_variable "FETCHCONTENT_SOURCE_DIR_${dependency_name_upper}")
+    if(VALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS OR
+       VALCRAFT_DEPENDENCY_SOURCE_ROOT OR
+       IS_DIRECTORY "${${source_override_variable}}" OR
+       IS_DIRECTORY "${FETCHCONTENT_BASE_DIR}/${dependency_name}-src")
+        return()
+    endif()
+    message(FATAL_ERROR
+        "Dependency '${dependency_name}' was not found locally. Install its "
+        "CMake package, provide VALCRAFT_DEPENDENCY_SOURCE_ROOT, or enable "
+        "VALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS."
+    )
+endfunction()
+
+function(valcraft_verify_dependency_revision dependency_name source_dir expected_revision)
+    if(NOT EXISTS "${source_dir}/.git")
+        message(FATAL_ERROR
+            "Fallback dependency '${dependency_name}' must be a Git checkout so "
+            "ValCraft can verify revision ${expected_revision}. Received: ${source_dir}"
+        )
+    endif()
+
+    find_package(Git QUIET)
+    if(NOT Git_FOUND OR NOT GIT_EXECUTABLE)
+        message(FATAL_ERROR
+            "Git is required to verify fallback dependency '${dependency_name}' "
+            "at revision ${expected_revision}."
+        )
+    endif()
+
+    file(REAL_PATH "${source_dir}" source_dir_real)
+    file(TO_CMAKE_PATH "${source_dir}" source_dir_for_git)
+    file(TO_CMAKE_PATH "${source_dir_real}" source_dir_real_for_git)
+    execute_process(
+        COMMAND
+            "${GIT_EXECUTABLE}"
+            -c "safe.directory=${source_dir_for_git}"
+            -c "safe.directory=${source_dir_real_for_git}"
+            -C "${source_dir_real_for_git}"
+            rev-parse --verify HEAD
+        RESULT_VARIABLE revision_result
+        OUTPUT_VARIABLE actual_revision
+        ERROR_VARIABLE revision_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    string(TOLOWER "${actual_revision}" actual_revision)
+    string(TOLOWER "${expected_revision}" expected_revision_lower)
+    if(NOT revision_result EQUAL 0 OR
+       NOT actual_revision STREQUAL expected_revision_lower)
+        message(FATAL_ERROR
+            "Fallback dependency '${dependency_name}' has revision "
+            "'${actual_revision}', expected '${expected_revision_lower}'. "
+            "Refresh the dependency cache before configuring. Git said: ${revision_error}"
+        )
+    endif()
+
+    execute_process(
+        COMMAND
+            "${GIT_EXECUTABLE}"
+            -c "safe.directory=${source_dir_for_git}"
+            -c "safe.directory=${source_dir_real_for_git}"
+            -C "${source_dir_real_for_git}"
+            status --porcelain=v1 --untracked-files=all
+        RESULT_VARIABLE status_result
+        OUTPUT_VARIABLE tracked_changes
+        ERROR_VARIABLE status_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT status_result EQUAL 0)
+        message(FATAL_ERROR
+            "Unable to inspect fallback dependency '${dependency_name}': ${status_error}"
+        )
+    endif()
+    if(tracked_changes)
+        message(FATAL_ERROR
+            "Fallback dependency '${dependency_name}' contains local changes "
+            "at ${source_dir}. Restore a clean checkout of revision "
+            "${expected_revision_lower} before configuring. Changes: "
+            "${tracked_changes}"
+        )
+    endif()
+
+    message(STATUS
+        "Verified fallback dependency ${dependency_name} at ${expected_revision_lower}"
+    )
+endfunction()
+
+macro(valcraft_populate_verified_dependency dependency_name expected_revision)
+    FetchContent_GetProperties(${dependency_name})
+    if(NOT ${dependency_name}_POPULATED)
+        FetchContent_Populate(${dependency_name})
+    endif()
+
+    set(_valcraft_dependency_source_variable "${dependency_name}_SOURCE_DIR")
+    set(_valcraft_dependency_source
+        "${${_valcraft_dependency_source_variable}}"
+    )
+
+    # Je valide chaque source avant de l'exposer au reste de la configuration,
+    # y compris les dependances header-only sans projet CMake comme FastNoiseLite.
+    valcraft_verify_dependency_revision(
+        "${dependency_name}"
+        "${_valcraft_dependency_source}"
+        "${expected_revision}"
+    )
+
+    unset(_valcraft_dependency_source_variable)
+    unset(_valcraft_dependency_source)
+endmacro()
+
+macro(valcraft_make_verified_dependency_available dependency_name expected_revision)
+    valcraft_populate_verified_dependency(
+        "${dependency_name}"
+        "${expected_revision}"
+    )
+
+    set(_valcraft_dependency_source_variable "${dependency_name}_SOURCE_DIR")
+    set(_valcraft_dependency_binary_variable "${dependency_name}_BINARY_DIR")
+    set(_valcraft_dependency_source
+        "${${_valcraft_dependency_source_variable}}"
+    )
+    set(_valcraft_dependency_binary
+        "${${_valcraft_dependency_binary_variable}}"
+    )
+
+    # Je n'execute le CMakeLists.txt d'une dependance qu'apres le controle Git.
+    add_subdirectory(
+        "${_valcraft_dependency_source}"
+        "${_valcraft_dependency_binary}"
+    )
+
+    unset(_valcraft_dependency_source_variable)
+    unset(_valcraft_dependency_binary_variable)
+    unset(_valcraft_dependency_source)
+    unset(_valcraft_dependency_binary)
+endmacro()
+
+function(valcraft_check_system_glad_target candidate_target result_variable)
+    set(CMAKE_REQUIRED_QUIET TRUE)
+    set(CMAKE_REQUIRED_LIBRARIES "${candidate_target}")
+    unset(VALCRAFT_SYSTEM_GLAD_TARGET_COMPILES CACHE)
+    check_cxx_source_compiles(
+        [=[
+            #include <glad/gl.h>
+
+            int main() {
+                GLADloadfunc loader = nullptr;
+                return gladLoadGL(loader) + GLAD_GL_VERSION_3_3;
+            }
+        ]=]
+        VALCRAFT_SYSTEM_GLAD_TARGET_COMPILES
+    )
+    set(system_glad_target_compiles "${VALCRAFT_SYSTEM_GLAD_TARGET_COMPILES}")
+    unset(VALCRAFT_SYSTEM_GLAD_TARGET_COMPILES CACHE)
+    set(${result_variable} "${system_glad_target_compiles}" PARENT_SCOPE)
+endfunction()
+
+function(valcraft_generated_glad_sources_are_verified generated_root result_variable)
+    set(generated_header "${generated_root}/include/glad/gl.h")
+    set(generated_khrplatform "${generated_root}/include/KHR/khrplatform.h")
+    set(generated_source "${generated_root}/src/gl.c")
+    if(NOT EXISTS "${generated_header}" OR
+       NOT EXISTS "${generated_khrplatform}" OR
+       NOT EXISTS "${generated_source}")
+        set(${result_variable} FALSE PARENT_SCOPE)
+        return()
+    endif()
+
+    file(SHA256 "${generated_header}" generated_header_sha256)
+    file(SHA256 "${generated_khrplatform}" generated_khrplatform_sha256)
+    file(SHA256 "${generated_source}" generated_source_sha256)
+    if("${generated_header_sha256}" STREQUAL "${VALCRAFT_GLAD_HEADER_SHA256}" AND
+       "${generated_khrplatform_sha256}" STREQUAL "${VALCRAFT_GLAD_KHRPLATFORM_SHA256}" AND
+       "${generated_source_sha256}" STREQUAL "${VALCRAFT_GLAD_SOURCE_SHA256}")
+        set(${result_variable} TRUE PARENT_SCOPE)
+    else()
+        message(STATUS
+            "Existing generated glad2 sources do not match the pinned hashes; "
+            "they will be regenerated with the locked Python runtime."
+        )
+        set(${result_variable} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(valcraft_require_glad_generator_runtime)
+    find_package(Python 3.8 COMPONENTS Interpreter QUIET)
+    if(NOT Python_Interpreter_FOUND)
+        message(FATAL_ERROR
+            "The generated glad fallback requires Python 3.8 or newer. Install "
+            "tools/requirements-build.txt or provide a compatible glad2 package."
+        )
+    endif()
+
+    foreach(python_distribution IN ITEMS Jinja2 MarkupSafe)
+        if(python_distribution STREQUAL "Jinja2")
+            set(expected_version "${VALCRAFT_GLAD_JINJA2_VERSION}")
+        else()
+            set(expected_version "${VALCRAFT_GLAD_MARKUPSAFE_VERSION}")
+        endif()
+        execute_process(
+            COMMAND
+                "${Python_EXECUTABLE}"
+                -c
+                "print(__import__('importlib.metadata', fromlist=['version']).version('${python_distribution}'))"
+            RESULT_VARIABLE package_probe_result
+            OUTPUT_VARIABLE installed_version
+            ERROR_VARIABLE package_probe_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_STRIP_TRAILING_WHITESPACE
+        )
+        if(NOT package_probe_result EQUAL 0 OR
+           NOT installed_version VERSION_EQUAL expected_version)
+            message(FATAL_ERROR
+                "The generated glad fallback requires ${python_distribution}==${expected_version} "
+                "for deterministic output, but Python '${Python_EXECUTABLE}' reports "
+                "'${installed_version}'. Run '${Python_EXECUTABLE} -m pip install "
+                "--requirement ${PROJECT_SOURCE_DIR}/tools/requirements-build.txt'. "
+                "Probe details: ${package_probe_error}"
+            )
+        endif()
+    endforeach()
+endfunction()
+
+# Je privilegie toujours les paquets fournis par le runner. Les commits de
+# repli sont immuables afin qu'un tag amont ne puisse jamais modifier le build.
+find_package(glm 1.0 CONFIG QUIET)
+if(NOT TARGET glm::glm AND NOT TARGET glm)
+    valcraft_use_cached_dependency_source(glm)
+    valcraft_require_offline_source(glm)
+    FetchContent_Declare(
+        glm
+        GIT_REPOSITORY https://github.com/g-truc/glm.git
+        GIT_TAG ${VALCRAFT_GLM_GIT_REVISION}
+    )
+    valcraft_make_verified_dependency_available(
+        glm
+        "${VALCRAFT_GLM_GIT_REVISION}"
+    )
 endif()
-add_subdirectory(${glad_SOURCE_DIR}/cmake ${glad_BINARY_DIR})
+
+if(NOT VALCRAFT_HEADLESS_BACKROOMS_TESTS_ONLY)
+    find_path(VALCRAFT_FASTNOISE_INCLUDE_DIR NAMES FastNoiseLite.h PATH_SUFFIXES Cpp)
+    if(NOT VALCRAFT_FASTNOISE_INCLUDE_DIR)
+        valcraft_use_cached_dependency_source(fastnoise)
+        valcraft_require_offline_source(fastnoise)
+        FetchContent_Declare(
+            fastnoise
+            GIT_REPOSITORY https://github.com/Auburn/FastNoiseLite.git
+            GIT_TAG ${VALCRAFT_FASTNOISE_GIT_REVISION}
+        )
+        valcraft_populate_verified_dependency(
+            fastnoise
+            "${VALCRAFT_FASTNOISE_GIT_REVISION}"
+        )
+    endif()
+endif()
+
+find_package(doctest 2.4 CONFIG QUIET)
+if(NOT TARGET doctest::doctest)
+    valcraft_use_cached_dependency_source(doctest)
+    valcraft_require_offline_source(doctest)
+    FetchContent_Declare(
+        doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG ${VALCRAFT_DOCTEST_GIT_REVISION}
+    )
+    valcraft_make_verified_dependency_available(
+        doctest
+        "${VALCRAFT_DOCTEST_GIT_REVISION}"
+    )
+endif()
+
+if(NOT COMMAND doctest_discover_tests)
+    include(doctest OPTIONAL)
+endif()
+if(NOT COMMAND doctest_discover_tests AND doctest_SOURCE_DIR)
+    include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
+endif()
+
+if(NOT VALCRAFT_HEADLESS_BACKROOMS_TESTS_ONLY)
+    find_package(SDL2 2.30 CONFIG QUIET)
+    if(NOT TARGET SDL2::SDL2)
+        valcraft_use_cached_dependency_source(sdl2)
+        valcraft_require_offline_source(sdl2)
+        FetchContent_Declare(
+            sdl2
+            GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+            GIT_TAG ${VALCRAFT_SDL2_GIT_REVISION}
+        )
+        valcraft_make_verified_dependency_available(
+            sdl2
+            "${VALCRAFT_SDL2_GIT_REVISION}"
+        )
+    endif()
+
+    set(VALCRAFT_SYSTEM_GLAD_TARGET "")
+    set(VALCRAFT_VERIFIED_GLAD_SOURCE_DIR "")
+    if(VALCRAFT_GLAD_GENERATED_SOURCE_DIR)
+        set(verified_glad_source_dir "${VALCRAFT_GLAD_GENERATED_SOURCE_DIR}")
+        cmake_path(
+            ABSOLUTE_PATH verified_glad_source_dir
+            BASE_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            NORMALIZE
+        )
+        valcraft_generated_glad_sources_are_verified(
+            "${verified_glad_source_dir}"
+            provided_glad_is_verified
+        )
+        if(NOT provided_glad_is_verified)
+            message(FATAL_ERROR
+                "VALCRAFT_GLAD_GENERATED_SOURCE_DIR must contain the pinned "
+                "glad2 OpenGL 3.3 files include/glad/gl.h and src/gl.c. "
+                "Expected SHA-256: gl.h=${VALCRAFT_GLAD_HEADER_SHA256}, "
+                "khrplatform.h=${VALCRAFT_GLAD_KHRPLATFORM_SHA256}, "
+                "gl.c=${VALCRAFT_GLAD_SOURCE_SHA256}. Received: "
+                "${verified_glad_source_dir}"
+            )
+        endif()
+        set(VALCRAFT_VERIFIED_GLAD_SOURCE_DIR "${verified_glad_source_dir}")
+        message(STATUS
+            "Using verified pre-generated glad2 sources from "
+            "${VALCRAFT_VERIFIED_GLAD_SOURCE_DIR}"
+        )
+    else()
+        find_package(glad CONFIG QUIET)
+        if(TARGET glad::glad)
+            set(system_glad_candidate glad::glad)
+        elseif(TARGET glad)
+            set(system_glad_candidate glad)
+        else()
+            set(system_glad_candidate "")
+        endif()
+        if(system_glad_candidate)
+            valcraft_check_system_glad_target(
+                "${system_glad_candidate}"
+                system_glad_is_compatible
+            )
+            if(system_glad_is_compatible)
+                set(VALCRAFT_SYSTEM_GLAD_TARGET "${system_glad_candidate}")
+                message(STATUS
+                    "Using compatible system glad2 target '${VALCRAFT_SYSTEM_GLAD_TARGET}'"
+                )
+            else()
+                message(WARNING
+                    "System target '${system_glad_candidate}' does not provide the "
+                    "required glad2 <glad/gl.h>, gladLoadGL and OpenGL 3.3 symbols. "
+                    "ValCraft will use its pinned generated fallback instead; see "
+                    "CMakeFiles/CMakeError.log for the compatibility probe."
+                )
+            endif()
+        endif()
+
+        if(NOT VALCRAFT_SYSTEM_GLAD_TARGET)
+            valcraft_use_cached_dependency_source(glad)
+            valcraft_require_offline_source(glad)
+            FetchContent_Declare(
+                glad
+                GIT_REPOSITORY https://github.com/Dav1dde/glad.git
+                GIT_TAG ${VALCRAFT_GLAD_GIT_REVISION}
+            )
+            FetchContent_GetProperties(glad)
+            if(NOT glad_POPULATED)
+                FetchContent_Populate(glad)
+            endif()
+            valcraft_verify_dependency_revision(
+                glad
+                "${glad_SOURCE_DIR}"
+                "${VALCRAFT_GLAD_GIT_REVISION}"
+            )
+            add_subdirectory(${glad_SOURCE_DIR}/cmake ${glad_BINARY_DIR})
+        endif()
+    endif()
+endif()
 
 function(valcraft_apply_strict_warnings target)
     if(NOT VALCRAFT_STRICT_WARNINGS)
@@ -134,6 +632,28 @@ function(valcraft_enable_address_sanitizer_for target)
         target_link_options(${target} PRIVATE -fsanitize=address)
     else()
         message(FATAL_ERROR "AddressSanitizer is unsupported by this compiler")
+    endif()
+endfunction()
+
+function(valcraft_enable_undefined_sanitizer_for target)
+    if(NOT VALCRAFT_ENABLE_UNDEFINED_SANITIZER)
+        return()
+    endif()
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # Je garde float-cast-overflow explicite : ce controle couvre les
+        # conversions de coordonnees qui avaient echappe a l'UBSan generique.
+        target_compile_options(${target} PRIVATE
+            -fsanitize=undefined,float-cast-overflow
+            -fno-omit-frame-pointer
+        )
+        target_link_options(${target} PRIVATE
+            -fsanitize=undefined,float-cast-overflow
+        )
+    else()
+        message(FATAL_ERROR
+            "VALCRAFT_ENABLE_UNDEFINED_SANITIZER requires GCC or Clang"
+        )
     endif()
 endfunction()
 
@@ -188,12 +708,111 @@ else()
     message(FATAL_ERROR "GLM target not found")
 endif()
 
-if(NOT TARGET FastNoiseLite)
-    add_library(FastNoiseLite INTERFACE)
-    target_include_directories(FastNoiseLite SYSTEM INTERFACE ${fastnoise_SOURCE_DIR}/Cpp)
+if(VALCRAFT_HEADLESS_BACKROOMS_TESTS_ONLY)
+    add_library(valcraft_backrooms_core
+        src/audio/BackroomsAmbience.cpp
+        src/gameplay/BackroomsFlashlight.cpp
+        src/gameplay/BackroomsThreatArbiter.cpp
+        src/world/BackroomsGenerator.cpp
+        src/world/BackroomsSpatialStack.cpp
+        src/world/Environment.cpp
+    )
+    target_include_directories(valcraft_backrooms_core
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(valcraft_backrooms_core PUBLIC ${VALCRAFT_GLM_TARGET})
+    valcraft_apply_strict_warnings(valcraft_backrooms_core)
+    valcraft_enable_coverage_for(valcraft_backrooms_core)
+    valcraft_enable_address_sanitizer_for(valcraft_backrooms_core)
+    valcraft_enable_undefined_sanitizer_for(valcraft_backrooms_core)
+
+    add_executable(backrooms_core_tests
+        tests/main.cpp
+        tests/BackroomsCoreTests.cpp
+        tests/BackroomsThreatArbiterTests.cpp
+    )
+    target_link_libraries(backrooms_core_tests
+        PRIVATE valcraft_backrooms_core doctest::doctest
+    )
+    valcraft_apply_strict_warnings(backrooms_core_tests)
+    valcraft_enable_coverage_for(backrooms_core_tests)
+    valcraft_enable_address_sanitizer_for(backrooms_core_tests)
+    valcraft_enable_undefined_sanitizer_for(backrooms_core_tests)
+
+    if(COMMAND doctest_discover_tests)
+        doctest_discover_tests(backrooms_core_tests TEST_PREFIX "backrooms_core::")
+    else()
+        add_test(NAME backrooms_core_tests COMMAND backrooms_core_tests)
+    endif()
+
+    add_custom_target(valcraft_check_backrooms_core
+        COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_BINARY_DIR} --output-on-failure
+        DEPENDS backrooms_core_tests
+        USES_TERMINAL
+    )
+    return()
 endif()
 
-glad_add_library(valcraft_glad REPRODUCIBLE API gl:core=3.3)
+if(NOT TARGET FastNoiseLite)
+    add_library(FastNoiseLite INTERFACE)
+    if(VALCRAFT_FASTNOISE_INCLUDE_DIR)
+        target_include_directories(FastNoiseLite SYSTEM INTERFACE ${VALCRAFT_FASTNOISE_INCLUDE_DIR})
+    else()
+        target_include_directories(FastNoiseLite SYSTEM INTERFACE ${fastnoise_SOURCE_DIR}/Cpp)
+    endif()
+endif()
+
+if(VALCRAFT_SYSTEM_GLAD_TARGET)
+    add_library(valcraft_glad INTERFACE)
+    target_link_libraries(valcraft_glad INTERFACE ${VALCRAFT_SYSTEM_GLAD_TARGET})
+elseif(VALCRAFT_VERIFIED_GLAD_SOURCE_DIR)
+    set(VALCRAFT_GENERATED_GLAD_ROOT "${VALCRAFT_VERIFIED_GLAD_SOURCE_DIR}")
+    add_library(valcraft_glad STATIC
+        "${VALCRAFT_GENERATED_GLAD_ROOT}/src/gl.c"
+    )
+    target_include_directories(valcraft_glad PUBLIC
+        "${VALCRAFT_GENERATED_GLAD_ROOT}/include"
+    )
+    if(CMAKE_DL_LIBS)
+        target_link_libraries(valcraft_glad PUBLIC ${CMAKE_DL_LIBS})
+    endif()
+else()
+    set(VALCRAFT_GENERATED_GLAD_ROOT
+        "${CMAKE_CURRENT_BINARY_DIR}/gladsources/valcraft_glad"
+    )
+    valcraft_generated_glad_sources_are_verified(
+        "${VALCRAFT_GENERATED_GLAD_ROOT}"
+        generated_glad_is_verified
+    )
+    if(generated_glad_is_verified)
+        message(STATUS "Reusing verified generated glad2 sources")
+    else()
+        valcraft_require_glad_generator_runtime()
+    endif()
+    glad_add_library(valcraft_glad REPRODUCIBLE API gl:core=3.3)
+endif()
+
+if(NOT VALCRAFT_SYSTEM_GLAD_TARGET)
+    add_custom_command(TARGET valcraft_glad POST_BUILD
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DVALCRAFT_FILE=${VALCRAFT_GENERATED_GLAD_ROOT}/include/glad/gl.h
+            -DVALCRAFT_EXPECTED_SHA256=${VALCRAFT_GLAD_HEADER_SHA256}
+            -P ${PROJECT_SOURCE_DIR}/tools/VerifyFileHash.cmake
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DVALCRAFT_FILE=${VALCRAFT_GENERATED_GLAD_ROOT}/include/KHR/khrplatform.h
+            -DVALCRAFT_EXPECTED_SHA256=${VALCRAFT_GLAD_KHRPLATFORM_SHA256}
+            -P ${PROJECT_SOURCE_DIR}/tools/VerifyFileHash.cmake
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DVALCRAFT_FILE=${VALCRAFT_GENERATED_GLAD_ROOT}/src/gl.c
+            -DVALCRAFT_EXPECTED_SHA256=${VALCRAFT_GLAD_SOURCE_SHA256}
+            -P ${PROJECT_SOURCE_DIR}/tools/VerifyFileHash.cmake
+        COMMENT "Verifying reproducible glad2 generated sources"
+        VERBATIM
+    )
+endif()
 
 add_library(valcraft_core
     src/app/Audit.cpp
@@ -326,6 +945,7 @@ target_compile_definitions(valcraft_core
 valcraft_apply_strict_warnings(valcraft_core)
 valcraft_enable_coverage_for(valcraft_core)
 valcraft_enable_address_sanitizer_for(valcraft_core)
+valcraft_enable_undefined_sanitizer_for(valcraft_core)
 valcraft_enable_ipo_for(valcraft_core)
 
 add_executable(ValCraft
@@ -353,6 +973,7 @@ endif()
 valcraft_apply_strict_warnings(ValCraft)
 valcraft_enable_coverage_for(ValCraft)
 valcraft_enable_address_sanitizer_for(ValCraft)
+valcraft_enable_undefined_sanitizer_for(ValCraft)
 valcraft_enable_ipo_for(ValCraft)
 
 valcraft_copy_runtime_dlls(ValCraft)
@@ -514,6 +1135,7 @@ target_compile_definitions(valcraft_tests PRIVATE VALCRAFT_BUILD_TYPE="${CMAKE_B
 valcraft_apply_strict_warnings(valcraft_tests)
 valcraft_enable_coverage_for(valcraft_tests)
 valcraft_enable_address_sanitizer_for(valcraft_tests)
+valcraft_enable_undefined_sanitizer_for(valcraft_tests)
 valcraft_copy_runtime_dlls(valcraft_tests)
 valcraft_copy_mingw_runtime_dlls(valcraft_tests)
 
@@ -524,6 +1146,7 @@ target_link_libraries(valcraft_model_icon_atlas_tool PRIVATE valcraft_core)
 valcraft_apply_strict_warnings(valcraft_model_icon_atlas_tool)
 valcraft_enable_coverage_for(valcraft_model_icon_atlas_tool)
 valcraft_enable_address_sanitizer_for(valcraft_model_icon_atlas_tool)
+valcraft_enable_undefined_sanitizer_for(valcraft_model_icon_atlas_tool)
 # Je rends l'outil disponible avant CTest, même lorsque la CI ne construit
 # explicitement que le binaire de tests.
 add_dependencies(valcraft_tests valcraft_model_icon_atlas_tool)
@@ -555,8 +1178,11 @@ set_tests_properties(
         LABELS "assets;determinism;visual"
 )
 
-include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
-doctest_discover_tests(valcraft_tests)
+if(COMMAND doctest_discover_tests)
+    doctest_discover_tests(valcraft_tests)
+else()
+    add_test(NAME valcraft_tests COMMAND valcraft_tests)
+endif()
 
 find_program(
     VALCRAFT_POWERSHELL_TEST_EXECUTABLE

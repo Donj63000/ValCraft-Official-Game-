@@ -1347,17 +1347,51 @@ TEST_CASE("world set_block outside valid Y is a no-op") {
 TEST_CASE("world spatial queries reject non finite inputs before coordinate casts") {
     constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
     constexpr auto infinity = std::numeric_limits<float>::infinity();
+    constexpr auto maximum = std::numeric_limits<float>::max();
 
     World world(9301, 1);
 
     CHECK_FALSE(world.raycast({nan, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 8.0F).hit);
     CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {infinity, 0.0F, 0.0F}, 8.0F).hit);
     CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, nan).hit);
+    CHECK_FALSE(world.raycast({maximum, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 8.0F).hit);
+    CHECK_FALSE(world.raycast({-maximum, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 8.0F).hit);
+    CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {nan, 0.0F, 0.0F}, 8.0F).hit);
+    CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, infinity).hit);
+    CHECK_FALSE(world.raycast({0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, -infinity).hit);
+    CHECK_FALSE(world.raycast(
+        {0.0F, 1.0F, 0.0F},
+        {1.0F, 0.0F, 0.0F},
+        kMaximumWorldRaycastDistance + 1.0F).hit);
 
     const auto streaming_stats = world.update_streaming({nan, 70.0F, infinity});
     CHECK_FALSE(streaming_stats.chunk_changed);
+    CHECK_FALSE(world.update_streaming({maximum, 70.0F, 0.0F}).chunk_changed);
+    CHECK_FALSE(world.update_streaming({-maximum, 70.0F, 0.0F}).chunk_changed);
     CHECK_FALSE(world.are_chunks_ready({nan, 70.0F, 0.0F}, 1));
+    CHECK_FALSE(world.are_chunks_ready({maximum, 70.0F, 0.0F}, 1));
+    CHECK_FALSE(world.are_chunks_ready({-maximum, 70.0F, 0.0F}, 1));
     CHECK_FALSE(world.are_chunks_ready({0.5F, 70.0F, 0.5F}, -1));
+    CHECK_FALSE(world.are_chunks_ready(
+        {0.5F, 70.0F, 0.5F},
+        kMaxStreamRadius + 1));
+    CHECK_FALSE(world.are_chunks_ready(
+        {0.5F, 70.0F, 0.5F},
+        std::numeric_limits<int>::max()));
+
+    const auto maximum_representable = std::nextafter(
+        static_cast<float>(std::numeric_limits<int>::max()),
+        0.0F);
+    const auto minimum_representable =
+        static_cast<float>(std::numeric_limits<int>::lowest());
+    World maximum_boundary_world(9302, 0);
+    World minimum_boundary_world(9303, 0);
+    CHECK(maximum_boundary_world.update_streaming(
+              {maximum_representable, 70.0F, maximum_representable})
+              .chunk_changed);
+    CHECK(minimum_boundary_world.update_streaming(
+              {minimum_representable, 70.0F, minimum_representable})
+              .chunk_changed);
 }
 
 TEST_CASE("modified chunks survive unload and reload within the same session") {
@@ -4375,6 +4409,138 @@ TEST_CASE("raycast returns first solid block and adjacent placement cell") {
     CHECK(hit.block == expected_hit_block);
     CHECK(hit.adjacent == expected_adjacent);
     CHECK(hit.block_id == to_block_id(BlockType::Stone));
+    CHECK(hit.distance == doctest::Approx(0.5F));
+}
+
+TEST_CASE("raycast supercover visits every cell touched at tied boundaries") {
+    World world(181, 1);
+    test::make_chunk_empty(world, {0, 0});
+    constexpr BlockCoord start {8, 10, 8};
+    constexpr glm::vec3 origin {8.5F, 10.5F, 8.5F};
+    constexpr std::array<unsigned, 4U> crossing_masks {{
+        0b011U,
+        0b101U,
+        0b110U,
+        0b111U,
+    }};
+
+    for (const auto crossing_mask : crossing_masks) {
+        auto active_axis_count = 0U;
+        for (auto axis = 0U; axis < 3U; ++axis) {
+            active_axis_count +=
+                (crossing_mask & (1U << axis)) != 0U ? 1U : 0U;
+        }
+        const auto sign_variant_count = 1U << active_axis_count;
+        for (auto sign_variant = 0U;
+             sign_variant < sign_variant_count;
+             ++sign_variant) {
+            CAPTURE(crossing_mask);
+            CAPTURE(sign_variant);
+            glm::vec3 direction {0.0F};
+            std::array<int, 3U> steps {{0, 0, 0}};
+            auto sign_index = 0U;
+            auto lateral_axis = 3U;
+            for (auto axis = 0U; axis < 3U; ++axis) {
+                if ((crossing_mask & (1U << axis)) == 0U) {
+                    continue;
+                }
+                const auto step =
+                    (sign_variant & (1U << sign_index)) != 0U
+                        ? -1
+                        : 1;
+                direction[axis] = static_cast<float>(step);
+                steps[axis] = step;
+                lateral_axis = std::min(lateral_axis, axis);
+                ++sign_index;
+            }
+
+            auto lateral = start;
+            auto diagonal = start;
+            if (lateral_axis == 0U) {
+                lateral.x += steps[0];
+            } else if (lateral_axis == 1U) {
+                lateral.y += steps[1];
+            } else {
+                lateral.z += steps[2];
+            }
+            diagonal.x += steps[0];
+            diagonal.y += steps[1];
+            diagonal.z += steps[2];
+
+            world.set_block(
+                lateral.x,
+                lateral.y,
+                lateral.z,
+                to_block_id(BlockType::Stone));
+            const auto conservative =
+                world.raycast_visibility(origin, direction, 3.0F);
+            REQUIRE(conservative.hit);
+            CHECK(conservative.block == lateral);
+
+            const auto thin_without_diagonal =
+                world.raycast(origin, direction, 3.0F);
+            CHECK_FALSE(thin_without_diagonal.hit);
+            world.set_block(
+                diagonal.x,
+                diagonal.y,
+                diagonal.z,
+                to_block_id(BlockType::Stone));
+            const auto thin = world.raycast(origin, direction, 3.0F);
+            REQUIRE(thin.hit);
+            CHECK(thin.block == diagonal);
+            CHECK(thin.adjacent == start);
+
+            world.set_block(
+                lateral.x,
+                lateral.y,
+                lateral.z,
+                to_block_id(BlockType::Air));
+            world.set_block(
+                diagonal.x,
+                diagonal.y,
+                diagonal.z,
+                to_block_id(BlockType::Air));
+        }
+    }
+}
+
+TEST_CASE("raycast handles both directions from an exact voxel boundary") {
+    World world(182, 1);
+    test::make_chunk_empty(world, {0, 0});
+
+    world.set_block(0, 10, 8, to_block_id(BlockType::Stone));
+    const auto negative = world.raycast(
+        {1.0F, 10.5F, 8.5F},
+        {-1.0F, 0.0F, 0.0F},
+        3.0F);
+    REQUIRE(negative.hit);
+    CHECK(negative.block == BlockCoord {0, 10, 8});
+    CHECK(negative.adjacent == BlockCoord {1, 10, 8});
+    CHECK(negative.distance == doctest::Approx(0.0F));
+
+    world.set_block(0, 10, 8, to_block_id(BlockType::Air));
+    world.set_block(2, 10, 8, to_block_id(BlockType::Stone));
+    const auto positive = world.raycast(
+        {1.0F, 10.5F, 8.5F},
+        {1.0F, 0.0F, 0.0F},
+        3.0F);
+    REQUIRE(positive.hit);
+    CHECK(positive.block == BlockCoord {2, 10, 8});
+    CHECK(positive.adjacent == BlockCoord {1, 10, 8});
+    CHECK(positive.distance == doctest::Approx(1.0F));
+}
+
+TEST_CASE("raycast normalizes a maximum finite direction without float overflow") {
+    World world(183, 1);
+    test::make_chunk_empty(world, {0, 0});
+    world.set_block(1, 10, 0, to_block_id(BlockType::Stone));
+
+    const auto hit = world.raycast(
+        {0.5F, 10.5F, 0.5F},
+        {std::numeric_limits<float>::max(), 0.0F, 0.0F},
+        kMaximumWorldRaycastDistance);
+    REQUIRE(hit.hit);
+    CHECK(hit.block == BlockCoord {1, 10, 0});
     CHECK(hit.distance == doctest::Approx(0.5F));
 }
 

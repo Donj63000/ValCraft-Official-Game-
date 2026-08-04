@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 
 namespace valcraft {
 
@@ -72,19 +73,44 @@ struct PathPoint {
     return quotient;
 }
 
-[[nodiscard]] constexpr auto saturating_add(
+[[nodiscard]] constexpr auto checked_add(
     int value,
-    int delta) noexcept -> int {
+    int delta) noexcept -> std::optional<int> {
     const auto wide =
         static_cast<std::int64_t>(value) +
         static_cast<std::int64_t>(delta);
-    return static_cast<int>(
-        std::clamp(
-            wide,
-            static_cast<std::int64_t>(
-                std::numeric_limits<int>::min()),
-            static_cast<std::int64_t>(
-                std::numeric_limits<int>::max())));
+    if (wide < std::numeric_limits<int>::lowest() ||
+        wide > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(wide);
+}
+
+[[nodiscard]] auto checked_floor_to_int(double value) noexcept
+    -> std::optional<int> {
+    if (!std::isfinite(value)) {
+        return std::nullopt;
+    }
+    const auto floored = std::floor(value);
+    if (floored <
+            static_cast<double>(std::numeric_limits<int>::lowest()) ||
+        floored >
+            static_cast<double>(std::numeric_limits<int>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<int>(floored);
+}
+
+[[nodiscard]] constexpr auto checked_offset(
+    int x,
+    int z,
+    PathPoint offset) noexcept -> std::optional<PathPoint> {
+    const auto candidate_x = checked_add(x, offset.x);
+    const auto candidate_z = checked_add(z, offset.z);
+    if (!candidate_x.has_value() || !candidate_z.has_value()) {
+        return std::nullopt;
+    }
+    return PathPoint {*candidate_x, *candidate_z};
 }
 
 [[nodiscard]] constexpr auto between_inclusive(
@@ -106,10 +132,14 @@ struct PathPoint {
                    world_x,
                    start.x,
                    destination.x) &&
-               std::abs(world_z - start.z) <= half_width;
+               std::abs(
+                   static_cast<std::int64_t>(world_z) - start.z) <=
+                   half_width;
     }
     if (start.x == destination.x) {
-        return std::abs(world_x - start.x) <= half_width &&
+        return std::abs(
+                   static_cast<std::int64_t>(world_x) - start.x) <=
+                   half_width &&
                between_inclusive(
                    world_z,
                    start.z,
@@ -125,8 +155,11 @@ struct PathPoint {
     PathPoint destination) noexcept -> bool {
     constexpr auto escape_distance = 4;
     constexpr auto half_width = 1;
-    const auto escape =
-        PathPoint {start.x + escape_distance, start.z};
+    const auto escape_x = checked_add(start.x, escape_distance);
+    if (!escape_x.has_value()) {
+        return false;
+    }
+    const auto escape = PathPoint {*escape_x, start.z};
     const auto corner =
         PathPoint {
             escape.x,
@@ -184,61 +217,10 @@ struct PathPoint {
     }
 }
 
-[[nodiscard]] auto square_spiral_point(int index) noexcept -> PathPoint {
-    PathPoint point {};
-    if (index <= 0) {
-        return point;
-    }
-
-    constexpr std::array<PathPoint, 4U> directions {{
-        {0, 1},
-        {1, 0},
-        {0, -1},
-        {-1, 0},
-    }};
-    auto direction = 0;
-    auto leg_length = 1;
-    auto leg_progress = 0;
-    auto completed_legs_at_length = 0;
-    for (int step = 0; step < index; ++step) {
-        point.x += directions[static_cast<std::size_t>(direction)].x;
-        point.z += directions[static_cast<std::size_t>(direction)].z;
-        ++leg_progress;
-        if (leg_progress < leg_length) {
-            continue;
-        }
-        leg_progress = 0;
-        direction = (direction + 1) & 3;
-        ++completed_legs_at_length;
-        if (completed_legs_at_length == 2) {
-            completed_legs_at_length = 0;
-            ++leg_length;
-        }
-    }
-    return point;
-}
-
-[[nodiscard]] auto path_point(
-    const BackroomsVerticalConnection& connection,
-    int index) noexcept -> PathPoint {
-    const auto local =
-        connection.style ==
-                BackroomsVerticalConnectionStyle::SpiralStairs
-            ? square_spiral_point(index)
-            : PathPoint {0, index};
-    const auto rotated =
-        rotate_local_path_point(
-            local,
-            connection.orientation_quarter_turns);
-    return {
-        connection.lower_landing.x + rotated.x,
-        connection.lower_landing.z + rotated.z,
-    };
-}
-
 [[nodiscard]] auto connector_path_points(
     const BackroomsVerticalConnection& connection) noexcept
-    -> std::array<PathPoint, kMaximumConnectorPathPoints> {
+    -> std::optional<
+        std::array<PathPoint, kMaximumConnectorPathPoints>> {
     std::array<PathPoint, kMaximumConnectorPathPoints> points {};
     constexpr std::array<PathPoint, 4U> spiral_directions {{
         {0, 1},
@@ -272,10 +254,16 @@ struct PathPoint {
             rotate_local_path_point(
                 local,
                 connection.orientation_quarter_turns);
-        points[index] = {
-            connection.lower_landing.x + rotated.x,
-            connection.lower_landing.z + rotated.z,
-        };
+        const auto world_x = checked_add(
+            connection.lower_landing.x,
+            rotated.x);
+        const auto world_z = checked_add(
+            connection.lower_landing.z,
+            rotated.z);
+        if (!world_x.has_value() || !world_z.has_value()) {
+            return std::nullopt;
+        }
+        points[index] = {*world_x, *world_z};
 
         if (connection.style !=
                 BackroomsVerticalConnectionStyle::SpiralStairs ||
@@ -398,10 +386,15 @@ struct BackroomsSpatialStack::ConnectorColumn {
 BackroomsSpatialStack::BackroomsSpatialStack(
     int seed,
     int anchor_level,
-    BackroomsSpatialProfile profile) noexcept
+    BackroomsSpatialProfile profile)
     : seed_(seed),
       anchor_level_(anchor_level),
       profile_(profile) {
+
+    if (!is_anchor_level_representable(anchor_level_)) {
+        throw std::out_of_range(
+            "Le niveau d'ancrage de la pile Backrooms est hors domaine");
+    }
 
     for (std::size_t index = 0U;
          index < placements_.size();
@@ -410,7 +403,7 @@ BackroomsSpatialStack::BackroomsSpatialStack(
             static_cast<int>(index) -
             kBackroomsSpatialLevelsBelowAnchor;
         const auto logical_level =
-            saturating_add(anchor_level_, relative_level);
+            anchor_level_ + relative_level;
         const auto base_y =
             kBackroomsSpatialFloorY[index];
         const auto theme =
@@ -490,6 +483,16 @@ auto BackroomsSpatialStack::placement_for_level(
     return *found;
 }
 
+auto BackroomsSpatialStack::generator_for_level(
+    int logical_level) const noexcept -> const BackroomsGenerator* {
+    for (std::size_t index = 0U; index < placements_.size(); ++index) {
+        if (placements_[index].logical_level == logical_level) {
+            return &generators_[index];
+        }
+    }
+    return nullptr;
+}
+
 auto BackroomsSpatialStack::logical_level_at_y(
     float world_y) const noexcept -> int {
     if (!std::isfinite(world_y)) {
@@ -517,24 +520,34 @@ auto BackroomsSpatialStack::theme_at_y(
                : BackroomsTheme::Offices;
 }
 
-auto BackroomsSpatialStack::spawn_block(
-    int logical_level) const noexcept -> BlockCoord {
-    auto index = std::size_t {0U};
-    for (; index < placements_.size(); ++index) {
-        if (placements_[index].logical_level == logical_level) {
-            break;
-        }
-    }
-    if (index == placements_.size()) {
-        index = static_cast<std::size_t>(
-            kBackroomsSpatialLevelsBelowAnchor);
-    }
+auto BackroomsSpatialStack::anchor_spawn_block() const noexcept
+    -> BlockCoord {
+    const auto index = static_cast<std::size_t>(
+        kBackroomsSpatialLevelsBelowAnchor);
     const auto local_spawn = generators_[index].spawn_block();
     return {
         local_spawn.x,
         placements_[index].floor_y + 1,
         local_spawn.z,
     };
+}
+
+auto BackroomsSpatialStack::spawn_block_for_level(
+    int logical_level) const noexcept -> std::optional<BlockCoord> {
+    for (std::size_t index = 0U;
+         index < placements_.size();
+         ++index) {
+        if (placements_[index].logical_level != logical_level) {
+            continue;
+        }
+        const auto local_spawn = generators_[index].spawn_block();
+        return BlockCoord {
+            local_spawn.x,
+            placements_[index].floor_y + 1,
+            local_spawn.z,
+        };
+    }
+    return std::nullopt;
 }
 
 auto BackroomsSpatialStack::connection_for_district(
@@ -560,6 +573,9 @@ auto BackroomsSpatialStack::connection_for_district(
             BackroomsConnectorDirection::Up,
             district_x,
             district_z);
+    if (!legacy_anchor.has_value()) {
+        return std::nullopt;
+    }
     const auto hash =
         connector_hash(
             seed_,
@@ -648,25 +664,34 @@ auto BackroomsSpatialStack::connection_for_district(
 
     auto orientation_quarter_turns =
         static_cast<int>(
-            legacy_anchor.destination_yaw_degrees / 90.0F) & 3;
+            legacy_anchor->destination_yaw_degrees / 90.0F) & 3;
     auto lower_landing = BlockCoord {
-        legacy_anchor.trigger_block.x,
+        legacy_anchor->trigger_block.x,
         placements_[lower_index].floor_y + 1,
-        legacy_anchor.trigger_block.z,
+        legacy_anchor->trigger_block.z,
     };
     if (starter_descent) {
         orientation_quarter_turns = 1;
+        const auto landing_x = checked_add(anchor_spawn.x, 3);
+        const auto landing_z = checked_add(anchor_spawn.z, 7);
+        if (!landing_x.has_value() || !landing_z.has_value()) {
+            return std::nullopt;
+        }
         lower_landing = {
-            anchor_spawn.x + 3,
+            *landing_x,
             placements_[lower_index].floor_y + 1,
-            anchor_spawn.z + 7,
+            *landing_z,
         };
     } else if (starter_ascent) {
         orientation_quarter_turns = 2;
+        const auto landing_z = checked_add(anchor_spawn.z, -8);
+        if (!landing_z.has_value()) {
+            return std::nullopt;
+        }
         lower_landing = {
             anchor_spawn.x,
             placements_[lower_index].floor_y + 1,
-            anchor_spawn.z - 8,
+            *landing_z,
         };
     }
 
@@ -687,8 +712,13 @@ auto BackroomsSpatialStack::connection_for_district(
         .upper_approach = starter_ascent,
         .lower_landing = lower_landing,
     };
+    const auto path_points = connector_path_points(connection);
+    if (!path_points.has_value() || path_length <= 0 ||
+        static_cast<std::size_t>(path_length) > path_points->size()) {
+        return std::nullopt;
+    }
     const auto upper_point =
-        path_point(connection, path_length - 1);
+        (*path_points)[static_cast<std::size_t>(path_length - 1)];
     connection.upper_landing = {
         upper_point.x,
         connection.upper_floor_y + 1,
@@ -786,18 +816,30 @@ auto BackroomsSpatialStack::connector_column(
             for (int district_offset_x = -1;
                  district_offset_x <= 1;
                  ++district_offset_x) {
+                const auto district_x = checked_add(
+                    center_district_x,
+                    district_offset_x);
+                const auto district_z = checked_add(
+                    center_district_z,
+                    district_offset_z);
+                if (!district_x.has_value() ||
+                    !district_z.has_value()) {
+                    continue;
+                }
                 const auto connection =
                     connection_for_district(
                         placements_[lower_index].logical_level,
-                        center_district_x + district_offset_x,
-                        center_district_z + district_offset_z);
+                        *district_x,
+                        *district_z);
                 if (!connection.has_value()) {
                     continue;
                 }
                 const auto trigger_delta_x =
-                    world_x - connection->lower_landing.x;
+                    static_cast<std::int64_t>(world_x) -
+                    connection->lower_landing.x;
                 const auto trigger_delta_z =
-                    world_z - connection->lower_landing.z;
+                    static_cast<std::int64_t>(world_z) -
+                    connection->lower_landing.z;
                 if (std::abs(trigger_delta_x) >
                         kConnectorSearchRadius ||
                     std::abs(trigger_delta_z) >
@@ -811,9 +853,11 @@ auto BackroomsSpatialStack::connector_column(
                     std::abs(trigger_delta_z) <=
                         kConnectorLandingHalfWidth;
                 const auto upper_delta_x =
-                    world_x - connection->upper_landing.x;
+                    static_cast<std::int64_t>(world_x) -
+                    connection->upper_landing.x;
                 const auto upper_delta_z =
-                    world_z - connection->upper_landing.z;
+                    static_cast<std::int64_t>(world_z) -
+                    connection->upper_landing.z;
                 const auto near_upper_landing =
                     std::abs(upper_delta_x) <=
                         kConnectorLandingHalfWidth &&
@@ -852,25 +896,28 @@ auto BackroomsSpatialStack::connector_column(
 
                 const auto path_points =
                     connector_path_points(*connection);
+                if (!path_points.has_value()) {
+                    continue;
+                }
                 const auto path_point_count =
                     std::min(
                         static_cast<std::size_t>(
                             std::max(
                                 connection->path_length,
                                 0)),
-                        path_points.size());
+                        path_points->size());
                 for (std::size_t path_index = 0U;
                      path_index < path_point_count;
                      ++path_index) {
                     const auto point =
-                        path_points[path_index];
+                        (*path_points)[path_index];
                     const auto next_point =
-                        path_points[
+                        (*path_points)[
                             std::min(
                                 path_index + 1U,
                                 path_point_count - 1U)];
                     const auto previous_point =
-                        path_points[
+                        (*path_points)[
                             path_index > 0U
                                 ? path_index - 1U
                                 : 0U];
@@ -884,8 +931,10 @@ auto BackroomsSpatialStack::connector_column(
                             point.z - previous_point.z,
                         };
                     }
-                    const auto delta_x = world_x - point.x;
-                    const auto delta_z = world_z - point.z;
+                    const auto delta_x =
+                        static_cast<std::int64_t>(world_x) - point.x;
+                    const auto delta_z =
+                        static_cast<std::int64_t>(world_z) - point.z;
                     const auto longitudinal =
                         tangent.x != 0
                             ? std::abs(delta_x)
@@ -919,7 +968,8 @@ auto BackroomsSpatialStack::connector_column(
                         path_surface_y(
                             *connection,
                             static_cast<int>(path_index));
-                    slice.lateral_distance = lateral;
+                    slice.lateral_distance =
+                        static_cast<int>(lateral);
                     slice.half_width = half_width;
                     slice.path = on_path;
                     slice.rail = on_rail;
@@ -1140,9 +1190,16 @@ auto BackroomsSpatialStack::needs_recessed_pool_shore(
         {0, -1},
     }};
     for (const auto& direction : cardinal_directions) {
+        const auto neighbour_coord = checked_offset(
+            world_x,
+            world_z,
+            direction);
+        if (!neighbour_coord.has_value()) {
+            continue;
+        }
         const auto neighbour = connector_column(
-            world_x + direction.x,
-            world_z + direction.z);
+            neighbour_coord->x,
+            neighbour_coord->z);
         const auto override_block =
             connector_override(neighbour, world_y);
         if (override_block.has_value() &&
@@ -1186,6 +1243,38 @@ auto BackroomsSpatialStack::sample_block(
         layer_index,
         column,
         world_y);
+}
+
+auto BackroomsSpatialStack::light_fixture_at(
+    int world_x,
+    int world_y,
+    int world_z) const noexcept
+    -> std::optional<BackroomsLightFixtureLayout> {
+    if (!is_world_y_valid(world_y)) {
+        return std::nullopt;
+    }
+
+    const auto layer_index = layer_index_at_y(world_y);
+    const auto& placement = placements_[layer_index];
+    auto fixture =
+        generators_[layer_index].light_fixture_at(
+            world_x,
+            world_z);
+    if (!fixture.has_value()) {
+        return std::nullopt;
+    }
+
+    fixture->ceiling_y =
+        std::clamp(
+            placement.floor_y +
+                (fixture->ceiling_y - kBackroomsFloorY),
+            placement.floor_y + 4,
+            placement.roof_y);
+    if (fixture->ceiling_y != world_y ||
+        sample_block(world_x, world_y, world_z) != fixture->block) {
+        return std::nullopt;
+    }
+    return fixture;
 }
 
 auto BackroomsSpatialStack::sample_water_state(
@@ -1275,9 +1364,15 @@ auto BackroomsSpatialStack::rasterize_column(
         for (std::size_t direction_index = 0U;
              direction_index < cardinal_directions.size();
              ++direction_index) {
-            neighbours[direction_index] = connector_column(
-                world_x + cardinal_directions[direction_index].x,
-                world_z + cardinal_directions[direction_index].z);
+            const auto neighbour_coord = checked_offset(
+                world_x,
+                world_z,
+                cardinal_directions[direction_index]);
+            if (neighbour_coord.has_value()) {
+                neighbours[direction_index] = connector_column(
+                    neighbour_coord->x,
+                    neighbour_coord->z);
+            }
         }
         for (std::size_t layer_index = 0U;
              layer_index < columns.size();
@@ -1363,14 +1458,24 @@ auto BackroomsSpatialStack::has_player_clearance(
     int feet_y,
     int world_z,
     int required_height) const noexcept -> bool {
-    const auto safe_height = std::max(required_height, 1);
-    for (int offset = 0;
-         offset < safe_height;
+    if (required_height < 1 ||
+        required_height > kBackroomsMaximumClearanceHeight ||
+        !is_world_y_valid(feet_y)) {
+        return false;
+    }
+    const auto top_y =
+        static_cast<std::int64_t>(feet_y) + required_height - 1;
+    if (top_y > kWorldMaxY) {
+        return false;
+    }
+    for (auto offset = std::int64_t {0};
+         offset < required_height;
          ++offset) {
         if (is_block_collidable(
                 sample_block(
                     world_x,
-                    feet_y + offset,
+                    static_cast<int>(
+                        static_cast<std::int64_t>(feet_y) + offset),
                     world_z))) {
             return false;
         }
@@ -1384,29 +1489,48 @@ auto BackroomsSpatialStack::has_body_clearance(
     float world_z,
     int required_height,
     float half_width) const noexcept -> bool {
-    constexpr auto collision_epsilon = 0.001F;
-    const auto safe_half_width = std::max(half_width, 0.0F);
-    const auto min_x = static_cast<int>(std::floor(
-        world_x - safe_half_width));
-    const auto max_x = static_cast<int>(std::floor(
-        world_x + safe_half_width - collision_epsilon));
-    const auto min_z = static_cast<int>(std::floor(
-        world_z - safe_half_width));
-    const auto max_z = static_cast<int>(std::floor(
-        world_z + safe_half_width - collision_epsilon));
-    const auto block_y = static_cast<int>(std::floor(feet_y));
-    if (!is_world_y_valid(block_y)) {
+    if (!std::isfinite(world_x) || !std::isfinite(feet_y) ||
+        !std::isfinite(world_z) || !std::isfinite(half_width) ||
+        required_height < 1 ||
+        required_height > kBackroomsMaximumClearanceHeight ||
+        half_width < 0.0F ||
+        half_width > kBackroomsMaximumClearanceHalfWidth) {
+        return false;
+    }
+
+    constexpr auto collision_epsilon = 0.001;
+    const auto center_x = static_cast<double>(world_x);
+    const auto center_z = static_cast<double>(world_z);
+    const auto width = static_cast<double>(half_width);
+    const auto min_x = checked_floor_to_int(center_x - width);
+    const auto max_x = checked_floor_to_int(std::max(
+        center_x - width,
+        center_x + width - collision_epsilon));
+    const auto min_z = checked_floor_to_int(center_z - width);
+    const auto max_z = checked_floor_to_int(std::max(
+        center_z - width,
+        center_z + width - collision_epsilon));
+    const auto block_y = checked_floor_to_int(feet_y);
+    if (!min_x.has_value() || !max_x.has_value() ||
+        !min_z.has_value() || !max_z.has_value() ||
+        !block_y.has_value()) {
         return false;
     }
 
     // Je valide chaque colonne traversée par l'AABB, avec la même marge
     // que la collision du joueur. Cette primitive sert aussi aux migrations.
-    for (auto sample_z = min_z; sample_z <= max_z; ++sample_z) {
-        for (auto sample_x = min_x; sample_x <= max_x; ++sample_x) {
+    const auto end_x = static_cast<std::int64_t>(*max_x) + 1;
+    const auto end_z = static_cast<std::int64_t>(*max_z) + 1;
+    for (auto sample_z = static_cast<std::int64_t>(*min_z);
+         sample_z < end_z;
+         ++sample_z) {
+        for (auto sample_x = static_cast<std::int64_t>(*min_x);
+             sample_x < end_x;
+             ++sample_x) {
             if (!has_player_clearance(
-                    sample_x,
-                    block_y,
-                    sample_z,
+                    static_cast<int>(sample_x),
+                    *block_y,
+                    static_cast<int>(sample_z),
                     required_height)) {
                 return false;
             }

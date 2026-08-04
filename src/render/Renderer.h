@@ -105,22 +105,20 @@ struct BackroomsTerminalFogSnapshot {
 inline constexpr float kBackroomsBlackoutPulseFallbackOutput = 0.05F;
 
 struct BackroomsInterferenceFixtureCacheKey {
-  int world_seed = 0;
-  int logical_level = 0;
-  int anchor_cell_x = 0;
-  int anchor_cell_z = 0;
+  BackroomsGenerationContext generation_context{};
+  std::uint64_t fixture_revision = 0U;
+  float query_position_x = 0.0F;
+  float query_position_z = 0.0F;
   int search_radius = 1;
   BackroomsJackLightInterferenceMode mode =
       BackroomsJackLightInterferenceMode::Flicker;
 
-  [[nodiscard]] auto query_position_x() const noexcept -> double {
-    return (static_cast<double>(anchor_cell_x) + 0.5) *
-           static_cast<double>(kBackroomsFlickerCacheCellSize);
+  [[nodiscard]] auto exact_query_position_x() const noexcept -> double {
+    return static_cast<double>(query_position_x);
   }
 
-  [[nodiscard]] auto query_position_z() const noexcept -> double {
-    return (static_cast<double>(anchor_cell_z) + 0.5) *
-           static_cast<double>(kBackroomsFlickerCacheCellSize);
+  [[nodiscard]] auto exact_query_position_z() const noexcept -> double {
+    return static_cast<double>(query_position_z);
   }
 
   auto operator==(const BackroomsInterferenceFixtureCacheKey &) const
@@ -145,11 +143,12 @@ struct BackroomsInterferenceFixtureCache {
   }
 };
 
-// Je quantifie l'ancre de Jack sur la meme maille de huit metres que les
-// luminaires. Une position stable ne relance donc jamais le sondage du
-// generateur a chaque image.
+// Je conserve la position reelle de l'interference dans la cle : deux points
+// d'une meme maille de huit metres peuvent avoir une rampe la plus proche
+// differente, ou ne pas partager le meme disque de recherche.
 [[nodiscard]] auto make_backrooms_interference_fixture_cache_key(
-    int world_seed, int logical_level,
+    const BackroomsGenerationContext &generation_context,
+    std::uint64_t fixture_revision,
     const BackroomsJackLightInterferenceView &interference) noexcept
     -> std::optional<BackroomsInterferenceFixtureCacheKey>;
 
@@ -1788,8 +1787,8 @@ private:
   glm::vec3 backrooms_marlow_visual_anchor_ {0.0F};
   BackroomsInterferenceFixtureCache
       backrooms_jack_interference_fixture_cache_{};
-  int backrooms_flicker_world_seed_ = 0;
-  int backrooms_flicker_level_ = 0;
+  BackroomsGenerationContext backrooms_flicker_context_{};
+  std::uint64_t backrooms_flicker_fixture_revision_ = 0U;
   int backrooms_flicker_cache_x_ = 0;
   int backrooms_flicker_cache_z_ = 0;
   RendererShipMeshCacheState ship_mesh_cache_{};

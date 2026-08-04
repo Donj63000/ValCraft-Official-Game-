@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <tuple>
@@ -1247,6 +1248,172 @@ TEST_CASE("architectural mesher rejects invalid ranges and missing halo data") {
             valid,
             ArchitecturalSampler {})),
         std::invalid_argument);
+}
+
+TEST_CASE("architectural mesher validates numeric boundaries before sampling") {
+    constexpr auto maximum = std::numeric_limits<int>::max();
+    constexpr auto minimum = std::numeric_limits<int>::lowest();
+    auto sample_count = std::size_t {0U};
+    const ArchitecturalSampler sampler =
+        [&sample_count](int, int, int) {
+            ++sample_count;
+            return ArchitecturalCellSample {};
+        };
+
+    // Je conserve une section valide dont le halo atteint exactement INT_MAX :
+    // les compteurs 64 bits terminent la boucle sans increment signe invalide.
+    const ArchitecturalSection upper_boundary {
+        {maximum - 1, 0, 0},
+        {maximum - 1, 0, 0},
+        1,
+    };
+    const auto upper_mesh = ArchitecturalMesher {}.build_mesh(
+        upper_boundary,
+        sampler);
+    CHECK(upper_mesh.empty());
+    CHECK(sample_count == 27U);
+
+    sample_count = 0U;
+    const ArchitecturalSection overflowing_upper {
+        {maximum, 0, 0},
+        {maximum, 0, 0},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(ArchitecturalMesher {}.build_mesh(
+            overflowing_upper,
+            sampler)),
+        std::overflow_error);
+    CHECK(sample_count == 0U);
+
+    const ArchitecturalSection overflowing_lower {
+        {minimum, 0, 0},
+        {minimum, 0, 0},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(ArchitecturalMesher {}.build_mesh(
+            overflowing_lower,
+            sampler)),
+        std::overflow_error);
+    CHECK(sample_count == 0U);
+}
+
+TEST_CASE("architectural mesher enforces axis and sampled-volume budgets") {
+    auto sample_count = std::size_t {0U};
+    const ArchitecturalSampler sampler =
+        [&sample_count](int, int, int) {
+            ++sample_count;
+            return ArchitecturalCellSample {};
+        };
+
+    const ArchitecturalSection oversized_axis {
+        {0, 0, 0},
+        {255, 0, 0},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(ArchitecturalMesher {}.build_mesh(
+            oversized_axis,
+            sampler)),
+        std::length_error);
+    CHECK(sample_count == 0U);
+
+    // Je reste sous quatre millions de cellules utiles, mais le halo ferait
+    // depasser le budget d'echantillonnage : la reservation doit etre refusee.
+    const ArchitecturalSection oversized_halo_volume {
+        {0, 0, 0},
+        {254, 254, 63},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(ArchitecturalMesher {}.build_mesh(
+            oversized_halo_volume,
+            sampler)),
+        std::length_error);
+    CHECK(sample_count == 0U);
+
+    // Je refuse aussi un coeur dont le pire cas de sortie depasserait le
+    // budget, meme lorsque son volume echantillonne resterait raisonnable.
+    const ArchitecturalSection oversized_output {
+        {0, 0, 0},
+        {40, 40, 40},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(ArchitecturalMesher {}.build_mesh(
+            oversized_output,
+            sampler)),
+        std::length_error);
+    CHECK(sample_count == 0U);
+
+    // Je couvre aussi la frontiere positive exacte avec un sampler vide :
+    // 64 x 32 x 32 vaut exactement 65 536 cellules de coeur.
+    const ArchitecturalSection exact_output_budget {
+        {0, 0, 0},
+        {63, 31, 31},
+        1,
+    };
+    const auto exact_mesh = ArchitecturalMesher {}.build_mesh(
+        exact_output_budget,
+        sampler);
+    CHECK(exact_mesh.empty());
+    CHECK(sample_count == 66U * 34U * 34U);
+}
+
+TEST_CASE("architectural mesh growth rejects excessive prefixes without allocation") {
+    const auto exact_limit = checked_architectural_mesh_growth(
+        kMaximumArchitecturalMeshVertices,
+        kMaximumArchitecturalMeshIndices,
+        0U,
+        0U);
+    CHECK(
+        exact_limit.vertex_count ==
+        kMaximumArchitecturalMeshVertices);
+    CHECK(
+        exact_limit.index_count ==
+        kMaximumArchitecturalMeshIndices);
+
+    CHECK_THROWS_AS(
+        static_cast<void>(checked_architectural_mesh_growth(
+            kMaximumArchitecturalMeshVertices + 1U,
+            0U,
+            0U,
+            0U)),
+        std::length_error);
+    CHECK_THROWS_AS(
+        static_cast<void>(checked_architectural_mesh_growth(
+            0U,
+            kMaximumArchitecturalMeshIndices + 1U,
+            0U,
+            0U)),
+        std::length_error);
+    CHECK_THROWS_AS(
+        static_cast<void>(checked_architectural_mesh_growth(
+            kMaximumArchitecturalMeshVertices,
+            kMaximumArchitecturalMeshIndices,
+            1U,
+            1U)),
+        std::length_error);
+}
+
+TEST_CASE("architectural mesher clamps untrusted reserve hints") {
+    auto sample_count = std::size_t {0U};
+    const ArchitecturalSection one_cell {{0, 0, 0}, {0, 0, 0}, 1};
+
+    // Je passe volontairement SIZE_MAX : le mesher doit reserver seulement
+    // le pire cas des six faces de cette cellule, sans tentative geante.
+    const auto mesh = ArchitecturalMesher {}.build_mesh(
+        one_cell,
+        [&sample_count](int, int, int) {
+            ++sample_count;
+            return ArchitecturalCellSample {};
+        },
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max());
+
+    CHECK(mesh.empty());
+    CHECK(sample_count == 27U);
 }
 
 } // namespace valcraft

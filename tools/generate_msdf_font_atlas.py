@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import math
 import pathlib
 import struct
@@ -36,6 +37,7 @@ FNV_PRIME = 1099511628211
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_FONT = ROOT / "assets" / "fonts" / "Montserrat-wght.ttf"
 DEFAULT_OUTPUT = ROOT / "assets" / "fonts" / "valcraft_ui_font.msdfa"
+VISUAL_REQUIREMENTS = ROOT / "tools" / "requirements-visual.txt"
 
 # Je couvre l'ASCII imprimable, la typographie francaise courante et les
 # ponctuations utilisees par les menus modernes.
@@ -91,6 +93,42 @@ def quantize_x64(value: float) -> int:
     # moins lisibles : l'arrondi symetrique est explicite.
     scaled = value * 64.0
     return int(math.floor(scaled + 0.5) if scaled >= 0.0 else math.ceil(scaled - 0.5))
+
+
+def locked_visual_dependency_versions() -> dict[str, str]:
+    locked: dict[str, str] = {}
+    for raw_line in VISUAL_REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, separator, version = line.partition("==")
+        if not separator or not name.strip() or not version.strip():
+            raise RuntimeError(
+                f"visual dependency must use an exact == pin: {raw_line!r}"
+            )
+        locked[name.strip().lower()] = version.strip()
+    return locked
+
+
+def validate_visual_dependency_versions() -> None:
+    locked = locked_visual_dependency_versions()
+    mismatches: list[str] = []
+    for distribution in ("numpy", "Pillow"):
+        expected = locked.get(distribution.lower())
+        if expected is None:
+            raise RuntimeError(
+                f"missing exact {distribution} pin in {VISUAL_REQUIREMENTS}"
+            )
+        actual = importlib.metadata.version(distribution)
+        if actual != expected:
+            mismatches.append(f"{distribution} {actual} (expected {expected})")
+    if mismatches:
+        details = ", ".join(mismatches)
+        raise RuntimeError(
+            "visual asset runtime differs from tools/requirements-visual.txt: "
+            f"{details}. Refusing to generate environment-dependent bytes; run "
+            f"'{sys.executable} -m pip install --requirement {VISUAL_REQUIREMENTS}'."
+        )
 
 
 def edt_1d(values: np.ndarray) -> np.ndarray:
@@ -343,6 +381,11 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     arguments = parse_arguments()
+    try:
+        validate_visual_dependency_versions()
+    except RuntimeError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     generated, font_sha256 = generate(arguments.font)
     if arguments.check:
         if not arguments.output.exists():

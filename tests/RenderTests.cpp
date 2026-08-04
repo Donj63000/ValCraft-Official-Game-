@@ -46,6 +46,31 @@ struct FaceSample {
   std::array<float, 4> uv_rect{};
 };
 
+[[nodiscard]] constexpr auto is_shader_source_whitespace(char value) noexcept
+    -> bool {
+  return value == ' ' || value == '\t' || value == '\n' || value == '\r' ||
+         value == '\f' || value == '\v';
+}
+
+[[nodiscard]] auto collapse_shader_source_whitespace(std::string_view source)
+    -> std::string {
+  auto normalized = std::string{};
+  normalized.reserve(source.size());
+  auto pending_space = false;
+  for (const auto character : source) {
+    if (is_shader_source_whitespace(character)) {
+      pending_space = !normalized.empty();
+      continue;
+    }
+    if (pending_space) {
+      normalized.push_back(' ');
+      pending_space = false;
+    }
+    normalized.push_back(character);
+  }
+  return normalized;
+}
+
 auto atlas_uv_rect(const BlockAtlasTile &tile) -> std::array<float, 4> {
   const auto uv_step = 1.0F / kBlockAtlasTilesPerAxis;
   const auto u0 = static_cast<float>(tile.x) * uv_step;
@@ -561,14 +586,17 @@ TEST_CASE("maritime detail stays opaque above a fogged proxy underlay") {
       },
       std::istreambuf_iterator<char>{},
   };
+  // Je controle les expressions C++ plutot que la mise en forme imposee par
+  // clang-format : un retour a la ligne ne doit pas annuler cette regression.
+  const auto normalized_renderer_source =
+      collapse_shader_source_whitespace(renderer_source);
   CHECK(renderer_source.find("fog_distance =\n"
                              "            distance(") != std::string::npos);
   CHECK(renderer_source.find("maritime_plane_distance)\n"
                              "                : 1.0;") != std::string::npos);
-  CHECK(renderer_source.find("sea_horizon_uniforms_.sea_level,\n"
-                             "        static_cast<float>(\n"
-                             "            kSeaLevel + 1));") !=
-        std::string::npos);
+  CHECK(normalized_renderer_source.find(
+            "sea_horizon_uniforms_.sea_level, "
+            "static_cast<float>(kSeaLevel + 1));") != std::string::npos);
   CHECK(renderer_source.find("ordered_transition_threshold(\n"
                              "                gl_FragCoord.xy)") !=
         std::string::npos);
@@ -582,11 +610,12 @@ TEST_CASE("maritime detail stays opaque above a fogged proxy underlay") {
                              "        discard;") != std::string::npos);
   CHECK(renderer_source.find("underwater_camera") == std::string::npos);
   const auto legacy_underwater_guard =
-      renderer_source.find("options_.visual_pipeline ==\n"
-                           "                VisualPipeline::LegacyVoxel");
+      normalized_renderer_source.find(
+          "options_.visual_pipeline == VisualPipeline::LegacyVoxel");
   REQUIRE(legacy_underwater_guard != std::string::npos);
   const auto legacy_overlay =
-      renderer_source.find("const auto overlay_edge", legacy_underwater_guard);
+      normalized_renderer_source.find("const auto overlay_edge",
+                                      legacy_underwater_guard);
   REQUIRE(legacy_overlay != std::string::npos);
   CHECK(legacy_overlay - legacy_underwater_guard < 256U);
   CHECK(renderer_source.find("u_camera_position.y >=\n"
@@ -1233,6 +1262,81 @@ TEST_CASE("BlackoutPulse masque completement une apparition meme sans rampe") {
 }
 
 TEST_CASE(
+    "Backrooms renderer fixture cache keys include generation and index identity") {
+  const BackroomsJackLightInterferenceView interference {
+      .position = {17.25F, 48.0F, -9.75F},
+      .radius = 24.0F,
+      .intensity = 0.8F,
+      .active = true,
+      .mode = BackroomsJackLightInterferenceMode::Flicker,
+  };
+  const BackroomsGenerationContext v3_context {
+      .seed = 7193,
+      .logical_level = -2,
+      .connector_district_modules =
+          kBackroomsSpatialConnectorDistrictModules,
+      .physical_floor_y = 1,
+      .pool_geometry_profile =
+          BackroomsPoolGeometryProfile::RecessedOneBlock,
+      .generation_version = WorldGenerationVersion::BackroomsV3,
+      .theme = BackroomsTheme::Poolrooms,
+  };
+  auto v4_context = v3_context;
+  v4_context.pool_geometry_profile =
+      BackroomsPoolGeometryProfile::FloodedDistrictsV4;
+  v4_context.physical_floor_y = 2;
+  v4_context.generation_version = WorldGenerationVersion::BackroomsV4;
+
+  const auto first = make_backrooms_interference_fixture_cache_key(
+      v3_context,
+      41U,
+      interference);
+  const auto repeated = make_backrooms_interference_fixture_cache_key(
+      v3_context,
+      41U,
+      interference);
+  const auto other_revision =
+      make_backrooms_interference_fixture_cache_key(
+          v3_context,
+          42U,
+          interference);
+  const auto other_profile = make_backrooms_interference_fixture_cache_key(
+      v4_context,
+      41U,
+      interference);
+  auto moved_inside_same_legacy_cell = interference;
+  moved_inside_same_legacy_cell.position.x = 17.75F;
+  moved_inside_same_legacy_cell.position.z = -9.25F;
+  const auto moved_position =
+      make_backrooms_interference_fixture_cache_key(
+          v3_context,
+          41U,
+          moved_inside_same_legacy_cell);
+
+  REQUIRE(first.has_value());
+  REQUIRE(repeated.has_value());
+  REQUIRE(other_revision.has_value());
+  REQUIRE(other_profile.has_value());
+  REQUIRE(moved_position.has_value());
+  CHECK(*first == *repeated);
+  CHECK(*first != *other_revision);
+  CHECK(*first != *other_profile);
+  CHECK(*first != *moved_position);
+  CHECK(first->exact_query_position_x() == doctest::Approx(17.25));
+  CHECK(first->exact_query_position_z() == doctest::Approx(-9.75));
+  CHECK(moved_position->exact_query_position_x() == doctest::Approx(17.75));
+  CHECK(moved_position->exact_query_position_z() == doctest::Approx(-9.25));
+
+  BackroomsInterferenceFixtureCache cache {};
+  cache.key = *first;
+  cache.valid = true;
+  CHECK(cache.matches(*repeated));
+  CHECK_FALSE(cache.matches(*other_revision));
+  CHECK_FALSE(cache.matches(*other_profile));
+  CHECK_FALSE(cache.matches(*moved_position));
+}
+
+TEST_CASE(
     "Poolrooms block ids atlas and physical properties stay append only") {
   CHECK(to_block_id(BlockType::PoolroomsTile) == 53U);
   CHECK(to_block_id(BlockType::PoolroomsWetTile) == 54U);
@@ -1313,12 +1417,26 @@ TEST_CASE(
 
 TEST_CASE(
     "Poolrooms environment stays cold enclosed and darker than offices") {
+  const BackroomsGenerationContext office_context {
+      .seed = 481,
+      .theme = BackroomsTheme::Offices,
+  };
+  const BackroomsGenerationContext poolrooms_context {
+      .seed = 481,
+      .logical_level = -2,
+      .connector_district_modules =
+          kBackroomsSpatialConnectorDistrictModules,
+      .pool_geometry_profile =
+          BackroomsPoolGeometryProfile::FloodedDistrictsV4,
+      .generation_version = WorldGenerationVersion::BackroomsV4,
+      .theme = BackroomsTheme::Poolrooms,
+  };
   const auto offices =
       make_backrooms_environment_state(
-          19.0F, 481, 12.0F, -7.0F);
+          19.0F, office_context, 12.0F, -7.0F);
   const auto poolrooms =
       make_backrooms_environment_state(
-          19.0F, 481, 12.0F, -7.0F, true);
+          19.0F, poolrooms_context, 12.0F, -7.0F);
 
   CHECK(offices.enclosed_interior);
   CHECK_FALSE(offices.poolrooms);

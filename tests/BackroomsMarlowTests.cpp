@@ -421,8 +421,30 @@ TEST_CASE("La grille lazy et les chemins malformes sont rejetes sans acces hors 
     CHECK(find_backrooms_marlow_path(grid, {0, 0}, {1, 0}).empty());
 
     grid.cells.resize(kBackroomsMarlowNavigationCellCount + 1U);
+    grid.cells.front().walkable = true;
     CHECK(backrooms_marlow_navigation_cell(grid, 0, 0) == nullptr);
     CHECK(find_backrooms_marlow_path(grid, {0, 0}, {1, 0}).empty());
+
+    auto forged_domain = handmade_grid();
+    forged_domain.origin_world_x = std::numeric_limits<int>::max();
+    forged_domain.origin_world_z = std::numeric_limits<int>::max();
+    for (auto& cell : forged_domain.cells) {
+        cell.walkable = true;
+        cell.clearance = 8.0F;
+    }
+    const BackroomsMarlowGridPoint forged_origin {
+        forged_domain.origin_world_x,
+        forged_domain.origin_world_z,
+    };
+    CHECK(backrooms_marlow_navigation_cell(
+              forged_domain,
+              forged_origin.x,
+              forged_origin.z) == nullptr);
+    CHECK(find_backrooms_marlow_path(
+              forged_domain,
+              forged_origin,
+              forged_origin)
+              .empty());
 
     BackroomsMarlowPath malformed {};
     malformed.nodes.push_back({0, 0});
@@ -652,6 +674,37 @@ TEST_CASE("Le mode Blocking ne parait que si un vrai chemin de detour existe") {
         BackroomsMarlowEncounterMode::Blocking,
         0x424C4F43U);
     CHECK_FALSE(unsafe.found);
+}
+
+TEST_CASE("la grille de Marlow refuse les chunks dont le domaine deborde") {
+    const BackroomsGenerator generator(63017, -2);
+    constexpr std::array<ChunkCoord, 2U> extreme_centers {{
+        {std::numeric_limits<int>::lowest(),
+         std::numeric_limits<int>::lowest()},
+        {std::numeric_limits<int>::max(),
+         std::numeric_limits<int>::max()},
+    }};
+
+    for (const auto center : extreme_centers) {
+        CAPTURE(center.x);
+        CAPTURE(center.z);
+        const auto grid =
+            build_backrooms_marlow_navigation_grid(generator, center);
+        CHECK(grid.center_chunk == center);
+        REQUIRE(
+            grid.cells.size() ==
+            kBackroomsMarlowNavigationCellCount);
+        CHECK(std::none_of(
+            grid.cells.begin(),
+            grid.cells.end(),
+            [](const BackroomsMarlowNavigationCell& cell) {
+                return cell.walkable;
+            }));
+        CHECK(backrooms_marlow_navigation_cell(
+                  grid,
+                  center.x,
+                  center.z) == nullptr);
+    }
 }
 
 TEST_CASE("La navigation reconnait les nappes V4 et leurs bassins profonds") {
@@ -997,6 +1050,150 @@ TEST_CASE("Une manifestation en attente demande puis acquiert exactement un slot
     REQUIRE(acquired.event_count == 1U);
     CHECK(acquired.events[0].kind ==
           BackroomsMarlowEventKind::BuoyAppeared);
+}
+
+TEST_CASE("Le gel suspend toute nouvelle demande de slot de menace") {
+    const BackroomsGenerator poolrooms {
+        7331,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4,
+    };
+    auto grid = handmade_grid();
+    open_marlow_space_at(grid, 20, 20, true, true, 2.0F);
+    const auto readiness = full_readiness(grid.center_chunk);
+
+    auto state = initialize_backrooms_marlow(0x47454C53U, -2);
+    state.cue_seconds = 20.0F;
+    state.manifestation_seconds = 20.0F;
+    BackroomsMarlowRuntime runtime {};
+    runtime.navigation = grid;
+    runtime.navigation_readiness = readiness;
+    runtime.navigation_valid = true;
+    runtime.navigation_readiness_valid = true;
+    runtime.waiting_for_threat_slot = true;
+    runtime.pending_manifestation = {
+        .position = {20.5F, 40.001F, 20.5F},
+        .buoy_position = {20.5F, 42.0F, 20.5F},
+        .body_yaw_degrees = 45.0F,
+        .peek_side = 1.0F,
+        .mode = BackroomsMarlowEncounterMode::WaterAmbush,
+        .next_random_state = state.random_state,
+        .found = true,
+        .has_guaranteed_detour = false,
+        .presentation = BackroomsMarlowPresentation::FullBody,
+        .wall_normal = {0.0F, 0.0F, 0.0F},
+    };
+
+    BackroomsMarlowUpdateContext context {};
+    context.player = marlow_player(30.5F, 30.5F);
+    context.chunk_readiness = readiness;
+    context.threat_slot_available = true;
+    context.simulation_frozen = true;
+
+    // Je garde la manifestation en attente sans publier de nouvelle requete
+    // tant que le monde ne peut pas faire progresser son attribution.
+    const auto frozen = update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.10F);
+    CHECK_FALSE(frozen.requests_threat_slot);
+    CHECK_FALSE(frozen.holds_threat_slot);
+    CHECK(frozen.event_count == 0U);
+    CHECK(runtime.waiting_for_threat_slot);
+    CHECK(runtime.pending_manifestation.found);
+    CHECK(runtime.phase == BackroomsMarlowPhase::Dormant);
+    CHECK(state.cue_seconds == doctest::Approx(20.0F));
+    CHECK(state.manifestation_seconds == doctest::Approx(20.0F));
+
+    // Je laisse la demande repartir uniquement apres la reprise effective.
+    context.simulation_frozen = false;
+    const auto resumed = update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.10F);
+    CHECK(resumed.requests_threat_slot);
+    CHECK(runtime.waiting_for_threat_slot);
+}
+
+TEST_CASE("La Maglite activee pendant le gel ne recree pas un front a la reprise") {
+    const BackroomsGenerator poolrooms {
+        7331,
+        -2,
+        kBackroomsConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4,
+    };
+    auto grid = handmade_grid();
+    const auto readiness = full_readiness(grid.center_chunk);
+
+    auto state = initialize_backrooms_marlow(0x4D41474CU, -2);
+    state.cue_seconds = 20.0F;
+    state.cooldown_seconds = 20.0F;
+    state.manifestation_seconds = 20.0F;
+    BackroomsMarlowRuntime runtime {};
+    runtime.navigation = std::move(grid);
+    runtime.navigation_readiness = readiness;
+    runtime.navigation_valid = true;
+    runtime.navigation_readiness_valid = true;
+
+    BackroomsMarlowUpdateContext context {};
+    context.player = marlow_player(30.5F, 30.5F);
+    context.player.flashlight_on_water = true;
+    context.chunk_readiness = readiness;
+    context.allow_manifestation = false;
+    context.simulation_frozen = true;
+
+    // Je memorise l'etat lumineux sans avancer la pression ni les horloges.
+    const auto frozen = update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.25F);
+    CHECK(runtime.previous_flashlight_on_water);
+    CHECK_FALSE(runtime.pressure_hysteresis_initialized);
+    CHECK(runtime.pressure_attack_armed);
+    CHECK(state.pressure == doctest::Approx(0.0F));
+    CHECK(state.cue_seconds == doctest::Approx(20.0F));
+    CHECK(state.cooldown_seconds == doctest::Approx(20.0F));
+    CHECK(state.manifestation_seconds == doctest::Approx(20.0F));
+    CHECK(frozen.event_count == 0U);
+
+    // Je ne compte a la reprise que l'exposition continue de la lampe : le
+    // bonus ponctuel de front montant ne doit pas etre rejoue.
+    context.simulation_frozen = false;
+    const auto resumed = update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.25F);
+    CHECK(resumed.event_count == 0U);
+    CHECK(runtime.pressure_hysteresis_initialized);
+    CHECK(state.pressure == doctest::Approx(0.04F));
+
+    // Je verifie qu'un vrai front ulterieur reste bien detecte.
+    context.player.flashlight_on_water = false;
+    static_cast<void>(update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.25F));
+    const auto pressure_before_new_edge = state.pressure;
+    context.player.flashlight_on_water = true;
+    static_cast<void>(update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.25F));
+    CHECK(state.pressure ==
+          doctest::Approx(pressure_before_new_edge + 0.12F));
 }
 
 TEST_CASE("Un changement de Poolrooms restitue la menace sans demarrer le nouveau niveau") {
@@ -1442,11 +1639,22 @@ TEST_CASE("L hysteresis chargee se derive de la pression durable") {
         *runtime,
         poolrooms,
         context,
-        0.0F));
+        0.10F));
 
+    CHECK_FALSE(runtime->pressure_hysteresis_initialized);
+    CHECK(runtime->pressure_attack_armed);
+    CHECK(state.manifestation_seconds == doctest::Approx(30.0F));
+
+    context.simulation_frozen = false;
+    static_cast<void>(update_backrooms_marlow(
+        state,
+        *runtime,
+        poolrooms,
+        context,
+        0.10F));
     CHECK(runtime->pressure_hysteresis_initialized);
     CHECK_FALSE(runtime->pressure_attack_armed);
-    CHECK(state.manifestation_seconds == doctest::Approx(30.0F));
+    CHECK(state.manifestation_seconds == doctest::Approx(29.90F));
 }
 
 TEST_CASE("Un pic de pression programme une attaque avec hysteresis") {
@@ -1529,13 +1737,14 @@ TEST_CASE("Les revisions internes reconstruisent la navigation de Marlow") {
     BackroomsMarlowUpdateContext context {};
     context.player = marlow_player(feet.x, feet.z);
     context.chunk_readiness = readiness;
-    context.simulation_frozen = true;
+    context.allow_manifestation = false;
+    context.player_alive = false;
     static_cast<void>(update_backrooms_marlow(
         state,
         runtime,
         poolrooms,
         context,
-        0.0F));
+        0.01F));
     REQUIRE(runtime.navigation_valid);
     runtime.navigation.cells[0].clearance = 12'345.0F;
 
@@ -1550,7 +1759,7 @@ TEST_CASE("Les revisions internes reconstruisent la navigation de Marlow") {
         runtime,
         poolrooms,
         context,
-        0.0F));
+        0.01F));
     CHECK(runtime.navigation.cells[0].clearance ==
           doctest::Approx(12'345.0F));
 
@@ -1561,12 +1770,12 @@ TEST_CASE("Les revisions internes reconstruisent la navigation de Marlow") {
         runtime,
         poolrooms,
         context,
-        0.0F));
+        0.01F));
     CHECK(runtime.navigation.cells[0].clearance !=
           doctest::Approx(12'345.0F));
 }
 
-TEST_CASE("Une revision annule proprement la demande de menace obsolete") {
+TEST_CASE("Une revision en gel preserve la demande de menace jusqu a la reprise") {
     const BackroomsGenerator poolrooms {
         7331,
         -2,
@@ -1596,24 +1805,54 @@ TEST_CASE("Une revision annule proprement la demande de menace obsolete") {
             0x50454E44U);
     REQUIRE(runtime.pending_manifestation.found);
     runtime.waiting_for_threat_slot = true;
+    runtime.navigation.cells[0].clearance = 12'345.0F;
+    state.manifestation_seconds = 20.0F;
 
     readiness.mesh_revisions[
         readiness_index(readiness, grid.center_chunk)] = 2U;
     BackroomsMarlowUpdateContext context {};
     context.player = marlow_player(30.5F, 30.5F);
     context.chunk_readiness = readiness;
+    context.threat_slot_available = true;
+    context.threat_slot_owned = true;
     context.simulation_frozen = true;
-    const auto result = update_backrooms_marlow(
+    const auto frozen = update_backrooms_marlow(
         state,
         runtime,
         poolrooms,
         context,
-        0.0F);
-    CHECK(result.cancels_threat_request);
-    CHECK_FALSE(result.requests_threat_slot);
+        0.10F);
+
+    // Je conserve la navigation et l'attente malgre la revision devenue
+    // obsolete, sans emettre de demande, d'annulation ni de restitution.
+    CHECK_FALSE(frozen.requests_threat_slot);
+    CHECK_FALSE(frozen.cancels_threat_request);
+    CHECK_FALSE(frozen.releases_threat_slot);
+    CHECK_FALSE(runtime.pressure_hysteresis_initialized);
+    CHECK(runtime.pressure_attack_armed);
+    CHECK(runtime.waiting_for_threat_slot);
+    CHECK(runtime.pending_manifestation.found);
+    CHECK(runtime.navigation.cells[0].clearance ==
+          doctest::Approx(12'345.0F));
+    CHECK(runtime.retry_seconds == doctest::Approx(0.0F));
+    CHECK(state.manifestation_seconds == doctest::Approx(20.0F));
+
+    // Je traite l'invalidation seulement lorsque la simulation reprend.
+    context.simulation_frozen = false;
+    const auto resumed = update_backrooms_marlow(
+        state,
+        runtime,
+        poolrooms,
+        context,
+        0.10F);
+    CHECK(resumed.cancels_threat_request);
+    CHECK(resumed.releases_threat_slot);
+    CHECK_FALSE(resumed.requests_threat_slot);
     CHECK_FALSE(runtime.waiting_for_threat_slot);
-    CHECK(runtime.retry_seconds == doctest::Approx(1.0F));
-    CHECK(state.manifestation_seconds == doctest::Approx(0.0F));
+    // Je tiens compte du dixieme de seconde effectivement consomme par la
+    // frame de reprise apres l'invalidation.
+    CHECK(runtime.retry_seconds == doctest::Approx(0.90F));
+    CHECK(state.manifestation_seconds == doctest::Approx(-0.10F));
 }
 
 TEST_CASE("La grille de Marlow superpose les obstacles reels du World") {

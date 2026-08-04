@@ -16,6 +16,27 @@ namespace {
 
 constexpr float kUvUnits = 256.0F;
 constexpr float kNormalEpsilonSquared = 1.0e-12F;
+// Je limite une passe de props au volume reel d'une section 16 x 16 x 16.
+// Une densite superieure a un huitieme de ce volume revele une entree
+// pathologique et risquerait sinon de reserver plusieurs centaines de Mo.
+constexpr std::size_t kMaximumBackroomsPropSectionCells = 4U * 1024U;
+constexpr std::size_t kMaximumBackroomsPropsPerSection = 512U;
+constexpr std::size_t kRoundedComponentsPerProp = 6U;
+constexpr std::size_t kMaximumRampVertices = 24U;
+constexpr std::size_t kMaximumRampIndices = 36U;
+// Je pre-valide avec le profil High avant de construire la primitive. Les
+// profils Low, Medium et le fallback invalide restent tous sous ce pire cas.
+constexpr std::size_t kMaximumRoundedBoxVertices = 486U;
+constexpr std::size_t kMaximumRoundedBoxIndices = 2'304U;
+constexpr std::size_t kMaximumRoundedPropVertices =
+    kRoundedComponentsPerProp * kMaximumRoundedBoxVertices;
+constexpr std::size_t kMaximumRoundedPropIndices =
+    kRoundedComponentsPerProp * kMaximumRoundedBoxIndices;
+
+static_assert(
+    kMaximumArchitecturalMeshVertices <=
+    static_cast<std::size_t>(
+        std::numeric_limits<std::uint32_t>::max()));
 
 struct PropVector {
     float x = 0.0F;
@@ -27,6 +48,32 @@ struct PropLight {
     std::uint8_t sky = 15U;
     std::uint8_t block = 0U;
 };
+
+struct PendingProp {
+    BlockCoord owner {};
+    BlockId block_id = to_block_id(BlockType::Air);
+};
+
+[[nodiscard]] auto checked_product(
+    std::size_t left,
+    std::size_t right,
+    const char* error_message) -> std::size_t {
+    if (left != 0U &&
+        right > std::numeric_limits<std::size_t>::max() / left) {
+        throw std::length_error(error_message);
+    }
+    return left * right;
+}
+
+void checked_add(
+    std::size_t& total,
+    std::size_t addition,
+    const char* error_message) {
+    if (addition > std::numeric_limits<std::size_t>::max() - total) {
+        throw std::length_error(error_message);
+    }
+    total += addition;
+}
 
 [[nodiscard]] constexpr auto subtract(
     const PropVector& lhs,
@@ -440,41 +487,189 @@ auto append_modern_backrooms_prop_geometry(
     const ArchitecturalSampler& sampler,
     StylizedPrimitiveLod lod) -> std::size_t {
     const auto first_added_index = mesh.indices.size();
-    if (!section.valid() || !sampler) {
+    if (!sampler) {
         throw std::invalid_argument(
             "La section d'accessoires Backrooms est invalide");
     }
+    if (mesh.fixtures.size() > kMaximumArchitecturalFixtures) {
+        throw std::length_error(
+            "Le maillage contient trop de fixtures architecturales");
+    }
+    // Je refuse d'abord un prefixe deja hors contrat, avant le sampler et la
+    // moindre reservation locale.
+    [[maybe_unused]] const auto validated_prefix =
+        checked_architectural_mesh_growth(
+            mesh.vertices.size(),
+            mesh.indices.size(),
+            0U,
+            0U);
 
-    std::optional<StylizedPrimitiveMesh> rounded_box;
-    for (int y = section.min.y; y <= section.max.y; ++y) {
-        for (int z = section.min.z; z <= section.max.z; ++z) {
-            for (int x = section.min.x; x <= section.max.x; ++x) {
-                const auto sample = sampler(x, y, z);
+    const auto cell_count = checked_architectural_section_cell_count(
+        section,
+        kMaximumBackroomsPropSectionCells);
+    std::vector<PendingProp> pending_props;
+    pending_props.reserve(std::min(
+        cell_count,
+        kMaximumBackroomsPropsPerSection));
+    const auto end_x = static_cast<std::int64_t>(section.max.x) + 1;
+    const auto end_y = static_cast<std::int64_t>(section.max.y) + 1;
+    const auto end_z = static_cast<std::int64_t>(section.max.z) + 1;
+    for (auto y = static_cast<std::int64_t>(section.min.y); y < end_y; ++y) {
+        for (auto z = static_cast<std::int64_t>(section.min.z); z < end_z; ++z) {
+            for (auto x = static_cast<std::int64_t>(section.min.x); x < end_x; ++x) {
+                const auto sample = sampler(
+                    static_cast<int>(x),
+                    static_cast<int>(y),
+                    static_cast<int>(z));
                 if (!is_modern_backrooms_hard_surface_prop(sample.block_id)) {
                     continue;
                 }
-                if (is_backrooms_ramp(sample.block_id)) {
-                    append_ramp(
-                        mesh,
-                        sampler,
-                        {x, y, z},
-                        sample.block_id);
-                    continue;
+                if (pending_props.size() >=
+                    kMaximumBackroomsPropsPerSection) {
+                    throw std::length_error(
+                        "La section contient trop d'accessoires Backrooms");
                 }
-                if (!rounded_box.has_value()) {
-                    // Je ne construis la primitive arrondie que si la section
-                    // contient reellement un meuble. Les grandes
-                    // sections architecturales et les rampes seules ne paient
-                    // donc aucune tessellation inutile.
-                    rounded_box.emplace(build_stylized_rounded_box(lod));
-                }
-                append_prop(
-                    mesh,
-                    *rounded_box,
-                    sampler,
-                    {x, y, z},
-                    sample.block_id);
+                pending_props.push_back({
+                    {
+                        static_cast<int>(x),
+                        static_cast<int>(y),
+                        static_cast<int>(z),
+                    },
+                    sample.block_id,
+                });
             }
+        }
+    }
+
+    const auto rounded_prop_count = static_cast<std::size_t>(std::count_if(
+        pending_props.begin(),
+        pending_props.end(),
+        [](const auto& prop) noexcept {
+            return !is_backrooms_ramp(prop.block_id);
+        }));
+    const auto ramp_count = pending_props.size() - rounded_prop_count;
+    auto maximum_vertex_budget = std::size_t {0U};
+    auto maximum_index_budget = std::size_t {0U};
+    checked_add(
+        maximum_vertex_budget,
+        checked_product(
+            rounded_prop_count,
+            kMaximumRoundedPropVertices,
+            "Le budget maximal de sommets Backrooms est invalide"),
+        "Le budget maximal de sommets Backrooms est invalide");
+    checked_add(
+        maximum_vertex_budget,
+        checked_product(
+            ramp_count,
+            kMaximumRampVertices,
+            "Le budget maximal de sommets Backrooms est invalide"),
+        "Le budget maximal de sommets Backrooms est invalide");
+    checked_add(
+        maximum_index_budget,
+        checked_product(
+            rounded_prop_count,
+            kMaximumRoundedPropIndices,
+            "Le budget maximal d'indices Backrooms est invalide"),
+        "Le budget maximal d'indices Backrooms est invalide");
+    checked_add(
+        maximum_index_budget,
+        checked_product(
+            ramp_count,
+            kMaximumRampIndices,
+            "Le budget maximal d'indices Backrooms est invalide"),
+        "Le budget maximal d'indices Backrooms est invalide");
+    // Je compose le prefixe et le pire cas avant la construction du rounded
+    // box : aucun rejet de budget ne peut donc modifier le mesh appelant.
+    const auto maximum_size = checked_architectural_mesh_growth(
+        mesh.vertices.size(),
+        mesh.indices.size(),
+        maximum_vertex_budget,
+        maximum_index_budget);
+    if (maximum_size.vertex_count > mesh.vertices.max_size() ||
+        maximum_size.index_count > mesh.indices.max_size()) {
+        throw std::length_error(
+            "Le maillage des accessoires Backrooms est trop grand");
+    }
+
+    std::optional<StylizedPrimitiveMesh> rounded_box;
+    if (rounded_prop_count > 0U) {
+        // Je ne construis la primitive arrondie que si la section contient
+        // reellement un meuble. Les rampes seules ne paient donc aucune
+        // tessellation inutile.
+        rounded_box.emplace(build_stylized_rounded_box(lod));
+        if (rounded_box->vertices.size() >
+                kMaximumRoundedBoxVertices ||
+            rounded_box->indices.size() >
+                kMaximumRoundedBoxIndices) {
+            throw std::logic_error(
+                "La primitive arrondie depasse son budget contractuel");
+        }
+    }
+
+    auto vertex_budget = std::size_t {0U};
+    auto index_budget = std::size_t {0U};
+    if (rounded_box.has_value()) {
+        checked_add(
+            vertex_budget,
+            checked_product(
+                rounded_prop_count,
+                checked_product(
+                    kRoundedComponentsPerProp,
+                    rounded_box->vertices.size(),
+                    "Le budget de sommets Backrooms est invalide"),
+                "Le budget de sommets Backrooms est invalide"),
+            "Le budget de sommets Backrooms est invalide");
+        checked_add(
+            index_budget,
+            checked_product(
+                rounded_prop_count,
+                checked_product(
+                    kRoundedComponentsPerProp,
+                    rounded_box->indices.size(),
+                    "Le budget d'indices Backrooms est invalide"),
+                "Le budget d'indices Backrooms est invalide"),
+            "Le budget d'indices Backrooms est invalide");
+    }
+    checked_add(
+        vertex_budget,
+        checked_product(
+            ramp_count,
+            kMaximumRampVertices,
+            "Le budget de sommets Backrooms est invalide"),
+        "Le budget de sommets Backrooms est invalide");
+    checked_add(
+        index_budget,
+        checked_product(
+            ramp_count,
+            kMaximumRampIndices,
+            "Le budget d'indices Backrooms est invalide"),
+        "Le budget d'indices Backrooms est invalide");
+    const auto final_size = checked_architectural_mesh_growth(
+        mesh.vertices.size(),
+        mesh.indices.size(),
+        vertex_budget,
+        index_budget);
+    mesh.vertices.reserve(final_size.vertex_count);
+    mesh.indices.reserve(final_size.index_count);
+
+    for (const auto& prop : pending_props) {
+        if (is_backrooms_ramp(prop.block_id)) {
+            append_ramp(
+                mesh,
+                sampler,
+                prop.owner,
+                prop.block_id);
+        } else {
+            if (!rounded_box.has_value()) {
+                throw std::logic_error(
+                    "La primitive arrondie Backrooms est absente");
+            }
+            append_prop(
+                mesh,
+                *rounded_box,
+                sampler,
+                prop.owner,
+                prop.block_id);
         }
     }
     return first_added_index;

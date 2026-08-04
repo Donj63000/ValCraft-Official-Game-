@@ -20,7 +20,27 @@ namespace {
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 constexpr std::size_t kMaximumSampledCells = 4U * 1024U * 1024U;
+// Je borne aussi le coeur, car une cellule peut produire jusqu'a six quads.
+// Ce plafond limite donc le pire cas a 393 216 quads, 1 572 864 sommets et
+// 2 359 296 indices avant toute allocation de sortie.
+constexpr std::size_t kMaximumFacesPerCell = 6U;
+constexpr std::size_t kVerticesPerQuad = 4U;
+constexpr std::size_t kIndicesPerQuad = 6U;
+constexpr std::size_t kMaximumArchitecturalQuads =
+    kMaximumArchitecturalCoreCells * kMaximumFacesPerCell;
+constexpr std::size_t kMaximumArchitecturalVertices =
+    kMaximumArchitecturalQuads * kVerticesPerQuad;
+constexpr std::size_t kMaximumArchitecturalIndices =
+    kMaximumArchitecturalQuads * kIndicesPerQuad;
+constexpr std::size_t kMaximumSectionAxisExtent = 255U;
 constexpr std::uint16_t kUvUnitsPerBlock = 256U;
+
+static_assert(
+    kMaximumArchitecturalVertices <=
+    kMaximumArchitecturalMeshVertices);
+static_assert(
+    kMaximumArchitecturalIndices <=
+    kMaximumArchitecturalMeshIndices);
 
 struct SampledVolume {
     BlockCoord min {};
@@ -134,27 +154,32 @@ void set_axis_value(BlockCoord& coordinate, int axis, int value) noexcept {
     return static_cast<std::size_t>(extent);
 }
 
+[[nodiscard]] auto checked_volume(
+    std::size_t size_x,
+    std::size_t size_y,
+    std::size_t size_z,
+    std::size_t maximum_cells,
+    const char* error_message) -> std::size_t {
+    if (size_x > maximum_cells / size_y) {
+        throw std::length_error(error_message);
+    }
+    const auto plane_size = size_x * size_y;
+    if (plane_size > maximum_cells / size_z) {
+        throw std::length_error(error_message);
+    }
+    return plane_size * size_z;
+}
+
 [[nodiscard]] auto sample_volume(
     const ArchitecturalSection& section,
     const ArchitecturalSampler& sampler) -> SampledVolume {
     if (!sampler) {
         throw std::invalid_argument("architectural sampler is empty");
     }
-    if (!section.valid()) {
-        throw std::invalid_argument("architectural section has invalid bounds");
-    }
-    if (section.halo < 1 || section.halo > 8) {
-        throw std::invalid_argument("architectural halo must be between one and eight");
-    }
-
-    for (int axis = 0; axis < 3; ++axis) {
-        const auto core_extent = checked_extent(
-            axis_min(section, axis),
-            axis_max(section, axis));
-        if (core_extent > 255U) {
-            throw std::length_error("architectural section exceeds compact UV range");
-        }
-    }
+    [[maybe_unused]] const auto core_cell_count =
+        checked_architectural_section_cell_count(
+            section,
+            kMaximumArchitecturalCoreCells);
 
     SampledVolume volume {};
     volume.min = {
@@ -170,17 +195,23 @@ void set_axis_value(BlockCoord& coordinate, int axis, int value) noexcept {
     volume.size_x = checked_extent(volume.min.x, volume.max.x);
     volume.size_y = checked_extent(volume.min.y, volume.max.y);
     volume.size_z = checked_extent(volume.min.z, volume.max.z);
-    if (volume.size_x > kMaximumSampledCells / volume.size_y ||
-        volume.size_x * volume.size_y > kMaximumSampledCells / volume.size_z) {
-        throw std::length_error("architectural section is too large");
-    }
-
-    const auto cell_count = volume.size_x * volume.size_y * volume.size_z;
+    const auto cell_count = checked_volume(
+        volume.size_x,
+        volume.size_y,
+        volume.size_z,
+        kMaximumSampledCells,
+        "architectural section is too large");
     volume.cells.reserve(cell_count);
-    for (int y = volume.min.y; y <= volume.max.y; ++y) {
-        for (int z = volume.min.z; z <= volume.max.z; ++z) {
-            for (int x = volume.min.x; x <= volume.max.x; ++x) {
-                auto sample = sampler(x, y, z);
+    const auto end_x = static_cast<std::int64_t>(volume.max.x) + 1;
+    const auto end_y = static_cast<std::int64_t>(volume.max.y) + 1;
+    const auto end_z = static_cast<std::int64_t>(volume.max.z) + 1;
+    for (auto y = static_cast<std::int64_t>(volume.min.y); y < end_y; ++y) {
+        for (auto z = static_cast<std::int64_t>(volume.min.z); z < end_z; ++z) {
+            for (auto x = static_cast<std::int64_t>(volume.min.x); x < end_x; ++x) {
+                auto sample = sampler(
+                    static_cast<int>(x),
+                    static_cast<int>(y),
+                    static_cast<int>(z));
                 sample.sky_light = std::min<std::uint8_t>(sample.sky_light, 15U);
                 sample.block_light = std::min<std::uint8_t>(sample.block_light, 15U);
                 volume.cells.push_back(sample);
@@ -840,6 +871,18 @@ void append_quad(
         flags |= ArchitecturalTransparent;
     }
 
+    // Je garde une seconde barriere au point d'emission. Le calcul
+    // structurel fait avant l'echantillonnage suffit aujourd'hui, mais cette
+    // garde empechera une future primitive d'outrepasser le contrat memoire.
+    if (mesh.quads.size() >= kMaximumArchitecturalQuads ||
+        mesh.vertices.size() >
+            kMaximumArchitecturalVertices - kVerticesPerQuad ||
+        mesh.indices.size() >
+            kMaximumArchitecturalIndices - kIndicesPerQuad) {
+        throw std::length_error(
+            "architectural mesh exceeds its output budget");
+    }
+
     const auto first_vertex = static_cast<std::uint32_t>(mesh.vertices.size());
     const auto first_index = static_cast<std::uint32_t>(mesh.indices.size());
     const auto u_max = fixed_uv(width);
@@ -1095,6 +1138,10 @@ void append_fixture(
     ArchitecturalMesh& mesh,
     BlockCoord coordinate,
     const ArchitecturalCellSample& sample) {
+    if (mesh.fixtures.size() >= kMaximumArchitecturalFixtures) {
+        throw std::length_error(
+            "architectural mesh exceeds its fixture budget");
+    }
     const auto support = torch_support_offset(sample.block_id);
     ArchitecturalFixtureInstance fixture {};
     fixture.position_x =
@@ -1204,6 +1251,74 @@ auto ArchitecturalSection::contains(BlockCoord coordinate) const noexcept -> boo
            coordinate.z >= min.z && coordinate.z <= max.z;
 }
 
+auto checked_architectural_mesh_growth(
+    std::size_t current_vertex_count,
+    std::size_t current_index_count,
+    std::size_t additional_vertex_count,
+    std::size_t additional_index_count) -> ArchitecturalMeshSize {
+    if (current_vertex_count > kMaximumArchitecturalMeshVertices ||
+        current_index_count > kMaximumArchitecturalMeshIndices ||
+        additional_vertex_count >
+            kMaximumArchitecturalMeshVertices - current_vertex_count ||
+        additional_index_count >
+            kMaximumArchitecturalMeshIndices - current_index_count) {
+        throw std::length_error(
+            "architectural mesh exceeds its shared output budget");
+    }
+    return {
+        current_vertex_count + additional_vertex_count,
+        current_index_count + additional_index_count,
+    };
+}
+
+auto checked_architectural_section_cell_count(
+    const ArchitecturalSection& section,
+    std::size_t maximum_core_cells) -> std::size_t {
+    if (!section.valid()) {
+        throw std::invalid_argument("architectural section has invalid bounds");
+    }
+    if (section.halo < 1 || section.halo > 8) {
+        throw std::invalid_argument(
+            "architectural halo must be between one and eight");
+    }
+
+    std::array<std::size_t, 3U> core_extents {};
+    for (int axis = 0; axis < 3; ++axis) {
+        auto& core_extent = core_extents[static_cast<std::size_t>(axis)];
+        core_extent = checked_extent(
+            axis_min(section, axis),
+            axis_max(section, axis));
+        if (core_extent > kMaximumSectionAxisExtent) {
+            throw std::length_error(
+                "architectural section exceeds compact UV range");
+        }
+    }
+    const auto core_cell_count = checked_volume(
+        core_extents[0],
+        core_extents[1],
+        core_extents[2],
+        maximum_core_cells,
+        "architectural section core is too large");
+
+    const BlockCoord expanded_min {
+        checked_expanded_coordinate(section.min.x, -section.halo),
+        checked_expanded_coordinate(section.min.y, -section.halo),
+        checked_expanded_coordinate(section.min.z, -section.halo),
+    };
+    const BlockCoord expanded_max {
+        checked_expanded_coordinate(section.max.x, section.halo),
+        checked_expanded_coordinate(section.max.y, section.halo),
+        checked_expanded_coordinate(section.max.z, section.halo),
+    };
+    [[maybe_unused]] const auto sampled_cell_count = checked_volume(
+        checked_extent(expanded_min.x, expanded_max.x),
+        checked_extent(expanded_min.y, expanded_max.y),
+        checked_extent(expanded_min.z, expanded_max.z),
+        kMaximumSampledCells,
+        "architectural section is too large");
+    return core_cell_count;
+}
+
 ArchitecturalMesher::ArchitecturalMesher(
     ArchitecturalMesherSettings settings) noexcept
     : settings_(settings) {}
@@ -1213,10 +1328,28 @@ auto ArchitecturalMesher::build_mesh(
     const ArchitecturalSampler& sampler,
     std::size_t vertex_reserve_hint,
     std::size_t index_reserve_hint) const -> ArchitecturalMesh {
+    // Je valide le budget de sortie avant d'echantillonner. La fusion et ses
+    // subdivisions partitionnent les faces visibles : elles ne peuvent donc
+    // jamais produire plus de six quads par cellule du coeur.
+    const auto core_cell_count = checked_architectural_section_cell_count(
+        section,
+        kMaximumArchitecturalCoreCells);
+    const auto maximum_quad_count =
+        core_cell_count * kMaximumFacesPerCell;
+    const auto maximum_vertex_count =
+        maximum_quad_count * kVerticesPerQuad;
+    const auto maximum_index_count =
+        maximum_quad_count * kIndicesPerQuad;
     const auto volume = sample_volume(section, sampler);
     ArchitecturalMesh mesh {};
-    mesh.vertices.reserve(vertex_reserve_hint);
-    mesh.indices.reserve(index_reserve_hint);
+    // Je ne fais jamais confiance aux hints publics : meme SIZE_MAX reste
+    // rabattu sur le pire cas structurel deja valide de cette section.
+    mesh.vertices.reserve(std::min(
+        vertex_reserve_hint,
+        maximum_vertex_count));
+    mesh.indices.reserve(std::min(
+        index_reserve_hint,
+        maximum_index_count));
     for (const auto& definition : kFaceDefinitions) {
         build_face_direction(
             mesh,

@@ -1,13 +1,113 @@
 #include "gameplay/BackroomsFlashlight.h"
+#include "gameplay/BackroomsSimulationTime.h"
 #include "render/Renderer.h"
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <utility>
 
 namespace valcraft {
+
+TEST_CASE("les interfaces utilisent une horloge de simulation Backrooms gelee") {
+    CHECK(backrooms_ui_freezes_simulation(false, true));
+    CHECK_FALSE(backrooms_ui_freezes_simulation(false, false));
+    CHECK_FALSE(backrooms_ui_freezes_simulation(true, true));
+
+    const auto running =
+        resolve_backrooms_frame_time(0.25F, false);
+    CHECK(running.real_delta_seconds ==
+          doctest::Approx(kBackroomsMaximumSimulationDeltaSeconds));
+    CHECK(running.simulation_delta_seconds ==
+          doctest::Approx(kBackroomsMaximumSimulationDeltaSeconds));
+    CHECK_FALSE(running.simulation_frozen);
+
+    const auto frozen =
+        resolve_backrooms_frame_time(0.016F, true);
+    CHECK(frozen.real_delta_seconds == doctest::Approx(0.016F));
+    CHECK(frozen.simulation_delta_seconds == doctest::Approx(0.0F));
+    CHECK(frozen.simulation_frozen);
+
+    const auto invalid = resolve_backrooms_frame_time(
+        std::numeric_limits<float>::infinity(),
+        false);
+    CHECK(invalid.real_delta_seconds == doctest::Approx(0.0F));
+    CHECK(invalid.simulation_delta_seconds == doctest::Approx(0.0F));
+}
+
+TEST_CASE("chaque interface Backrooms bloque la simulation") {
+    const std::array blockers {
+        BackroomsGameplayBlockers {.death_screen = true},
+        BackroomsGameplayBlockers {.pause_menu = true},
+        BackroomsGameplayBlockers {.inventory = true},
+        BackroomsGameplayBlockers {.progression = true},
+        BackroomsGameplayBlockers {.command_console = true},
+        BackroomsGameplayBlockers {.confirmation_dialog = true},
+        BackroomsGameplayBlockers {.front_end = true},
+    };
+
+    CHECK_FALSE(backrooms_gameplay_interaction_blocked({}));
+    for (const auto& blocker : blockers) {
+        CHECK(backrooms_gameplay_interaction_blocked(blocker));
+    }
+}
+
+TEST_CASE("Espace reste neutralise de la reprise jusqu'a son relachement") {
+    BackroomsResumeState state {};
+
+    const auto frozen =
+        advance_backrooms_resume_state(state, true, false);
+    CHECK(frozen.synchronize_latches);
+    CHECK_FALSE(frozen.suppress_jump);
+
+    const auto resumed_with_space =
+        advance_backrooms_resume_state(state, false, true);
+    CHECK(resumed_with_space.synchronize_latches);
+    CHECK(resumed_with_space.suppress_jump);
+
+    const auto still_held =
+        advance_backrooms_resume_state(state, false, true);
+    CHECK_FALSE(still_held.synchronize_latches);
+    CHECK(still_held.suppress_jump);
+
+    const auto released =
+        advance_backrooms_resume_state(state, false, false);
+    CHECK_FALSE(released.suppress_jump);
+
+    const auto fresh_press =
+        advance_backrooms_resume_state(state, false, true);
+    CHECK_FALSE(fresh_press.suppress_jump);
+}
+
+TEST_CASE("la validation du menu arme la reprise d'une nouvelle session") {
+    auto session_state = initialize_backrooms_resume_state(false);
+    const auto validated_with_space =
+        advance_backrooms_resume_state(session_state, false, true);
+    CHECK(validated_with_space.synchronize_latches);
+    CHECK(validated_with_space.suppress_jump);
+
+    auto smoke_state = initialize_backrooms_resume_state(true);
+    const auto smoke_input =
+        advance_backrooms_resume_state(smoke_state, false, true);
+    CHECK_FALSE(smoke_input.synchronize_latches);
+    CHECK_FALSE(smoke_input.suppress_jump);
+}
+
+TEST_CASE("une interface ouverte puis fermee dans le meme lot reste observee") {
+    BackroomsResumeState state {};
+    note_backrooms_interaction_boundary(state, true, false);
+
+    const auto resumed_with_space =
+        advance_backrooms_resume_state(state, false, true);
+    CHECK(resumed_with_space.synchronize_latches);
+    CHECK(resumed_with_space.suppress_jump);
+
+    BackroomsResumeState smoke_state {};
+    note_backrooms_interaction_boundary(smoke_state, true, true);
+    CHECK_FALSE(smoke_state.simulation_was_frozen);
+}
 
 TEST_CASE("la lampe Backrooms demarre pleine et eteinte") {
     const BackroomsFlashlightState state {};

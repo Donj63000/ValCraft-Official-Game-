@@ -4451,8 +4451,10 @@ TEST_CASE("la migration Backrooms V1 V2 vide les chunks et projette toutes les p
         seed,
         anchor,
         BackroomsSpatialProfile::LegacyV2);
-    const auto pool_spawn = legacy_stack.spawn_block(-2);
-    const auto office_spawn = legacy_stack.spawn_block(-1);
+    const auto pool_spawn = legacy_stack.spawn_block_for_level(-2);
+    const auto office_spawn = legacy_stack.spawn_block_for_level(-1);
+    REQUIRE(pool_spawn.has_value());
+    REQUIRE(office_spawn.has_value());
     const auto position_for =
         [](const BlockCoord& block) noexcept {
             return glm::vec3 {
@@ -4461,8 +4463,8 @@ TEST_CASE("la migration Backrooms V1 V2 vide les chunks et projette toutes les p
                 static_cast<float>(block.z) + 0.5F,
             };
         };
-    const auto legacy_pool_position = position_for(pool_spawn);
-    const auto legacy_office_position = position_for(office_spawn);
+    const auto legacy_pool_position = position_for(*pool_spawn);
+    const auto legacy_office_position = position_for(*office_spawn);
 
     SaveGameSnapshot v2 {};
     v2.metadata.seed = seed;

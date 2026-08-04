@@ -13,6 +13,7 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -625,12 +626,130 @@ TEST_CASE("la pile spatiale Backrooms place cinq niveaux reels autour de son anc
         CHECK(
             stack.placement_for_level(expected_levels[index]) ==
             placements[index]);
-        CHECK(
-            stack.spawn_block(expected_levels[index]).y ==
-            placements[index].floor_y + 1);
+        const auto spawn =
+            stack.spawn_block_for_level(expected_levels[index]);
+        REQUIRE(spawn.has_value());
+        CHECK(spawn->y == placements[index].floor_y + 1);
     }
     CHECK_FALSE(stack.placement_for_level(4).has_value());
     CHECK_FALSE(stack.placement_for_level(10).has_value());
+    CHECK_FALSE(stack.spawn_block_for_level(4).has_value());
+    CHECK_FALSE(stack.spawn_block_for_level(10).has_value());
+    REQUIRE(stack.spawn_block_for_level(anchor_level).has_value());
+    CHECK(
+        stack.anchor_spawn_block() ==
+        *stack.spawn_block_for_level(anchor_level));
+}
+
+TEST_CASE("la pile spatiale refuse les ancres qui ne peuvent pas contenir ses cinq niveaux") {
+    constexpr auto minimum_valid_anchor =
+        std::numeric_limits<int>::lowest() +
+        kBackroomsSpatialLevelsBelowAnchor;
+    constexpr auto maximum_valid_anchor =
+        std::numeric_limits<int>::max() -
+        kBackroomsSpatialLevelsAboveAnchor;
+
+    CHECK(BackroomsSpatialStack::is_anchor_level_representable(
+        minimum_valid_anchor));
+    CHECK(BackroomsSpatialStack::is_anchor_level_representable(
+        maximum_valid_anchor));
+    CHECK_FALSE(BackroomsSpatialStack::is_anchor_level_representable(
+        minimum_valid_anchor - 1));
+    CHECK_FALSE(BackroomsSpatialStack::is_anchor_level_representable(
+        maximum_valid_anchor + 1));
+    CHECK_NOTHROW(
+        (void)BackroomsSpatialStack(63017, minimum_valid_anchor));
+    CHECK_NOTHROW(
+        (void)BackroomsSpatialStack(63017, maximum_valid_anchor));
+    CHECK_THROWS_AS(
+        (void)BackroomsSpatialStack(
+            63017,
+            std::numeric_limits<int>::lowest()),
+        std::out_of_range);
+    CHECK_THROWS_AS(
+        (void)BackroomsSpatialStack(
+            63017,
+            std::numeric_limits<int>::max()),
+        std::out_of_range);
+}
+
+TEST_CASE("les APIs de spawn du monde distinguent ancre niveau present et niveau absent") {
+    constexpr auto anchor = 7;
+    WorldGenerator generator(
+        63017,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV4,
+        anchor);
+    World world {
+        63017,
+        1,
+        WorldGenerationProfile::Backrooms,
+        WorldGenerationVersion::BackroomsV4,
+        VisualPipeline::LegacyVoxel,
+        anchor,
+    };
+
+    const auto generator_anchor =
+        generator.backrooms_spawn_block_for_level(anchor);
+    const auto world_anchor =
+        world.backrooms_spawn_block_for_level(anchor);
+    REQUIRE(generator_anchor.has_value());
+    REQUIRE(world_anchor.has_value());
+    CHECK(generator.backrooms_anchor_spawn_block() == *generator_anchor);
+    CHECK(world.backrooms_anchor_spawn_block() == *world_anchor);
+    CHECK_FALSE(
+        generator.backrooms_spawn_block_for_level(anchor - 3));
+    CHECK_FALSE(
+        generator.backrooms_spawn_block_for_level(anchor + 3));
+    CHECK_FALSE(world.backrooms_spawn_block_for_level(anchor - 3));
+    CHECK_FALSE(world.backrooms_spawn_block_for_level(anchor + 3));
+}
+
+TEST_CASE("les requetes spatiales Backrooms echouent ferme sur les entrees numeriques invalides") {
+    const BackroomsSpatialStack stack(63017, 0);
+    constexpr auto maximum_int = std::numeric_limits<int>::max();
+    constexpr auto minimum_int = std::numeric_limits<int>::lowest();
+    constexpr auto maximum_float = std::numeric_limits<float>::max();
+    constexpr auto infinity = std::numeric_limits<float>::infinity();
+    constexpr auto nan = std::numeric_limits<float>::quiet_NaN();
+
+    CHECK_FALSE(stack.has_player_clearance(0, 40, 0, 0));
+    CHECK_FALSE(stack.has_player_clearance(0, 40, 0, -1));
+    CHECK_FALSE(stack.has_player_clearance(
+        0,
+        40,
+        0,
+        kBackroomsMaximumClearanceHeight + 1));
+    CHECK_FALSE(stack.has_player_clearance(0, maximum_int, 0, 2));
+    CHECK_FALSE(stack.has_player_clearance(0, minimum_int, 0, 2));
+
+    CHECK_FALSE(stack.has_body_clearance(nan, 40.0F, 0.0F, 2, 0.3F));
+    CHECK_FALSE(stack.has_body_clearance(0.0F, infinity, 0.0F, 2, 0.3F));
+    CHECK_FALSE(stack.has_body_clearance(0.0F, 40.0F, -infinity, 2, 0.3F));
+    CHECK_FALSE(stack.has_body_clearance(maximum_float, 40.0F, 0.0F, 2, 0.3F));
+    CHECK_FALSE(stack.has_body_clearance(0.0F, 40.0F, 0.0F, 2, nan));
+    CHECK_FALSE(stack.has_body_clearance(0.0F, 40.0F, 0.0F, 2, -0.1F));
+    CHECK_FALSE(stack.has_body_clearance(
+        0.0F,
+        40.0F,
+        0.0F,
+        2,
+        kBackroomsMaximumClearanceHalfWidth + 0.1F));
+
+    CHECK_FALSE(stack.connection_for_district(
+        0,
+        maximum_int,
+        maximum_int).has_value());
+    CHECK_FALSE(stack.connection_for_district(
+        0,
+        minimum_int,
+        minimum_int).has_value());
+    CHECK(
+        stack.sample_block(maximum_int, 40, maximum_int) ==
+        stack.sample_block(maximum_int, 40, maximum_int));
+    CHECK(
+        stack.sample_block(minimum_int, 40, minimum_int) ==
+        stack.sample_block(minimum_int, 40, minimum_int));
 }
 
 TEST_CASE("la pile V3 reserve la base des Poolrooms aux fonds encaisses") {
@@ -694,20 +813,21 @@ TEST_CASE("la pile V3 reserve la base des Poolrooms aux fonds encaisses") {
                 WaterState {0});
 
             const auto spawn =
-                stack.spawn_block(placement.logical_level);
-            CHECK(spawn.y == placement.floor_y + 1);
+                stack.spawn_block_for_level(placement.logical_level);
+            REQUIRE(spawn.has_value());
+            CHECK(spawn->y == placement.floor_y + 1);
             CHECK(
                 is_block_collidable(
                     stack.sample_block(
-                        spawn.x,
+                        spawn->x,
                         placement.floor_y,
-                        spawn.z)));
+                        spawn->z)));
             CHECK(
                 is_block_collidable(
                     stack.sample_block(
-                        spawn.x,
+                        spawn->x,
                         placement.base_y,
-                        spawn.z)));
+                        spawn->z)));
         }
     }
 
@@ -730,7 +850,9 @@ TEST_CASE("la pile V4 contient les nappes continues et les bassins profonds dans
     REQUIRE(placement.has_value());
     REQUIRE(placement->theme == BackroomsTheme::Poolrooms);
     CHECK(placement->floor_y == placement->base_y + 2);
-    CHECK(stack.spawn_block(anchor).y == placement->floor_y + 1);
+    const auto spawn = stack.spawn_block_for_level(anchor);
+    REQUIRE(spawn.has_value());
+    CHECK(spawn->y == placement->floor_y + 1);
 
     const BackroomsGenerator generator(
         seed,
@@ -1271,7 +1393,7 @@ TEST_CASE("le hub Backrooms offre toujours une montee et une descente visibles")
             CAPTURE(seed);
             CAPTURE(anchor);
             const BackroomsSpatialStack stack(seed, anchor);
-            const auto spawn = stack.spawn_block(anchor);
+            const auto spawn = stack.anchor_spawn_block();
             const auto district_x =
                 spawn.x / district_world_size;
             const auto district_z =
@@ -1343,7 +1465,9 @@ TEST_CASE("le hub Backrooms offre toujours une montee et une descente visibles")
                         ascent->lower_landing.z)));
 
             const auto upper_hub =
-                stack.spawn_block(placements[3].logical_level);
+                stack.spawn_block_for_level(
+                    placements[3].logical_level);
+            REQUIRE(upper_hub.has_value());
             const auto escape_x =
                 ascent->upper_landing.x + 4;
             const auto check_approach_cell =
@@ -1371,14 +1495,14 @@ TEST_CASE("le hub Backrooms offre toujours une montee et une descente visibles")
                     ascent->upper_landing.z);
             }
             for (int z = ascent->upper_landing.z;
-                 z <= upper_hub.z;
+                 z <= upper_hub->z;
                  ++z) {
                 check_approach_cell(escape_x, z);
             }
-            for (int x = upper_hub.x;
+            for (int x = upper_hub->x;
                  x <= escape_x;
                  ++x) {
-                check_approach_cell(x, upper_hub.z);
+                check_approach_cell(x, upper_hub->z);
             }
         }
     }

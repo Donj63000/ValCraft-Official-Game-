@@ -844,6 +844,53 @@ TEST_CASE("la ligne de vue de Jack refuse une origine muree et une traversee hor
         clear_but_excessive_origin + glm::vec3 {0.0F, 5000.0F, 0.0F}));
 }
 
+TEST_CASE("la grille de Jack refuse les chunks dont le domaine deborde") {
+    const BackroomsGenerator generator(7331);
+    constexpr std::array<ChunkCoord, 2U> extreme_centers {{
+        {std::numeric_limits<int>::lowest(),
+         std::numeric_limits<int>::lowest()},
+        {std::numeric_limits<int>::max(),
+         std::numeric_limits<int>::max()},
+    }};
+
+    for (const auto center : extreme_centers) {
+        CAPTURE(center.x);
+        CAPTURE(center.z);
+        const auto grid =
+            build_backrooms_jack_navigation_grid(generator, center);
+        CHECK(grid.center_chunk == center);
+        CHECK(std::none_of(
+            grid.cells.begin(),
+            grid.cells.end(),
+            [](const BackroomsJackNavigationCell& cell) {
+                return cell.walkable;
+            }));
+        CHECK(backrooms_jack_navigation_cell(
+                  grid,
+                  center.x,
+                  center.z) == nullptr);
+    }
+}
+
+TEST_CASE("les APIs de navigation de Jack refusent une grille au domaine forge") {
+    BackroomsJackNavigationGrid grid {};
+    grid.origin_world_x = std::numeric_limits<int>::max();
+    grid.origin_world_z = std::numeric_limits<int>::max();
+    grid.cells.front().walkable = true;
+
+    const BackroomsJackGridPoint origin {
+        grid.origin_world_x,
+        grid.origin_world_z,
+    };
+    CHECK(backrooms_jack_navigation_cell(
+              grid,
+              origin.x,
+              origin.z) == nullptr);
+    const auto path = find_backrooms_jack_path(grid, origin, origin);
+    CHECK(path.count == 0U);
+    CHECK(path.empty());
+}
+
 TEST_CASE("le spawn psychologique reste accessible pret et deterministe") {
     const BackroomsGenerator generator {7331};
     const auto spawn = generator.spawn_block();

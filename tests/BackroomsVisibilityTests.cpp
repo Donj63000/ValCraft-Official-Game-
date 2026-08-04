@@ -830,16 +830,21 @@ TEST_CASE(
 
     const auto state_at_module_center =
         [&](int module_x, int module_z, bool poolrooms) {
+            const BackroomsGenerationContext generation_context {
+                .seed = seed,
+                .theme = poolrooms
+                             ? BackroomsTheme::Poolrooms
+                             : BackroomsTheme::Offices,
+            };
             return make_backrooms_environment_state(
                 17.0F,
-                seed,
+                generation_context,
                 static_cast<float>(
                     module_x * kBackroomsModuleSize +
                     kBackroomsModuleSize / 2),
                 static_cast<float>(
                     module_z * kBackroomsModuleSize +
-                    kBackroomsModuleSize / 2),
-                poolrooms);
+                    kBackroomsModuleSize / 2));
         };
 
     CHECK(
@@ -922,16 +927,22 @@ TEST_CASE(
         kBackroomsModuleSize);
     const auto sample =
         [&](float offset, bool poolrooms) {
+            const BackroomsGenerationContext generation_context {
+                .seed = seed,
+                .theme = poolrooms
+                             ? BackroomsTheme::Poolrooms
+                             : BackroomsTheme::Offices,
+            };
             return make_backrooms_environment_state(
                 23.0F,
-                seed,
+                generation_context,
                 boundary_along_x
                     ? boundary_coordinate + offset
                     : fixed_x,
                 boundary_along_x
                     ? fixed_z
-                    : boundary_coordinate + offset,
-                poolrooms).interior_visibility_floor;
+                    : boundary_coordinate + offset)
+                .interior_visibility_floor;
         };
 
     for (const auto& [poolrooms, normal_floor] :

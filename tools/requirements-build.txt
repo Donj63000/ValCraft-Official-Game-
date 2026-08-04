@@ -1,0 +1,4 @@
+# Je verrouille le moteur de templates utilise pour generer exactement le meme
+# chargeur glad2 sur chaque poste et dans la CI.
+Jinja2==3.1.6
+MarkupSafe==3.0.3

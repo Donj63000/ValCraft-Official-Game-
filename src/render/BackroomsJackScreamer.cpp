@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <fstream>
 #include <limits>
+#include <new>
+#include <span>
 #include <string_view>
 #include <system_error>
 
@@ -15,9 +17,16 @@ namespace {
 constexpr auto kMaximumScreamerDimension = 8'192;
 constexpr auto kBitmapFileHeaderBytes = 14U;
 constexpr auto kBitmapInfoHeaderBytes = 40U;
+constexpr std::uint64_t kMebibyte = UINT64_C(1'048'576);
+constexpr std::uint64_t kMaximumDecodedImageBytes =
+    UINT64_C(64) * kMebibyte;
+constexpr std::uint64_t kMaximumBitmapMetadataBytes =
+    UINT64_C(1) * kMebibyte;
+constexpr std::uint64_t kMaximumScreamerFileBytes =
+    kMaximumDecodedImageBytes + kMaximumBitmapMetadataBytes;
 
 [[nodiscard]] auto read_u16(
-    const std::vector<std::uint8_t>& bytes,
+    std::span<const std::uint8_t> bytes,
     std::size_t offset) noexcept -> std::uint16_t {
     if (offset > bytes.size() || bytes.size() - offset < 2U) {
         return 0U;
@@ -28,7 +37,7 @@ constexpr auto kBitmapInfoHeaderBytes = 40U;
 }
 
 [[nodiscard]] auto read_u32(
-    const std::vector<std::uint8_t>& bytes,
+    std::span<const std::uint8_t> bytes,
     std::size_t offset) noexcept -> std::uint32_t {
     if (offset > bytes.size() || bytes.size() - offset < 4U) {
         return 0U;
@@ -40,9 +49,36 @@ constexpr auto kBitmapInfoHeaderBytes = 40U;
 }
 
 [[nodiscard]] auto read_i32(
-    const std::vector<std::uint8_t>& bytes,
+    std::span<const std::uint8_t> bytes,
     std::size_t offset) noexcept -> std::int32_t {
     return static_cast<std::int32_t>(read_u32(bytes, offset));
+}
+
+[[nodiscard]] auto checked_add(
+    std::uint64_t left,
+    std::uint64_t right,
+    std::uint64_t& result) noexcept -> bool {
+
+    if (left >
+        std::numeric_limits<std::uint64_t>::max() - right) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+[[nodiscard]] auto checked_multiply(
+    std::uint64_t left,
+    std::uint64_t right,
+    std::uint64_t& result) noexcept -> bool {
+
+    if (left != 0U &&
+        right >
+            std::numeric_limits<std::uint64_t>::max() / left) {
+        return false;
+    }
+    result = left * right;
+    return true;
 }
 
 [[nodiscard]] auto failure(std::string message)
@@ -63,33 +99,43 @@ constexpr auto kBitmapInfoHeaderBytes = 40U;
             path.string());
     }
 
-    const auto file_size = stream.tellg();
-    if (file_size < 0 ||
-        static_cast<std::uint64_t>(file_size) >
-            static_cast<std::uint64_t>(
-                std::numeric_limits<std::size_t>::max())) {
+    const auto file_position = stream.tellg();
+    if (file_position < 0) {
         return failure("Taille BMP invalide pour le screamer de " + owner);
     }
-    const auto byte_count = static_cast<std::size_t>(file_size);
-    if (byte_count < kBitmapFileHeaderBytes + kBitmapInfoHeaderBytes) {
+    const auto file_size =
+        static_cast<std::uint64_t>(file_position);
+    if (file_size <
+        static_cast<std::uint64_t>(
+            kBitmapFileHeaderBytes + kBitmapInfoHeaderBytes)) {
         return failure("BMP de " + owner + " tronque avant son en-tete");
     }
+    // Je refuse la ressource avant toute allocation proportionnelle au fichier.
+    // Le budget laisse 64 Mio de pixels décodés et 1 Mio de métadonnées BMP.
+    if (file_size > kMaximumScreamerFileBytes) {
+        return failure(
+            "Le fichier BMP de " + owner +
+            " depasse la limite de securite");
+    }
 
-    std::vector<std::uint8_t> bytes(byte_count);
+    std::array<std::uint8_t,
+               kBitmapFileHeaderBytes + kBitmapInfoHeaderBytes> header {};
     stream.seekg(0, std::ios::beg);
     if (!stream.read(
-            reinterpret_cast<char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()))) {
-        return failure("Lecture incomplete du BMP de " + owner);
+            reinterpret_cast<char*>(header.data()),
+            static_cast<std::streamsize>(header.size()))) {
+        return failure("Lecture incomplete de l'en-tete BMP de " + owner);
     }
+    const auto bytes = std::span<const std::uint8_t> {header};
 
     if (bytes[0] != static_cast<std::uint8_t>('B') ||
         bytes[1] != static_cast<std::uint8_t>('M')) {
         return failure(
             "La ressource du screamer de " + owner + " n'est pas un BMP");
     }
+    const auto declared_file_size = read_u32(bytes, 2U);
     const auto pixel_offset =
-        static_cast<std::size_t>(read_u32(bytes, 10U));
+        static_cast<std::uint64_t>(read_u32(bytes, 10U));
     const auto dib_size = read_u32(bytes, 14U);
     const auto width_signed = read_i32(bytes, 18U);
     const auto height_signed = read_i32(bytes, 22U);
@@ -118,51 +164,112 @@ constexpr auto kBitmapInfoHeaderBytes = 40U;
     }
 
     const auto bytes_per_pixel =
-        static_cast<std::size_t>(bits_per_pixel / 8U);
-    const auto width_size = static_cast<std::size_t>(width);
-    const auto height_size = static_cast<std::size_t>(height);
-    if (width_size >
-        (std::numeric_limits<std::size_t>::max() - 3U) /
-            bytes_per_pixel) {
+        static_cast<std::uint64_t>(bits_per_pixel / 8U);
+    std::uint64_t row_bytes = 0U;
+    std::uint64_t padded_row_bytes = 0U;
+    if (!checked_multiply(width, bytes_per_pixel, row_bytes) ||
+        !checked_add(row_bytes, 3U, padded_row_bytes)) {
         return failure("Debordement de ligne dans le BMP de " + owner);
     }
     const auto row_stride =
-        (width_size * bytes_per_pixel + 3U) & ~std::size_t{3U};
-    if (height_size != 0U &&
-        row_stride >
-            (std::numeric_limits<std::size_t>::max() - pixel_offset) /
-                height_size) {
+        padded_row_bytes & ~UINT64_C(3);
+    std::uint64_t pixel_data_bytes = 0U;
+    std::uint64_t required_bytes = 0U;
+    if (!checked_multiply(row_stride, height, pixel_data_bytes) ||
+        !checked_add(
+            pixel_offset,
+            pixel_data_bytes,
+            required_bytes)) {
         return failure("Debordement de pixels dans le BMP de " + owner);
     }
-    const auto required_bytes = pixel_offset + row_stride * height_size;
-    if (pixel_offset < kBitmapFileHeaderBytes + dib_size ||
-        required_bytes > bytes.size()) {
+
+    std::uint64_t minimum_pixel_offset = 0U;
+    if (!checked_add(
+            kBitmapFileHeaderBytes,
+            dib_size,
+            minimum_pixel_offset) ||
+        minimum_pixel_offset > kMaximumBitmapMetadataBytes ||
+        pixel_offset < minimum_pixel_offset ||
+        pixel_offset > kMaximumBitmapMetadataBytes) {
+        return failure(
+            "En-tete BMP trop grand pour le screamer de " + owner);
+    }
+    if (required_bytes > file_size) {
         return failure("Pixels BMP tronques pour le screamer de " + owner);
     }
-    if (width_size >
-        std::numeric_limits<std::size_t>::max() /
-            std::max<std::size_t>(height_size * 4U, 1U)) {
+
+    if (declared_file_size != 0U &&
+        (static_cast<std::uint64_t>(declared_file_size) < required_bytes ||
+         static_cast<std::uint64_t>(declared_file_size) > file_size)) {
+        return failure(
+            "Taille declaree incoherente dans le BMP de " + owner);
+    }
+
+    std::uint64_t pixel_count = 0U;
+    std::uint64_t decoded_bytes = 0U;
+    if (!checked_multiply(width, height, pixel_count) ||
+        !checked_multiply(pixel_count, 4U, decoded_bytes) ||
+        decoded_bytes > kMaximumDecodedImageBytes ||
+        decoded_bytes >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::size_t>::max())) {
         return failure("Image BMP de " + owner + " trop grande");
+    }
+    if (row_stride >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::size_t>::max()) ||
+        row_stride >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::streamsize>::max()) ||
+        pixel_offset >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::streamoff>::max())) {
+        return failure("Taille BMP non representable pour le screamer de " + owner);
     }
 
     BackroomsJackScreamerImage image {};
     image.width = static_cast<int>(width);
     image.height = static_cast<int>(height);
-    image.rgba.resize(width_size * height_size * 4U);
+    std::vector<std::uint8_t> source_row {};
+    try {
+        image.rgba.resize(
+            static_cast<std::size_t>(decoded_bytes));
+        source_row.resize(
+            static_cast<std::size_t>(row_stride));
+    } catch (const std::bad_alloc&) {
+        return failure(
+            "Memoire insuffisante pour decoder le BMP de " + owner);
+    }
+
+    stream.seekg(
+        static_cast<std::streamoff>(pixel_offset),
+        std::ios::beg);
+    if (!stream) {
+        return failure("Offset de pixels BMP invalide pour " + owner);
+    }
+
+    const auto width_size = static_cast<std::size_t>(width);
+    const auto height_size = static_cast<std::size_t>(height);
+    const auto bytes_per_pixel_size =
+        static_cast<std::size_t>(bytes_per_pixel);
     const auto source_is_top_down = height_signed < 0;
-    for (std::size_t destination_y = 0U;
-         destination_y < height_size;
-         ++destination_y) {
-        const auto source_y =
+    for (std::size_t source_y = 0U;
+         source_y < height_size;
+         ++source_y) {
+        if (!stream.read(
+                reinterpret_cast<char*>(source_row.data()),
+                static_cast<std::streamsize>(source_row.size()))) {
+            return failure("Pixels BMP tronques pour le screamer de " + owner);
+        }
+        const auto destination_y =
             source_is_top_down
-                ? destination_y
-                : height_size - 1U - destination_y;
-        const auto* source_row =
-            bytes.data() + pixel_offset + source_y * row_stride;
+                ? source_y
+                : height_size - 1U - source_y;
         auto* destination_row =
             image.rgba.data() + destination_y * width_size * 4U;
         for (std::size_t x = 0U; x < width_size; ++x) {
-            const auto* source = source_row + x * bytes_per_pixel;
+            const auto* source =
+                source_row.data() + x * bytes_per_pixel_size;
             auto* destination = destination_row + x * 4U;
             destination[0] = source[2];
             destination[1] = source[1];

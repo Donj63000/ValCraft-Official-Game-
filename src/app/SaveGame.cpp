@@ -2353,13 +2353,16 @@ void migrate_backrooms_snapshot_to_v3(
     SaveGameSnapshot& snapshot,
     WorldGenerationVersion source_version,
     int logical_level) noexcept {
+    if (!BackroomsSpatialStack::is_anchor_level_representable(
+            logical_level)) {
+        return;
+    }
     const auto seed = snapshot.metadata.seed;
     const BackroomsSpatialStack target_stack(
         seed,
         logical_level,
         BackroomsSpatialProfile::RecessedPoolroomsV3);
-    const auto fallback_block =
-        target_stack.spawn_block(logical_level);
+    const auto fallback_block = target_stack.anchor_spawn_block();
     const auto fallback = glm::vec3 {
         static_cast<float>(fallback_block.x) + 0.5F,
         static_cast<float>(fallback_block.y) + 0.001F,

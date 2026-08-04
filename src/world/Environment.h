@@ -1,5 +1,7 @@
 #pragma once
 
+#include "world/WorldGenerator.h"
+
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
@@ -74,10 +76,9 @@ struct EnvironmentState {
 
 [[nodiscard]] auto make_backrooms_environment_state(
     float elapsed_seconds,
-    int seed,
+    const BackroomsGenerationContext& generation_context,
     float player_x,
-    float player_z,
-    bool poolrooms = false) noexcept -> EnvironmentState;
+    float player_z) noexcept -> EnvironmentState;
 
 enum class CreaturePhase : unsigned char {
     Day = 0,

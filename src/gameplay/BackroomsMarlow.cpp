@@ -112,9 +112,14 @@ struct OccluderSelection {
 [[nodiscard]] auto horizontal_distance(
     const glm::vec3& first,
     const glm::vec3& second) noexcept -> float {
-    const auto delta_x = first.x - second.x;
-    const auto delta_z = first.z - second.z;
-    return std::sqrt(delta_x * delta_x + delta_z * delta_z);
+    const auto delta_x =
+        static_cast<double>(first.x) - second.x;
+    const auto delta_z =
+        static_cast<double>(first.z) - second.z;
+    const auto distance = std::hypot(delta_x, delta_z);
+    return static_cast<float>(std::min(
+        distance,
+        static_cast<double>(std::numeric_limits<float>::max())));
 }
 
 [[nodiscard]] constexpr auto floor_division(
@@ -138,17 +143,33 @@ struct OccluderSelection {
         static_cast<double>(std::numeric_limits<int>::max())));
 }
 
-[[nodiscard]] auto saturating_int(std::int64_t value) noexcept -> int {
-    return static_cast<int>(std::clamp(
-        value,
-        static_cast<std::int64_t>(std::numeric_limits<int>::lowest()),
-        static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+[[nodiscard]] constexpr auto checked_int(std::int64_t value) noexcept
+    -> std::optional<int> {
+    if (value < std::numeric_limits<int>::lowest() ||
+        value > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+[[nodiscard]] constexpr auto checked_offset(
+    BackroomsMarlowGridPoint point,
+    int delta_x,
+    int delta_z) noexcept -> std::optional<BackroomsMarlowGridPoint> {
+    const auto x = checked_int(
+        static_cast<std::int64_t>(point.x) + delta_x);
+    const auto z = checked_int(
+        static_cast<std::int64_t>(point.z) + delta_z);
+    if (!x.has_value() || !z.has_value()) {
+        return std::nullopt;
+    }
+    return BackroomsMarlowGridPoint {*x, *z};
 }
 
 [[nodiscard]] auto translated_world_y(
     int local_y,
-    int world_y_offset) noexcept -> int {
-    return saturating_int(
+    int world_y_offset) noexcept -> std::optional<int> {
+    return checked_int(
         static_cast<std::int64_t>(local_y) +
         static_cast<std::int64_t>(world_y_offset));
 }
@@ -161,9 +182,15 @@ struct OccluderSelection {
     int local_y,
     int world_z) -> BlockId {
     if (spatial_world != nullptr) {
+        const auto world_y = translated_world_y(
+            local_y,
+            spatial_world_y_offset);
+        if (!world_y.has_value()) {
+            return to_block_id(BlockType::BackroomsConcrete);
+        }
         return spatial_world->peek_block_or_generated(
             world_x,
-            translated_world_y(local_y, spatial_world_y_offset),
+            *world_y,
             world_z);
     }
     return generator.sample_block(world_x, local_y, world_z);
@@ -177,9 +204,15 @@ struct OccluderSelection {
     int local_y,
     int world_z) -> std::uint8_t {
     if (spatial_world != nullptr) {
+        const auto world_y = translated_world_y(
+            local_y,
+            spatial_world_y_offset);
+        if (!world_y.has_value()) {
+            return 0U;
+        }
         return spatial_world->peek_water_level_or_generated(
             world_x,
-            translated_world_y(local_y, spatial_world_y_offset),
+            *world_y,
             world_z);
     }
     return water_level_from_state(
@@ -194,7 +227,13 @@ struct OccluderSelection {
 
 [[nodiscard]] auto navigation_grid_has_valid_shape(
     const BackroomsMarlowNavigationGrid& grid) noexcept -> bool {
-    return grid.cells.size() == kBackroomsMarlowNavigationCellCount;
+    return grid.cells.size() == kBackroomsMarlowNavigationCellCount &&
+           static_cast<std::int64_t>(grid.origin_world_x) +
+                   kBackroomsMarlowNavigationSide - 1 <=
+               std::numeric_limits<int>::max() &&
+           static_cast<std::int64_t>(grid.origin_world_z) +
+                   kBackroomsMarlowNavigationSide - 1 <=
+               std::numeric_limits<int>::max();
 }
 
 [[nodiscard]] auto grid_local_coordinates(
@@ -245,9 +284,9 @@ struct OccluderSelection {
     const auto local_z = index / kBackroomsMarlowNavigationSide;
     const auto local_x = index % kBackroomsMarlowNavigationSide;
     return {
-        saturating_int(
+        static_cast<int>(
             static_cast<std::int64_t>(grid.origin_world_x) + local_x),
-        saturating_int(
+        static_cast<int>(
             static_cast<std::int64_t>(grid.origin_world_z) + local_z),
     };
 }
@@ -482,13 +521,16 @@ struct OccluderSelection {
     const BackroomsMarlowNavigationGrid& grid,
     const BackroomsMarlowChunkReadiness* readiness,
     BackroomsMarlowGridPoint point) noexcept -> int {
+    if (!navigation_grid_has_valid_shape(grid)) {
+        return -1;
+    }
     const auto exact = point_index(grid, point);
     if (exact >= 0 && marlow_point_is_navigable(grid, readiness, point)) {
         return exact;
     }
 
     auto best_index = -1;
-    auto best_distance = std::numeric_limits<std::int64_t>::max();
+    auto best_distance = std::numeric_limits<double>::infinity();
     for (std::size_t index = 0U; index < grid.cells.size(); ++index) {
         if (!grid.cells[index].walkable) {
             continue;
@@ -499,9 +541,9 @@ struct OccluderSelection {
             continue;
         }
         const auto delta_x =
-            static_cast<std::int64_t>(candidate.x) - point.x;
+            static_cast<double>(candidate.x) - point.x;
         const auto delta_z =
-            static_cast<std::int64_t>(candidate.z) - point.z;
+            static_cast<double>(candidate.z) - point.z;
         const auto distance = delta_x * delta_x + delta_z * delta_z;
         if (distance < best_distance) {
             best_distance = distance;
@@ -516,7 +558,11 @@ struct OccluderSelection {
     const BackroomsMarlowChunkReadiness* readiness,
     BackroomsMarlowGridPoint from,
     BackroomsMarlowGridPoint to) noexcept -> bool {
-    if (std::abs(from.x - to.x) + std::abs(from.z - to.z) != 1) {
+    const auto delta_x =
+        static_cast<std::int64_t>(from.x) - to.x;
+    const auto delta_z =
+        static_cast<std::int64_t>(from.z) - to.z;
+    if (std::abs(delta_x) + std::abs(delta_z) != 1) {
         return false;
     }
     const auto* from_cell = backrooms_marlow_navigation_cell(
@@ -540,9 +586,11 @@ struct OccluderSelection {
     // être dans une cellule alors que son épaule est déjà dans la suivante.
     // Le vérifier supprime les traversées de murs et les couloirs trop étroits.
     const auto midpoint_x =
-        (static_cast<float>(from.x + to.x) + 1.0F) * 0.5F;
+        static_cast<float>(
+            (static_cast<double>(from.x) + to.x + 1.0) * 0.5);
     const auto midpoint_z =
-        (static_cast<float>(from.z + to.z) + 1.0F) * 0.5F;
+        static_cast<float>(
+            (static_cast<double>(from.z) + to.z + 1.0) * 0.5);
     const auto midpoint_floor =
         (from_cell->floor_y + to_cell->floor_y) * 0.5F;
     return marlow_body_footprint_clear(
@@ -563,10 +611,14 @@ struct OccluderSelection {
         for (auto delta_x = -kBackroomsMarlowNavigationChunkRadius;
              delta_x <= kBackroomsMarlowNavigationChunkRadius;
              ++delta_x) {
-            const ChunkCoord chunk {
-                navigation_center.x + delta_x,
-                navigation_center.z + delta_z,
-            };
+            const auto chunk_x = checked_int(
+                static_cast<std::int64_t>(navigation_center.x) + delta_x);
+            const auto chunk_z = checked_int(
+                static_cast<std::int64_t>(navigation_center.z) + delta_z);
+            if (!chunk_x.has_value() || !chunk_z.has_value()) {
+                return false;
+            }
+            const ChunkCoord chunk {*chunk_x, *chunk_z};
             const auto left_index = readiness_index(left, chunk);
             const auto right_index = readiness_index(right, chunk);
             if (left_index < 0 || right_index < 0) {
@@ -616,18 +668,21 @@ struct OccluderSelection {
         for (std::size_t direction = 0U;
              direction < delta_x.size();
              ++direction) {
-            const BackroomsMarlowGridPoint neighbor {
-                current.x + delta_x[direction],
-                current.z + delta_z[direction],
-            };
-            const auto neighbor_index = point_index(grid, neighbor);
+            const auto neighbor = checked_offset(
+                current,
+                delta_x[direction],
+                delta_z[direction]);
+            if (!neighbor.has_value()) {
+                continue;
+            }
+            const auto neighbor_index = point_index(grid, *neighbor);
             if (neighbor_index < 0 ||
                 neighbor_index == blocked_index ||
                 !marlow_transition_allowed(
                     grid,
                     readiness,
                     current,
-                    neighbor)) {
+                    *neighbor)) {
                 continue;
             }
             const auto offset = static_cast<std::size_t>(neighbor_index);
@@ -664,9 +719,12 @@ struct OccluderSelection {
 [[nodiscard]] auto manhattan(
     BackroomsMarlowGridPoint first,
     BackroomsMarlowGridPoint second) noexcept -> float {
+    const auto delta_x = std::abs(
+        static_cast<std::int64_t>(first.x) - second.x);
+    const auto delta_z = std::abs(
+        static_cast<std::int64_t>(first.z) - second.z);
     return static_cast<float>(
-        std::abs(first.x - second.x) +
-        std::abs(first.z - second.z));
+        static_cast<double>(delta_x) + delta_z);
 }
 
 [[nodiscard]] auto has_adjacent_occluder(
@@ -679,10 +737,17 @@ struct OccluderSelection {
         {0, -1},
     }};
     for (const auto offset : offsets) {
+        const auto candidate = checked_offset(
+            point,
+            offset.x,
+            offset.z);
+        if (!candidate.has_value()) {
+            continue;
+        }
         const auto* neighbor = backrooms_marlow_navigation_cell(
             grid,
-            point.x + offset.x,
-            point.z + offset.z);
+            candidate->x,
+            candidate->z);
         if (neighbor != nullptr && !neighbor->walkable) {
             return true;
         }
@@ -707,10 +772,17 @@ struct OccluderSelection {
     auto best_alignment = 0.0F;
     OccluderSelection selected {};
     for (const auto offset : offsets) {
+        const auto candidate = checked_offset(
+            point,
+            offset.x,
+            offset.z);
+        if (!candidate.has_value()) {
+            continue;
+        }
         const auto* neighbor = backrooms_marlow_navigation_cell(
             grid,
-            point.x + offset.x,
-            point.z + offset.z);
+            candidate->x,
+            candidate->z);
         if (neighbor == nullptr || neighbor->walkable) {
             continue;
         }
@@ -741,6 +813,11 @@ struct OccluderSelection {
         std::numeric_limits<int>::lowest(),
         std::numeric_limits<int>::lowest(),
     };
+    if (!std::isfinite(maximum_distance) || maximum_distance < 0.0F ||
+        maximum_distance >
+            static_cast<float>(kBackroomsMarlowNavigationSide)) {
+        return best;
+    }
     auto best_distance = std::numeric_limits<float>::infinity();
     const auto radius = static_cast<int>(std::ceil(maximum_distance));
     for (auto delta_z = -radius; delta_z <= radius; ++delta_z) {
@@ -750,22 +827,25 @@ struct OccluderSelection {
             if (distance > maximum_distance || distance >= best_distance) {
                 continue;
             }
-            const BackroomsMarlowGridPoint candidate {
-                origin.x + delta_x,
-                origin.z + delta_z,
-            };
+            const auto candidate = checked_offset(
+                origin,
+                delta_x,
+                delta_z);
+            if (!candidate.has_value()) {
+                continue;
+            }
             const auto* cell = backrooms_marlow_navigation_cell(
                 grid,
-                candidate.x,
-                candidate.z);
+                candidate->x,
+                candidate->z);
             if (cell == nullptr ||
                 !cell->walkable ||
                 !cell->has_water ||
                 cell->water_depth < minimum_water_depth ||
-                !point_ready(readiness, candidate)) {
+                !point_ready(readiness, *candidate)) {
                 continue;
             }
-            best = candidate;
+            best = *candidate;
             best_distance = distance;
         }
     }
@@ -1423,20 +1503,35 @@ void rebuild_backrooms_marlow_navigation_grid(
     int spatial_world_y_offset) {
     // Je redimensionne le buffer existant : apres un reset, sa capacite de
     // 6 400 cellules est reutilisee sans nouvelle allocation.
-    grid.cells.resize(kBackroomsMarlowNavigationCellCount);
+    grid.cells.assign(
+        kBackroomsMarlowNavigationCellCount,
+        BackroomsMarlowNavigationCell {});
     grid.center_chunk = center_chunk;
     grid.logical_level = static_cast<std::int32_t>(std::clamp<std::int64_t>(
         generator.logical_level(),
         kMinimumLogicalLevel,
         kMaximumLogicalLevel));
-    grid.origin_world_x = saturating_int(
+    const auto origin_world_x = checked_int(
         (static_cast<std::int64_t>(center_chunk.x) -
          kBackroomsMarlowNavigationChunkRadius) *
         kChunkSizeX);
-    grid.origin_world_z = saturating_int(
+    const auto origin_world_z = checked_int(
         (static_cast<std::int64_t>(center_chunk.z) -
          kBackroomsMarlowNavigationChunkRadius) *
         kChunkSizeZ);
+    if (!origin_world_x.has_value() || !origin_world_z.has_value() ||
+        static_cast<std::int64_t>(*origin_world_x) +
+                kBackroomsMarlowNavigationSide - 1 >
+            std::numeric_limits<int>::max() ||
+        static_cast<std::int64_t>(*origin_world_z) +
+                kBackroomsMarlowNavigationSide - 1 >
+            std::numeric_limits<int>::max()) {
+        grid.origin_world_x = 0;
+        grid.origin_world_z = 0;
+        return;
+    }
+    grid.origin_world_x = *origin_world_x;
+    grid.origin_world_z = *origin_world_z;
 
     for (auto local_z = 0;
          local_z < kBackroomsMarlowNavigationSide;
@@ -1444,9 +1539,9 @@ void rebuild_backrooms_marlow_navigation_grid(
         for (auto local_x = 0;
              local_x < kBackroomsMarlowNavigationSide;
              ++local_x) {
-            const auto world_x = saturating_int(
+            const auto world_x = static_cast<int>(
                 static_cast<std::int64_t>(grid.origin_world_x) + local_x);
-            const auto world_z = saturating_int(
+            const auto world_z = static_cast<int>(
                 static_cast<std::int64_t>(grid.origin_world_z) + local_z);
             const auto column = generator.sample_column(world_x, world_z);
             const auto floor_y = static_cast<float>(column.floor_y + 1);
@@ -1560,6 +1655,9 @@ namespace {
     BackroomsMarlowGridPoint start,
     BackroomsMarlowGridPoint goal) -> BackroomsMarlowPath {
     BackroomsMarlowPath path {};
+    if (!navigation_grid_has_valid_shape(grid)) {
+        return path;
+    }
     const auto start_index = nearest_navigable_index(
         grid,
         readiness,
@@ -1610,17 +1708,20 @@ namespace {
         for (std::size_t direction = 0U;
              direction < kDeltaX.size();
              ++direction) {
-            const BackroomsMarlowGridPoint neighbor_point {
-                current_point.x + kDeltaX[direction],
-                current_point.z + kDeltaZ[direction],
-            };
-            const auto neighbor_index = point_index(grid, neighbor_point);
+            const auto neighbor_point = checked_offset(
+                current_point,
+                kDeltaX[direction],
+                kDeltaZ[direction]);
+            if (!neighbor_point.has_value()) {
+                continue;
+            }
+            const auto neighbor_index = point_index(grid, *neighbor_point);
             if (neighbor_index < 0 ||
                 !marlow_transition_allowed(
                     grid,
                     readiness,
                     current_point,
-                    neighbor_point)) {
+                    *neighbor_point)) {
                 continue;
             }
             const auto neighbor_offset =
@@ -1642,7 +1743,7 @@ namespace {
             costs[neighbor_offset] = candidate_cost;
             parents[neighbor_offset] = current.index;
             const auto heuristic =
-                manhattan(neighbor_point, resolved_goal) * 0.50F;
+                manhattan(*neighbor_point, resolved_goal) * 0.50F;
             open.push({
                 neighbor_index,
                 candidate_cost + heuristic,
@@ -2556,17 +2657,34 @@ auto update_backrooms_marlow(
         return lifecycle;
     }
 
+    const auto safe_dt = clamp_finite(
+        dt,
+        0.0F,
+        0.0F,
+        kMaximumAcceptedDeltaSeconds);
+    if (context.simulation_frozen || safe_dt <= 0.0F) {
+        // Je synchronise le verrou d'entree pendant le gel afin que la reprise
+        // ne transforme pas un etat deja actif en nouveau front de Maglite.
+        runtime.previous_flashlight_on_water =
+            context.player.flashlight_on_water;
+        // Je fournis les vues courantes avant toute reconstruction ou avancee
+        // de simulation, sans publier d'intention nouvelle vers l'arbitre.
+        auto frozen_result = make_result_views(
+            state,
+            runtime,
+            context.threat_slot_owned);
+        frozen_result.requests_threat_slot = false;
+        frozen_result.cancels_threat_request = false;
+        frozen_result.releases_threat_slot = false;
+        return frozen_result;
+    }
+
     if (!runtime.pressure_hysteresis_initialized) {
         runtime.pressure_attack_armed =
             state.pressure < kMarlowPressureAttackTrigger;
         runtime.pressure_hysteresis_initialized = true;
     }
 
-    const auto safe_dt = clamp_finite(
-        dt,
-        0.0F,
-        0.0F,
-        kMaximumAcceptedDeltaSeconds);
     const auto player_position = safe_vector(
         context.player.feet_position,
         glm::vec3 {0.5F, static_cast<float>(kBackroomsFloorY + 1), 0.5F});
@@ -2614,13 +2732,6 @@ auto update_backrooms_marlow(
     result.releases_threat_slot =
         pending_invalidated_by_navigation &&
         context.threat_slot_owned;
-    if (context.simulation_frozen || safe_dt <= 0.0F) {
-        if (runtime.waiting_for_threat_slot &&
-            context.threat_slot_available) {
-            result.requests_threat_slot = true;
-        }
-        return result;
-    }
 
     const auto flashlight_started =
         context.player.flashlight_on_water &&

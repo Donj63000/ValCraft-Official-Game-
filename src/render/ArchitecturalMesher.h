@@ -59,6 +59,31 @@ static_assert(sizeof(HardSurfaceVertex) == 32, "Je limite le sommet architectura
 static_assert(std::is_standard_layout_v<HardSurfaceVertex>);
 static_assert(std::is_trivially_copyable_v<HardSurfaceVertex>);
 
+// Je publie un budget commun a toutes les passes qui enrichissent le meme
+// maillage. Le pire cas structurel, 512 fixtures Medium et 512 meubles High
+// tiennent ensemble sous ces plafonds sans autoriser une croissance repetee.
+inline constexpr std::size_t kMaximumArchitecturalCoreCells =
+    64U * 1024U;
+inline constexpr std::size_t kMaximumArchitecturalFixtures = 512U;
+inline constexpr std::size_t kMaximumArchitecturalMeshVertices =
+    4U * 1024U * 1024U;
+inline constexpr std::size_t kMaximumArchitecturalMeshIndices =
+    12U * 1024U * 1024U;
+
+struct ArchitecturalMeshSize {
+    std::size_t vertex_count = 0U;
+    std::size_t index_count = 0U;
+};
+
+// Je valide les compteurs sans devoir materialiser un enorme vector dans les
+// tests ni laisser chaque passe reimplementer une addition potentiellement
+// debordante.
+[[nodiscard]] auto checked_architectural_mesh_growth(
+    std::size_t current_vertex_count,
+    std::size_t current_index_count,
+    std::size_t additional_vertex_count,
+    std::size_t additional_index_count) -> ArchitecturalMeshSize;
+
 struct ArchitecturalBounds {
     float min_x = 0.0F;
     float min_y = 0.0F;
@@ -93,6 +118,13 @@ struct ArchitecturalSection {
     [[nodiscard]] auto valid() const noexcept -> bool;
     [[nodiscard]] auto contains(BlockCoord coordinate) const noexcept -> bool;
 };
+
+// Je centralise ici le contrat numerique des sections afin que toutes les
+// passes qui les parcourent refusent les memes bornes et les memes volumes
+// avant d'appeler leur sampler ou de reserver un buffer.
+[[nodiscard]] auto checked_architectural_section_cell_count(
+    const ArchitecturalSection& section,
+    std::size_t maximum_core_cells) -> std::size_t;
 
 struct ArchitecturalQuad {
     std::uint32_t first_vertex = 0;

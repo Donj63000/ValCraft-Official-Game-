@@ -5,6 +5,7 @@
 #include "app/InputBindings.h"
 #include "app/GameLoop.h"
 #include "gameplay/BackroomsMarlowWorld.h"
+#include "gameplay/BackroomsSimulationTime.h"
 #include "gameplay/StartingPort.h"
 #include "gameplay/progression/VanguardTargeting.h"
 #include "player/PlayerGeometry.h"
@@ -188,23 +189,23 @@ auto finite_vec3_or(const glm::vec3& value, const glm::vec3& fallback) noexcept 
 
 [[nodiscard]] constexpr auto backrooms_runtime_spatial_profile(
     WorldGenerationVersion version) noexcept -> BackroomsSpatialProfile {
-    return version == WorldGenerationVersion::BackroomsV4
-               ? BackroomsSpatialProfile::FloodedPoolroomsV4
-               : BackroomsSpatialProfile::RecessedPoolroomsV3;
+    return backrooms_spatial_profile_for_version(version);
 }
 
 [[nodiscard]] constexpr auto backrooms_runtime_pool_geometry_profile(
     WorldGenerationVersion version) noexcept -> BackroomsPoolGeometryProfile {
     return version == WorldGenerationVersion::BackroomsV4
                ? BackroomsPoolGeometryProfile::FloodedDistrictsV4
-               : BackroomsPoolGeometryProfile::RecessedOneBlock;
+               : version == WorldGenerationVersion::BackroomsV3
+                     ? BackroomsPoolGeometryProfile::RecessedOneBlock
+                     : BackroomsPoolGeometryProfile::LegacyFlat;
 }
 
 [[nodiscard]] auto backrooms_runtime_stack(
     int seed,
     int logical_level,
     WorldGenerationVersion version =
-        WorldGenerationVersion::BackroomsV4) noexcept
+        WorldGenerationVersion::BackroomsV4)
     -> BackroomsSpatialStack {
     return BackroomsSpatialStack(
         seed,
@@ -216,10 +217,10 @@ auto backrooms_spawn_position(
     int seed,
     int logical_level = 0,
     WorldGenerationVersion version =
-        WorldGenerationVersion::BackroomsV4) noexcept -> glm::vec3 {
+        WorldGenerationVersion::BackroomsV4) -> glm::vec3 {
     const auto stack =
         backrooms_runtime_stack(seed, logical_level, version);
-    const auto block = stack.spawn_block(logical_level);
+    const auto block = stack.anchor_spawn_block();
     return {
         static_cast<float>(block.x) + 0.5F,
         static_cast<float>(block.y) + 0.001F,
@@ -233,6 +234,10 @@ auto backrooms_spawn_position(
     int logical_level,
     WorldGenerationVersion version =
         WorldGenerationVersion::BackroomsV4) noexcept -> int {
+    if (!BackroomsSpatialStack::is_anchor_level_representable(
+            anchor_level)) {
+        return 0;
+    }
     const auto stack = BackroomsSpatialStack(
         seed,
         anchor_level,
@@ -269,10 +274,15 @@ void translate_backrooms_jack_result_y(
     }
 }
 
-auto backrooms_spawn_position(
+auto backrooms_spawn_position_for_level_or_anchor(
     const World& world,
     int logical_level) noexcept -> glm::vec3 {
-    const auto block = world.backrooms_spawn_block(logical_level);
+    // Je nomme explicitement ce repli : un appelant de chargement peut
+    // demander un ancien niveau absent, sans le confondre avec un lookup
+    // valide qui aurait retourne silencieusement l'ancre.
+    const auto block =
+        world.backrooms_spawn_block_for_level(logical_level)
+            .value_or(world.backrooms_anchor_spawn_block());
     return {
         static_cast<float>(block.x) + 0.5F,
         static_cast<float>(block.y) + 0.001F,
@@ -297,8 +307,14 @@ struct BackroomsSmokeCameraPose {
 };
 
 [[nodiscard]] auto backrooms_blackout_smoke_pose(
-    int seed) -> std::optional<BackroomsSmokeCameraPose> {
-    const BackroomsGenerator generator {seed};
+    int seed,
+    int logical_level) -> std::optional<BackroomsSmokeCameraPose> {
+    const BackroomsGenerator generator {
+        seed,
+        logical_level,
+        kBackroomsSpatialConnectorDistrictModules,
+        BackroomsPoolGeometryProfile::FloodedDistrictsV4,
+    };
     constexpr std::array<BackroomsJackGridPoint, 4U> directions {{
         {0, -1},
         {1, 0},
@@ -513,8 +529,7 @@ struct BackroomsSmokeCameraPose {
     };
     const auto stack =
         backrooms_runtime_stack(seed, logical_level);
-    const auto spawn =
-        stack.spawn_block(logical_level);
+    const auto spawn = stack.anchor_spawn_block();
     const auto placement =
         stack.placement_for_level(logical_level);
     if (!placement.has_value()) {
@@ -1037,7 +1052,8 @@ struct BackroomsSmokeCameraPose {
     }
     if (blackout && logical_level >= -1) {
         return backrooms_blackout_smoke_pose(
-            seed);
+            seed,
+            logical_level);
     }
     if (logical_level <= -2) {
         if (const auto poolrooms_pose =
@@ -1061,7 +1077,7 @@ void sanitize_backrooms_player_state(
     int seed,
     int logical_level = 0,
     WorldGenerationVersion version =
-        WorldGenerationVersion::BackroomsV4) noexcept {
+        WorldGenerationVersion::BackroomsV4) {
     const auto stack =
         backrooms_runtime_stack(seed, logical_level, version);
     const auto fallback =
@@ -1108,7 +1124,7 @@ void configure_backrooms_smoke_camera(
     const glm::vec3& position,
     float yaw_degrees,
     int logical_level = 0,
-    bool ceiling_view = false) noexcept {
+    bool ceiling_view = false) {
 
     auto state = player.state();
     state.position = position;
@@ -3968,7 +3984,11 @@ void Game::update_simulation(float dt, FramePerformanceStats& frame_stats) {
         (death_screen_visible_ ||
          paused_ ||
          progression_menu_.visible())) {
-        (void)dt;
+        if (backrooms_active()) {
+            // Je traverse le garde Backrooms avec un delta de frame reel afin
+            // de synchroniser ses verrous d'entree, sans avancer la simulation.
+            update_backrooms_simulation(dt);
+        }
         (void)frame_stats;
         return;
     }
@@ -7618,7 +7638,23 @@ void Game::update_world_pipeline(FramePerformanceStats& frame_stats) {
         frame_stats.override_bytes = last_world_memory_.override_bytes;
     };
 
-    if (!options_.smoke_test && (death_screen_visible_ || paused_) && !front_end_visible()) {
+    const auto backrooms_world_frozen =
+        backrooms_active() &&
+        backrooms_ui_freezes_simulation(
+            options_.smoke_test,
+            gameplay_interaction_blocked());
+    const auto legacy_world_frozen =
+        (death_screen_visible_ || paused_) &&
+        !front_end_visible();
+    if (!options_.smoke_test &&
+        (legacy_world_frozen || backrooms_world_frozen)) {
+        // Je suspends aussi les fluides et les revisions du monde derriere
+        // chaque interface Backrooms afin que les capteurs reprennent ensemble.
+        if (backrooms_world_frozen) {
+            // Je memorise le gel au rythme des frames, meme lorsqu'aucun tick
+            // fixe n'a ete execute entre l'ouverture et la fermeture du menu.
+            backrooms_resume_state_.simulation_was_frozen = true;
+        }
         capture_world_memory();
         return;
     }
@@ -7754,6 +7790,12 @@ void Game::set_command_console_visible(bool visible) {
     }
     if (visible && !can_open_command_console()) {
         return;
+    }
+    if (visible) {
+        note_backrooms_interaction_boundary(
+            backrooms_resume_state_,
+            backrooms_active(),
+            options_.smoke_test);
     }
 
     pending_toggle_fly_ = false;
@@ -8100,6 +8142,12 @@ void Game::set_death_screen_visible(bool visible, PlayerDeathCause cause) {
     if (death_screen_visible_ == visible && (!visible || death_screen_.cause == cause)) {
         return;
     }
+    if (visible) {
+        note_backrooms_interaction_boundary(
+            backrooms_resume_state_,
+            backrooms_active(),
+            options_.smoke_test);
+    }
 
     death_screen_visible_ = visible;
     death_screen_.visible = visible;
@@ -8168,6 +8216,12 @@ void Game::set_paused(bool paused) {
     if (death_screen_visible_ || front_end_visible() || !has_active_session_) {
         return;
     }
+    if (paused) {
+        note_backrooms_interaction_boundary(
+            backrooms_resume_state_,
+            backrooms_active(),
+            options_.smoke_test);
+    }
 
     paused_ = paused;
     pause_menu_.visible = paused;
@@ -8216,6 +8270,12 @@ void Game::set_inventory_visible(bool visible) {
     }
     if (inventory_visible_ == visible) {
         return;
+    }
+    if (visible) {
+        note_backrooms_interaction_boundary(
+            backrooms_resume_state_,
+            backrooms_active(),
+            options_.smoke_test);
     }
 
     inventory_visible_ = visible;
@@ -8283,6 +8343,12 @@ void Game::set_progression_menu_visible(
     if (progression_menu_.visible() ==
         visible) {
         return;
+    }
+    if (visible) {
+        note_backrooms_interaction_boundary(
+            backrooms_resume_state_,
+            backrooms_active(),
+            options_.smoke_test);
     }
 
     if (!visible &&
@@ -8650,6 +8716,12 @@ void Game::set_confirm_dialog_visible(bool visible,
                                       std::optional<std::size_t> slot_index) {
     if (options_.smoke_test) {
         return;
+    }
+    if (visible) {
+        note_backrooms_interaction_boundary(
+            backrooms_resume_state_,
+            backrooms_active(),
+            options_.smoke_test);
     }
 
     confirm_dialog_.visible = visible;
@@ -14394,7 +14466,7 @@ void Game::respawn_player() {
         maritime_respawn
             ? sea_adventure_.deck_spawn_position()
             : backrooms_respawn
-                  ? backrooms_spawn_position(
+                  ? backrooms_spawn_position_for_level_or_anchor(
                         world_,
                         world_.backrooms_level())
                   : find_initial_spawn_position();
@@ -14531,13 +14603,15 @@ auto Game::front_end_visible() const noexcept -> bool {
 }
 
 auto Game::gameplay_interaction_blocked() const noexcept -> bool {
-    return death_screen_visible_ ||
-           paused_ ||
-           inventory_visible_ ||
-           progression_menu_.visible() ||
-           command_console_.visible() ||
-           confirm_dialog_.visible ||
-           front_end_visible();
+    return backrooms_gameplay_interaction_blocked({
+        .death_screen = death_screen_visible_,
+        .pause_menu = paused_,
+        .inventory = inventory_visible_,
+        .progression = progression_menu_.visible(),
+        .command_console = command_console_.visible(),
+        .confirmation_dialog = confirm_dialog_.visible,
+        .front_end = front_end_visible(),
+    });
 }
 
 auto Game::backrooms_active() const noexcept -> bool {
@@ -14644,13 +14718,17 @@ auto Game::current_environment_state() const -> EnvironmentState {
     }
 
     const auto& position = player_.position();
+    const auto generation_context =
+        world_.backrooms_generation_context(
+            current_backrooms_level());
+    if (!generation_context.has_value()) {
+        return environment_.current_state();
+    }
     return make_backrooms_environment_state(
         backrooms_elapsed_seconds_,
-        world_.seed(),
+        *generation_context,
         position.x,
-        position.z,
-        world_.backrooms_theme_at_y(position.y) ==
-            BackroomsTheme::Poolrooms);
+        position.z);
 }
 
 void Game::update_backrooms_simulation(float dt) {
@@ -14671,10 +14749,64 @@ void Game::update_backrooms_simulation(float dt) {
     player_.set_fly_mode_enabled(false);
     super_vision_active_ = false;
 
+    const auto held_input =
+        read_player_movement_input(
+            SDL_GetKeyboardState(nullptr));
+
+    // Je laisse le harnais smoke piloter sa scene meme lorsqu'il affiche une
+    // surimpression de QA ; seules les interfaces d'une vraie partie figent.
+    const auto frame_time =
+        resolve_backrooms_frame_time(
+            dt,
+            backrooms_ui_freezes_simulation(
+                options_.smoke_test,
+                gameplay_interaction_blocked()));
     const auto safe_dt =
-        std::isfinite(dt)
-            ? std::clamp(dt, 0.0F, 0.10F)
-            : 0.0F;
+        frame_time.simulation_delta_seconds;
+    const auto resume_decision =
+        advance_backrooms_resume_state(
+            backrooms_resume_state_,
+            frame_time.simulation_frozen,
+            held_input.jump);
+    if (resume_decision.synchronize_latches) {
+        // Je traite chaque interface bloquante comme une vraie pause du monde :
+        // aucune batterie, horloge, physique, IA ou attribution de menace ne
+        // peut progresser derriere l'inventaire, la console ou un dialogue.
+        pending_look_x_ = 0.0F;
+        pending_look_y_ = 0.0F;
+
+        const auto current_position = player_.position();
+        const auto water_contact =
+            player_.sample_world_water_contact(
+                world_,
+                current_position);
+        backrooms_marlow_previous_player_position_ =
+            current_position;
+        backrooms_marlow_has_previous_player_position_ = true;
+        backrooms_marlow_previous_in_water_ =
+            water_contact.any_contact();
+        backrooms_marlow_previous_on_ground_ =
+            player_.state().on_ground;
+        backrooms_marlow_previous_jump_input_ =
+            held_input.jump;
+        // Je synchronise les verrous de fronts avec les capteurs reels sans
+        // publier d'evenement : une action faite dans l'UI ne reapparait pas
+        // artificiellement comme une nouvelle activation a la reprise.
+        backrooms_marlow_runtime_.previous_flashlight_on_water =
+            backrooms_marlow_flashlight_hits_water(
+                world_,
+                player_.eye_position(),
+                player_.look_direction(),
+                backrooms_flashlight_.enabled,
+                backrooms_flashlight_intensity(
+                    backrooms_flashlight_));
+        // Je retire aussi un saut encore present dans le tampon physique : il
+        // appartient a la frame precedente a l'ouverture de l'interface.
+        player_.discard_buffered_jump();
+    }
+    if (frame_time.simulation_frozen) {
+        return;
+    }
     player_.set_water_movement_profile(
         world_.backrooms_theme_at_y(
             player_.position().y) ==
@@ -14703,8 +14835,11 @@ void Game::update_backrooms_simulation(float dt) {
         !backrooms_cinematic_active();
     PlayerInput input {};
     if (gameplay_input_enabled) {
-        input = read_player_movement_input(
-            SDL_GetKeyboardState(nullptr));
+        input = held_input;
+    }
+    if (resume_decision.suppress_jump) {
+        input.jump = false;
+        input.move_up = std::min(input.move_up, 0.0F);
     }
     input.toggle_fly = false;
     input.look_delta_x =
@@ -14908,7 +15043,7 @@ void Game::update_backrooms_simulation(float dt) {
         auto local_player_eye = player_.eye_position();
         local_player_eye.y -= jack_vertical_offset_float;
         const auto ui_blocks_simulation =
-            gameplay_interaction_blocked();
+            frame_time.simulation_frozen;
         const BackroomsJackUpdateContext context {
             .player = {
                 .feet_position =
@@ -15163,7 +15298,7 @@ void Game::update_backrooms_simulation(float dt) {
                 backrooms_flashlight_intensity(
                     backrooms_flashlight_));
         const auto ui_blocks_simulation =
-            gameplay_interaction_blocked();
+            frame_time.simulation_frozen;
         const auto threat_slot_available =
             backrooms_threat_arbiter_.owner ==
                 BackroomsThreatOwner::None &&
@@ -15321,7 +15456,9 @@ void Game::update_backrooms_simulation(float dt) {
                 .any_contact();
         backrooms_marlow_previous_on_ground_ =
             player_.state().on_ground;
-        backrooms_marlow_previous_jump_input_ = input.jump;
+        // Je conserve l'etat physique brut : la touche qui a ferme l'interface
+        // doit etre relachee avant de pouvoir creer un nouveau front de saut.
+        backrooms_marlow_previous_jump_input_ = held_input.jump;
     } else {
         backrooms_marlow_last_result_ = {};
         if (marlow_poolrooms_was_active || logical_context_changed) {
@@ -16462,6 +16599,9 @@ void Game::prepare_game_session(
     death_screen_visible_ = false;
     death_screen_.visible = false;
     death_screen_.cause = PlayerDeathCause::None;
+    backrooms_resume_state_ =
+        initialize_backrooms_resume_state(
+            options_.smoke_test);
     reset_backrooms_jack_runtime();
     pending_fishing_ = false;
     player_musket_.reset(
@@ -16882,7 +17022,7 @@ void Game::start_new_game_in_slot(std::size_t slot_index, GameMode game_mode) {
                 : backrooms_mode
                       ? backrooms_smoke_camera_pose_valid_
                             ? backrooms_smoke_camera_position_
-                            : backrooms_spawn_position(
+                            : backrooms_spawn_position_for_level_or_anchor(
                                   prepared_world,
                                   backrooms_level)
                       : find_initial_spawn_position(
@@ -17607,7 +17747,7 @@ auto Game::load_snapshot_into_session(SaveGameSnapshot snapshot, std::optional<s
         }
         auto prepared_spawn =
             backrooms_mode
-                ? backrooms_spawn_position(
+                ? backrooms_spawn_position_for_level_or_anchor(
                       prepared_world,
                       backrooms_level)
                 : finite_vec3_or(
@@ -18094,6 +18234,9 @@ auto Game::start_smoke_session() -> bool {
         const BackroomsGenerator generator {
             kSmokeSeed,
             options_.smoke_backrooms_level,
+            kBackroomsSpatialConnectorDistrictModules,
+            backrooms_runtime_pool_geometry_profile(
+                world_.generation_version()),
         };
         const auto player_block_x =
             static_cast<int>(
@@ -18502,7 +18645,7 @@ void Game::update_smoke_player(float dt) {
             world_.seed(),
             backrooms_smoke_camera_pose_valid_
                 ? backrooms_smoke_camera_position_
-                : backrooms_spawn_position(
+                : backrooms_spawn_position_for_level_or_anchor(
                       world_,
                       world_.backrooms_level()),
             backrooms_jack_smoke_camera_yaw(

@@ -10,6 +10,12 @@ namespace {
 
 constexpr float kTwoPi = 6.28318530717958647692F;
 constexpr float kHalfPi = 1.57079632679489661923F;
+// Je conserve la couleur du filtre historique à 48 kHz, mais j'exprime
+// désormais ses coupures en hertz afin qu'elle ne dépende plus du
+// périphérique audio.
+constexpr float kNoiseLowpassMinimumHz = 10.70F;
+constexpr float kNoiseLowpassMaximumHz = 32.17F;
+constexpr float kNoiseBandpassResponseHz = 240.58F;
 
 [[nodiscard]] auto finite_unit(float value) noexcept -> float {
     return std::isfinite(value)
@@ -55,6 +61,37 @@ void advance_phase(
                     static_cast<double>(rate))));
 }
 
+[[nodiscard]] auto filter_coefficient(
+    float cutoff_hz,
+    float sample_rate) noexcept -> float {
+
+    const auto safe_rate =
+        std::max(sample_rate, 8'000.0F);
+    const auto safe_cutoff =
+        std::clamp(
+            cutoff_hz,
+            0.0F,
+            safe_rate * 0.49F);
+    return static_cast<float>(
+        -std::expm1(
+            -static_cast<double>(kTwoPi) *
+            static_cast<double>(safe_cutoff) /
+            static_cast<double>(safe_rate)));
+}
+
+[[nodiscard]] auto mixed_seed(
+    std::uint32_t value) noexcept -> std::uint32_t {
+
+    value ^= value >> 16U;
+    value *= UINT32_C(0x7FEB352D);
+    value ^= value >> 15U;
+    value *= UINT32_C(0x846CA68B);
+    value ^= value >> 16U;
+    return value == 0U
+               ? UINT32_C(0x7F4A7C15)
+               : value;
+}
+
 [[nodiscard]] auto mix_value(
     float first,
     float second,
@@ -79,12 +116,30 @@ void BackroomsAmbience::set_sample_rate(
         sample_rate,
         8'000,
         192'000);
+    const auto rate =
+        static_cast<float>(sample_rate_);
+    noise_lowpass_minimum_coefficient_ =
+        filter_coefficient(
+            kNoiseLowpassMinimumHz,
+            rate);
+    noise_lowpass_maximum_coefficient_ =
+        filter_coefficient(
+            kNoiseLowpassMaximumHz,
+            rate);
+    noise_bandpass_coefficient_ =
+        filter_coefficient(
+            kNoiseBandpassResponseHz,
+            rate);
+    // Je ramene la difference entre deux echantillons a la duree de reference
+    // de 48 kHz. Sans cette normalisation, le residu perdrait 6 dB a chaque
+    // doublement de la frequence d'echantillonnage.
+    noise_derivative_scale_ = rate / 48'000.0F;
 }
 
 void BackroomsAmbience::reset() noexcept {
     target_active_ = false;
     seed_ = 0U;
-    noise_state_ = 0x7F4A7C15U;
+    channels_ = {};
     target_darkness_ = 0.0F;
     target_anomaly_ = 0.0F;
     smoothed_darkness_ = 0.0F;
@@ -95,9 +150,6 @@ void BackroomsAmbience::reset() noexcept {
     ballast_phase_ = 0.0F;
     drift_phase_ = 0.0F;
     stereo_phase_ = 0.0F;
-    noise_lowpass_ = 0.0F;
-    noise_bandpass_ = 0.0F;
-    previous_noise_lowpass_ = 0.0F;
     apply_seed(0xB4C3'0001U);
 }
 
@@ -105,12 +157,19 @@ void BackroomsAmbience::apply_seed(
     std::uint32_t seed) noexcept {
 
     seed_ = seed == 0U ? 0xB4C3'0001U : seed;
-    auto state = seed_ ^ 0x9E37'79B9U;
+    auto state = seed_ ^ UINT32_C(0x9E3779B9);
     state ^= state << 13U;
     state ^= state >> 17U;
     state ^= state << 5U;
-    noise_state_ =
-        state == 0U ? 0x7F4A7C15U : state;
+    if (state == 0U) {
+        state = UINT32_C(0x7F4A7C15);
+    }
+    // Je dérive deux flux disjoints du même seed. Un canal ne peut donc plus
+    // consommer l'aléa ni l'historique de filtre de l'autre.
+    channels_[0].noise_state =
+        mixed_seed(seed_ ^ UINT32_C(0x4C454654));
+    channels_[1].noise_state =
+        mixed_seed(seed_ ^ UINT32_C(0x52474854));
 
     const auto unit = [](std::uint32_t value) noexcept {
         return static_cast<float>(value & 0xFFFFU) /
@@ -146,16 +205,18 @@ void BackroomsAmbience::set_context(
     }
 }
 
-auto BackroomsAmbience::next_noise() noexcept -> float {
-    auto state = noise_state_;
+auto BackroomsAmbience::next_noise(
+    ChannelState& channel) noexcept -> float {
+
+    auto state = channel.noise_state;
     state ^= state << 13U;
     state ^= state >> 17U;
     state ^= state << 5U;
-    noise_state_ =
+    channel.noise_state =
         state == 0U ? 0x7F4A7C15U : state;
     const auto normalized =
         static_cast<float>(
-            noise_state_ &
+            channel.noise_state &
             std::numeric_limits<std::uint16_t>::max()) /
         static_cast<float>(
             std::numeric_limits<std::uint16_t>::max());
@@ -192,12 +253,13 @@ void BackroomsAmbience::advance_phases() noexcept {
 }
 
 auto BackroomsAmbience::render_channel(
-    bool right_channel,
+    std::size_t channel_index,
     float darkness,
     float anomaly) noexcept -> float {
 
+    auto& channel = channels_[channel_index];
     const auto side =
-        right_channel ? 1.0F : -1.0F;
+        channel_index == 0U ? -1.0F : 1.0F;
     const auto stereo_offset =
         side *
         (0.0018F +
@@ -236,17 +298,22 @@ auto BackroomsAmbience::render_channel(
          ballast * 0.05F) *
         voltage_sag;
 
-    const auto noise =
-        next_noise();
-    previous_noise_lowpass_ = noise_lowpass_;
-    noise_lowpass_ +=
-        (noise - noise_lowpass_) *
-        mix_value(0.0014F, 0.0042F, anomaly);
+    const auto noise = next_noise(channel);
+    channel.previous_noise_lowpass =
+        channel.noise_lowpass;
+    channel.noise_lowpass +=
+        (noise - channel.noise_lowpass) *
+        mix_value(
+            noise_lowpass_minimum_coefficient_,
+            noise_lowpass_maximum_coefficient_,
+            anomaly);
     const auto differentiated =
-        noise_lowpass_ - previous_noise_lowpass_;
-    noise_bandpass_ +=
-        (differentiated - noise_bandpass_) *
-        0.031F;
+        (channel.noise_lowpass -
+         channel.previous_noise_lowpass) *
+        noise_derivative_scale_;
+    channel.noise_bandpass +=
+        (differentiated - channel.noise_bandpass) *
+        noise_bandpass_coefficient_;
 
     const auto electrical_gain =
         mix_value(0.034F, 0.025F, darkness);
@@ -256,15 +323,16 @@ auto BackroomsAmbience::render_channel(
         mix_value(0.004F, 0.011F, anomaly);
     return electrical * electrical_gain +
            ventilation * ventilation_gain +
-           noise_bandpass_ * noise_gain;
+           channel.noise_bandpass * noise_gain;
 }
 
 void BackroomsAmbience::mix_interleaved(
     std::span<float> samples,
     std::size_t channel_count) noexcept {
 
-    if (channel_count == 0U ||
-        samples.size() < channel_count) {
+    if ((channel_count != 1U && channel_count != 2U) ||
+        samples.empty() ||
+        samples.size() % channel_count != 0U) {
         return;
     }
 
@@ -310,35 +378,48 @@ void BackroomsAmbience::mix_interleaved(
             std::sin(mix_ * kHalfPi);
         const auto music_gain =
             std::cos(mix_ * kHalfPi);
-        const auto left =
-            render_channel(
-                false,
-                smoothed_darkness_,
-                smoothed_anomaly_);
-        const auto right =
-            render_channel(
-                true,
-                smoothed_darkness_,
-                smoothed_anomaly_);
+        const auto left = render_channel(
+            0U,
+            smoothed_darkness_,
+            smoothed_anomaly_);
+        const auto right = render_channel(
+            1U,
+            smoothed_darkness_,
+            smoothed_anomaly_);
 
         const auto base_index =
             frame * channel_count;
-        for (std::size_t channel = 0U;
-             channel < channel_count;
-             ++channel) {
+        if (channel_count == 1U) {
             const auto ambience =
-                channel == 0U ? left : right;
+                (left + right) * 0.5F;
             const auto mixed =
-                samples[base_index + channel] *
+                samples[base_index] *
                     music_gain +
                 ambience * ambience_gain;
-            samples[base_index + channel] =
+            samples[base_index] =
                 std::isfinite(mixed)
                     ? std::clamp(
                           mixed,
                           -1.0F,
                           1.0F)
                     : 0.0F;
+        } else {
+            const std::array ambience {left, right};
+            for (std::size_t channel = 0U;
+                 channel < ambience.size();
+                 ++channel) {
+                const auto mixed =
+                    samples[base_index + channel] *
+                        music_gain +
+                    ambience[channel] * ambience_gain;
+                samples[base_index + channel] =
+                    std::isfinite(mixed)
+                        ? std::clamp(
+                              mixed,
+                              -1.0F,
+                              1.0F)
+                        : 0.0F;
+            }
         }
 
         advance_phases();

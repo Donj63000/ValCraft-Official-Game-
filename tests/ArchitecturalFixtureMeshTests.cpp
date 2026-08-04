@@ -493,4 +493,22 @@ TEST_CASE("fixture geometry rejects malformed descriptions atomically") {
     CHECK(outside_cell == outside_cell_before);
 }
 
+TEST_CASE("fixture geometry rejects its public count limit atomically") {
+    ArchitecturalMesh mesh {};
+    mesh.vertices.push_back(HardSurfaceVertex {});
+    mesh.indices.push_back(0U);
+    mesh.bounds.valid = true;
+    mesh.fixtures.resize(kMaximumArchitecturalFixtures + 1U);
+    const auto before = mesh;
+
+    // Je depasse le plafond avec seulement 513 descriptions legeres : le test
+    // prouve le rejet avant la construction des primitives et de leur copie.
+    CHECK_THROWS_AS(
+        static_cast<void>(append_architectural_fixture_geometry(
+            mesh,
+            StylizedPrimitiveLod::Medium)),
+        std::length_error);
+    CHECK(mesh == before);
+}
+
 } // namespace valcraft

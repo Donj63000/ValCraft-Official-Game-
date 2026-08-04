@@ -6,7 +6,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -28,6 +30,33 @@ constexpr int kNavigationDecorationOverhang = 2;
 constexpr int kSparseArchipelagoCellSize = 128;
 constexpr std::uint32_t kSparseArchipelagoCellChancePercent = 42U;
 constexpr float kSparseIslandEmergenceThreshold = 0.14F;
+constexpr auto kChunkColumnCount =
+    static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
+
+struct ChunkWorldOrigin {
+    int x = 0;
+    int z = 0;
+};
+
+[[nodiscard]] constexpr auto checked_chunk_world_origin(
+    ChunkCoord coord) noexcept -> std::optional<ChunkWorldOrigin> {
+    const auto origin_x =
+        static_cast<std::int64_t>(coord.x) * kChunkSizeX;
+    const auto origin_z =
+        static_cast<std::int64_t>(coord.z) * kChunkSizeZ;
+    const auto maximum_x = origin_x + kChunkSizeX - 1;
+    const auto maximum_z = origin_z + kChunkSizeZ - 1;
+    if (origin_x < std::numeric_limits<int>::lowest() ||
+        maximum_x > std::numeric_limits<int>::max() ||
+        origin_z < std::numeric_limits<int>::lowest() ||
+        maximum_z > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return ChunkWorldOrigin {
+        static_cast<int>(origin_x),
+        static_cast<int>(origin_z),
+    };
+}
 
 struct ResourceOreDefinition {
     BlockType block = BlockType::CoalOre;
@@ -248,6 +277,10 @@ auto backrooms_saved_logical_level_at_y(
     if (!uses_backrooms_spatial_stack(generation_version)) {
         return anchor_level;
     }
+    if (!BackroomsSpatialStack::is_anchor_level_representable(
+            anchor_level)) {
+        return anchor_level;
+    }
     const BackroomsSpatialStack stack(
         seed,
         anchor_level,
@@ -263,6 +296,10 @@ auto backrooms_v3_position_delta_y(
     if (source_version == WorldGenerationVersion::BackroomsV3 ||
         source_version == WorldGenerationVersion::BackroomsV4 ||
         !is_backrooms_generation_version(source_version)) {
+        return 0;
+    }
+    if (!BackroomsSpatialStack::is_anchor_level_representable(
+            anchor_level)) {
         return 0;
     }
 
@@ -367,6 +404,15 @@ void WorldGenerator::generate_chunk(Chunk& chunk) const {
 auto WorldGenerator::begin_chunk_generation(ChunkCoord coord, bool generate_decorations) const -> ChunkGenerationState {
     ChunkGenerationState state {coord, generate_decorations};
     state.resource_ore_blocks.fill(to_block_id(BlockType::Air));
+    if (!checked_chunk_world_origin(coord).has_value()) {
+        // Je termine un chunk vide lorsque son domaine ne peut pas etre
+        // represente par les coordonnees de bloc publiques.
+        state.next_column = kChunkColumnCount;
+        state.chunk.clear_dirty();
+        state.chunk.mark_dirty();
+        state.finalized = true;
+        return state;
+    }
     if (profile_ != WorldGenerationProfile::Backrooms) {
         build_resource_ore_map(state);
     }
@@ -374,17 +420,24 @@ auto WorldGenerator::begin_chunk_generation(ChunkCoord coord, bool generate_deco
 }
 
 void WorldGenerator::advance_chunk_generation(ChunkGenerationState& state, std::size_t column_budget) const {
-    constexpr auto column_count = static_cast<std::size_t>(kChunkSizeX * kChunkSizeZ);
     if (state.finalized || column_budget == 0U) {
         return;
     }
 
     const auto coord = state.chunk.coord();
-    const auto base_world_x = coord.x * kChunkSizeX;
-    const auto base_world_z = coord.z * kChunkSizeZ;
+    const auto world_origin = checked_chunk_world_origin(coord);
+    if (!world_origin.has_value()) {
+        state.next_column = kChunkColumnCount;
+        state.chunk.clear_dirty();
+        state.chunk.mark_dirty();
+        state.finalized = true;
+        return;
+    }
+    const auto base_world_x = world_origin->x;
+    const auto base_world_z = world_origin->z;
     auto processed_columns = std::size_t {0};
 
-    while (state.next_column < column_count && processed_columns < column_budget) {
+    while (state.next_column < kChunkColumnCount && processed_columns < column_budget) {
         const auto local_x = static_cast<int>(state.next_column % static_cast<std::size_t>(kChunkSizeX));
         const auto local_z = static_cast<int>(state.next_column / static_cast<std::size_t>(kChunkSizeX));
         const auto world_x = base_world_x + local_x;
@@ -567,7 +620,7 @@ void WorldGenerator::advance_chunk_generation(ChunkGenerationState& state, std::
         ++processed_columns;
     }
 
-    if (state.next_column == column_count) {
+    if (state.next_column == kChunkColumnCount) {
         finalize_ocean_navigation_corridor(state.chunk);
         state.chunk.clear_dirty();
         state.chunk.mark_dirty();
@@ -616,13 +669,95 @@ auto WorldGenerator::backrooms_theme_at_y(
     return backrooms_generator_.theme();
 }
 
-auto WorldGenerator::backrooms_spawn_block(
-    int logical_level) const noexcept -> BlockCoord {
+auto WorldGenerator::backrooms_generation_context(
+    int logical_level) const noexcept
+    -> std::optional<BackroomsGenerationContext> {
+    if (profile_ != WorldGenerationProfile::Backrooms) {
+        return std::nullopt;
+    }
+
+    if (uses_backrooms_spatial_stack(generation_version_)) {
+        const auto placement =
+            backrooms_spatial_stack_.placement_for_level(logical_level);
+        const auto* generator =
+            backrooms_spatial_stack_.generator_for_level(logical_level);
+        if (!placement.has_value() || generator == nullptr) {
+            return std::nullopt;
+        }
+        return BackroomsGenerationContext {
+            .seed = seed_,
+            .logical_level = logical_level,
+            .connector_district_modules =
+                generator->connector_district_modules(),
+            .physical_floor_y = placement->floor_y,
+            .pool_geometry_profile = generator->pool_geometry_profile(),
+            .generation_version = generation_version_,
+            .theme = generator->theme(),
+        };
+    }
+
+    if (logical_level != logical_level_) {
+        return std::nullopt;
+    }
+    return BackroomsGenerationContext {
+        .seed = seed_,
+        .logical_level = logical_level_,
+        .connector_district_modules =
+            backrooms_generator_.connector_district_modules(),
+        .physical_floor_y = kBackroomsFloorY,
+        .pool_geometry_profile =
+            backrooms_generator_.pool_geometry_profile(),
+        .generation_version = generation_version_,
+        .theme = backrooms_generator_.theme(),
+    };
+}
+
+auto WorldGenerator::backrooms_light_fixture_at(
+    int world_x,
+    int world_y,
+    int world_z) const noexcept
+    -> std::optional<BackroomsLightFixtureLayout> {
+    if (profile_ != WorldGenerationProfile::Backrooms) {
+        return std::nullopt;
+    }
+    if (uses_backrooms_spatial_stack(generation_version_)) {
+        return backrooms_spatial_stack_.light_fixture_at(
+            world_x,
+            world_y,
+            world_z);
+    }
+
+    auto fixture =
+        backrooms_generator_.light_fixture_at(world_x, world_z);
+    if (!fixture.has_value() || fixture->ceiling_y != world_y ||
+        backrooms_generator_.sample_block(world_x, world_y, world_z) !=
+            fixture->block) {
+        return std::nullopt;
+    }
+    return fixture;
+}
+
+auto WorldGenerator::backrooms_anchor_spawn_block() const noexcept
+    -> BlockCoord {
     if (profile_ == WorldGenerationProfile::Backrooms &&
         uses_backrooms_spatial_stack(
             generation_version_)) {
-        return backrooms_spatial_stack_.spawn_block(
+        return backrooms_spatial_stack_.anchor_spawn_block();
+    }
+    return backrooms_generator_.spawn_block();
+}
+
+auto WorldGenerator::backrooms_spawn_block_for_level(
+    int logical_level) const noexcept -> std::optional<BlockCoord> {
+    if (profile_ != WorldGenerationProfile::Backrooms) {
+        return std::nullopt;
+    }
+    if (uses_backrooms_spatial_stack(generation_version_)) {
+        return backrooms_spatial_stack_.spawn_block_for_level(
             logical_level);
+    }
+    if (logical_level != logical_level_) {
+        return std::nullopt;
     }
     return backrooms_generator_.spawn_block();
 }
@@ -750,8 +885,7 @@ auto WorldGenerator::sample_column(int world_x, int world_z) const noexcept -> T
         if (uses_backrooms_spatial_stack(
                 generation_version_)) {
             const auto spawn =
-                backrooms_spatial_stack_.spawn_block(
-                    logical_level_);
+                backrooms_spatial_stack_.anchor_spawn_block();
             TerrainColumnSample sample {};
             sample.biome = BiomeType::Meadow;
             sample.surface_height = spawn.y - 1;

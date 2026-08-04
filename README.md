@@ -355,7 +355,8 @@ transition reste une evolution visuelle et ne provoque aucune regression de game
 ### Pour les devs
 
 - `C++20`, `CMake 3.24+`, `SDL2`, `OpenGL 3.3 Core`, `glad`, `glm`, `FastNoiseLite`, `doctest`
-- dependances recuperees automatiquement via `FetchContent`
+- dependances recherchees localement avant un repli `FetchContent` sur des commits verifies
+- configuration hors ligne verifiee en CI avec un cache de clones Git explicite
 - warnings stricts avec `-Werror`
 - tests unitaires et de regression
 - smoke test non interactif du jeu
@@ -378,9 +379,22 @@ transition reste une evolution visuelle et ne provoque aucune regression de game
 
 - Windows
 - GCC / MinGW
+- Git
 - Ninja
 - OpenGL `3.3 Core`
 - PowerShell ou CLion
+
+Un build complet qui doit regenerer glad exige aussi Python 3.8+ et les
+versions verrouillees dans `tools/requirements-build.txt` :
+
+```powershell
+python -m pip install --requirement tools/requirements-build.txt
+```
+
+Un paquet glad systeme n'est accepte que s'il expose glad2 via `<glad/gl.h>`,
+`gladLoadGL` et les symboles OpenGL 3.3. Sinon CMake affiche le diagnostic du
+probe. Pour eviter Python, `VALCRAFT_GLAD_GENERATED_SOURCE_DIR` peut designer
+une sortie glad2 deja generee et validee par SHA-256.
 
 > Le script `scripts/check.ps1` sait retrouver automatiquement les outils `cmake`, `ctest`, `gcov`, `ninja`
 > et MinGW depuis une installation CLion recente si besoin.
@@ -404,6 +418,71 @@ cmake --build cmake-build-relwithdebinfo --target ValCraft --parallel
 cmake --build cmake-build-relwithdebinfo --target valcraft_tests --parallel
 ctest --test-dir cmake-build-relwithdebinfo --output-on-failure
 ```
+
+### Tests Backrooms sans SDL/OpenGL
+
+Cette cible isole la generation, l'ambiance et l'arbitrage Backrooms. Elle ne
+configure ni SDL ni glad et convient aux runners sans fenetre ou pilote GPU.
+
+```powershell
+cmake -S . -B cmake-build-backrooms-core -G Ninja `
+  -DVALCRAFT_HEADLESS_BACKROOMS_TESTS_ONLY=ON
+cmake --build cmake-build-backrooms-core --target backrooms_core_tests --parallel
+ctest --test-dir cmake-build-backrooms-core --output-on-failure
+```
+
+Pour interdire tout acces reseau, installer `glm` et `doctest` comme paquets
+CMake ou placer des clones Git propres dans `<cache>/glm` et
+`<cache>/doctest`. CMake verifie leur revision exacte avant de construire :
+
+- GLM : `8d1fd52e5ab5590e2c81768ace50c72bae28f2ed`
+- doctest : `1da23a3e8119ec5cce4f9388e91b065e20bf06f5`
+
+Configurer ensuite ainsi :
+
+```powershell
+cmake -S . -B cmake-build-offline -G Ninja `
+  -DVALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS=OFF `
+  -DVALCRAFT_DEPENDENCY_SOURCE_ROOT=C:\deps\valcraft `
+  -DVALCRAFT_HEADLESS_BACKROOMS_TESTS_ONLY=ON
+cmake --build cmake-build-offline --target backrooms_core_tests --parallel
+ctest --test-dir cmake-build-offline --output-on-failure
+```
+
+`VALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS=OFF` force
+`FETCHCONTENT_FULLY_DISCONNECTED=ON`. Le job CI `backrooms-headless-offline`
+desactive en plus les transports Git et les proxies reseau pendant la
+configuration, la compilation et les tests.
+
+L'exemple ci-dessus est volontairement headless : il n'a besoin que de GLM et
+doctest. Pour un build complet sans paquets systeme, la racine de dependances
+doit contenir des clones Git propres, sans modification ni fichier non suivi, dans
+les sous-dossiers suivants :
+
+- `glm` : `8d1fd52e5ab5590e2c81768ace50c72bae28f2ed`
+- `fastnoise` : `7ccfbc16eb1c932568f177d63a9ba51d89bbe516`
+- `doctest` : `1da23a3e8119ec5cce4f9388e91b065e20bf06f5`
+- `sdl2` : `c98c4fbff6d8f3016a3ce6685bf8f43433c3efcc`
+- `glad` : `73db193f853e2ee079bf3ca8a64aa2eaf6459043`, uniquement si glad doit etre regenere
+
+Une source glad2 pre-generee peut remplacer le clone `glad` et le runtime
+Python. Elle doit contenir `include/glad/gl.h`, `include/KHR/khrplatform.h` et
+`src/gl.c`, avec respectivement les SHA-256 suivants :
+
+- `38555534130ab0f6bdf7815fbbae52241f4f7aeb6165949fccd284348a1daa1a`
+- `5ee5d5c2c6b2abd028cec8dc1a24e995bb47b075654a6fc55f3a1293de36943f`
+- `60ba6709b27cde10e2b617a4a4ca6793ffb733fab18623a0e7b7513167a44fc9`
+
+```powershell
+cmake -S . -B cmake-build-full-offline -G Ninja `
+  -DVALCRAFT_ALLOW_DEPENDENCY_DOWNLOADS=OFF `
+  -DVALCRAFT_DEPENDENCY_SOURCE_ROOT=C:\deps\valcraft `
+  -DVALCRAFT_GLAD_GENERATED_SOURCE_DIR=C:\deps\valcraft-glad-generated
+```
+
+Sous GCC ou Clang, `-DVALCRAFT_ENABLE_UNDEFINED_SANITIZER=ON` active
+UBSan ainsi que `float-cast-overflow`. L'option peut etre combinee avec
+`-DVALCRAFT_ENABLE_ADDRESS_SANITIZER=ON` pour les campagnes de robustesse.
 
 ### Lancer un smoke/perf run
 
@@ -458,7 +537,9 @@ Cette verification controle notamment :
 - `FastNoiseLite`
 - `doctest`
 
-Toutes les dependances sont recuperees automatiquement via `FetchContent`.
+Les paquets systeme compatibles sont utilises en priorite. Les fallbacks
+`FetchContent` ne sont actives que pour les dependances absentes et leurs
+revisions Git sont verifiees avant la fin de la configuration.
 
 ### Regeneration des visuels proceduraux
 

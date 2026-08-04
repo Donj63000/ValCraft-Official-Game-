@@ -10,10 +10,14 @@ namespace valcraft {
 inline constexpr int kBackroomsModuleSize = 64;
 inline constexpr int kBackroomsFloorY = 40;
 inline constexpr int kBackroomsMaxCeilingHeight = 26;
+inline constexpr int kBackroomsLightFixtureNominalLength = 4;
 inline constexpr int kBackroomsRoofY =
     kBackroomsFloorY + kBackroomsMaxCeilingHeight;
 inline constexpr int kBackroomsPortalHalfWidth = 2;
 inline constexpr int kBackroomsConnectorDistrictModules = 4;
+// Je borne toute recherche publique de connecteur afin que son cout reste
+// constant et qu'un rayon invalide ne soit jamais corrige silencieusement.
+inline constexpr int kBackroomsMaximumConnectorSearchRadius = 128;
 
 enum class BackroomsTheme : std::uint8_t {
     Offices = 0,
@@ -138,6 +142,31 @@ struct BackroomsColumnSample {
     auto operator==(const BackroomsColumnSample&) const -> bool = default;
 };
 
+// Je decris l'identite procedurale d'une rampe avant toute decoupe provoquee
+// par le streaming, un connecteur ou une modification du monde. Le module et
+// l'ancre nominale empechent deux motifs voisins de fusionner par accident.
+struct BackroomsLightFixtureLayout {
+    int logical_level = 0;
+    int module_x = 0;
+    int module_z = 0;
+    int nominal_anchor_x = 0;
+    int nominal_anchor_z = 0;
+    int ceiling_y = kBackroomsFloorY;
+    int nominal_length = kBackroomsLightFixtureNominalLength;
+    int connector_district_modules =
+        kBackroomsConnectorDistrictModules;
+    bool primary_axis_x = true;
+    BackroomsTheme theme = BackroomsTheme::Offices;
+    BackroomsArchetype archetype =
+        BackroomsArchetype::ClassicOffice;
+    BackroomsLightState state = BackroomsLightState::None;
+    BackroomsPoolGeometryProfile pool_geometry_profile =
+        BackroomsPoolGeometryProfile::LegacyFlat;
+    BlockId block = to_block_id(BlockType::Air);
+
+    auto operator==(const BackroomsLightFixtureLayout&) const -> bool = default;
+};
+
 struct BackroomsLevelConnector {
     BackroomsConnectorDirection direction = BackroomsConnectorDirection::Up;
     BackroomsConnectorStyle style = BackroomsConnectorStyle::Stairs;
@@ -162,6 +191,7 @@ public:
 
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto logical_level() const noexcept -> int;
+    [[nodiscard]] auto connector_district_modules() const noexcept -> int;
     [[nodiscard]] auto pool_geometry_profile() const noexcept
         -> BackroomsPoolGeometryProfile;
     [[nodiscard]] auto theme() const noexcept -> BackroomsTheme;
@@ -178,6 +208,10 @@ public:
         -> BackroomsModuleDescriptor;
     [[nodiscard]] auto sample_column(int world_x, int world_z) const noexcept
         -> BackroomsColumnSample;
+    [[nodiscard]] auto light_fixture_at(
+        int world_x,
+        int world_z) const noexcept
+        -> std::optional<BackroomsLightFixtureLayout>;
     [[nodiscard]] auto sample_block(int world_x, int y, int world_z) const noexcept
         -> BlockId;
     [[nodiscard]] auto sample_water_state(
@@ -195,7 +229,8 @@ public:
     [[nodiscard]] auto connector_in_district(
         BackroomsConnectorDirection direction,
         int district_x,
-        int district_z) const noexcept -> BackroomsLevelConnector;
+        int district_z) const noexcept
+        -> std::optional<BackroomsLevelConnector>;
 
     [[nodiscard]] static auto module_coordinate(int world_coordinate) noexcept -> int;
     [[nodiscard]] static auto local_coordinate(int world_coordinate) noexcept -> int;

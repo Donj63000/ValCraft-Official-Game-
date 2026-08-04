@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace valcraft {
@@ -13,6 +14,8 @@ inline constexpr std::size_t kBackroomsSpatialLevelCount = 5U;
 inline constexpr int kBackroomsSpatialLevelsBelowAnchor = 2;
 inline constexpr int kBackroomsSpatialLevelsAboveAnchor = 2;
 inline constexpr int kBackroomsSpatialConnectorDistrictModules = 2;
+inline constexpr int kBackroomsMaximumClearanceHeight = kChunkHeight;
+inline constexpr float kBackroomsMaximumClearanceHalfWidth = 4.0F;
 inline constexpr std::array<int, kBackroomsSpatialLevelCount>
     kBackroomsSpatialFloorY {{0, 20, 40, 68, 98}};
 
@@ -77,7 +80,17 @@ public:
         int seed = 1337,
         int anchor_level = 0,
         BackroomsSpatialProfile profile =
-            BackroomsSpatialProfile::LegacyV2) noexcept;
+            BackroomsSpatialProfile::LegacyV2);
+
+    [[nodiscard]] static constexpr auto is_anchor_level_representable(
+        int anchor_level) noexcept -> bool {
+        return anchor_level >=
+                   std::numeric_limits<int>::lowest() +
+                       kBackroomsSpatialLevelsBelowAnchor &&
+               anchor_level <=
+                   std::numeric_limits<int>::max() -
+                       kBackroomsSpatialLevelsAboveAnchor;
+    }
 
     [[nodiscard]] auto seed() const noexcept -> int;
     [[nodiscard]] auto anchor_level() const noexcept -> int;
@@ -86,11 +99,14 @@ public:
                             kBackroomsSpatialLevelCount>&;
     [[nodiscard]] auto placement_for_level(int logical_level) const noexcept
         -> std::optional<BackroomsLevelPlacement>;
+    [[nodiscard]] auto generator_for_level(int logical_level) const noexcept
+        -> const BackroomsGenerator*;
     [[nodiscard]] auto logical_level_at_y(float world_y) const noexcept -> int;
     [[nodiscard]] auto theme_at_y(float world_y) const noexcept
         -> BackroomsTheme;
-    [[nodiscard]] auto spawn_block(int logical_level) const noexcept
-        -> BlockCoord;
+    [[nodiscard]] auto anchor_spawn_block() const noexcept -> BlockCoord;
+    [[nodiscard]] auto spawn_block_for_level(
+        int logical_level) const noexcept -> std::optional<BlockCoord>;
 
     [[nodiscard]] auto connection_for_district(
         int lower_level,
@@ -101,6 +117,11 @@ public:
         int world_x,
         int world_y,
         int world_z) const noexcept -> BlockId;
+    [[nodiscard]] auto light_fixture_at(
+        int world_x,
+        int world_y,
+        int world_z) const noexcept
+        -> std::optional<BackroomsLightFixtureLayout>;
     [[nodiscard]] auto sample_water_state(
         int world_x,
         int world_y,

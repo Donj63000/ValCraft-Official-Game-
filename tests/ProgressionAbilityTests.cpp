@@ -1596,6 +1596,35 @@ TEST_CASE("le plan de construction est borné par rang et interdit sur navire mo
     CHECK(prepared.resolution.maximum_construction_cells == 9U);
     CHECK(prepared.resolution.construction_plan.cell_count == 9U);
 
+    auto line_state = state;
+    auto& line_plan = line_state.construction_plans[0U];
+    line_plan.shape = ConstructionPlanShape::Line;
+    line_plan.cell_count = 5U;
+    for (std::size_t index = 0U;
+         index < line_plan.cell_count;
+         ++index) {
+        line_plan.cells[index] = {
+            static_cast<std::int8_t>(index),
+            0,
+            0,
+            4U,
+        };
+    }
+    const auto valid_line =
+        prepare_player_ability_cast(
+            line_state,
+            request);
+    REQUIRE(valid_line.succeeded());
+    CHECK(valid_line.resolution.maximum_construction_cells == 5U);
+    line_plan.cell_count = 6U;
+    line_plan.cells[5U] = {5, 0, 0, 4U};
+    CHECK(
+        prepare_player_ability_cast(
+            line_state,
+            request)
+            .failure ==
+        AbilityCastFailure::InvalidConstructionPlan);
+
     request.construction_cell_count = 10U;
     CHECK(
         prepare_player_ability_cast(

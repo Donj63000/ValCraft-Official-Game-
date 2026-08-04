@@ -196,6 +196,9 @@ public:
     void set_water_movement_profile(
         PlayerWaterMovementProfile profile) noexcept;
     void set_block_break_speed_multiplier(float multiplier) noexcept;
+    // Je purge uniquement l'intention de saut mise en tampon quand une
+    // interface fige la simulation, sans modifier la position ni la velocite.
+    void discard_buffered_jump() noexcept;
     void trigger_primary_action() noexcept;
     void trigger_secondary_action() noexcept;
     void respawn(const glm::vec3& position) noexcept;

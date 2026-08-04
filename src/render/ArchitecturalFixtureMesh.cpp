@@ -24,6 +24,11 @@ constexpr float kFlameRadialScale = 0.24F;
 constexpr float kFlameAxialScale = 0.32F;
 constexpr float kFlameCenterOffset = 0.30F;
 constexpr float kFixtureUvUnits = 256.0F;
+// Je dimensionne le preflight sur le profil Medium, qui est aussi le plafond
+// utilise lorsque l'appelant demande High : 192 sommets de hampe et 864 de
+// flamme, avec le meme nombre d'indices.
+constexpr std::size_t kMaximumFixtureVerticesPerInstance = 1'056U;
+constexpr std::size_t kMaximumFixtureIndicesPerInstance = 1'056U;
 
 struct FixtureVector {
     float x = 0.0F;
@@ -445,6 +450,25 @@ auto append_architectural_fixture_geometry(
     StylizedPrimitiveLod lod) -> std::size_t {
 
     const auto first_added_index = mesh.indices.size();
+    if (mesh.fixtures.size() > kMaximumArchitecturalFixtures) {
+        throw std::length_error(
+            "Le maillage contient trop de fixtures architecturales");
+    }
+    // Je refuse un prefixe ou un ajout excessif avant de construire les deux
+    // primitives et leurs buffers temporaires. Le mesh appelant reste donc
+    // strictement intact sur ce chemin de rejet.
+    const auto maximum_size = checked_architectural_mesh_growth(
+        mesh.vertices.size(),
+        mesh.indices.size(),
+        mesh.fixtures.size() *
+            kMaximumFixtureVerticesPerInstance,
+        mesh.fixtures.size() *
+            kMaximumFixtureIndicesPerInstance);
+    if (maximum_size.vertex_count > mesh.vertices.max_size() ||
+        maximum_size.index_count > mesh.indices.max_size()) {
+        throw std::length_error(
+            "Le maillage des fixtures architecturales est trop grand");
+    }
     if (mesh.fixtures.empty()) {
         return first_added_index;
     }
@@ -460,24 +484,20 @@ auto append_architectural_fixture_geometry(
     const auto indices_per_fixture =
         shaft.indices.size() +
         flame.indices.size();
-    const auto maximum_vertex_count =
-        static_cast<std::size_t>(
-            std::numeric_limits<std::uint32_t>::max());
     if (vertices_per_fixture == 0U ||
         indices_per_fixture == 0U ||
-        mesh.vertices.size() >
-            maximum_vertex_count ||
-        mesh.fixtures.size() >
-            (maximum_vertex_count -
-             mesh.vertices.size()) /
-                vertices_per_fixture ||
-        mesh.fixtures.size() >
-            (std::numeric_limits<std::size_t>::max() -
-             mesh.indices.size()) /
-                indices_per_fixture) {
-        throw std::length_error(
-            "Le maillage des fixtures architecturales est trop grand");
+        vertices_per_fixture >
+            kMaximumFixtureVerticesPerInstance ||
+        indices_per_fixture >
+            kMaximumFixtureIndicesPerInstance) {
+        throw std::logic_error(
+            "La primitive de fixture depasse son budget contractuel");
     }
+    const auto final_size = checked_architectural_mesh_growth(
+        mesh.vertices.size(),
+        mesh.indices.size(),
+        mesh.fixtures.size() * vertices_per_fixture,
+        mesh.fixtures.size() * indices_per_fixture);
 
     FixtureGeometry addition {};
     addition.vertices.reserve(
@@ -496,12 +516,8 @@ auto append_architectural_fixture_geometry(
 
     const auto base_vertex =
         static_cast<std::uint32_t>(mesh.vertices.size());
-    mesh.vertices.reserve(
-        mesh.vertices.size() +
-        addition.vertices.size());
-    mesh.indices.reserve(
-        mesh.indices.size() +
-        addition.indices.size());
+    mesh.vertices.reserve(final_size.vertex_count);
+    mesh.indices.reserve(final_size.index_count);
     mesh.vertices.insert(
         mesh.vertices.end(),
         addition.vertices.begin(),

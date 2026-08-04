@@ -479,10 +479,9 @@ void apply_weather(EnvironmentState& state,
 
 auto make_backrooms_environment_state(
     float elapsed_seconds,
-    int seed,
+    const BackroomsGenerationContext& generation_context,
     float player_x,
-    float player_z,
-    bool poolrooms) noexcept -> EnvironmentState {
+    float player_z) noexcept -> EnvironmentState {
 
     const auto safe_coordinate = [](float value) noexcept -> double {
         if (!std::isfinite(value)) {
@@ -502,7 +501,15 @@ auto make_backrooms_environment_state(
                   0.0F,
                   kMaximumWeatherTimeSeconds)
             : 0.0F;
-    const BackroomsGenerator generator {seed};
+    const auto seed = generation_context.seed;
+    const auto poolrooms =
+        generation_context.theme == BackroomsTheme::Poolrooms;
+    const BackroomsGenerator generator {
+        generation_context.seed,
+        generation_context.logical_level,
+        generation_context.connector_district_modules,
+        generation_context.pool_geometry_profile,
+    };
 
     // La variation reste lente et de faible amplitude : elle entretient une
     // instabilité perceptible sans stroboscope ni rupture brutale de lisibilité.

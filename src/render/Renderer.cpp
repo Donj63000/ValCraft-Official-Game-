@@ -4184,7 +4184,8 @@ void append_backrooms_flashlight_hud_geometry(
 } // namespace
 
 auto make_backrooms_interference_fixture_cache_key(
-    int world_seed, int logical_level,
+    const BackroomsGenerationContext &generation_context,
+    std::uint64_t fixture_revision,
     const BackroomsJackLightInterferenceView &interference) noexcept
     -> std::optional<BackroomsInterferenceFixtureCacheKey> {
   const auto supported_mode =
@@ -4199,30 +4200,15 @@ auto make_backrooms_interference_fixture_cache_key(
     return std::nullopt;
   }
 
-  const auto cell_size =
-      static_cast<double>(kBackroomsFlickerCacheCellSize);
-  const auto anchor_cell_x =
-      std::floor(static_cast<double>(interference.position.x) / cell_size);
-  const auto anchor_cell_z =
-      std::floor(static_cast<double>(interference.position.z) / cell_size);
-  constexpr auto minimum_cell =
-      static_cast<double>(std::numeric_limits<int>::min());
-  constexpr auto maximum_cell =
-      static_cast<double>(std::numeric_limits<int>::max());
-  if (anchor_cell_x < minimum_cell || anchor_cell_x > maximum_cell ||
-      anchor_cell_z < minimum_cell || anchor_cell_z > maximum_cell) {
-    return std::nullopt;
-  }
-
   const auto search_radius =
       static_cast<int>(std::ceil(std::clamp(
           interference.radius, 1.0F,
           static_cast<float>(kMaximumBackroomsFixtureSearchRadius))));
   return BackroomsInterferenceFixtureCacheKey{
-      .world_seed = world_seed,
-      .logical_level = logical_level,
-      .anchor_cell_x = static_cast<int>(anchor_cell_x),
-      .anchor_cell_z = static_cast<int>(anchor_cell_z),
+      .generation_context = generation_context,
+      .fixture_revision = fixture_revision,
+      .query_position_x = interference.position.x,
+      .query_position_z = interference.position.z,
       .search_radius = search_radius,
       .mode = interference.mode,
   };
@@ -5741,6 +5727,10 @@ void Renderer::render_frame(
       environment.poolrooms;
   const auto backrooms_level =
       world.backrooms_level_at_y(player.position().y);
+  const auto backrooms_generation_context =
+      world.backrooms_generation_context(backrooms_level);
+  const auto backrooms_fixture_revision =
+      world.backrooms_light_fixture_revision();
   const auto resident_stream_radius = std::max(world.stream_radius(), 0);
   const auto visible_stream_radius =
       backrooms_interior
@@ -5893,37 +5883,28 @@ void Renderer::render_frame(
                   static_cast<double>(kBackroomsFlickerCacheCellSize)));
       const auto cache_matches =
           backrooms_flicker_cache_valid_ &&
-          backrooms_flicker_world_seed_ == world.seed() &&
-          backrooms_flicker_level_ == backrooms_level &&
+          backrooms_generation_context.has_value() &&
+          backrooms_flicker_context_ == *backrooms_generation_context &&
+          backrooms_flicker_fixture_revision_ ==
+              backrooms_fixture_revision &&
           backrooms_flicker_cache_x_ == camera_cache_x &&
           backrooms_flicker_cache_z_ == camera_cache_z;
-      if (!cache_matches) {
+      if (!backrooms_generation_context.has_value()) {
+        backrooms_flicker_field_ = {};
+        backrooms_flicker_cache_valid_ = false;
+      } else if (!cache_matches) {
         // Je recherche les rares rampes candidates hors de la zone de brume
         // visible. Le cache peut ainsi changer sans faire apparaitre un
         // clignotement au milieu de l'ecran.
         backrooms_flicker_field_ =
             collect_backrooms_flicker_field(
-                world.seed(),
+                world,
                 camera_block_x,
                 camera_block_z,
                 backrooms_level);
-        const auto physical_level_offset =
-            world.backrooms_spawn_block(backrooms_level).y -
-            world.backrooms_spawn_block(
-                world.backrooms_level()).y;
-        if (physical_level_offset != 0) {
-          // Je translate les luminaires du générateur local vers leur étage
-          // physique. Le cache conserve ainsi une seule identité logique sans
-          // faire clignoter une source dans la dalle voisine.
-          for (std::size_t index = 0U;
-               index < backrooms_flicker_field_.count;
-               ++index) {
-            backrooms_flicker_field_.anchors[index].position_y +=
-                static_cast<float>(physical_level_offset);
-          }
-        }
-        backrooms_flicker_world_seed_ = world.seed();
-        backrooms_flicker_level_ = backrooms_level;
+        backrooms_flicker_context_ = *backrooms_generation_context;
+        backrooms_flicker_fixture_revision_ =
+            backrooms_fixture_revision;
         backrooms_flicker_cache_x_ = camera_cache_x;
         backrooms_flicker_cache_z_ = camera_cache_z;
         backrooms_flicker_cache_valid_ = true;
@@ -5981,33 +5962,24 @@ void Renderer::render_frame(
             : BackroomsJackLightInterferenceMode::Flicker;
   }
   const auto interference_cache_key =
-      backrooms_interior
+      backrooms_interior && backrooms_generation_context.has_value()
           ? make_backrooms_interference_fixture_cache_key(
-                world.seed(), backrooms_level,
+                *backrooms_generation_context,
+                backrooms_fixture_revision,
                 effective_backrooms_interference)
           : std::nullopt;
   std::optional<glm::vec4> forced_interference_uniform{};
   if (interference_cache_key.has_value()) {
     if (!backrooms_jack_interference_fixture_cache_.matches(
             *interference_cache_key)) {
-      // Je sonde depuis le centre canonique de la cellule : le resultat reste
-      // deterministe pendant tout son parcours et le cout n'est paye qu'a la
-      // frontiere suivante.
+      // Je sonde depuis la position reelle : le rayon et la rampe la plus
+      // proche ne doivent pas dependre du centre arbitraire d'une maille.
       auto fixture = find_nearest_backrooms_light_fixture(
-          interference_cache_key->world_seed,
-          interference_cache_key->query_position_x(),
-          interference_cache_key->query_position_z(),
+          world,
+          interference_cache_key->exact_query_position_x(),
+          interference_cache_key->exact_query_position_z(),
           interference_cache_key->search_radius,
-          interference_cache_key->logical_level);
-      if (fixture.has_value()) {
-        const auto physical_level_offset =
-            world.backrooms_spawn_block(
-                     interference_cache_key->logical_level)
-                .y -
-            world.backrooms_spawn_block(world.backrooms_level()).y;
-        fixture->position_y +=
-            static_cast<float>(physical_level_offset);
-      }
+          interference_cache_key->generation_context.logical_level);
       backrooms_jack_interference_fixture_cache_.key =
           *interference_cache_key;
       backrooms_jack_interference_fixture_cache_.fixture =

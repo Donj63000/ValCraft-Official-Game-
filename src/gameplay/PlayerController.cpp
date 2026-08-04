@@ -1108,6 +1108,10 @@ void PlayerController::set_fly_mode_enabled(bool enabled) noexcept {
     reset_dynamic_climb_state();
 }
 
+void PlayerController::discard_buffered_jump() noexcept {
+    jump_buffer_timer_ = 0.0F;
+}
+
 void PlayerController::set_selected_block(BlockId block_id) noexcept {
     selected_block_ = block_item_id(block_id);
 }

@@ -9,6 +9,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
 
 namespace valcraft {
 
@@ -174,6 +176,78 @@ TEST_CASE("les rampes hard-surface restent des prismes inclines valides") {
         }
         CHECK(slope_vertex_count == 4U);
     }
+}
+
+TEST_CASE("le mesher de props refuse les sections hors budget avant le sampler") {
+    auto sample_count = std::size_t {0U};
+    const ArchitecturalSampler sampler =
+        [&sample_count](int, int, int) {
+            ++sample_count;
+            return ArchitecturalCellSample {};
+        };
+    ArchitecturalMesh mesh;
+
+    const ArchitecturalSection oversized {
+        {0, 0, 0},
+        {16, 15, 15},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(append_modern_backrooms_prop_geometry(
+            mesh,
+            oversized,
+            sampler)),
+        std::length_error);
+    CHECK(sample_count == 0U);
+    CHECK(mesh.empty());
+
+    constexpr auto maximum = std::numeric_limits<int>::max();
+    const ArchitecturalSection overflowing_halo {
+        {maximum, 0, 0},
+        {maximum, 0, 0},
+        1,
+    };
+    CHECK_THROWS_AS(
+        static_cast<void>(append_modern_backrooms_prop_geometry(
+            mesh,
+            overflowing_halo,
+            sampler)),
+        std::overflow_error);
+    CHECK(sample_count == 0U);
+    CHECK(mesh.empty());
+}
+
+TEST_CASE("le mesher de props borne la densite avant de modifier le mesh") {
+    auto sample_count = std::size_t {0U};
+    const ArchitecturalSampler dense_sampler =
+        [&sample_count](int, int, int) {
+            ++sample_count;
+            return ArchitecturalCellSample {
+                to_block_id(BlockType::BackroomsDesk),
+                15U,
+                0U,
+            };
+        };
+    const ArchitecturalSection dense_section {
+        {0, 0, 0},
+        {8, 7, 7},
+        1,
+    };
+    ArchitecturalMesh mesh;
+    mesh.vertices.push_back(HardSurfaceVertex {});
+    mesh.indices.push_back(0U);
+    mesh.bounds.valid = true;
+    const auto before = mesh;
+
+    CHECK_THROWS_AS(
+        static_cast<void>(append_modern_backrooms_prop_geometry(
+            mesh,
+            dense_section,
+            dense_sampler,
+            StylizedPrimitiveLod::High)),
+        std::length_error);
+    CHECK(sample_count == 513U);
+    CHECK(mesh == before);
 }
 
 } // namespace valcraft

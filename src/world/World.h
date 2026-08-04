@@ -81,12 +81,38 @@ struct WorldStreamingStats {
     std::size_t unloaded_chunks = 0;
 };
 
+inline constexpr int kMaximumBackroomsLightFixtureQueryRadius = 80;
+
+struct BackroomsLightFixture {
+    BackroomsFixtureId id {};
+    float position_x = 0.0F;
+    float position_y = 0.0F;
+    float position_z = 0.0F;
+
+    auto operator==(const BackroomsLightFixture&) const -> bool = default;
+};
+
+struct BackroomsLightFixtureQuery {
+    std::vector<BackroomsLightFixture> fixtures {};
+    // Je publie ces compteurs pour verifier le cout structurel de la requete :
+    // je parcours des candidats de rampes dedupliques, puis leur empreinte
+    // bornee a quatre cellules, jamais les 25 921 colonnes historiques.
+    std::size_t inspected_fixture_candidates = 0U;
+    std::size_t inspected_fixture_footprint_cells = 0U;
+    // Je conserve ce compteur pour les consommateurs existants. La requete
+    // spatiale ne parcourt desormais plus le cache emissif voxel par voxel.
+    std::size_t inspected_emissive_cells = 0U;
+};
+
 enum class WorldRaycastMode : std::uint8_t {
     Selection = 0,
     VisibilityOpaque = 1,
     ProjectileCollidable = 2,
     WaterOrOpaque = 3,
 };
+
+inline constexpr float kMaximumWorldRaycastDistance = 4096.0F;
+inline constexpr std::size_t kMaximumWorldRaycastBoundarySteps = 8192U;
 
 struct WorldCellSnapshot {
     BlockCoord coordinate {};
@@ -205,6 +231,11 @@ public:
         mutable bool mesh_cache_dirty = false;
         std::uint64_t mesh_revision = 0;
         std::vector<BlockCoord> emissive_blocks {};
+        // Je separe l'index procedurale des rampes du cache voxel utilise par
+        // l'eclairage. Une rampe qui traverse deux chunks reste candidate dans
+        // chacun d'eux, puis la requete la deduplique par son layout complet.
+        std::vector<BackroomsLightFixtureLayout>
+            backrooms_fixture_candidates {};
         std::bitset<kChunkSizeX * kChunkSizeZ> sky_columns_dirty {};
         mutable std::size_t mesh_vertex_capacity_hint = 0;
         mutable std::size_t mesh_index_capacity_hint = 0;
@@ -330,8 +361,22 @@ public:
     [[nodiscard]] auto backrooms_level_at_y(float world_y) const noexcept -> int;
     [[nodiscard]] auto backrooms_theme_at_y(float world_y) const noexcept
         -> BackroomsTheme;
-    [[nodiscard]] auto backrooms_spawn_block(int logical_level) const noexcept
+    [[nodiscard]] auto backrooms_generation_context(
+        int logical_level) const noexcept
+        -> std::optional<BackroomsGenerationContext>;
+    [[nodiscard]] auto backrooms_light_fixture_revision() const noexcept
+        -> std::uint64_t;
+    [[nodiscard]] auto query_backrooms_light_fixtures(
+        double position_x,
+        double position_z,
+        int search_radius,
+        int logical_level,
+        bool include_emergency = false) const
+        -> BackroomsLightFixtureQuery;
+    [[nodiscard]] auto backrooms_anchor_spawn_block() const noexcept
         -> BlockCoord;
+    [[nodiscard]] auto backrooms_spawn_block_for_level(
+        int logical_level) const noexcept -> std::optional<BlockCoord>;
     [[nodiscard]] auto visual_pipeline() const noexcept -> VisualPipeline;
     void set_visual_pipeline(VisualPipeline visual_pipeline);
     [[nodiscard]] auto stream_radius() const noexcept -> int;
@@ -472,6 +517,21 @@ private:
     void enqueue_gpu_upload(const ChunkCoord& coord);
     void enqueue_gpu_unload(const ChunkCoord& coord);
     void remove_unsupported_torches_around(int x, int y, int z);
+    void bump_backrooms_light_fixture_revision() noexcept;
+    [[nodiscard]] auto backrooms_block_change_affects_fixture(
+        const BlockCoord& world_coord,
+        BlockId previous_block,
+        BlockId next_block) const noexcept -> bool;
+    [[nodiscard]] auto backrooms_chunk_fixture_state_changes(
+        const ChunkRecord& record,
+        const WorldChunkSnapshot& snapshot) const noexcept -> bool;
+    [[nodiscard]] auto backrooms_fixture_override_cells(
+        const ChunkCoord& coord,
+        const ChunkOverrideEntry& entry) const
+        -> std::unordered_set<BlockCoord, BlockCoordHash>;
+    [[nodiscard]] auto backrooms_unloaded_fixture_override_cells() const
+        -> std::unordered_set<BlockCoord, BlockCoordHash>;
+    void refresh_chunk_backrooms_fixture_index(ChunkRecord& record);
     void refresh_chunk_emissive_cache(ChunkRecord& record);
     void update_chunk_emissive_cache(ChunkRecord& record, const BlockCoord& local_coord, BlockId previous_block, BlockId next_block);
     [[nodiscard]] auto set_block_internal(
@@ -481,7 +541,9 @@ private:
         BlockId block_id,
         bool mark_player_placed) -> bool;
     void sync_chunk_override_snapshot(const ChunkCoord& coord, const Chunk& chunk);
-    void apply_chunk_override_to_record(ChunkRecord& record, const ChunkOverrideEntry& entry);
+    [[nodiscard]] auto apply_chunk_override_to_record(
+        ChunkRecord& record,
+        const ChunkOverrideEntry& entry) -> bool;
     [[nodiscard]] auto make_chunk_override_entry(
         const ChunkCoord& coord,
         const std::array<BlockId, kChunkVolume>& blocks,
@@ -572,6 +634,7 @@ private:
     ChunkCoord stream_center_ {};
     bool has_stream_center_ = false;
     int active_stream_radius_ = 0;
+    std::uint64_t backrooms_light_fixture_revision_ = 1U;
 };
 
 } // namespace valcraft

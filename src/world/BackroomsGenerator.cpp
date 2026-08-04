@@ -61,15 +61,121 @@ constexpr int kFloodedDeepPoolConnectorMargin = 8;
     return remainder < 0 ? remainder + divisor : remainder;
 }
 
+[[nodiscard]] constexpr auto fits_in_int(std::int64_t value) noexcept -> bool {
+    return value >=
+               static_cast<std::int64_t>(std::numeric_limits<int>::lowest()) &&
+           value <=
+               static_cast<std::int64_t>(std::numeric_limits<int>::max());
+}
+
+[[nodiscard]] constexpr auto checked_int(std::int64_t value) noexcept
+    -> std::optional<int> {
+    if (!fits_in_int(value)) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+[[nodiscard]] constexpr auto floor_division64(
+    std::int64_t value,
+    std::int64_t divisor) noexcept -> std::int64_t {
+    auto quotient = value / divisor;
+    if (value % divisor < 0) {
+        --quotient;
+    }
+    return quotient;
+}
+
+[[nodiscard]] constexpr auto positive_modulo64(
+    std::int64_t value,
+    int divisor) noexcept -> int {
+    const auto remainder = value % static_cast<std::int64_t>(divisor);
+    return static_cast<int>(
+        remainder < 0 ? remainder + divisor : remainder);
+}
+
+struct BackroomsFixturePattern {
+    int nominal_anchor_x = 0;
+    int nominal_anchor_z = 0;
+    int nominal_length = kBackroomsLightFixtureNominalLength;
+};
+
+[[nodiscard]] auto backrooms_fixture_pattern_at(
+    const BackroomsModuleDescriptor& descriptor,
+    int layout_seed,
+    int world_x,
+    int world_z,
+    int local_x,
+    int local_z,
+    bool wall) noexcept -> std::optional<BackroomsFixturePattern> {
+    if (wall) {
+        return std::nullopt;
+    }
+
+    auto row_spacing = 9;
+    auto strip_period = 11;
+    if (descriptor.archetype == BackroomsArchetype::GrandHall) {
+        row_spacing = 13;
+        strip_period = 15;
+    } else if (
+        descriptor.archetype == BackroomsArchetype::CompressionMaze) {
+        row_spacing = 7;
+        strip_period = 9;
+    }
+
+    const auto phase =
+        static_cast<int>(
+            hash_position(
+                layout_seed,
+                descriptor.module_x,
+                descriptor.module_z,
+                0x1B8E6F45ULL) % 17U);
+    const auto strip_offset =
+        descriptor.primary_axis_x
+            ? positive_modulo64(
+                  static_cast<std::int64_t>(local_x) + phase * 2,
+                  strip_period)
+            : positive_modulo64(
+                  static_cast<std::int64_t>(local_z) + phase * 2,
+                  strip_period);
+    const auto on_fixture_row =
+        descriptor.primary_axis_x
+            ? positive_modulo64(
+                  static_cast<std::int64_t>(local_z) + phase,
+                  row_spacing) == 2
+            : positive_modulo64(
+                  static_cast<std::int64_t>(local_x) + phase,
+                  row_spacing) == 2;
+    if (!on_fixture_row || strip_offset > 3) {
+        return std::nullopt;
+    }
+
+    const auto nominal_anchor_x = checked_int(
+        static_cast<std::int64_t>(world_x) -
+        (descriptor.primary_axis_x ? strip_offset : 0));
+    const auto nominal_anchor_z = checked_int(
+        static_cast<std::int64_t>(world_z) -
+        (descriptor.primary_axis_x ? 0 : strip_offset));
+    if (!nominal_anchor_x.has_value() ||
+        !nominal_anchor_z.has_value()) {
+        return std::nullopt;
+    }
+
+    return BackroomsFixturePattern {
+        .nominal_anchor_x = *nominal_anchor_x,
+        .nominal_anchor_z = *nominal_anchor_z,
+    };
+}
+
 [[nodiscard]] auto flooded_module_for_layout(
     int layout_seed,
-    int module_x,
-    int module_z) noexcept -> bool {
+    std::int64_t module_x,
+    std::int64_t module_z) noexcept -> bool {
 
     const auto district_x =
-        floor_division(module_x, kFloodedDistrictModules);
+        floor_division64(module_x, kFloodedDistrictModules);
     const auto district_z =
-        floor_division(module_z, kFloodedDistrictModules);
+        floor_division64(module_z, kFloodedDistrictModules);
 
     // Je protege tout le macro-district d'apparition : le joueur dispose ainsi
     // toujours d'une vraie zone de lecture avant sa premiere nappe inondee.
@@ -78,9 +184,9 @@ constexpr int kFloodedDeepPoolConnectorMargin = 8;
     }
 
     const auto local_module_x =
-        positive_modulo(module_x, kFloodedDistrictModules);
+        positive_modulo64(module_x, kFloodedDistrictModules);
     const auto local_module_z =
-        positive_modulo(module_z, kFloodedDistrictModules);
+        positive_modulo64(module_z, kFloodedDistrictModules);
     if (local_module_x < kFloodedDistrictCoreFirstModule ||
         local_module_x > kFloodedDistrictCoreLastModule ||
         local_module_z < kFloodedDistrictCoreFirstModule ||
@@ -282,8 +388,8 @@ constexpr int kFloodedDeepPoolConnectorMargin = 8;
 
 [[nodiscard]] auto shared_portal_center(
     int seed,
-    int edge_x,
-    int edge_z,
+    std::int64_t edge_x,
+    std::int64_t edge_z,
     std::uint64_t salt) noexcept -> int {
 
     constexpr auto portal_span =
@@ -522,6 +628,10 @@ auto BackroomsGenerator::logical_level() const noexcept -> int {
     return logical_level_;
 }
 
+auto BackroomsGenerator::connector_district_modules() const noexcept -> int {
+    return connector_district_modules_;
+}
+
 auto BackroomsGenerator::pool_geometry_profile() const noexcept
     -> BackroomsPoolGeometryProfile {
 
@@ -633,7 +743,7 @@ auto BackroomsGenerator::module_descriptor(
         shared_portal_center(
             layout_seed_,
             module_x,
-            module_z + 1,
+            static_cast<std::int64_t>(module_z) + 1,
             0x1187A4E3ULL);
     descriptor.west_portal_z =
         shared_portal_center(
@@ -644,7 +754,7 @@ auto BackroomsGenerator::module_descriptor(
     descriptor.east_portal_z =
         shared_portal_center(
             layout_seed_,
-            module_x + 1,
+            static_cast<std::int64_t>(module_x) + 1,
             module_z,
             0x4D2C90B7ULL);
     descriptor.base_ceiling_height =
@@ -696,7 +806,25 @@ auto BackroomsGenerator::descriptor_at(
 auto BackroomsGenerator::connector_in_district(
     BackroomsConnectorDirection direction,
     int district_x,
-    int district_z) const noexcept -> BackroomsLevelConnector {
+    int district_z) const noexcept
+    -> std::optional<BackroomsLevelConnector> {
+
+    switch (direction) {
+    case BackroomsConnectorDirection::Up:
+        if (logical_level_ == std::numeric_limits<int>::max()) {
+            return std::nullopt;
+        }
+        break;
+    case BackroomsConnectorDirection::Down:
+        if (logical_level_ == std::numeric_limits<int>::lowest()) {
+            return std::nullopt;
+        }
+        break;
+    default:
+        // Je refuse une direction inconnue avant tout calcul de niveau : elle
+        // ne doit jamais etre interpretee implicitement comme une descente.
+        return std::nullopt;
+    }
 
     const auto boundary_level =
         direction == BackroomsConnectorDirection::Up
@@ -727,19 +855,28 @@ auto BackroomsGenerator::connector_in_district(
         static_cast<int>(
             (placement_hash >> 2U) % district_module_count);
     const auto module_x =
-        district_x * connector_district_modules_ +
+        static_cast<std::int64_t>(district_x) *
+            connector_district_modules_ +
         module_offset_x;
     const auto module_z =
-        district_z * connector_district_modules_ +
+        static_cast<std::int64_t>(district_z) *
+            connector_district_modules_ +
         module_offset_z;
     const auto local_x =
         15 + static_cast<int>((placement_hash >> 8U) % 34U);
     const auto local_z =
         15 + static_cast<int>((placement_hash >> 16U) % 34U);
+    const auto trigger_x = checked_int(
+        module_x * kBackroomsModuleSize + local_x);
+    const auto trigger_z = checked_int(
+        module_z * kBackroomsModuleSize + local_z);
+    if (!trigger_x.has_value() || !trigger_z.has_value()) {
+        return std::nullopt;
+    }
     const BlockCoord trigger {
-        module_x * kBackroomsModuleSize + local_x,
+        *trigger_x,
         kBackroomsFloorY + 1,
-        module_z * kBackroomsModuleSize + local_z,
+        *trigger_z,
     };
 
     const auto orientation =
@@ -754,20 +891,23 @@ auto BackroomsGenerator::connector_in_district(
             ? landing_distance
             : orientation == 2 ? -landing_distance : 0;
 
-    auto destination_level = logical_level_;
-    if (direction == BackroomsConnectorDirection::Up) {
-        if (destination_level < std::numeric_limits<int>::max()) {
-            ++destination_level;
-        }
-    } else if (destination_level > std::numeric_limits<int>::min()) {
-        --destination_level;
+    const auto destination_level =
+        direction == BackroomsConnectorDirection::Up
+            ? logical_level_ + 1
+            : logical_level_ - 1;
+    const auto landing_x = checked_int(
+        static_cast<std::int64_t>(trigger.x) + landing_offset_x);
+    const auto landing_z = checked_int(
+        static_cast<std::int64_t>(trigger.z) + landing_offset_z);
+    if (!landing_x.has_value() || !landing_z.has_value()) {
+        return std::nullopt;
     }
 
     const auto slide =
         direction == BackroomsConnectorDirection::Down &&
         is_poolrooms() &&
         ((placement_hash >> 24U) % 5U == 0U);
-    return {
+    return BackroomsLevelConnector {
         .direction = direction,
         .style =
             slide
@@ -776,9 +916,9 @@ auto BackroomsGenerator::connector_in_district(
         .destination_level = destination_level,
         .trigger_block = trigger,
         .destination_landing_block = {
-            trigger.x + landing_offset_x,
+            *landing_x,
             kBackroomsFloorY + 1,
-            trigger.z + landing_offset_z,
+            *landing_z,
         },
         .destination_yaw_degrees =
             static_cast<float>(orientation * 90),
@@ -792,7 +932,11 @@ auto BackroomsGenerator::connector_near(
     int horizontal_radius) const noexcept
     -> std::optional<BackroomsLevelConnector> {
 
-    const auto radius = std::max(0, horizontal_radius);
+    if (horizontal_radius < 0 ||
+        horizontal_radius > kBackroomsMaximumConnectorSearchRadius) {
+        return std::nullopt;
+    }
+    const auto radius = horizontal_radius;
     const auto district_world_size =
         connector_district_modules_ *
         kBackroomsModuleSize;
@@ -815,29 +959,45 @@ auto BackroomsGenerator::connector_near(
          ++district_offset_z) {
         for (int district_offset_x = -district_radius;
              district_offset_x <= district_radius;
-             ++district_offset_x) {
+            ++district_offset_x) {
             for (const auto direction : directions) {
+                const auto district_x = checked_int(
+                    static_cast<std::int64_t>(center_district_x) +
+                    district_offset_x);
+                const auto district_z = checked_int(
+                    static_cast<std::int64_t>(center_district_z) +
+                    district_offset_z);
+                if (!district_x.has_value() ||
+                    !district_z.has_value()) {
+                    continue;
+                }
                 const auto connector =
                     connector_in_district(
                         direction,
-                        center_district_x + district_offset_x,
-                        center_district_z + district_offset_z);
+                        *district_x,
+                        *district_z);
+                if (!connector.has_value()) {
+                    continue;
+                }
                 const auto delta_x =
                     static_cast<std::int64_t>(world_x) -
-                    connector.trigger_block.x;
+                    connector->trigger_block.x;
                 const auto delta_z =
                     static_cast<std::int64_t>(world_z) -
-                    connector.trigger_block.z;
+                    connector->trigger_block.z;
+                const auto delta_y =
+                    static_cast<std::int64_t>(world_y) -
+                    connector->trigger_block.y;
                 if (std::abs(delta_x) > radius ||
                     std::abs(delta_z) > radius ||
-                    std::abs(world_y - connector.trigger_block.y) > 1) {
+                    std::abs(delta_y) > 1) {
                     continue;
                 }
 
                 const auto distance_squared =
                     delta_x * delta_x + delta_z * delta_z;
                 if (distance_squared < nearest_distance_squared) {
-                    nearest = connector;
+                    nearest = *connector;
                     nearest_distance_squared = distance_squared;
                 }
             }
@@ -880,8 +1040,10 @@ auto BackroomsGenerator::floor_block_for(
         const auto patch =
             hash_position(
                 layout_seed_,
-                descriptor.module_x * 4 + local_x / 16,
-                descriptor.module_z * 4 + local_z / 16,
+                static_cast<std::int64_t>(descriptor.module_x) * 4 +
+                    local_x / 16,
+                static_cast<std::int64_t>(descriptor.module_z) * 4 +
+                    local_z / 16,
                 0x9425E17BULL);
         if (patch % 7U == 0U) {
             return to_block_id(BlockType::BackroomsConcrete);
@@ -939,17 +1101,18 @@ auto BackroomsGenerator::is_guaranteed_route_in_rectangle(
                 direction,
                 district_x,
                 district_z);
-        if (module_coordinate(connector.trigger_block.x) !=
+        if (!connector.has_value() ||
+            module_coordinate(connector->trigger_block.x) !=
                 descriptor.module_x ||
-            module_coordinate(connector.trigger_block.z) !=
+            module_coordinate(connector->trigger_block.z) !=
                 descriptor.module_z) {
             continue;
         }
 
         const auto connector_x =
-            local_coordinate(connector.trigger_block.x);
+            local_coordinate(connector->trigger_block.x);
         const auto connector_z =
-            local_coordinate(connector.trigger_block.z);
+            local_coordinate(connector->trigger_block.z);
         const auto room =
             intersects(
                 connector_x - kConnectorRoomHalfWidth,
@@ -1065,8 +1228,10 @@ auto BackroomsGenerator::ceiling_height_at(
         const auto zone_hash =
             hash_position(
                 layout_seed_,
-                descriptor.module_x * 4 + zone_x,
-                descriptor.module_z * 4 + zone_z,
+                static_cast<std::int64_t>(descriptor.module_x) * 4 +
+                    zone_x,
+                static_cast<std::int64_t>(descriptor.module_z) * 4 +
+                    zone_z,
                 0xE1347AA9ULL);
         height = 5 + static_cast<int>(zone_hash % 14U);
     } else if (descriptor.archetype == BackroomsArchetype::NestedRooms) {
@@ -1082,8 +1247,10 @@ auto BackroomsGenerator::ceiling_height_at(
         const auto zone_hash =
             hash_position(
                 layout_seed_,
-                descriptor.module_x * 2 + local_x / 32,
-                descriptor.module_z * 2 + local_z / 32,
+                static_cast<std::int64_t>(descriptor.module_x) * 2 +
+                    local_x / 32,
+                static_cast<std::int64_t>(descriptor.module_z) * 2 +
+                    local_z / 32,
                 0x2C5D8F11ULL);
         height = std::clamp(
             descriptor.base_ceiling_height +
@@ -1239,8 +1406,10 @@ auto BackroomsGenerator::wall_height_at(
         const auto omission =
             hash_position(
                 layout_seed_,
-                descriptor.module_x * 8 + local_x / 9,
-                descriptor.module_z * 8 + local_z / 9,
+                static_cast<std::int64_t>(descriptor.module_x) * 8 +
+                    local_x / 9,
+                static_cast<std::int64_t>(descriptor.module_z) * 8 +
+                    local_z / 9,
                 0xF7A82C39ULL) % 7U == 0U;
         wall = pillar_x && pillar_z && !omission;
         break;
@@ -1316,45 +1485,16 @@ auto BackroomsGenerator::light_state_at(
     int local_z,
     bool wall) const noexcept -> BackroomsLightState {
 
-    if (wall) {
-        return BackroomsLightState::None;
-    }
-
-    auto row_spacing = 9;
-    auto strip_period = 11;
-    if (descriptor.archetype == BackroomsArchetype::GrandHall) {
-        row_spacing = 13;
-        strip_period = 15;
-    } else if (
-        descriptor.archetype == BackroomsArchetype::CompressionMaze) {
-        row_spacing = 7;
-        strip_period = 9;
-    }
-
-    const auto phase =
-        static_cast<int>(
-            hash_position(
-                layout_seed_,
-                descriptor.module_x,
-                descriptor.module_z,
-                0x1B8E6F45ULL) % 17U);
-
-    auto strip_offset = 0;
-    bool fixture = false;
-    if (descriptor.primary_axis_x) {
-        strip_offset =
-            positive_modulo(local_x + phase * 2, strip_period);
-        fixture =
-            positive_modulo(local_z + phase, row_spacing) == 2 &&
-            strip_offset <= 3;
-    } else {
-        strip_offset =
-            positive_modulo(local_z + phase * 2, strip_period);
-        fixture =
-            positive_modulo(local_x + phase, row_spacing) == 2 &&
-            strip_offset <= 3;
-    }
-    if (!fixture) {
+    const auto fixture =
+        backrooms_fixture_pattern_at(
+            descriptor,
+            layout_seed_,
+            world_x,
+            world_z,
+            local_x,
+            local_z,
+            wall);
+    if (!fixture.has_value()) {
         return BackroomsLightState::None;
     }
 
@@ -1362,10 +1502,8 @@ auto BackroomsGenerator::light_state_at(
     // d'obscurité lisibles, bien plus inquiétantes que des lampes aléatoires.
     // Je rattache les quatre cellules d'une rampe à une ancre commune. Une
     // rampe ne peut ainsi plus changer d'état au milieu de sa longueur.
-    const auto fixture_anchor_x =
-        world_x - (descriptor.primary_axis_x ? strip_offset : 0);
-    const auto fixture_anchor_z =
-        world_z - (descriptor.primary_axis_x ? 0 : strip_offset);
+    const auto fixture_anchor_x = fixture->nominal_anchor_x;
+    const auto fixture_anchor_z = fixture->nominal_anchor_z;
     const auto outage_cell_x =
         floor_division(fixture_anchor_x, 16);
     const auto outage_cell_z =
@@ -1497,27 +1635,35 @@ auto BackroomsGenerator::sample_poolrooms_column(
         if (wall) {
             pool_surface = BackroomsPoolSurface::Dry;
         } else {
+            const auto module_x64 =
+                static_cast<std::int64_t>(descriptor.module_x);
+            const auto module_z64 =
+                static_cast<std::int64_t>(descriptor.module_z);
             const auto transition_to_dry_module =
                 (local_x < kFloodedTransitionWidth &&
-                 !is_flooded_module(
-                     descriptor.module_x - 1,
-                     descriptor.module_z)) ||
+                 !flooded_module_for_layout(
+                     layout_seed_,
+                     module_x64 - 1,
+                     module_z64)) ||
                 (local_x >=
                          kBackroomsModuleSize -
                              kFloodedTransitionWidth &&
-                 !is_flooded_module(
-                     descriptor.module_x + 1,
-                     descriptor.module_z)) ||
+                 !flooded_module_for_layout(
+                     layout_seed_,
+                     module_x64 + 1,
+                     module_z64)) ||
                 (local_z < kFloodedTransitionWidth &&
-                 !is_flooded_module(
-                     descriptor.module_x,
-                     descriptor.module_z - 1)) ||
+                 !flooded_module_for_layout(
+                     layout_seed_,
+                     module_x64,
+                     module_z64 - 1)) ||
                 (local_z >=
                          kBackroomsModuleSize -
                              kFloodedTransitionWidth &&
-                 !is_flooded_module(
-                     descriptor.module_x,
-                     descriptor.module_z + 1));
+                 !flooded_module_for_layout(
+                     layout_seed_,
+                     module_x64,
+                     module_z64 + 1));
             if (transition_to_dry_module) {
                 pool_surface = BackroomsPoolSurface::Shore;
             }
@@ -1566,10 +1712,13 @@ auto BackroomsGenerator::sample_poolrooms_column(
             floor_division(world_z, 6),
             0x51D806ABULL);
     const auto decoration_anchor =
-        positive_modulo(world_x + static_cast<int>(decoration_hash & 3U), 12) ==
-            3 &&
-        positive_modulo(
-            world_z + static_cast<int>((decoration_hash >> 2U) & 3U),
+        positive_modulo64(
+            static_cast<std::int64_t>(world_x) +
+                static_cast<int>(decoration_hash & 3U),
+            12) == 3 &&
+        positive_modulo64(
+            static_cast<std::int64_t>(world_z) +
+                static_cast<int>((decoration_hash >> 2U) & 3U),
             12) ==
             3;
     if (!wall &&
@@ -1611,10 +1760,10 @@ auto BackroomsGenerator::sample_poolrooms_column(
         wall = false;
         wall_top_y = kBackroomsFloorY;
         const auto delta_x =
-            world_x -
+            static_cast<std::int64_t>(world_x) -
             connector_structure->trigger_block.x;
         const auto delta_z =
-            world_z -
+            static_cast<std::int64_t>(world_z) -
             connector_structure->trigger_block.z;
         const auto orientation =
             static_cast<int>(
@@ -1669,14 +1818,14 @@ auto BackroomsGenerator::sample_poolrooms_column(
             12);
     auto connector_flight = false;
     auto connector_balcony = false;
-    auto connector_forward = 0;
-    auto connector_lateral = 0;
+    auto connector_forward = std::int64_t {0};
+    auto connector_lateral = std::int64_t {0};
     if (connector_elevated.has_value()) {
         const auto delta_x =
-            world_x -
+            static_cast<std::int64_t>(world_x) -
             connector_elevated->trigger_block.x;
         const auto delta_z =
-            world_z -
+            static_cast<std::int64_t>(world_z) -
             connector_elevated->trigger_block.z;
         const auto orientation =
             static_cast<int>(
@@ -1807,8 +1956,8 @@ auto BackroomsGenerator::sample_poolrooms_column(
             std::min(
                 kBackroomsFloorY + 7,
                 ceiling_y - 2);
-        const auto stair_index =
-            -5 - connector_forward;
+        const auto stair_index = static_cast<int>(
+            -5 - connector_forward);
         overhead_bottom_y =
             std::min(
                 kBackroomsFloorY + 5 +
@@ -2084,10 +2233,10 @@ auto BackroomsGenerator::sample_column(
         wall = false;
         wall_top_y = kBackroomsFloorY;
         const auto delta_x =
-            world_x -
+            static_cast<std::int64_t>(world_x) -
             connector_structure->trigger_block.x;
         const auto delta_z =
-            world_z -
+            static_cast<std::int64_t>(world_z) -
             connector_structure->trigger_block.z;
         const auto orientation =
             static_cast<int>(
@@ -2135,12 +2284,14 @@ auto BackroomsGenerator::sample_column(
             floor_division(world_z, 5),
             0x29D56A83ULL);
     const auto decoration_anchor =
-        positive_modulo(
-            world_x + static_cast<int>(decoration_hash & 7U),
+        positive_modulo64(
+            static_cast<std::int64_t>(world_x) +
+                static_cast<int>(decoration_hash & 7U),
             13) ==
             4 &&
-        positive_modulo(
-            world_z + static_cast<int>((decoration_hash >> 3U) & 7U),
+        positive_modulo64(
+            static_cast<std::int64_t>(world_z) +
+                static_cast<int>((decoration_hash >> 3U) & 7U),
             13) ==
             4;
     if (!wall &&
@@ -2220,6 +2371,47 @@ auto BackroomsGenerator::sample_column(
         .wall = wall,
         .guaranteed_route = guaranteed_route,
         .light_state = light_state,
+    };
+}
+
+auto BackroomsGenerator::light_fixture_at(
+    int world_x,
+    int world_z) const noexcept
+    -> std::optional<BackroomsLightFixtureLayout> {
+    const auto descriptor = descriptor_at(world_x, world_z);
+    const auto sample = sample_column(world_x, world_z);
+    if (sample.light_state == BackroomsLightState::None) {
+        return std::nullopt;
+    }
+
+    const auto fixture =
+        backrooms_fixture_pattern_at(
+            descriptor,
+            layout_seed_,
+            world_x,
+            world_z,
+            local_coordinate(world_x),
+            local_coordinate(world_z),
+            sample.wall);
+    if (!fixture.has_value()) {
+        return std::nullopt;
+    }
+
+    return BackroomsLightFixtureLayout {
+        .logical_level = logical_level_,
+        .module_x = descriptor.module_x,
+        .module_z = descriptor.module_z,
+        .nominal_anchor_x = fixture->nominal_anchor_x,
+        .nominal_anchor_z = fixture->nominal_anchor_z,
+        .ceiling_y = sample.ceiling_y,
+        .nominal_length = fixture->nominal_length,
+        .connector_district_modules = connector_district_modules_,
+        .primary_axis_x = descriptor.primary_axis_x,
+        .theme = descriptor.theme,
+        .archetype = descriptor.archetype,
+        .state = sample.light_state,
+        .pool_geometry_profile = pool_geometry_profile_,
+        .block = sample.ceiling_block,
     };
 }
 

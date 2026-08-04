@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <ranges>
 
 namespace valcraft {
@@ -233,11 +234,45 @@ namespace {
                         0xFFU));
             }
         };
+    const auto hash_u64 =
+        [&](std::uint64_t value) {
+            for (int shift = 0;
+                 shift < 64;
+                 shift += 8) {
+                hash_byte(
+                    static_cast<std::uint8_t>(
+                        (
+                            value >>
+                            static_cast<unsigned>(
+                                shift)
+                        ) &
+                        0xFFU));
+            }
+        };
     const auto hash_float =
         [&](float value) {
-            hash_u32(
-                std::bit_cast<std::uint32_t>(
-                    value));
+            // Je photographie la geometrie a la precision utile du mesher.
+            // Les derniers bits de sin, cos, sqrt et normalize varient entre
+            // les bibliotheques MSVC et MinGW sans changer le decor rendu.
+            constexpr auto precision = 10'000.0;
+            const auto scaled =
+                static_cast<double>(value) * precision;
+            if (!std::isfinite(scaled) ||
+                scaled < static_cast<double>(
+                             std::numeric_limits<std::int64_t>::lowest()) ||
+                scaled > static_cast<double>(
+                             std::numeric_limits<std::int64_t>::max())) {
+                hash_byte(0xFFU);
+                hash_u32(
+                    std::bit_cast<std::uint32_t>(
+                        value));
+                return;
+            }
+            hash_byte(0U);
+            hash_u64(
+                std::bit_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(
+                        std::llround(scaled))));
         };
     for (const auto& vertex :
          mesh.vertices) {
@@ -341,7 +376,7 @@ TEST_CASE("le décor Legacy reste la photographie historique antérieure à la r
     CHECK(
         legacy_mesh_checksum(
             legacy_mesh) ==
-        7'175'173'902'441'106'935ULL);
+        2'777'901'064'978'038'532ULL);
 }
 
 TEST_CASE("la cabine et l'infirmerie utilisent des lits à échelle humaine") {
